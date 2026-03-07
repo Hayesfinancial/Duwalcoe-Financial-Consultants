@@ -346,7 +346,18 @@ function renderDash(){
     if(clean(c.ReviewDate)){var d2=daysTo(c.ReviewDate);if(d2!==null&&d2<=60)up.push({name:c.Name,type:'📋 Review',days:d2,col:'var(--sky)'});}
   });
   up.sort(function(a,b){return a.days-b.days;});
-  var myT=open.filter(function(t){return t.Assignee===cu();}).slice(0,5);
+  var myT=open.filter(function(t){return t.Assignee===cu();});
+  var today=new Date(); today.setHours(0,0,0,0);
+  var overdue=myT.filter(function(t){
+    if(!clean(t.DueDate))return false;
+    var d=new Date(t.DueDate); d.setHours(0,0,0,0);
+    return d<today;
+  });
+  var dueToday=myT.filter(function(t){
+    if(!clean(t.DueDate))return false;
+    var d=new Date(t.DueDate); d.setHours(0,0,0,0);
+    return d.getTime()===today.getTime();
+  });
   var reviewsDue=DB.clients.filter(function(c){var d=daysTo(c.ReviewDate);return d!==null&&d<=30;}).length;
 
   return '<div class="g4">'+
@@ -373,8 +384,14 @@ function renderDash(){
         '<div style="font-weight:700;font-size:12px;color:'+col+'">'+
         (u.days===0?'Today!':u.days===1?'Tomorrow':'In '+u.days+'d')+'</div></div>';
     }).join(''))+'</div></div>'+
-    '<div class="card"><div class="ch"><h2>✅ My Tasks</h2>'+btn('btn b-gd xs','open-task','+ Task')+'</div><div class="cb">'+
-    (myT.length===0?'<div class="empty">All clear ✅</div>':myT.map(taskRow).join(''))+'</div></div>'+
+    '<div class="card"><div class="ch"><h2>✅ My Tasks</h2>'+btn('btn b-gd xs','open-task','+ Task')+'</div>'+
+    (overdue.length?'<div style="background:#fde8e8;border-left:4px solid var(--rose);padding:10px 16px;font-size:12px;font-weight:700;color:var(--rose)">🚨 '+overdue.length+' OVERDUE</div>':'')+
+    (dueToday.length?'<div style="background:#e0f4ea;border-left:4px solid var(--sage);padding:10px 16px;font-size:12px;font-weight:700;color:var(--sage)">📅 '+dueToday.length+' due today</div>':'')+
+    '<div class="cb">'+
+    (overdue.length===0&&dueToday.length===0?'<div class="empty">Nothing due — check Tasks for upcoming</div>':
+    overdue.map(function(t){ return taskRowColored(t,'rose'); }).join('')+
+    dueToday.map(function(t){ return taskRowColored(t,'sage'); }).join(''))+
+    '</div></div>'+
     '</div>'+
     '<div class="card"><div class="ch"><h2>👥 Recent Clients</h2>'+btn('btn b-gh sm','go-clients','View All →')+'</div>'+
     clientTable(DB.clients.slice(0,8),true)+'</div>';
@@ -719,6 +736,24 @@ function renderTasks(){
     '<div class="cb">'+done.slice(-10).reverse().map(taskRow).join('')+'</div></div>':'');
 }
 
+function taskRowColored(t, color){
+  var done=isdone(t);
+  var log=[]; try{ log=JSON.parse(t.Notes||'[]'); }catch(e){ if(t.Notes) log=[{text:t.Notes}]; }
+  var entryCount=log.length;
+  var bg = color==='rose'?'background:#fff8f8':color==='sage'?'background:#f8fffb':'';
+  return '<div class="ti" style="'+bg+'">'+
+    '<div class="tcb'+(done?' dn':'')+'" data-act="toggle-task" data-id="'+t.ID+'" data-done="'+(done?'true':'false')+'"></div>'+
+    '<div style="flex:1;cursor:pointer" data-act="open-task-log" data-id="'+t.ID+'">'+
+    '<div style="font-size:13px;font-weight:600;color:'+(color==='rose'?'var(--rose)':color==='sage'?'var(--sage)':'var(--ink)')+'">'+( t.Title||'')+'</div>'+
+    '<div style="font-size:11px;color:#889;margin-top:2px;display:flex;gap:8px;flex-wrap:wrap">'+
+    '<span style="background:var(--smoke);border-radius:10px;padding:1px 7px;font-size:10px;font-weight:700">'+(t.Assignee||'Clinton')+'</span>'+
+    (t.ClientName?'<span>👤 '+t.ClientName+'</span>':'')+
+    (clean(t.DueDate)?'<span>📅 '+fdate(t.DueDate)+'</span>':'')+
+    (entryCount?'<span style="color:var(--sky)">📝 '+entryCount+'</span>':'')+
+    '</div></div>'+
+    '<button class="btn b-rd xs" data-act="del-task" data-id="'+t.ID+'">Del</button></div>';
+}
+
 function taskRow(t){
   var done=isdone(t);
   var log=[]; try{ log=JSON.parse(t.Notes||'[]'); }catch(e){ if(t.Notes) log=[{text:t.Notes}]; }
@@ -1033,9 +1068,16 @@ function openTaskLogModal(taskId){
     '</div></div>'+
     '<div class="fld"><label>Add Action / Note</label>'+
     '<textarea id="tlogentry" placeholder="What happened? What was actioned?" style="min-height:80px"></textarea></div>';
+  var isDone = isdone(t);
   document.getElementById('tMod').querySelector('.mf').innerHTML=
     '<button class="btn b-gh sm" data-close="1">Close</button>'+
-    '<button class="btn b-gd sm" data-save="task-log">+ Add Entry</button>';
+    (!isDone?'<div style="display:flex;align-items:center;gap:8px">'+
+    '<select id="treassign" style="border:1.5px solid var(--mist);border-radius:7px;padding:6px 10px;font-size:12px;font-family:inherit">'+
+    '<option value="">Reassign to…</option>'+
+    ['Clinton','Wife','Daughter'].map(function(p){ return '<option value="'+p+'"'+(t.Assignee===p?' selected':'')+'>'+p+'</option>'; }).join('')+
+    '</select>'+
+    '<button class="btn b-gd sm" data-save="task-log">+ Add Entry</button>'+
+    '</div>':'');
   document.getElementById('tMod').classList.add('open');
 }
 
@@ -1060,10 +1102,17 @@ function saveTaskLog(){
   if(!t) return;
   var log = [];
   try{ log = JSON.parse(t.Notes||'[]'); }catch(e){ if(t.Notes) log=[{date:t.Timestamp||'',text:t.Notes,user:t.Assignee||''}]; }
-  log.push({date:new Date().toISOString(), text:entry.value.trim(), user:cu()});
+  var reassign = document.getElementById('treassign');
+  var newAssignee = reassign ? reassign.value : '';
+  var entryText = entry.value.trim();
+  if(newAssignee && newAssignee !== t.Assignee){
+    entryText += ' [Reassigned to '+newAssignee+']';
+    t.Assignee = newAssignee;
+  }
+  log.push({date:new Date().toISOString(), text:entryText, user:cu()});
   t.Notes = JSON.stringify(log);
   closeAll(); render();
-  post({action:'updateTaskNotes',id:TASK_LOG_ID,notes:t.Notes},function(){toast('Entry added','ok');});
+  post({action:'updateTaskNotes',id:TASK_LOG_ID,notes:t.Notes,assignee:t.Assignee},function(){toast('Entry added','ok');});
 }
 
 function toggleTask(id,wasDone){
@@ -1120,6 +1169,7 @@ document.addEventListener('click', function(e){
         case 'open-task':      openTaskModal(el.getAttribute('data-client')||''); break;
         case 'toggle-task':    toggleTask(id, el.getAttribute('data-done')==='true'); break;
         case 'open-task-log':  openTaskLogModal(id); break;
+        case 'task-filter':    TASK_FILTER=el.getAttribute('data-filter'); render(); break;
         case 'del-task':       delTask(id); break;
         case 'add-spouse':     openFamModal(id,'Spouse'); break;
         case 'add-child-row':  addChildRow(); break;
@@ -1207,17 +1257,41 @@ function checkAuth(){
 function tryPin(){
   var val = document.getElementById('pinInput').value;
   if(val==='6551'){
-    sessionStorage.setItem('du_auth','ok');
-    var lock=document.getElementById('lockScreen');
-    if(lock) lock.remove();
-    var shell=document.querySelector('.shell');
-    if(shell) shell.style.display='';
-    bootApp();
+    // Show user selection screen
+    var lock = document.getElementById('lockScreen');
+    lock.innerHTML = '<div style="text-align:center">'+
+      '<div style="font-family:Georgia,serif;font-size:28px;color:var(--gold);margin-bottom:4px">Duwalcoe</div>'+
+      '<div style="font-family:Georgia,serif;font-size:16px;color:#fff;font-style:italic;margin-bottom:24px">Practice Manager</div>'+
+      '<div style="background:rgba(255,255,255,.08);border-radius:12px;padding:28px 32px;min-width:280px">'+
+      '<div style="color:#8899bb;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:1px;margin-bottom:16px">Who are you?</div>'+
+      '<div style="display:flex;flex-direction:column;gap:10px">'+
+      ['Clinton','Wife','Daughter'].map(function(u){
+        return '<button style="background:rgba(255,255,255,.08);border:1.5px solid #334466;border-radius:8px;padding:14px;color:#fff;font-size:15px;font-weight:600;cursor:pointer;font-family:inherit;transition:all .2s" '+
+          'onmouseover="this.style.background='var(--gold)';this.style.borderColor='var(--gold)'" '+
+          'onmouseout="this.style.background='rgba(255,255,255,.08)';this.style.borderColor='#334466'" '+
+          'onclick="selectUser(''+u+'')">'+u+'</button>';
+      }).join('')+
+      '</div></div>'+
+      '<div style="color:#445577;font-size:11px;margin-top:16px">FSP No: 9978 · Duwalcoe Financial Consultants CC</div>'+
+      '</div>';
   } else {
     document.getElementById('pinErr').textContent='Incorrect code — please try again';
     document.getElementById('pinInput').value='';
     document.getElementById('pinInput').focus();
   }
+}
+
+function selectUser(name){
+  sessionStorage.setItem('du_auth','ok');
+  sessionStorage.setItem('du_auth_domain', location.hostname);
+  localStorage.setItem('du_user', name);
+  var lock=document.getElementById('lockScreen');
+  if(lock) lock.remove();
+  var shell=document.querySelector('.shell');
+  if(shell) shell.style.display='';
+  var sel=document.getElementById('userSel');
+  if(sel) sel.value=name;
+  bootApp();
 }
 
 function bootApp(){
