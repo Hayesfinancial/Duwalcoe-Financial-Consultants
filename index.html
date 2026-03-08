@@ -1781,15 +1781,67 @@ function openPolicySchedule(cid){
   });
 
   // Premium totals
+  // Split monthly vs non-monthly premiums
+  function isMonthly(p){ var f=p.Frequency||'Monthly'; return f==='Monthly'||f===''; }
+  function toMonthly(p){
+    var n=N(p.Premium); var f=p.Frequency||'Monthly';
+    if(f==='Quarterly') return n/3;
+    if(f==='Annually') return n/12;
+    return 0; // Once Off and anything else = excluded from monthly
+  }
+
   var totLife=0, totRA=0, totInv=0, totMed=0, totBiz=0, totOther=0;
-  groups.personal.pols.forEach(function(p){totLife+=N(p.Premium);});
-  groups.ra.pols.forEach(function(p){totRA+=N(p.Premium);});
-  groups.invest.pols.forEach(function(p){totInv+=N(p.Premium);});
-  groups.medical.pols.forEach(function(p){totMed+=N(p.Premium);});
-  groups.business.pols.forEach(function(p){totBiz+=N(p.Premium);});
-  groups.other.pols.forEach(function(p){totOther+=N(p.Premium);});
+  var totLifeM=0, totRAM=0, totInvM=0, totMedM=0, totBizM=0, totOtherM=0;
+  var nonMonthly=[];
+
+  function addPol(p, totRef, totMRef){
+    var n=N(p.Premium);
+    totRef.val+=n;
+    if(isMonthly(p)) totMRef.val+=n;
+    else if(p.Frequency==='Quarterly'||p.Frequency==='Annually') totMRef.val+=toMonthly(p);
+    else nonMonthly.push(p); // Once Off
+  }
+
+  // Use objects to allow pass-by-ref
+  var tL={val:0},tR={val:0},tI={val:0},tM={val:0},tB={val:0},tO={val:0};
+  var tLM={val:0},tRM={val:0},tIM={val:0},tMM={val:0},tBM={val:0},tOM={val:0};
+  groups.personal.pols.forEach(function(p){
+    var n=N(p.Premium); tL.val+=n;
+    if(p.Frequency==='Once Off'||p.Frequency==='Lump Sum') nonMonthly.push(p);
+    else tLM.val+=(isMonthly(p)?n:toMonthly(p));
+  });
+  groups.ra.pols.forEach(function(p){
+    var n=N(p.Premium); tR.val+=n;
+    if(p.Frequency==='Once Off'||p.Frequency==='Lump Sum') nonMonthly.push(p);
+    else tRM.val+=(isMonthly(p)?n:toMonthly(p));
+  });
+  groups.invest.pols.forEach(function(p){
+    var n=N(p.Premium); tI.val+=n;
+    if(p.Frequency==='Once Off'||p.Frequency==='Lump Sum') nonMonthly.push(p);
+    else tIM.val+=(isMonthly(p)?n:toMonthly(p));
+  });
+  groups.medical.pols.forEach(function(p){
+    var n=N(p.Premium); tM.val+=n;
+    if(p.Frequency==='Once Off'||p.Frequency==='Lump Sum') nonMonthly.push(p);
+    else tMM.val+=(isMonthly(p)?n:toMonthly(p));
+  });
+  groups.business.pols.forEach(function(p){
+    var n=N(p.Premium); tB.val+=n;
+    if(p.Frequency==='Once Off'||p.Frequency==='Lump Sum') nonMonthly.push(p);
+    else tBM.val+=(isMonthly(p)?n:toMonthly(p));
+  });
+  groups.other.pols.forEach(function(p){
+    var n=N(p.Premium); tO.val+=n;
+    if(p.Frequency==='Once Off'||p.Frequency==='Lump Sum') nonMonthly.push(p);
+    else tOM.val+=(isMonthly(p)?n:toMonthly(p));
+  });
+
+  var totLife=tL.val, totRA=tR.val, totInv=tI.val, totMed=tM.val, totBiz=tB.val, totOther=tO.val;
+  var totLifeM=tLM.val, totRAM=tRM.val, totInvM=tIM.val, totMedM=tMM.val, totBizM=tBM.val, totOtherM=tOM.val;
   var totPersonal=totLife+totRA+totInv+totMed+totOther;
+  var totPersonalM=totLifeM+totRAM+totInvM+totMedM+totOtherM;
   var totAll=totPersonal+totBiz;
+  var totAllM=totPersonalM+totBizM;
 
   // Build policy detail card
   function buildCard(p, color){
@@ -1869,31 +1921,56 @@ function openPolicySchedule(cid){
   doc+='<div style="font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:#c8a84b;margin-bottom:14px">Premium Summary</div>';
   doc+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:0;border:1px solid #eee;border-radius:6px;overflow:hidden">';
 
-  function sumRow(lbl, amt, bold){
+  // 3-col row: label | monthly equiv | actual/frequency
+  function sumRow(lbl, monthly, actual, freq, bold){
     var st=bold?'font-weight:700;background:#f5f5f0':'';
+    var mStr=monthly>0?'R '+Math.round(monthly).toLocaleString('en-ZA'):'—';
+    var aStr=actual>0?'R '+Math.round(actual).toLocaleString('en-ZA')+(freq&&freq!=='Monthly'?' / '+freq:''):'—';
     return '<div style="padding:8px 14px;border-bottom:1px solid #eee;'+st+'">'+lbl+'</div>'+
-           '<div style="padding:8px 14px;border-bottom:1px solid #eee;text-align:right;'+st+'">'+(amt>0?'R '+Math.round(amt).toLocaleString('en-ZA'):'—')+'</div>';
+           '<div style="padding:8px 14px;border-bottom:1px solid #eee;text-align:right;color:#2e7d5a;'+st+'">'+mStr+'</div>'+
+           '<div style="padding:8px 14px;border-bottom:1px solid #eee;text-align:right;color:#666;font-size:12px;'+st+'">'+aStr+'</div>';
   }
+
+  // Switch to 3-col grid
+  doc=doc.replace('grid-template-columns:1fr 1fr','grid-template-columns:2fr 1fr 1fr');
+
+  // Column headers
+  doc+='<div style="grid-column:1/-1;display:grid;grid-template-columns:2fr 1fr 1fr;background:#e8e4d8">';
+  doc+='<div style="padding:5px 14px;font-size:10px;font-weight:700;text-transform:uppercase;color:#888">Category</div>';
+  doc+='<div style="padding:5px 14px;font-size:10px;font-weight:700;text-transform:uppercase;color:#2e7d5a;text-align:right">Monthly Cost</div>';
+  doc+='<div style="padding:5px 14px;font-size:10px;font-weight:700;text-transform:uppercase;color:#888;text-align:right">Actual Premium</div>';
+  doc+='</div>';
 
   // Personal section
   doc+='<div style="grid-column:1/-1;background:#1a2a4a;color:#fff;padding:7px 14px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px">Personal Policies — Your Responsibility</div>';
-  if(totLife>0)  doc+=sumRow('Life & Risk Cover (premiums)', totLife, false);
-  if(totRA>0)    doc+=sumRow('Retirement Annuities & Preservation', totRA, false);
-  if(totInv>0)   doc+=sumRow('Investments & Savings', totInv, false);
-  if(totMed>0)   doc+=sumRow('Medical Aid', totMed, false);
-  if(totOther>0) doc+=sumRow('Other', totOther, false);
-  doc+=sumRow('Total Personal Premium /pm', totPersonal, true);
+  if(tL.val>0)  doc+=sumRow('Life & Risk Cover', totLifeM, totLife, '', false);
+  if(tR.val>0)  doc+=sumRow('Retirement Annuities & Preservation', totRAM, totRA, '', false);
+  if(tI.val>0)  doc+=sumRow('Investments & Savings', totInvM, totInv, '', false);
+  if(tM.val>0)  doc+=sumRow('Medical Aid', totMedM, totMed, '', false);
+  if(tO.val>0)  doc+=sumRow('Other', totOtherM, totOther, '', false);
+  doc+=sumRow('Total Personal /pm', totPersonalM, totPersonalM, '', true);
 
   // Business section (only if exists)
-  if(totBiz>0){
+  if(tB.val>0){
     doc+='<div style="grid-column:1/-1;background:#b45309;color:#fff;padding:7px 14px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px">Business Assurance — Usually Employer / Company Funded</div>';
-    doc+=sumRow('Business Assurance Premium', totBiz, false);
-    doc+=sumRow('Total Business Premium /pm', totBiz, true);
+    doc+=sumRow('Business Assurance', totBizM, totBiz, '', false);
+    doc+=sumRow('Total Business /pm', totBizM, totBizM, '', true);
   }
 
   // Grand total
   doc+='<div style="grid-column:1/-1;height:2px;background:#c8a84b"></div>';
-  doc+=sumRow('TOTAL ALL POLICIES /pm', totAll, true);
+  doc+=sumRow('TOTAL MONTHLY COST TO CLIENT', totPersonalM, totPersonalM, '', true);
+
+  // Once-off / lump sum note
+  if(nonMonthly.length){
+    doc+='<div style="grid-column:1/-1;background:#fef3c7;padding:10px 14px;border-top:2px solid #f59e0b">';
+    doc+='<div style="font-size:11px;font-weight:700;text-transform:uppercase;color:#92400e;margin-bottom:6px">Once-Off / Lump Sum Contributions (excluded from monthly total)</div>';
+    nonMonthly.forEach(function(p){
+      doc+='<div style="font-size:12px;padding:3px 0;display:flex;justify-content:space-between"><span>'+(p.Insurer||'')+(p.Product?' — '+p.Product:'')+'</span><span style="font-weight:700">R '+Math.round(N(p.Premium)).toLocaleString('en-ZA')+(p.Frequency?' ('+p.Frequency+')':'')+'</span></div>';
+    });
+    doc+='</div>';
+  }
+
   doc+='</div></div>';
 
   // ── POLICY SECTIONS ──
