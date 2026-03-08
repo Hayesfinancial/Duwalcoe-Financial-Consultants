@@ -240,8 +240,13 @@ function syncNow() {
     DB.tasks    = d.tasks    || [];
     DB.roas     = d.roas     || [];
     DB.links    = d.links    || [];
-    // Restore LastAccessed so Recent Clients order is preserved
-    DB.clients.forEach(function(c){ if(lastAccessed[String(c.ID)]) c.LastAccessed=lastAccessed[String(c.ID)]; });
+    // Restore LastAccessed from dedicated recent store (more reliable than DB cache)
+    try{
+      var ra=JSON.parse(localStorage.getItem('du_recent')||'{}');
+      DB.clients.forEach(function(c){ if(ra[String(c.ID)]) c.LastAccessed=ra[String(c.ID)]; });
+    }catch(e){}
+    // Also fall back to DB cache timestamps
+    DB.clients.forEach(function(c){ if(!c.LastAccessed && lastAccessed[String(c.ID)]) c.LastAccessed=lastAccessed[String(c.ID)]; });
     try { localStorage.setItem('du_db', JSON.stringify(DB)); } catch(e){}
     setSS('ok');
     render();
@@ -348,9 +353,19 @@ function bx(cls,txt){ return H('span',{'class':'bx '+cls},txt); }
 function goPage(p){ PAGE=p; SEL=null; render(); }
 function openClient(id){
   SEL=id; CTAB='overview'; PAGE='client';
-  // Track last accessed time for Recent Clients
+  // Track last accessed - write to dedicated key so it survives full DB resyncs
   var c=DB.clients.find(function(x){return String(x.ID)===String(id);});
-  if(c){ c.LastAccessed=Date.now(); try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){} }
+  if(c){
+    c.LastAccessed=Date.now();
+    try{
+      // Store in dedicated recent-access store keyed by client ID
+      var ra={};
+      try{ ra=JSON.parse(localStorage.getItem('du_recent')||'{}'); }catch(e){}
+      ra[String(id)]=Date.now();
+      localStorage.setItem('du_recent', JSON.stringify(ra));
+      localStorage.setItem('du_db',JSON.stringify(DB));
+    }catch(e){}
+  }
   render();
 }
 function closeAll(){ document.querySelectorAll('.ov').forEach(function(o){o.classList.remove('open');}); }
@@ -372,14 +387,35 @@ function render(){
 function renderDash(){
   var active=DB.clients.filter(function(c){return c.Status==='Active';});
   var open=DB.tasks.filter(function(t){return !isdone(t);});
-  var up=[];
-  DB.clients.forEach(function(c){
-    if(clean(c.DOB)){var d=daysTo(c.DOB);if(d!==null&&d<=60)up.push({name:c.Name,type:'🎂 Birthday',days:d,col:'var(--gold)'});}
-    if(clean(c.ReviewDate)){var d2=daysTo(c.ReviewDate);if(d2!==null&&d2<=60)up.push({name:c.Name,type:'📋 Review',days:d2,col:'var(--sky)'});}
-  });
-  up.sort(function(a,b){return a.days-b.days;});
-  var myT=open.filter(function(t){return t.Assignee===cu();});
   var today=new Date(); today.setHours(0,0,0,0);
+  var up=[];
+
+  // Birthdays and manual review dates
+  DB.clients.forEach(function(c){
+    if(clean(c.DOB)){var d=daysTo(c.DOB);if(d!==null&&d<=60)up.push({name:c.Name,id:c.ID,cell:c.Cell||'',type:'🎂 Birthday',days:d,col:'var(--gold)'});}
+    if(clean(c.ReviewDate)){var d2=daysTo(c.ReviewDate);if(d2!==null&&d2<=60)up.push({name:c.Name,id:c.ID,cell:c.Cell||'',type:'📋 Review Due',days:d2,col:'var(--sky)'});}
+  });
+
+  // Policy anniversaries — add to reminders
+  DB.policies.forEach(function(p){
+    if(!clean(p.StartDate)) return;
+    var client = DB.clients.find(function(x){ return String(x.ID)===String(p.ClientID); });
+    if(!client) return;
+    // Find next anniversary of start date
+    var start = new Date(p.StartDate);
+    var ann = new Date(start);
+    ann.setFullYear(today.getFullYear());
+    if(ann < today) ann.setFullYear(today.getFullYear()+1);
+    var diff = Math.round((ann - today)/(1000*60*60*24));
+    if(diff <= 60){
+      var label = p.Insurer ? p.Insurer+(p.PolicyType?' — '+p.PolicyType:'') : (p.PolicyType||'Policy');
+      up.push({name:client.Name,id:client.ID,cell:client.Cell||'',type:'📄 '+label+' anniversary',days:diff,col:'var(--sage)'});
+    }
+  });
+
+  up.sort(function(a,b){return a.days-b.days;});
+
+  var myT=open.filter(function(t){return t.Assignee===cu();});
   var overdue=myT.filter(function(t){
     if(!clean(t.DueDate))return false;
     var d=new Date(t.DueDate); d.setHours(0,0,0,0);
@@ -390,68 +426,71 @@ function renderDash(){
     var d=new Date(t.DueDate); d.setHours(0,0,0,0);
     return d.getTime()===today.getTime();
   });
-  var future=myT.filter(function(t){
-    if(!clean(t.DueDate))return false;
-    var d=new Date(t.DueDate); d.setHours(0,0,0,0);
-    return d>today;
-  });
-  var noDate=myT.filter(function(t){ return !clean(t.DueDate); });
   var dashFilter = window.DASH_TASK_FILTER||'today';
   var reviewsDue=DB.clients.filter(function(c){var d=daysTo(c.ReviewDate);return d!==null&&d<=30;}).length;
 
+  // Recent clients — sorted by LastAccessed, only those actually opened
+  var recentClients = DB.clients.filter(function(c){ return c.LastAccessed; })
+    .slice().sort(function(a,b){ return (b.LastAccessed||0)-(a.LastAccessed||0); }).slice(0,8);
+
   return '<div class="g4">'+
-    '<div class="stat s-gd"><div class="v">'+active.length+'</div><div class="l">Active Clients</div></div>'+
+    '<div class="stat s-gd" style="cursor:pointer" data-act="go-clients"><div class="v">'+active.length+'</div><div class="l">Active Clients</div></div>'+
     '<div class="stat s-sg"><div class="v">'+up.filter(function(u){return u.days<=30;}).length+'</div><div class="l">Reminders (30d)</div></div>'+
     '<div class="stat s-sk"><div class="v">'+open.length+'</div><div class="l">Open Tasks</div></div>'+
-    '<div class="stat s-rd"><div class="v">'+reviewsDue+'</div><div class="l">Reviews Due</div></div>'+
+    '<div class="stat s-rd"><div class="v">'+reviewsDue+'</div><div class="l">Reviews Due (30d)</div></div>'+
     '</div>'+
     '<div class="g2">'+
+
+    // LEFT: Reminders
     '<div class="card"><div class="ch"><h2>📅 Reminders (60 days)</h2></div><div class="cb">'+
     (up.length===0?'<div class="empty">Nothing coming up 🎉</div>':
-    up.slice(0,8).map(function(u){
+    up.slice(0,10).map(function(u){
       var col=u.days<=7?'var(--rose)':u.days<=14?'var(--gold)':'var(--sage)';
-      var rc = DB.clients.find(function(x){ return x.Name===u.name; });
-      var rcell = rc ? (rc.Cell||'') : '';
-      var rid = rc ? rc.ID : '';
-      return '<div class="ri" style="cursor:pointer'+(rid?'':'')+'" '+(rid?'data-act="open-client" data-id="'+rid+'"':'')+'>'+
+      return '<div class="ri" style="cursor:pointer" data-act="open-client" data-id="'+u.id+'">'+
         '<div class="rdot" style="background:'+u.col+';flex-shrink:0"></div>'+
         '<div style="flex:1"><div style="font-weight:600">'+u.name+'</div>'+
         '<div style="font-size:11px;color:#889;display:flex;gap:8px;flex-wrap:wrap">'+
         '<span>'+u.type+'</span>'+
-        (rcell?'<span>📱 '+rcell+'</span>':'')+
+        (u.cell?'<span>📱 '+u.cell+'</span>':'')+
         '</div></div>'+
         '<div style="font-weight:700;font-size:12px;color:'+col+'">'+
         (u.days===0?'Today!':u.days===1?'Tomorrow':'In '+u.days+'d')+'</div></div>';
     }).join(''))+'</div></div>'+
+
+    // RIGHT: Tasks
     '<div class="card">'+
     '<div class="ch"><h2>✅ My Tasks</h2>'+btn('btn b-gd xs','open-task','+ Task')+'</div>'+
     (overdue.length?'<div style="background:#fde8e8;border-left:4px solid var(--rose);padding:10px 16px;font-size:13px;font-weight:700;color:var(--rose);cursor:pointer" data-act="dash-task-filter" data-filter="overdue">🚨 '+overdue.length+' overdue — click to view</div>':'')+
     '<div style="display:flex;gap:6px;padding:10px 16px;border-bottom:1px solid var(--smoke)">'+
     ['today','overdue','all'].map(function(f){
-      var active=dashFilter===f;
+      var isActive=dashFilter===f;
       var label=f==='today'?'Today':f==='overdue'?'Overdue':'All';
-      return '<button class="btn '+(active?'b-nv':'b-gh')+' xs" data-act="dash-task-filter" data-filter="'+f+'">'+label+'</button>';
+      return '<button class="btn '+(isActive?'b-nv':'b-gh')+' xs" data-act="dash-task-filter" data-filter="'+f+'">'+label+'</button>';
     }).join('')+
     '</div>'+
     '<div class="cb">'+
     (function(){
-      var show = dashFilter==='today'?dueToday:dashFilter==='overdue'?overdue:myT;
-      var color = dashFilter==='overdue'?'rose':dashFilter==='today'?'sage':'';
+      var show=dashFilter==='today'?dueToday:dashFilter==='overdue'?overdue:myT;
       if(show.length===0) return '<div class="empty">'+(dashFilter==='today'?'No tasks due today ✅':dashFilter==='overdue'?'No overdue tasks ✅':'No open tasks ✅')+'</div>';
       return show.map(function(t){
-        var c = dashFilter==='overdue'?'rose':dashFilter==='today'?'sage':'';
-        if(!c){
+        var c='';
+        if(clean(t.DueDate)){
           var d=new Date(t.DueDate); d.setHours(0,0,0,0);
-          if(clean(t.DueDate)&&d<today) c='rose';
-          else if(clean(t.DueDate)&&d.getTime()===today.getTime()) c='sage';
+          if(d<today) c='rose'; else if(d.getTime()===today.getTime()) c='sage';
         }
         return taskRowColored(t,c);
       }).join('');
     })()+
     '</div></div>'+
     '</div>'+
-    '<div class="card"><div class="ch"><h2>👥 Recent Clients</h2>'+btn('btn b-gh sm','go-clients','View All →')+'</div>'+
-    clientTable(DB.clients.slice().sort(function(a,b){return (b.LastAccessed||0)-(a.LastAccessed||0);}).slice(0,8),true)+'</div>';
+
+    // BOTTOM: Recent Clients (only shows if any have been opened)
+    '<div class="card">'+
+    '<div class="ch"><h2>🕐 Recent Clients</h2>'+btn('btn b-gh sm','go-clients','View All →')+'</div>'+
+    (recentClients.length===0?
+      '<div class="empty" style="padding:16px">Open a client record to start tracking recent activity</div>':
+      clientTable(recentClients, true))+
+    '</div>';
 }
 
 // CLIENTS PAGE
