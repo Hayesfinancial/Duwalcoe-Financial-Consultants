@@ -1748,114 +1748,172 @@ document.addEventListener('click', function(e){
 function openPolicySchedule(cid){
   var c=DB.clients.find(function(x){return String(x.ID)===String(cid);});
   if(!c){toast('Client not found','err');return;}
-  var pols=polsFor(cid).filter(function(p){return p.Status!=='Replaced'&&p.Status!=='Cancelled';});
+  var allPols=polsFor(cid).filter(function(p){return p.Status!=='Replaced'&&p.Status!=='Cancelled';});
   var today=new Date().toLocaleDateString('en-ZA',{day:'2-digit',month:'long',year:'numeric'});
 
-  function R(v){if(!v||v==='0'||v==='None')return '—';var n=parseFloat(String(v).replace(/[^0-9.-]/g,''));return isNaN(n)?String(v):'R '+Math.round(n).toLocaleString('en-ZA');}
-  function V(v){if(v===0||v==='0')return '0'; return (!v||v==='None')?'—':String(v);}
+  function N(v){var n=parseFloat(String(v||'0').replace(/[^0-9.-]/g,''));return isNaN(n)?0:n;}
+  function R(v){if(v===0||v==='0')return 'R 0';if(!v||v==='None')return '—';var n=N(v);return isNaN(n)||n===0?'—':'R '+Math.round(n).toLocaleString('en-ZA');}
+  function Rpct(v){if(v===0||v==='0')return '0%';if(v===''||v===undefined||v===null||v==='None')return '—';return String(v)+'%';}
+  function V(v){if(v===0||v==='0')return '0';return (!v||v==='None')?'—':String(v);}
   function FD(v){if(!v||v==='None')return '—';var p=parseDateVal(v);if(!p.y)return String(v);var mn=['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];return (p.d||'?')+' '+(mn[parseInt(p.m,10)]||'?')+' '+p.y;}
 
-  var benRows='';
-  pols.forEach(function(p){
+  // Classify policies into groups
+  var raTypes=['Retirement Annuity','Pension Fund','Provident Fund','Pension Preservation','Provident Preservation'];
+  var invTypes=['Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment','Unit Trust','Tax Free Savings','Living Annuity'];
+
+  var groups={
+    personal: {label:'Personal Life & Risk Cover', color:'#1a2a4a', pols:[]},
+    ra:       {label:'Retirement Annuities & Preservation Funds', color:'#2e7d5a', pols:[]},
+    invest:   {label:'Investments & Savings', color:'#2563ab', pols:[]},
+    medical:  {label:'Medical Aid', color:'#7c3aed', pols:[]},
+    business: {label:'Business Assurance', color:'#b45309', pols:[]},
+    other:    {label:'Other', color:'#6b7280', pols:[]}
+  };
+
+  allPols.forEach(function(p){
+    var t=p.Type||'';
+    if(t==='Business Assurance') groups.business.pols.push(p);
+    else if(t==='Life / Income Protector') groups.personal.pols.push(p);
+    else if(raTypes.indexOf(t)>=0) groups.ra.pols.push(p);
+    else if(invTypes.indexOf(t)>=0) groups.invest.pols.push(p);
+    else if(t==='Medical Aid') groups.medical.pols.push(p);
+    else groups.other.pols.push(p);
+  });
+
+  // Premium totals
+  var totLife=0, totRA=0, totInv=0, totMed=0, totBiz=0, totOther=0;
+  groups.personal.pols.forEach(function(p){totLife+=N(p.Premium);});
+  groups.ra.pols.forEach(function(p){totRA+=N(p.Premium);});
+  groups.invest.pols.forEach(function(p){totInv+=N(p.Premium);});
+  groups.medical.pols.forEach(function(p){totMed+=N(p.Premium);});
+  groups.business.pols.forEach(function(p){totBiz+=N(p.Premium);});
+  groups.other.pols.forEach(function(p){totOther+=N(p.Premium);});
+  var totPersonal=totLife+totRA+totInv+totMed+totOther;
+  var totAll=totPersonal+totBiz;
+
+  // Build policy detail card
+  function buildCard(p, color){
     var bens=[];
     try{bens=p.Beneficiaries?JSON.parse(p.Beneficiaries):[];}catch(e){}
-    var benStr=bens.length?bens.map(function(b){return (b.name||b.type)+(b.pct?' ('+b.pct+'%)':'');}).join(', '):(V(p.Beneficiary)||'—');
-
+    var benStr=bens.length?bens.map(function(b){return (b.name||b.type)+(b.pct?' ('+b.pct+'%)':'');}).join(', '):'—';
     var incBens=[];
     try{incBens=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):[];}catch(e){}
 
-    benRows+='<div style="page-break-inside:avoid;border:1px solid #dde0e8;border-radius:8px;margin-bottom:20px;overflow:hidden">';
-    // Policy header bar
-    benRows+='<div style="background:#1a2a4a;color:#fff;padding:10px 16px;display:flex;justify-content:space-between;align-items:center">';
-    benRows+='<div><span style="font-size:15px;font-weight:700">'+(p.Insurer||'—')+'</span>';
-    if(p.Product) benRows+=' &nbsp;·&nbsp; <span style="font-size:13px;opacity:.8">'+p.Product+'</span>';
-    benRows+='</div>';
-    benRows+='<div style="font-size:11px;opacity:.7">'+V(p.Type)+'</div></div>';
+    var s='<div style="page-break-inside:avoid;border:1px solid #dde0e8;border-radius:8px;margin-bottom:16px;overflow:hidden">';
+    s+='<div style="background:'+color+';color:#fff;padding:9px 14px;display:flex;justify-content:space-between;align-items:center">';
+    s+='<div><span style="font-size:14px;font-weight:700">'+(p.Insurer||'—')+'</span>';
+    if(p.Product) s+=' &nbsp;·&nbsp; <span style="font-size:12px;opacity:.85">'+p.Product+'</span>';
+    s+='</div><div style="font-size:11px;opacity:.7">'+V(p.Type)+'</div></div>';
+    s+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:0">';
 
-    // Two column grid
-    benRows+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:0">';
+    function cell(lbl,val){return '<div style="padding:7px 14px;border-bottom:1px solid #eef"><div style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:.4px">'+lbl+'</div><div style="font-weight:600;font-size:13px;margin-top:1px">'+val+'</div></div>';}
 
-    function cell(lbl,val){return '<div style="padding:8px 14px;border-bottom:1px solid #eef"><div style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:.5px">'+lbl+'</div><div style="font-weight:600;font-size:13px;margin-top:2px">'+val+'</div></div>';}
+    s+=cell('Policy No', V(p.PolicyNo));
+    s+=cell('Inception Date', FD(p.StartDate));
+    s+=cell('Premium', R(p.Premium)+(p.Frequency&&p.Frequency!=='Monthly'?' / '+p.Frequency:' /pm'));
+    s+=cell('Status', V(p.Status||'Active'));
+    s+=cell('Premium Escalation', Rpct(p.PremEscalation));
+    s+=cell('Benefit Escalation', Rpct(p.BenEscalation));
+    s+=cell('Policy Owner', p.ClientIsOwner==='No'?V(p.Owner):'Client');
+    s+=cell('Payer', V(p.Payer||c.Name));
+    if(p.BenDeath)       s+=cell('Death Benefit', R(p.BenDeath));
+    if(p.BenDisability)  s+=cell('Capital Disability', R(p.BenDisability));
+    if(p.BenDreadDisease)s+=cell('Dread Disease'+(p.DreadDiseaseType?' ('+p.DreadDiseaseType+')':''), R(p.BenDreadDisease)+(p.DreadDiseaseNotes?' — '+p.DreadDiseaseNotes:''));
+    if(p.BenFundValue)   s+=cell('Fund Value', R(p.BenFundValue));
+    if(p.BenSurrenderValue) s+=cell('Nett Surrender Value', R(p.BenSurrenderValue));
+    if(p.MaturityDate)   s+=cell('Maturity Date', FD(p.MaturityDate));
+    if(p.BizType)        s+=cell('Business Assurance Type', V(p.BizType));
+    if(p.EstateDutiable) s+=cell('Estate Dutiable', V(p.EstateDutiable));
+    s+='</div>';
 
-    benRows+=cell('Policy / Contract No', V(p.PolicyNo));
-    benRows+=cell('Inception Date', FD(p.StartDate));
-    benRows+=cell('Premium', R(p.Premium)+(p.Frequency?' / '+p.Frequency:''));
-    benRows+=cell('Status', V(p.Status||'Active'));
-    benRows+=cell('Premium Escalation', (p.PremEscalation!==undefined&&p.PremEscalation!==''&&p.PremEscalation!=='None')?V(p.PremEscalation)+'%':'—');
-    benRows+=cell('Benefit Escalation', (p.BenEscalation!==undefined&&p.BenEscalation!==''&&p.BenEscalation!=='None')?V(p.BenEscalation)+'%':'—');
-    benRows+=cell('Policy Owner', p.ClientIsOwner==='No'?V(p.Owner):'Client');
-    benRows+=cell('Payer', V(p.Payer||c.Name));
-
-    // Risk benefits
-    if(p.BenDeath)    benRows+=cell('Death Benefit', R(p.BenDeath));
-    if(p.BenDisability) benRows+=cell('Capital Disability', R(p.BenDisability));
-    if(p.BenDreadDisease) benRows+=cell('Dread Disease'+(p.DreadDiseaseType?' ('+p.DreadDiseaseType+')':''), R(p.BenDreadDisease)+(p.DreadDiseaseNotes?' — '+p.DreadDiseaseNotes:''));
-    if(p.BenFundValue)  benRows+=cell('Fund Value', R(p.BenFundValue));
-    if(p.BenSurrenderValue) benRows+=cell('Nett Surrender Value', R(p.BenSurrenderValue));
-    if(p.MaturityDate)  benRows+=cell('Maturity Date', FD(p.MaturityDate));
-
-    // Business assurance extras
-    if(p.BizType)     benRows+=cell('Business Assurance Type', V(p.BizType));
-    if(p.EstateDutiable) benRows+=cell('Estate Dutiable', V(p.EstateDutiable));
-
-    benRows+='</div>';
-
-    // Income benefits rows
     if(incBens.length){
-      benRows+='<div style="padding:10px 14px;background:#f8f8f5;border-top:1px solid #eef">';
-      benRows+='<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:#c8a84b;margin-bottom:8px">Income Benefits</div>';
-      benRows+='<table style="width:100%;border-collapse:collapse;font-size:12px">';
-      benRows+='<thead><tr style="background:#eee"><th style="padding:5px 8px;text-align:left">Type</th><th style="padding:5px 8px;text-align:left">Label</th><th style="padding:5px 8px;text-align:right">Amount/pm</th><th style="padding:5px 8px;text-align:left">Waiting</th><th style="padding:5px 8px;text-align:left">Benefit Period</th><th style="padding:5px 8px;text-align:left">Taxable</th></tr></thead><tbody>';
-      incBens.forEach(function(r){
-        benRows+='<tr><td style="padding:5px 8px">'+V(r.type)+'</td><td style="padding:5px 8px">'+V(r.label)+'</td><td style="padding:5px 8px;text-align:right">'+R(r.amount)+'</td><td style="padding:5px 8px">'+V(r.waiting)+'</td><td style="padding:5px 8px">'+V(r.term)+'</td><td style="padding:5px 8px">'+V(r.taxable)+'</td></tr>';
-      });
-      benRows+='</tbody></table></div>';
+      s+='<div style="padding:10px 14px;background:#f8f8f5;border-top:1px solid #eef">';
+      s+='<div style="font-size:10px;font-weight:700;text-transform:uppercase;color:#c8a84b;margin-bottom:6px">Income Benefits</div>';
+      s+='<table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr style="background:#eee">';
+      s+='<th style="padding:4px 8px;text-align:left">Type</th><th style="padding:4px 8px;text-align:left">Label</th><th style="padding:4px 8px;text-align:right">Amount/pm</th><th style="padding:4px 8px;text-align:left">Waiting</th><th style="padding:4px 8px;text-align:left">Benefit Period</th><th style="padding:4px 8px;text-align:left">Taxable</th></tr></thead><tbody>';
+      incBens.forEach(function(r){s+='<tr><td style="padding:4px 8px">'+V(r.type)+'</td><td style="padding:4px 8px">'+V(r.label)+'</td><td style="padding:4px 8px;text-align:right">'+R(r.amount)+'</td><td style="padding:4px 8px">'+V(r.waiting)+'</td><td style="padding:4px 8px">'+V(r.term)+'</td><td style="padding:4px 8px">'+V(r.taxable)+'</td></tr>';});
+      s+='</tbody></table></div>';
     }
 
-    // Beneficiaries
-    benRows+='<div style="padding:10px 14px;border-top:1px solid #eef;background:#fafaf8">';
-    benRows+='<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:#c8a84b;margin-bottom:4px">Beneficiaries</div>';
-    benRows+='<div style="font-size:13px">'+benStr+'</div></div>';
+    s+='<div style="padding:8px 14px;border-top:1px solid #eef;background:#fafaf8;display:flex;gap:20px">';
+    s+='<div><span style="font-size:10px;color:#888;text-transform:uppercase">Beneficiaries</span><div style="font-size:13px;font-weight:600;margin-top:1px">'+benStr+'</div></div></div>';
+    if(p.Notes) s+='<div style="padding:6px 14px;border-top:1px solid #eef;font-size:12px;color:#667;font-style:italic">'+p.Notes+'</div>';
+    s+='</div>';
+    return s;
+  }
 
-    if(p.Notes){
-      benRows+='<div style="padding:8px 14px;border-top:1px solid #eef;font-size:12px;color:#667"><em>'+p.Notes+'</em></div>';
-    }
-    benRows+='</div>';
-  });
+  // Build section
+  function buildSection(grp, color){
+    if(!grp.pols.length) return '';
+    var s='<div style="margin-bottom:28px">';
+    s+='<div style="background:'+color+';color:#fff;padding:10px 16px;border-radius:8px 8px 0 0;font-size:13px;font-weight:700;letter-spacing:.5px;text-transform:uppercase">'+grp.label+'</div>';
+    grp.pols.forEach(function(p){ s+=buildCard(p,color); });
+    s+='</div>';
+    return s;
+  }
 
-  var doc='<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Policy Schedule — '+c.Name+'</title><style>';
-  doc+='body{font-family:Arial,sans-serif;color:#1a2a4a;font-size:13px;max-width:860px;margin:0 auto;padding:30px}';
-  doc+='@media print{.noprint{display:none}body{padding:10px}}';
-  doc+='</style></head><body>';
+  // ── BUILD DOC ──
+  var doc='<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Policy Schedule — '+c.Name+'</title>';
+  doc+='<style>body{font-family:Arial,sans-serif;color:#1a2a4a;font-size:13px;max-width:880px;margin:0 auto;padding:30px}@media print{.noprint{display:none}body{padding:10px}}</style>';
+  doc+='</head><body>';
 
   // Header
-  doc+='<div style="display:flex;justify-content:space-between;align-items:flex-start;border-bottom:3px solid #c8a84b;padding-bottom:14px;margin-bottom:20px">';
+  doc+='<div style="display:flex;justify-content:space-between;align-items:flex-start;border-bottom:3px solid #c8a84b;padding-bottom:14px;margin-bottom:24px">';
   doc+='<div><div style="font-size:11px;text-transform:uppercase;letter-spacing:1px;color:#888">Policy Schedule</div>';
-  doc+='<div style="font-size:22px;font-weight:700;margin:4px 0">'+c.Name+'</div>';
-  doc+='<div style="font-size:12px;color:#666">'+(c.IDNumber?'ID: '+c.IDNumber+' &nbsp;·&nbsp; ':'')+( c.Cell||'')+'</div></div>';
-  doc+='<div style="text-align:right;font-size:12px;color:#666">';
-  doc+='<strong style="color:#1a2a4a;display:block;font-size:14px">Clinton Hayes</strong>';
-  doc+='Duwalcoe Financial Consultants CC<br>FSP No: 9978<br>clinton@duwalcoe.co.za<br>083 608 5617<br><br>Date: '+today+'</div></div>';
+  doc+='<div style="font-size:24px;font-weight:700;margin:4px 0">'+c.Name+'</div>';
+  doc+='<div style="font-size:12px;color:#666">'+(c.IDNumber?'ID: '+c.IDNumber+'&nbsp;&nbsp;':'')+(c.Cell||'')+'</div></div>';
+  doc+='<div style="text-align:right;font-size:12px;color:#666"><strong style="color:#1a2a4a;display:block;font-size:14px">Clinton Hayes</strong>Duwalcoe Financial Consultants CC<br>FSP No: 9978<br>clinton@duwalcoe.co.za<br>083 608 5617<br><br>'+today+'</div></div>';
 
-  // Summary table
-  doc+='<table style="width:100%;border-collapse:collapse;margin-bottom:24px;font-size:12px">';
-  doc+='<thead><tr style="background:#1a2a4a;color:#fff"><th style="padding:7px 10px;text-align:left">Insurer</th><th style="padding:7px 10px;text-align:left">Product</th><th style="padding:7px 10px;text-align:left">Policy No</th><th style="padding:7px 10px;text-align:left">Type</th><th style="padding:7px 10px;text-align:right">Premium</th><th style="padding:7px 10px;text-align:left">Status</th></tr></thead><tbody>';
-  pols.forEach(function(p){
-    doc+='<tr style="border-bottom:1px solid #eef"><td style="padding:6px 10px;font-weight:600">'+(p.Insurer||'—')+'</td><td style="padding:6px 10px">'+(p.Product||'—')+'</td><td style="padding:6px 10px;font-family:monospace">'+(p.PolicyNo||'—')+'</td><td style="padding:6px 10px">'+(p.Type||'—')+'</td><td style="padding:6px 10px;text-align:right;color:#2e7d5a;font-weight:600">'+R(p.Premium)+'</td><td style="padding:6px 10px">'+(p.Status||'Active')+'</td></tr>';
-  });
-  // Total row
-  var totalPrem=pols.reduce(function(s,p){var n=parseFloat(String(p.Premium||'0').replace(/[^0-9.-]/g,''));return s+(isNaN(n)?0:n);},0);
-  doc+='<tr style="background:#f5f5f0;font-weight:700"><td colspan="4" style="padding:7px 10px">Total Monthly Premium</td><td style="padding:7px 10px;text-align:right;color:#2e7d5a">R '+Math.round(totalPrem).toLocaleString('en-ZA')+'</td><td></td></tr>';
-  doc+='</tbody></table>';
+  // ── PREMIUM SUMMARY BOX ──
+  doc+='<div style="border:2px solid #c8a84b;border-radius:10px;padding:18px 20px;margin-bottom:28px;background:#fffdf5">';
+  doc+='<div style="font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:#c8a84b;margin-bottom:14px">Premium Summary</div>';
+  doc+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:0;border:1px solid #eee;border-radius:6px;overflow:hidden">';
 
-  doc+=benRows;
+  function sumRow(lbl, amt, bold){
+    var st=bold?'font-weight:700;background:#f5f5f0':'';
+    return '<div style="padding:8px 14px;border-bottom:1px solid #eee;'+st+'">'+lbl+'</div>'+
+           '<div style="padding:8px 14px;border-bottom:1px solid #eee;text-align:right;'+st+'">'+(amt>0?'R '+Math.round(amt).toLocaleString('en-ZA'):'—')+'</div>';
+  }
 
-  doc+='<div style="margin-top:32px;font-size:10px;color:#999;border-top:1px solid #eee;padding-top:12px">This policy schedule has been prepared by Clinton Hayes on behalf of Duwalcoe Financial Consultants CC (FSP No: 9978) on '+today+'. Information is based on data captured in the practice management system. Please verify details with the respective insurers.</div>';
+  // Personal section
+  doc+='<div style="grid-column:1/-1;background:#1a2a4a;color:#fff;padding:7px 14px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px">Personal Policies — Your Responsibility</div>';
+  if(totLife>0)  doc+=sumRow('Life & Risk Cover (premiums)', totLife, false);
+  if(totRA>0)    doc+=sumRow('Retirement Annuities & Preservation', totRA, false);
+  if(totInv>0)   doc+=sumRow('Investments & Savings', totInv, false);
+  if(totMed>0)   doc+=sumRow('Medical Aid', totMed, false);
+  if(totOther>0) doc+=sumRow('Other', totOther, false);
+  doc+=sumRow('Total Personal Premium /pm', totPersonal, true);
 
+  // Business section (only if exists)
+  if(totBiz>0){
+    doc+='<div style="grid-column:1/-1;background:#b45309;color:#fff;padding:7px 14px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px">Business Assurance — Usually Employer / Company Funded</div>';
+    doc+=sumRow('Business Assurance Premium', totBiz, false);
+    doc+=sumRow('Total Business Premium /pm', totBiz, true);
+  }
+
+  // Grand total
+  doc+='<div style="grid-column:1/-1;height:2px;background:#c8a84b"></div>';
+  doc+=sumRow('TOTAL ALL POLICIES /pm', totAll, true);
+  doc+='</div></div>';
+
+  // ── POLICY SECTIONS ──
+  doc+=buildSection(groups.personal, '#1a2a4a');
+  doc+=buildSection(groups.ra,       '#2e7d5a');
+  doc+=buildSection(groups.invest,   '#2563ab');
+  doc+=buildSection(groups.medical,  '#7c3aed');
+  if(groups.other.pols.length) doc+=buildSection(groups.other, '#6b7280');
+
+  // Business assurance - separate section with note
+  if(groups.business.pols.length){
+    doc+='<div style="margin-top:8px;padding:10px 16px;background:#fef3c7;border:1px solid #f59e0b;border-radius:8px;font-size:12px;color:#92400e;margin-bottom:12px">ℹ️ Business assurance policies are typically funded by the employer or company, not the individual. Premium amounts shown are for record purposes.</div>';
+    doc+=buildSection(groups.business, '#b45309');
+  }
+
+  doc+='<div style="margin-top:32px;font-size:10px;color:#999;border-top:1px solid #eee;padding-top:12px">Policy schedule prepared by Clinton Hayes, Duwalcoe Financial Consultants CC (FSP No: 9978) on '+today+'. Based on information captured in the practice management system. Please verify all details with the respective product providers.</div>';
   doc+='<div class="noprint" style="position:fixed;bottom:20px;right:20px"><button onclick="window.print()" style="background:#1a2a4a;color:#fff;border:none;padding:10px 24px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:700;box-shadow:0 4px 12px rgba(0,0,0,.2)">🖨 Print / Save PDF</button></div>';
   doc+='</body></html>';
 
-  var win=window.open('','_blank','width=940,height=900');
+  var win=window.open('','_blank','width=960,height=900');
   win.document.write(doc);
   win.document.close();
 }
