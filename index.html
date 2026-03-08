@@ -831,7 +831,9 @@ function renderOverview(c,pols,roas,ctasks){
 function renderPolicies(c,pols){
   return '<div class="card">'+
     '<div class="ch"><h2>📄 Policies</h2>'+
-    '<button class="btn b-gd sm" data-act="open-new-policy" data-cid="'+c.ID+'">+ Add Policy</button></div>'+
+    '<div style="display:flex;gap:8px">'+
+    '<button class="btn b-gh sm" data-act="view-schedule" data-cid="'+c.ID+'">🖨 Print Schedule</button>'+
+    '<button class="btn b-gd sm" data-act="open-new-policy" data-cid="'+c.ID+'">+ Add Policy</button></div></div>'+
     (pols.length===0?'<div class="empty cb">No policies yet</div>':
     '<div style="overflow:hidden"><table class="tbl"><thead><tr>'+
     '<th>Insurer</th><th>Product</th><th>Policy No.</th><th>Type</th><th>Benefit</th><th>Premium</th><th>Status</th><th></th>'+
@@ -1713,6 +1715,121 @@ document.addEventListener('click', function(e){
     el=el.parentElement;
   }
 });
+
+function openPolicySchedule(cid){
+  var c=DB.clients.find(function(x){return String(x.ID)===String(cid);});
+  if(!c){toast('Client not found','err');return;}
+  var pols=polsFor(cid).filter(function(p){return p.Status!=='Replaced'&&p.Status!=='Cancelled';});
+  var today=new Date().toLocaleDateString('en-ZA',{day:'2-digit',month:'long',year:'numeric'});
+
+  function R(v){if(!v||v==='0'||v==='None')return '—';var n=parseFloat(String(v).replace(/[^0-9.-]/g,''));return isNaN(n)?String(v):'R '+Math.round(n).toLocaleString('en-ZA');}
+  function V(v){return (!v||v==='None'||v==='0')?'—':String(v);}
+  function FD(v){if(!v||v==='None')return '—';var p=parseDateVal(v);if(!p.y)return String(v);var mn=['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];return (p.d||'?')+' '+(mn[parseInt(p.m,10)]||'?')+' '+p.y;}
+
+  var benRows='';
+  pols.forEach(function(p){
+    var bens=[];
+    try{bens=p.Beneficiaries?JSON.parse(p.Beneficiaries):[];}catch(e){}
+    var benStr=bens.length?bens.map(function(b){return (b.name||b.type)+(b.pct?' ('+b.pct+'%)':'');}).join(', '):(V(p.Beneficiary)||'—');
+
+    var incBens=[];
+    try{incBens=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):[];}catch(e){}
+
+    benRows+='<div style="page-break-inside:avoid;border:1px solid #dde0e8;border-radius:8px;margin-bottom:20px;overflow:hidden">';
+    // Policy header bar
+    benRows+='<div style="background:#1a2a4a;color:#fff;padding:10px 16px;display:flex;justify-content:space-between;align-items:center">';
+    benRows+='<div><span style="font-size:15px;font-weight:700">'+(p.Insurer||'—')+'</span>';
+    if(p.Product) benRows+=' &nbsp;·&nbsp; <span style="font-size:13px;opacity:.8">'+p.Product+'</span>';
+    benRows+='</div>';
+    benRows+='<div style="font-size:11px;opacity:.7">'+V(p.Type)+'</div></div>';
+
+    // Two column grid
+    benRows+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:0">';
+
+    function cell(lbl,val){return '<div style="padding:8px 14px;border-bottom:1px solid #eef"><div style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:.5px">'+lbl+'</div><div style="font-weight:600;font-size:13px;margin-top:2px">'+val+'</div></div>';}
+
+    benRows+=cell('Policy / Contract No', V(p.PolicyNo));
+    benRows+=cell('Inception Date', FD(p.StartDate));
+    benRows+=cell('Premium', R(p.Premium)+(p.Frequency?' / '+p.Frequency:''));
+    benRows+=cell('Status', V(p.Status||'Active'));
+    benRows+=cell('Premium Escalation', V(p.PremEscalation)?V(p.PremEscalation)+'%':'—');
+    benRows+=cell('Benefit Escalation', V(p.BenEscalation)?V(p.BenEscalation)+'%':'—');
+    benRows+=cell('Policy Owner', p.ClientIsOwner==='No'?V(p.Owner):'Client');
+    benRows+=cell('Payer', V(p.Payer||c.Name));
+
+    // Risk benefits
+    if(p.BenDeath)    benRows+=cell('Death Benefit', R(p.BenDeath));
+    if(p.BenDisability) benRows+=cell('Capital Disability', R(p.BenDisability));
+    if(p.BenDreadDisease) benRows+=cell('Dread Disease'+(p.DreadDiseaseType?' ('+p.DreadDiseaseType+')':''), R(p.BenDreadDisease)+(p.DreadDiseaseNotes?' — '+p.DreadDiseaseNotes:''));
+    if(p.BenFundValue)  benRows+=cell('Fund Value', R(p.BenFundValue));
+    if(p.BenSurrenderValue) benRows+=cell('Nett Surrender Value', R(p.BenSurrenderValue));
+    if(p.MaturityDate)  benRows+=cell('Maturity Date', FD(p.MaturityDate));
+
+    // Business assurance extras
+    if(p.BizType)     benRows+=cell('Business Assurance Type', V(p.BizType));
+    if(p.EstateDutiable) benRows+=cell('Estate Dutiable', V(p.EstateDutiable));
+
+    benRows+='</div>';
+
+    // Income benefits rows
+    if(incBens.length){
+      benRows+='<div style="padding:10px 14px;background:#f8f8f5;border-top:1px solid #eef">';
+      benRows+='<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:#c8a84b;margin-bottom:8px">Income Benefits</div>';
+      benRows+='<table style="width:100%;border-collapse:collapse;font-size:12px">';
+      benRows+='<thead><tr style="background:#eee"><th style="padding:5px 8px;text-align:left">Type</th><th style="padding:5px 8px;text-align:left">Label</th><th style="padding:5px 8px;text-align:right">Amount/pm</th><th style="padding:5px 8px;text-align:left">Waiting</th><th style="padding:5px 8px;text-align:left">Benefit Period</th><th style="padding:5px 8px;text-align:left">Taxable</th></tr></thead><tbody>';
+      incBens.forEach(function(r){
+        benRows+='<tr><td style="padding:5px 8px">'+V(r.type)+'</td><td style="padding:5px 8px">'+V(r.label)+'</td><td style="padding:5px 8px;text-align:right">'+R(r.amount)+'</td><td style="padding:5px 8px">'+V(r.waiting)+'</td><td style="padding:5px 8px">'+V(r.term)+'</td><td style="padding:5px 8px">'+V(r.taxable)+'</td></tr>';
+      });
+      benRows+='</tbody></table></div>';
+    }
+
+    // Beneficiaries
+    benRows+='<div style="padding:10px 14px;border-top:1px solid #eef;background:#fafaf8">';
+    benRows+='<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:#c8a84b;margin-bottom:4px">Beneficiaries</div>';
+    benRows+='<div style="font-size:13px">'+benStr+'</div></div>';
+
+    if(p.Notes){
+      benRows+='<div style="padding:8px 14px;border-top:1px solid #eef;font-size:12px;color:#667"><em>'+p.Notes+'</em></div>';
+    }
+    benRows+='</div>';
+  });
+
+  var doc='<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Policy Schedule — '+c.Name+'</title><style>';
+  doc+='body{font-family:Arial,sans-serif;color:#1a2a4a;font-size:13px;max-width:860px;margin:0 auto;padding:30px}';
+  doc+='@media print{.noprint{display:none}body{padding:10px}}';
+  doc+='</style></head><body>';
+
+  // Header
+  doc+='<div style="display:flex;justify-content:space-between;align-items:flex-start;border-bottom:3px solid #c8a84b;padding-bottom:14px;margin-bottom:20px">';
+  doc+='<div><div style="font-size:11px;text-transform:uppercase;letter-spacing:1px;color:#888">Policy Schedule</div>';
+  doc+='<div style="font-size:22px;font-weight:700;margin:4px 0">'+c.Name+'</div>';
+  doc+='<div style="font-size:12px;color:#666">'+(c.IDNumber?'ID: '+c.IDNumber+' &nbsp;·&nbsp; ':'')+( c.Cell||'')+'</div></div>';
+  doc+='<div style="text-align:right;font-size:12px;color:#666">';
+  doc+='<strong style="color:#1a2a4a;display:block;font-size:14px">Clinton Hayes</strong>';
+  doc+='Duwalcoe Financial Consultants CC<br>FSP No: 9978<br>clinton@duwalcoe.co.za<br>083 608 5617<br><br>Date: '+today+'</div></div>';
+
+  // Summary table
+  doc+='<table style="width:100%;border-collapse:collapse;margin-bottom:24px;font-size:12px">';
+  doc+='<thead><tr style="background:#1a2a4a;color:#fff"><th style="padding:7px 10px;text-align:left">Insurer</th><th style="padding:7px 10px;text-align:left">Product</th><th style="padding:7px 10px;text-align:left">Policy No</th><th style="padding:7px 10px;text-align:left">Type</th><th style="padding:7px 10px;text-align:right">Premium</th><th style="padding:7px 10px;text-align:left">Status</th></tr></thead><tbody>';
+  pols.forEach(function(p){
+    doc+='<tr style="border-bottom:1px solid #eef"><td style="padding:6px 10px;font-weight:600">'+(p.Insurer||'—')+'</td><td style="padding:6px 10px">'+(p.Product||'—')+'</td><td style="padding:6px 10px;font-family:monospace">'+(p.PolicyNo||'—')+'</td><td style="padding:6px 10px">'+(p.Type||'—')+'</td><td style="padding:6px 10px;text-align:right;color:#2e7d5a;font-weight:600">'+R(p.Premium)+'</td><td style="padding:6px 10px">'+(p.Status||'Active')+'</td></tr>';
+  });
+  // Total row
+  var totalPrem=pols.reduce(function(s,p){var n=parseFloat(String(p.Premium||'0').replace(/[^0-9.-]/g,''));return s+(isNaN(n)?0:n);},0);
+  doc+='<tr style="background:#f5f5f0;font-weight:700"><td colspan="4" style="padding:7px 10px">Total Monthly Premium</td><td style="padding:7px 10px;text-align:right;color:#2e7d5a">R '+Math.round(totalPrem).toLocaleString('en-ZA')+'</td><td></td></tr>';
+  doc+='</tbody></table>';
+
+  doc+=benRows;
+
+  doc+='<div style="margin-top:32px;font-size:10px;color:#999;border-top:1px solid #eee;padding-top:12px">This policy schedule has been prepared by Clinton Hayes on behalf of Duwalcoe Financial Consultants CC (FSP No: 9978) on '+today+'. Information is based on data captured in the practice management system. Please verify details with the respective insurers.</div>';
+
+  doc+='<div class="noprint" style="position:fixed;bottom:20px;right:20px"><button onclick="window.print()" style="background:#1a2a4a;color:#fff;border:none;padding:10px 24px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:700;box-shadow:0 4px 12px rgba(0,0,0,.2)">🖨 Print / Save PDF</button></div>';
+  doc+='</body></html>';
+
+  var win=window.open('','_blank','width=940,height=900');
+  win.document.write(doc);
+  win.document.close();
+}
 
 // Search input
 document.addEventListener('change', function(e){
