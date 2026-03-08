@@ -712,6 +712,7 @@ function renderOverview(c,pols,roas,ctasks){
     dr('Anniversary', clean(c.Anniversary)?fdate(c.Anniversary):'—')+
     dr('Employer', clean(c.Employer)||'—')+
     dr('Occupation', clean(c.Occupation)||'—')+
+    dr('Education', clean(c.Education)?(c.Education+(clean(c.Qualification)?' — '+c.Qualification:'')):'—')+
     dr('Smoker', clean(c.Smoker)||'—')+
     dr('Risk Category', clean(c.RiskCategory)||'—')+
     dr('Gender', clean(c.Gender)||'—')+
@@ -834,7 +835,7 @@ function fld(id,lbl,val,type,extra){
   if(t==='textarea') return '<div class="fld" style="grid-column:1/-1"><label>'+lbl+'</label><textarea id="'+id+'">'+v+'</textarea></div>';
   if(t==='select'){
     return '<div class="fld"><label>'+lbl+'</label><select id="'+id+'">'+
-      (extra||[]).map(function(o){return '<option value="'+o+'"'+(o===v?' selected':'')+'>'+( o||'Select…')+'</option>';}).join('')+
+      (extra||[]).map(function(o){return '<option value="'+o+'"'+((o&&o.trim().toLowerCase())===(v&&v.trim().toLowerCase())?' selected':'')+'>'+( o||'Select…')+'</option>';}).join('')+
       '</select></div>';
   }
   return '<div class="fld"><label>'+lbl+'</label><input type="'+t+'" id="'+id+'" value="'+v+'"'+(extra?' '+extra:'')+' autocomplete="off"></div>';
@@ -909,6 +910,7 @@ function openClientModal(id){
     '<div class="g3" style="margin-top:10px">'+
     fs('fmar','Marital Status',['','Single','Married - ANC with accrual','Married - ANC without accrual','Married in COP','Divorced','Widowed'],c.MaritalStatus)+
     fs('fedu','Education Level',['','School - no matric','Matric','Diploma / Certificate','Degree','Post Graduate','Other'],c.Education||'')+
+    fld('fqual','Qualification Detail',c.Qualification||'')+
     fs('fst','Status',['Active','Inactive','Lead'],c.Status||'Active')+
     '</div>'+
 
@@ -951,6 +953,7 @@ function openClientModal(id){
   document.getElementById('cMod').classList.add('open');
 
   // Auto-derive DOB from ID if DOB field is blank
+  // Also pre-fill spouse fields from DB.links if not on client record
   setTimeout(function(){
     var fdEl = document.getElementById('fd');
     var fiEl = document.getElementById('fi');
@@ -958,7 +961,24 @@ function openClientModal(id){
       var derived = dobFromID(fiEl.value);
       if(derived) fdEl.value = derived;
     }
-    // Spouse: same
+    // Pre-fill spouse section from DB.links if client record spouse fields are blank
+    var fspnameEl = document.getElementById('fspname');
+    if(fspnameEl && !fspnameEl.value && EC){
+      var spLink = DB.links.find(function(l){ return String(l.PrincipalID)===String(EC) && l.Type==='Spouse'; });
+      if(spLink){
+        var fspnEl  = document.getElementById('fspname');
+        var fspidEl = document.getElementById('fspid');
+        var fspdEl  = document.getElementById('fspdob');
+        var fspcEl  = document.getElementById('fspcell');
+        var fspeEl  = document.getElementById('fspemail');
+        if(fspnEl  && !fspnEl.value)  fspnEl.value  = spLink.Name  || '';
+        if(fspidEl && !fspidEl.value) fspidEl.value = spLink.IDNumber || '';
+        if(fspdEl  && !fspdEl.value)  fspdEl.value  = spLink.DOB   || '';
+        if(fspcEl  && !fspcEl.value)  fspcEl.value  = spLink.Cell  || '';
+        if(fspeEl  && !fspeEl.value)  fspeEl.value  = spLink.Email || '';
+      }
+    }
+    // Spouse DOB from ID
     var fspdob = document.getElementById('fspdob');
     var fspid  = document.getElementById('fspid');
     if(fspdob && fspid && !fspdob.value && fspid.value.length >= 6){
@@ -986,10 +1006,10 @@ function saveClient(openFNA){
   if(!getRadio('fsm')&&!g('fsm')){toast('Please select Smoker status','err');return;}
   var id=EC||('new_'+Date.now());
   var c={ID:id,Name:name,IDNumber:g('fi'),DOB:g('fd'),Cell:g('fc'),Email:g('fe'),
-    Occupation:g('fo'),Employer:g('fem'),Income:g('finc'),TaxNo:g('ftx'),
+    Occupation:g('fo'),Employer:g('fem'),Income:g('finc')||'',TaxNo:g('ftx'),
     Anniversary:g('fann'),MaritalStatus:g('fmar'),Status:g('fst'),ReviewDate:g('fr'),
     Gender:getRadio('fgen')||g('fgen'),Smoker:getRadio('fsm')||g('fsm'),
-    Education:g('fedu'),TelHome:g('ftelh'),TelWork:g('ftelw'),
+    Education:g('fedu'),Qualification:g('fqual'),TelHome:g('ftelh'),TelWork:g('ftelw'),
     SpouseName:g('fspname'),SpouseIDNumber:g('fspid'),SpouseDOB:g('fspdob'),SpouseCell:g('fspcell'),SpouseEmail:g('fspemail'),
     Address:g('fadr'),DriveUrl:g('fdr'),Notes:g('fnt'),RiskCategory:g('frc'),Adviser:cu()};
   if(EC){var i=DB.clients.findIndex(function(x){return x.ID===EC;});if(i>=0)DB.clients[i]=c;}
@@ -1017,10 +1037,18 @@ function saveClient(openFNA){
     var existing = DB.links.find(function(l){ return String(l.PrincipalID)===String(id) && l.Type==='Spouse'; });
     if(!existing){
       var spLink = {ID:'fam_sp_'+Date.now(), PrincipalID:id,
-        Name:g('fspname'), IDNumber:'', DOB:g('fspdob'),
+        Name:g('fspname'), IDNumber:g('fspid')||'', DOB:g('fspdob'),
         Cell:g('fspcell'), Email:g('fspemail'), Type:'Spouse', IsClient:'No', ClientID:''};
       DB.links.push(spLink);
       post({action:'saveFamMember', member:spLink});
+    } else {
+      // Update existing spouse link with latest info from client form
+      existing.Name = g('fspname');
+      existing.IDNumber = g('fspid')||existing.IDNumber||'';
+      existing.DOB  = g('fspdob')||existing.DOB||'';
+      existing.Cell = g('fspcell')||existing.Cell||'';
+      existing.Email= g('fspemail')||existing.Email||'';
+      post({action:'saveFamMember', member:existing});
     }
   }
 
