@@ -1009,244 +1009,213 @@ function openPolicyModal(cid,idx){
   EPC=cid; EPI=(idx!==undefined?idx:null);
   var pols=polsFor(cid);
   var p=(idx!==undefined&&pols[idx])?pols[idx]:{};
-  document.getElementById('pModT').textContent=idx!==undefined?'Edit Policy':'Add Policy';
-  
-  var typeOpts=['Life Cover','Death Income Protection','Disability Lump Sum','Disability Income Protection',
-    'Dread Disease / Severe Illness','Retirement Annuity','Living Annuity','Endowment','Linked Investment',
-    'Unit Trust','Tax Free Savings','Pension/Provident Fund','Short Term','Medical Aid','Other'];
-
-  document.getElementById('pModB').innerHTML=
-    '<div style="display:flex;flex-direction:column;gap:0">'+
-    // Basic info
-    '<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--gold);padding:8px 0 6px">Policy Details</div>'+
-    '<div class="g2">'+
-    fld('pi','Insurer *',p.Insurer)+
-    fld('pp','Product / Plan Name',p.Product)+
-    '</div>'+
-    '<div class="g2">'+
-    fld('pn','Policy Number',p.PolicyNo)+
-    fs('pt','Policy Type',typeOpts,p.Type)+
-    '</div>'+
-    '<div class="g2">'+
-    fld('psd','Inception Date',p.StartDate,'date')+
-    fld('pmd','Maturity Date',p.MaturityDate,'date')+
-    '</div>'+
-    '<div class="g2">'+
-    fld('prd','Retirement Date',p.RetirementDate,'date')+
-    fs('pst','Status',['Active','Lapsed','Paid Up','Cancelled','Replaced'],p.Status||'Active')+
-    '</div>'+
-    // Benefits
-    '<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--gold);padding:12px 0 6px">Benefits</div>'+
-    '<div class="g2">'+
-    fld('pb_death','Death Benefit',p.BenDeath)+
-    fld('pb_di','Permanent Disability',p.BenDisability)+
-    '</div>'+
-    '<div class="g2">'+
-    fld('pb_imp','Impairment',p.BenImpairment)+
-    fld('pb_si','Severe Illness',p.BenSevereIllness)+
-    '</div>'+
-    '<div class="g2">'+
-    fld('pb_sv','Surrender Value',p.BenSurrenderValue)+
-    fld('pb_fv','Fund / Market Value',p.BenFundValue)+
-    '</div>'+
-    '<div class="g2">'+
-    fld('pb_mv','Maturity Value',p.BenMaturityValue)+
-    fld('pb_rv','Retirement Value',p.BenRetirementValue)+
-    '</div>'+
-    '<div class="g2">'+
-    fld('pb_ip','Income Protection (Monthly)',p.BenIncomeProtection)+
-    fld('pb_di2','Death Income Benefit (Monthly)',p.BenDeathIncome)+
-    '</div>'+
-    // Premium
-    '<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--gold);padding:12px 0 6px">Premium</div>'+
-    '<div class="g2">'+
-    fld('ppm','Monthly Contribution',p.Premium)+
-    fld('pprem_pct','Premium Escalation %',p.PremEscalation)+
-    '</div>'+
-    '<div class="g2">'+
-    fld('pben_pct','Benefit Escalation %',p.BenEscalation)+
-    fld('ppay','Payer',p.Payer)+
-    '</div>'+
-    // Parties
-    '<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--gold);padding:12px 0 6px">Parties & Beneficiaries</div>'+
-    fld('pbe','Beneficiary/ies',p.Beneficiary)+
-    fld('pins','Insured Life/Lives',p.Insured)+
-    // Notes
-    '<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--gold);padding:12px 0 6px">Notes</div>'+
-    fld('pnt','',p.Notes,'textarea')+
-    '</div>';
+  document.getElementById('pModT').textContent=(idx!==undefined?'Edit Policy':'Add Policy');
+  buildPolicyForm(p);
   document.getElementById('pMod').classList.add('open');
 }
 
+var POL_INCOME_ROWS=[];
 
-function openPolicySchedule(cid){
-  var c=DB.clients.find(function(x){return x.ID===cid||x.Name===cid;});
-  if(!c) return;
-  var pols=DB.policies.filter(function(p){return (p.ClientID===cid)&&p.Status!=='Replaced';});
-  
-  var typeOrder=['Life Cover','Disability Income','Disability Lump Sum','Dread Disease',
-    'Retirement Annuity','Living Annuity','Endowment','Linked Investment',
-    'Unit Trust','Tax Free Savings','Pension/Provident','Short Term','Medical Aid','Other'];
-  
-  var groups={};
-  pols.forEach(function(p){ var t=p.Type||'Other'; if(!groups[t])groups[t]=[]; groups[t].push(p); });
+function sec(title){
+  return '<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--gold);padding:14px 0 6px;border-top:1px solid var(--smoke);margin-top:8px">'+title+'</div>';
+}
 
-  function rz(v){ return (v&&v!='0'&&v!='—')?'R '+parseFloat(String(v).replace(/[^0-9.]/g,'')).toLocaleString('en-ZA'):'-'; }
-  function sumCol(arr,field){ 
-    var total=arr.reduce(function(s,p){ var v=parseFloat(String(p[field]||'0').replace(/[^0-9.]/g,'')); return s+(isNaN(v)?0:v); },0);
-    return total>0?'R '+Math.round(total).toLocaleString('en-ZA'):'-';
+function buildPolicyForm(p){
+  p=p||{};
+  var type=p.Type||'';
+  try{ POL_INCOME_ROWS=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):[]; }catch(e){ POL_INCOME_ROWS=[]; }
+
+  var isRisk=['Life / Income Protector','Business Assurance',''].indexOf(type)>=0;
+  var isRA=['Retirement Annuity','Pension Fund','Provident Fund','Pension Preservation','Provident Preservation'].indexOf(type)>=0;
+  var isInv=['Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment','Unit Trust','Tax Free Savings','Living Annuity'].indexOf(type)>=0;
+  var isMed=type==='Medical Aid';
+  var isBiz=type==='Business Assurance';
+
+  var typeOpts=['Life / Income Protector','Business Assurance','Retirement Annuity','Pension Fund','Provident Fund','Pension Preservation','Provident Preservation','Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment','Unit Trust','Tax Free Savings','Living Annuity','Medical Aid','Other'];
+
+  var html='<div style="display:flex;flex-direction:column;gap:0">';
+
+  // DETAILS
+  html+=sec('Policy Details');
+  html+='<div class="g2">'+fld('pi','Insurer / Company *',p.Insurer)+fld('pp','Product / Plan Name',p.Product)+'</div>';
+  html+='<div class="g2">'+fld('pn','Policy / Contract No',p.PolicyNo);
+  html+='<div class="fld"><label>Policy Type</label><select id="pt" onchange="buildPolicyForm(Object.assign(collectPolicyForm(),{Type:this.value}))" style="width:100%;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px">'+typeOpts.map(function(o){return '<option value="'+o+'"'+(p.Type===o?' selected':'')+'>'+o+'</option>';}).join('')+'</select></div></div>';
+  html+='<div class="g2">'+fld('psd','Inception Date',p.StartDate,'date')+fld('pown','Policy Owner',p.Owner||'')+'</div>';
+  html+='<div class="g2">';
+  html+=fs('pst','Status',['Active','Lapsed','Paid Up','Cancelled'],p.Status||'Active');
+  html+='<div class="fld"><label>Estate Dutiable</label><div style="display:flex;gap:12px;margin-top:8px">';
+  html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="pestate" value="Yes"'+(p.EstateDutiable==='Yes'?' checked':'')+'>Yes</label>';
+  html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="pestate" value="No"'+(p.EstateDutiable==='No'?' checked':'')+'>No</label>';
+  html+='</div></div></div>';
+
+  // BUSINESS ASSURANCE
+  if(isBiz){
+    html+=sec('Business Assurance');
+    html+='<div class="g2">'+fs('pbiztype','Type',['Buy & Sell','Contingent Liability','Keyman'],p.BizType)+fld('plifeassured','Life Assured',p.LifeAssured)+'</div>';
+    html+='<div class="g2">'+fld('ploanamt','Loan / Business Cover Amount',p.LoanAmount)+fld('pkeypos','Key Person Position',p.KeyPosition)+'</div>';
   }
 
-  var tablesByType = Object.keys(groups).sort(function(a,b){
-    return typeOrder.indexOf(a)-typeOrder.indexOf(b);
-  }).map(function(type){
-    var items=groups[type];
-    var isLife=['Life Cover','Disability Income','Disability Lump Sum','Dread Disease'].indexOf(type)>=0;
-    var isInv=['Retirement Annuity','Living Annuity','Endowment','Linked Investment','Unit Trust','Tax Free Savings'].indexOf(type)>=0;
-    
-    var cols = isLife ? 
-      ['Death','Death Income','Disability Lump','Disability Income','Severe Illness','Surrender Value','Prem %','Ben %','Contribution'] :
-      ['Death','Fund Value','Maturity Value','Retirement Value','Prem %','Ben %','Contribution'];
+  // PREMIUM
+  html+=sec('Premium');
+  html+='<div class="g2">'+fld('ppm','Premium / Contribution',p.Premium)+fs('pfreq','Frequency',['Monthly','Quarterly','Annually','Once Off'],p.Frequency||'Monthly')+'</div>';
+  html+='<div class="g2">'+fld('pprem_pct','Premium Escalation %',p.PremEscalation)+fld('pben_pct','Benefit Escalation %',p.BenEscalation)+'</div>';
 
-    var rows=items.map(function(p){
-      var cells = isLife ? [
-        rz(p.BenDeath||p.Benefit), rz(p.BenDeathIncome), rz(p.BenDisability), rz(p.BenIncomeProtection), rz(p.BenSevereIllness), rz(p.BenSurrenderValue),
-        p.PremEscalation||'-', p.BenEscalation||'-', 'R'+(p.Premium||'0')+' (M)'
-      ] : [
-        rz(p.BenDeath||p.Benefit), rz(p.BenFundValue), rz(p.BenMaturityValue), rz(p.BenRetirementValue),
-        p.PremEscalation||'-', p.BenEscalation||'-', 'R'+(p.Premium||'0')+' (M)'
-      ];
-      return '<tr style="border-bottom:1px solid #eee">'+
-        '<td style="padding:6px 8px;font-size:12px;font-weight:600">'+p.Insurer+'<br><span style="font-size:10px;color:#888;font-weight:400">'+p.PolicyNo+'</span></td>'+
-        '<td style="padding:6px 8px;font-size:11px;color:#555">'+(p.StartDate?p.StartDate.slice(0,10):'—')+'</td>'+
-        cells.map(function(v){ return '<td style="padding:6px 8px;font-size:12px;text-align:right">'+v+'</td>'; }).join('')+
-        '</tr>'+
-        (p.Beneficiary||p.Insured||p.Notes?
-        '<tr><td colspan="'+(cols.length+2)+'" style="padding:2px 8px 8px 16px;font-size:11px;color:#555;background:#fafaf8">'+
-        (p.Insured?'<strong>Insured:</strong> '+p.Insured+' &nbsp;':'')+
-        (p.Beneficiary?'<strong>Beneficiary:</strong> '+p.Beneficiary+' &nbsp;':'')+
-        (p.Notes?'<strong>Notes:</strong> '+p.Notes:'')+
-        '</td></tr>':'');
-    }).join('');
+  // RISK COVER
+  if(isRisk){
+    html+=sec('Risk Cover — Lump Sums');
+    html+='<div class="g2">'+fld('pb_death','Death Benefit',p.BenDeath)+fld('pb_dis','Capital Disability',p.BenDisability)+'</div>';
+    html+='<div class="g2">';
+    html+='<div class="fld"><label>Dread Disease / Severe Illness</label>';
+    html+='<div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">';
+    html+='<input id="pb_dd" type="text" value="'+(p.BenDreadDisease||'')+'" placeholder="Amount" style="flex:1;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px">';
+    html+='<select id="pb_ddtype" style="border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:12px"><option'+(p.DreadDiseaseType==='Monthly Income'?'':' selected')+'>Lump Sum</option><option'+(p.DreadDiseaseType==='Monthly Income'?' selected':'')+'>Monthly Income</option></select></div>';
+    html+='<input id="pb_ddnotes" type="text" value="'+(p.DreadDiseaseNotes||'')+'" placeholder="e.g. Comprehensive, Cancer only..." style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:7px 10px;font-family:inherit;font-size:12px"></div>';
+    html+=fld('pb_surr','Nett Surrender Value',p.BenSurrenderValue)+'</div>';
 
-    // Totals row
-    var totals = isLife ? [
-      sumCol(items,'BenDeath'),sumCol(items,'BenDisability'),'-',sumCol(items,'BenSevereIllness'),'-','','',
-      'R'+Math.round(items.reduce(function(s,p){return s+parseFloat(String(p.Premium||'0').replace(/[^0-9.]/g,''));},0)).toLocaleString('en-ZA')+'(M)'
-    ] : [
-      sumCol(items,'BenDeath'),sumCol(items,'BenFundValue'),sumCol(items,'BenMaturityValue'),sumCol(items,'BenRetirementValue'),'','',
-      'R'+Math.round(items.reduce(function(s,p){return s+parseFloat(String(p.Premium||'0').replace(/[^0-9.]/g,''));},0)).toLocaleString('en-ZA')+'(M)'
-    ];
+    html+=sec('Income Benefits');
+    html+='<div style="font-size:11px;color:#889;margin-bottom:8px">Death income, income protection, sickness benefits — one row per benefit stream.</div>';
+    html+='<div id="incomeRowsWrap">'+renderIncomeRows()+'</div>';
+    html+='<button type="button" class="btn b-gh sm" style="margin-top:6px" onclick="addIncomeRow()">+ Add Income Benefit</button>';
+  }
 
-    return '<div style="margin-bottom:24px">'+
-      '<div style="font-size:13px;font-weight:700;color:#1a2a4a;margin-bottom:6px;padding-bottom:4px;border-bottom:2px solid #c8a84b">'+type+'s</div>'+
-      '<table style="width:100%;border-collapse:collapse;font-family:Arial,sans-serif">'+
-      '<thead><tr style="background:#1a2a4a;color:#fff">'+
-      '<th style="padding:6px 8px;text-align:left;font-size:11px">Company / Policy No</th>'+
-      '<th style="padding:6px 8px;text-align:left;font-size:11px">Inception</th>'+
-      cols.map(function(c){ return '<th style="padding:6px 8px;text-align:right;font-size:11px">'+c+'</th>'; }).join('')+
-      '</tr></thead><tbody>'+rows+
-      '<tr style="background:#f5f0e8;font-weight:700">'+
-      '<td colspan="2" style="padding:6px 8px;font-size:12px">Total</td>'+
-      totals.map(function(v){ return '<td style="padding:6px 8px;font-size:12px;text-align:right">'+v+'</td>'; }).join('')+
-      '</tr></tbody></table></div>';
+  // RA / INVESTMENT
+  if(isRA||isInv){
+    html+=sec(isRA?'Fund & Retirement Values':'Investment Values');
+    html+='<div class="g2">'+fld('pb_fv','Current Fund Value',p.BenFundValue)+fld('pb_surr2','Nett Surrender Value',p.BenSurrenderValue)+'</div>';
+    if(isRA){
+      html+='<div class="g2">'+fld('pb_vested','Vested Component (Pot 1)',p.VestedValue)+fld('pb_nonvested','Non-Vested Component',p.NonVestedValue)+'</div>';
+      html+='<div class="g2">'+fld('pb_retcomp','Retirement Component (Pot 2)',p.RetirementComponent)+fld('pb_savcomp','Savings Component (Pot 3)',p.SavingsComponent)+'</div>';
+      html+='<div class="g2">'+fld('pb_retage','Retirement Age',p.RetirementAge||'65')+fld('pb_matdate','Maturity Date',p.MaturityDate,'date')+'</div>';
+      html+='<div class="g2">'+fld('pb_illrate','Illustrative Rate %',p.IllustrativeRate||'9')+fld('pb_growrate','Premium Growth Rate %',p.PremGrowthRate||'10')+'</div>';
+      html+='<div class="fld"><label>Will client withdraw Savings Pot (Pot 3) before retirement?</label><div style="display:flex;gap:12px;margin-top:8px">';
+      html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="p3pot" value="Yes"'+(p.WithdrawSavingsPot==='Yes'?' checked':'')+'>Yes</label>';
+      html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="p3pot" value="No"'+(p.WithdrawSavingsPot==='No'?' checked':'')+'>No</label>';
+      html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="p3pot" value="Undecided"'+((!p.WithdrawSavingsPot||p.WithdrawSavingsPot==='Undecided')?' checked':'')+'>Undecided</label>';
+      html+='</div></div>';
+    } else {
+      html+='<div class="g2">'+fld('pb_matval','Maturity Value',p.BenMaturityValue)+fld('pb_matdate','Maturity Date',p.MaturityDate,'date')+'</div>';
+      html+='<div class="g2">'+fld('pb_illrate','Illustrative Rate %',p.IllustrativeRate||'9')+fld('pb_growrate','Premium Growth Rate %',p.PremGrowthRate||'10')+'</div>';
+      if(type==='Endowment'||type==='Offshore Endowment'){
+        html+='<div class="fld"><label>Include in Retirement Planning?</label><div style="display:flex;gap:12px;margin-top:8px">';
+        html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="pinret" value="Yes"'+(p.IncludeInRetirement==='Yes'?' checked':'')+'>Yes</label>';
+        html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="pinret" value="No"'+(p.IncludeInRetirement!=='Yes'?' checked':'')+'>No</label>';
+        html+='</div></div>';
+      }
+    }
+  }
+
+  // MEDICAL
+  if(isMed){
+    html+=sec('Medical Aid Details');
+    html+='<div class="g2">'+fld('pmedplan','Plan Name',p.MedPlan)+fld('pmedlives','Lives Covered',p.MedLives)+'</div>';
+  }
+
+  // RELATIONS
+  html+=sec('Insured & Beneficiaries');
+  html+='<div class="g2">'+fld('pins','Life Assured / Insured',p.Insured)+fld('ppay','Payer',p.Payer)+'</div>';
+  html+='<div class="fld"><label>Beneficiary</label><div style="display:flex;gap:8px;align-items:center">';
+  html+='<select id="pbe_type" style="border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px;min-width:130px">';
+  ['Estate','Spouse','Children','Third Party','Business','Other'].forEach(function(o){ html+='<option value="'+o+'"'+(p.BeneficiaryType===o?' selected':'')+'>'+o+'</option>'; });
+  html+='</select><input id="pbe" type="text" value="'+(p.Beneficiary||'')+'" placeholder="Name(s) and % if applicable" style="flex:1;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px"></div></div>';
+
+  // NOTES
+  html+=sec('Notes');
+  html+=fld('pnt','',p.Notes,'textarea');
+  html+='</div>';
+
+  document.getElementById('pModB').innerHTML=html;
+}
+
+function renderIncomeRows(){
+  if(POL_INCOME_ROWS.length===0) return '<div style="font-size:12px;color:#aaa;padding:8px 0">No income benefits added yet.</div>';
+  var waitOpts=['7 days','2 weeks','1 month','3 months','6 months','1 year','2 years'];
+  var termOpts=['1 year','2 years','5 years','To age 55','To age 60','To age 65','To age 70','Whole of Life'];
+  var typeOpts=['Temporary IP','Extended IP','Death Income','Sickness Benefit','Hospital Income','Other'];
+  return POL_INCOME_ROWS.map(function(r,i){
+    return '<div style="background:var(--smoke);border-radius:8px;padding:10px 12px;margin-bottom:8px">'+
+      '<div style="display:flex;gap:6px;align-items:center;margin-bottom:8px">'+
+      '<select onchange="POL_INCOME_ROWS['+i+'].type=this.value" style="border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px;flex:1">'+
+      typeOpts.map(function(o){return '<option'+(r.type===o?' selected':'')+'>'+o+'</option>';}).join('')+
+      '</select>'+
+      '<input type="text" value="'+(r.label||'')+'" placeholder="Benefit label e.g. Income Protection Plus" onchange="POL_INCOME_ROWS['+i+'].label=this.value" style="flex:2;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px">'+
+      '<button type="button" onclick="POL_INCOME_ROWS.splice('+i+',1);document.getElementById(\'incomeRowsWrap\').innerHTML=renderIncomeRows()" style="background:var(--rose);color:#fff;border:none;border-radius:6px;padding:5px 9px;cursor:pointer;font-size:11px;font-weight:700">✕</button>'+
+      '</div>'+
+      '<div style="display:grid;grid-template-columns:repeat(6,1fr);gap:6px">'+
+      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Monthly Amount</div><input type="text" value="'+(r.amount||'')+'" placeholder="R" onchange="POL_INCOME_ROWS['+i+'].amount=this.value" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
+      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Waiting Period</div><select onchange="POL_INCOME_ROWS['+i+'].waiting=this.value" style="width:100%;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px">'+waitOpts.map(function(o){return '<option'+(r.waiting===o?' selected':'')+'>'+o+'</option>';}).join('')+'</select></div>'+
+      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Benefit Period</div><select onchange="POL_INCOME_ROWS['+i+'].term=this.value" style="width:100%;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px">'+termOpts.map(function(o){return '<option'+(r.term===o?' selected':'')+'>'+o+'</option>';}).join('')+'</select></div>'+
+      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Escalation %</div><input type="text" value="'+(r.esc||'')+'" placeholder="%" onchange="POL_INCOME_ROWS['+i+'].esc=this.value" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
+      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Taxable</div><select onchange="POL_INCOME_ROWS['+i+'].taxable=this.value" style="width:100%;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"><option'+(r.taxable==='Yes'?' selected':'')+'>Yes</option><option'+(r.taxable!=='Yes'?' selected':'')+'>No</option></select></div>'+
+      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Lump Sum opt?</div><select onchange="POL_INCOME_ROWS['+i+'].convert=this.value" style="width:100%;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"><option'+(r.convert==='Yes'?' selected':'')+'>Yes</option><option'+(r.convert!=='Yes'?' selected':'')+'>No</option></select></div>'+
+      '</div></div>';
   }).join('');
+}
 
-  var today=new Date().toLocaleDateString('en-ZA');
-  var scheduleHTML='<!DOCTYPE html><html><head><title>Insurance & Investment Schedule - '+c.Name+'</title>'+
-    '<style>body{font-family:Arial,sans-serif;padding:20px;color:#1a2a4a}@media print{.noprint{display:none}}</style>'+
-    '</head><body>'+
-    '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:20px;padding-bottom:12px;border-bottom:3px solid #c8a84b">'+
-    '<div>'+
-    '<div style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:1px">Insurance & Investment Schedule</div>'+
-    '<div style="font-size:22px;font-weight:700;color:#1a2a4a;margin:4px 0">'+c.Name+'</div>'+
-    '<div style="font-size:12px;color:#555">'+( c.IDNo||c.ID||'')+'</div>'+
-    (c.Email?'<div style="font-size:12px;color:#555">'+c.Email+'</div>':'')+
-    '</div>'+
-    '<div style="text-align:right">'+
-    '<div style="font-size:12px;color:#555">Clinton Hayes</div>'+
-    '<div style="font-size:11px;color:#888">clinton@duwalcoe.co.za</div>'+
-    '<div style="font-size:11px;color:#888">083 608 5617</div>'+
-    '<div style="font-size:11px;color:#888;margin-top:4px">Printed: '+today+'</div>'+
-    '<div style="font-size:10px;font-weight:700;color:#c8a84b;margin-top:2px">FSP No: 9978</div>'+
-    '</div>'+
-    '<div style="text-align:center">'+
-    '<div style="width:80px;height:40px;background:#1a2a4a;display:flex;align-items:center;justify-content:center;border-radius:4px">'+
-    '<span style="color:#c8a84b;font-weight:700;font-size:10px">DUWALCOE</span></div>'+
-    '</div></div>'+
-    tablesByType+
-    '<div style="margin-top:30px;padding-top:12px;border-top:1px solid #ddd;font-size:10px;color:#888">'+
-    '<strong>Please note:</strong> The value of financial products can increase or decrease depending on market conditions. '+
-    'Past performance is not a reliable indicator of future performance. All values are as at date of printing.'+
-    '</div>'+
-    '<div style="margin-top:8px;font-size:10px;color:#888">Prepared by Clinton Hayes on behalf of Clinton Hayes on '+today+'</div>'+
-    '<div class="noprint" style="position:fixed;bottom:20px;right:20px;display:flex;gap:8px">'+
-    '<button onclick="window.print()" style="background:#1a2a4a;color:#fff;border:none;padding:10px 20px;border-radius:6px;cursor:pointer;font-weight:700">🖨️ Print / Save PDF</button>'+
-    '<button onclick="window.close()" style="background:#888;color:#fff;border:none;padding:10px 20px;border-radius:6px;cursor:pointer">Close</button>'+
-    '</div></body></html>';
+function addIncomeRow(){
+  POL_INCOME_ROWS.push({type:'Temporary IP',label:'',amount:'',waiting:'1 month',term:'To age 65',esc:'',taxable:'No',convert:'No'});
+  document.getElementById('incomeRowsWrap').innerHTML=renderIncomeRows();
+}
 
-  var win=window.open('','_blank','width=1100,height=800');
-  win.document.write(scheduleHTML);
-  win.document.close();
+function collectPolicyForm(){
+  function getR(name){ var el=document.querySelector('input[name="'+name+'"]:checked'); return el?el.value:''; }
+  return {
+    Insurer:g('pi'),Product:g('pp'),PolicyNo:g('pn'),Type:g('pt'),
+    StartDate:g('psd'),Owner:g('pown'),Status:g('pst'),EstateDutiable:getR('pestate'),
+    BizType:g('pbiztype'),LifeAssured:g('plifeassured'),LoanAmount:g('ploanamt'),KeyPosition:g('pkeypos'),
+    Premium:g('ppm'),Frequency:g('pfreq'),PremEscalation:g('pprem_pct'),BenEscalation:g('pben_pct'),
+    BenDeath:g('pb_death'),BenDisability:g('pb_dis'),
+    BenDreadDisease:g('pb_dd'),
+    DreadDiseaseType:(document.getElementById('pb_ddtype')?document.getElementById('pb_ddtype').value:''),
+    DreadDiseaseNotes:g('pb_ddnotes'),
+    BenSurrenderValue:g('pb_surr')||g('pb_surr2'),
+    BenFundValue:g('pb_fv'),BenMaturityValue:g('pb_matval'),
+    MaturityDate:g('pb_matdate'),RetirementAge:g('pb_retage'),
+    VestedValue:g('pb_vested'),NonVestedValue:g('pb_nonvested'),
+    RetirementComponent:g('pb_retcomp'),SavingsComponent:g('pb_savcomp'),
+    IllustrativeRate:g('pb_illrate'),PremGrowthRate:g('pb_growrate'),
+    WithdrawSavingsPot:getR('p3pot'),IncludeInRetirement:getR('pinret'),
+    MedPlan:g('pmedplan'),MedLives:g('pmedlives'),
+    Insured:g('pins'),Payer:g('ppay'),
+    BeneficiaryType:(document.getElementById('pbe_type')?document.getElementById('pbe_type').value:''),
+    Beneficiary:g('pbe'),Notes:g('pnt'),
+    IncomeBenefits:JSON.stringify(POL_INCOME_ROWS)
+  };
 }
 
 function savePolicy(){
   if(!g('pi')){toast('Insurer required','err');return;}
   var now=new Date().toISOString().slice(0,10);
   var existing=polsFor(EPC);
-  var oldPol = (EPI!==null&&existing[EPI])?existing[EPI]:null;
-  
-  var pol={
-    ID: oldPol?oldPol.ID:('p_'+Date.now()),
-    ClientID:EPC,
-    Insurer:g('pi'),Product:g('pp'),PolicyNo:g('pn'),Type:g('pt'),
-    StartDate:g('psd'),MaturityDate:g('pmd'),RetirementDate:g('prd'),
-    Status:g('pst'),
-    BenDeath:g('pb_death'),BenDisability:g('pb_di'),
-    BenImpairment:g('pb_imp'),BenSevereIllness:g('pb_si'),
-    BenSurrenderValue:g('pb_sv'),BenFundValue:g('pb_fv'),
-    BenMaturityValue:g('pb_mv'),BenRetirementValue:g('pb_rv'),
-    BenIncomeProtection:g('pb_ip'),BenDeathIncome:g('pb_di2'),
-    Premium:g('ppm'),PremEscalation:g('pprem_pct'),BenEscalation:g('pben_pct'),
-    Payer:g('ppay'),Beneficiary:g('pbe'),Insured:g('pins'),
-    Notes:g('pnt'),
-    LastUpdated:now,
-    ReplacedBy:'', ReplacedDate:''
-  };
-  
-  if(EPI!==null&&oldPol){
-    var gi=DB.policies.indexOf(oldPol);
-    if(gi>=0) DB.policies[gi]=pol;
-  } else {
-    pol.CapturedDate=now;
-    DB.policies.push(pol);
-  }
-  closeAll(); render();
+  var oldPol=(EPI!==null&&existing[EPI])?existing[EPI]:null;
+  var pol=collectPolicyForm();
+  pol.ID=oldPol?oldPol.ID:('p_'+Date.now());
+  pol.ClientID=EPC;
+  pol.LastUpdated=now;
+  pol.CapturedDate=oldPol?(oldPol.CapturedDate||now):now;
+  pol.ReplacedBy=oldPol?oldPol.ReplacedBy:'';
+  pol.ReplacedDate=oldPol?oldPol.ReplacedDate:'';
+  if(EPI!==null&&oldPol){var gi=DB.policies.indexOf(oldPol);if(gi>=0)DB.policies[gi]=pol;}
+  else DB.policies.push(pol);
+  closeAll();render();
   post({action:'savePolicy',policy:pol},function(){toast('Policy saved','ok');});
 }
 
 function replacePolicy(cid,idx){
   var pols=polsFor(cid);
   var old=pols[idx];
-  if(!old) return;
-  if(!confirm('This will archive the current policy and open a new one. Continue?')) return;
-  // Archive old
+  if(!old)return;
+  if(!confirm('This will archive the current policy and open a new one. Continue?'))return;
   var gi=DB.policies.indexOf(old);
   var now=new Date().toISOString().slice(0,10);
-  if(gi>=0){ DB.policies[gi].Status='Replaced'; DB.policies[gi].ReplacedDate=now; }
+  if(gi>=0){DB.policies[gi].Status='Replaced';DB.policies[gi].ReplacedDate=now;}
   post({action:'savePolicy',policy:DB.policies[gi]},function(){});
-  // Open new policy modal pre-filled with same insurer/type
-  EPC=cid; EPI=null;
-  var pols2=polsFor(cid);
-  document.getElementById('pModT').textContent='New Policy (Replacing '+old.PolicyNo+')';
-  openPolicyModal(cid); 
-  // Pre-fill insurer and type from old
-  setTimeout(function(){
-    var pi=document.getElementById('pi'); if(pi) pi.value=old.Insurer||'';
-    var pt=document.getElementById('pt'); if(pt) pt.value=old.Type||'';
-  },100);
+  EPC=cid;EPI=null;
+  document.getElementById('pModT').textContent='New Policy — Replacing '+old.PolicyNo;
+  buildPolicyForm({Insurer:old.Insurer,Type:old.Type,Product:old.Product});
+  document.getElementById('pMod').classList.add('open');
   toast('Old policy archived — capture replacement details','ok');
 }
+
 
 function openROAModal(cid){
   RC=cid;
