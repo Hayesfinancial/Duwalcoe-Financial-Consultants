@@ -590,6 +590,19 @@ function saveFamMember(){
 
 function upgradeToClient(linkId){
   var lnk = DB.links.find(function(l){ return String(l.ID)===String(linkId); });
+  // Handle virtual spouse entry (from client record, not yet in DB.links)
+  if(!lnk && String(linkId).indexOf('virtual_sp_')===0){
+    var principalId = linkId.replace('virtual_sp_','');
+    var principal = DB.clients.find(function(x){ return String(x.ID)===String(principalId); });
+    if(!principal || !clean(principal.SpouseName)) return;
+    // Create a real link entry first
+    lnk = {ID:'fam_sp_'+Date.now(), PrincipalID:principalId,
+      Name:principal.SpouseName, IDNumber:principal.SpouseIDNumber||'',
+      DOB:principal.SpouseDOB||'', Cell:principal.SpouseCell||'',
+      Email:principal.SpouseEmail||'', Type:'Spouse', IsClient:'No', ClientID:''};
+    DB.links.push(lnk);
+    post({action:'saveFamMember', member:lnk});
+  }
   if(!lnk) return;
   var newId = 'new_' + Date.now();
   var c = {
@@ -671,6 +684,22 @@ function renderOverview(c,pols,roas,ctasks){
   var tPrem=pols.reduce(function(s,p){return s+parseFloat(p.Premium||0);},0);
   var tBen=pols.reduce(function(s,p){return s+parseFloat(p.Benefit||0);},0);
   var famMembers=famFor(c.ID);
+  // If SpouseName on client record but not yet in DB.links, show them as a virtual entry
+  if(clean(c.SpouseName) && !famMembers.find(function(m){return m.Type==='Spouse';})){
+    famMembers = [{
+      ID:'virtual_sp_'+c.ID,
+      PrincipalID:c.ID,
+      Name:c.SpouseName,
+      IDNumber:c.SpouseIDNumber||'',
+      DOB:c.SpouseDOB||'',
+      Cell:c.SpouseCell||'',
+      Email:c.SpouseEmail||'',
+      Type:'Spouse',
+      IsClient:'No',
+      ClientID:'',
+      _virtual:true
+    }].concat(famMembers);
+  }
   var familyHtml='<div class="card" style="margin-bottom:16px">'+
     '<div class="ch"><h2>👨‍👩‍👧 Family</h2>'+
     '<div style="display:flex;gap:8px">'+
