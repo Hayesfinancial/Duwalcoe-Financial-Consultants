@@ -1702,16 +1702,35 @@ function selectUser(name){
 }
 
 function bootApp(){
+  // Version stamp - wipe stale recent-client data from old builds
+  try{
+    if(localStorage.getItem('du_ver')!=='v14'){
+      localStorage.removeItem('du_recent');
+      localStorage.removeItem('du_db');
+      localStorage.setItem('du_ver','v14');
+    }
+  }catch(e){}
   document.getElementById('todayLbl').textContent=
     new Date().toLocaleDateString('en-ZA',{weekday:'long',day:'numeric',month:'long'});
   var su=localStorage.getItem('du_user');
   if(su)document.getElementById('userSel').value=su;
-  // Load from localStorage immediately so Recent Clients shows correct order right away
+  // Load from cache but ONLY apply LastAccessed from the dedicated du_recent store
+  // This prevents stale/wrong timestamps from polluting Recent Clients
   try {
     var cached = localStorage.getItem('du_db');
-    if(cached){ DB = JSON.parse(cached); render(); }
+    if(cached){
+      DB = JSON.parse(cached);
+      // Strip all LastAccessed from cached DB first
+      DB.clients.forEach(function(c){ delete c.LastAccessed; });
+      // Re-apply only from the trusted du_recent store
+      try{
+        var ra=JSON.parse(localStorage.getItem('du_recent')||'{}');
+        DB.clients.forEach(function(c){ if(ra[String(c.ID)]) c.LastAccessed=ra[String(c.ID)]; });
+      }catch(e){}
+      render();
+    }
   } catch(e){}
-  // Then sync from sheet in background to get latest data
+  // Then sync from sheet in background
   syncNow();
 }
 
