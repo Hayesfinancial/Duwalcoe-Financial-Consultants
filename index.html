@@ -428,7 +428,7 @@ function goPage(p){
   render();
 }
 function openClient(id){
-  SEL=id; CTAB='overview'; PAGE='client'; window.CLIENT_TASK_FILTER='open';
+  SEL=id; CTAB='overview'; PAGE='client'; window.CLIENT_TASK_FILTER='today';
   // Track last accessed - write to dedicated key so it survives full DB resyncs
   var c=DB.clients.find(function(x){return String(x.ID)===String(id);});
   if(c){
@@ -502,7 +502,7 @@ function renderDash(){
     var d=new Date(t.DueDate); d.setHours(0,0,0,0);
     return d.getTime()===today.getTime();
   });
-  var dashFilter = window.DASH_TASK_FILTER||'open';
+  var dashFilter = window.DASH_TASK_FILTER||'today';
   if(!window.DASH_USER_FILTER) window.DASH_USER_FILTER=cu();
   var reviewsDue=DB.clients.filter(function(c){var d=daysTo(c.ReviewDate);return d!==null&&d<=30;}).length;
 
@@ -566,10 +566,10 @@ function renderDash(){
     (function(){
       var allDone=DB.tasks.filter(function(t){return isdone(t)&&(window.DASH_USER_FILTER==='All'||(t.Assignee||'Clinton')===window.DASH_USER_FILTER);});
       var upcoming=myT.filter(function(t){
-        if(!clean(t.DueDate)) return true;
-        var d=new Date(t.DueDate); d.setHours(0,0,0,0); return d>=today;
+        if(!clean(t.DueDate)) return false;
+        var d=new Date(t.DueDate); d.setHours(0,0,0,0); return d>today;
       });
-      var filters=[['open','Open'],['upcoming','Upcoming'],['overdue','Overdue'],['completed','Completed'+(allDone.length?' ('+allDone.length+')':'')]];
+      var filters=[['today','Today'],['upcoming','Upcoming'],['overdue','Overdue'],['completed','Completed'+(allDone.length?' ('+allDone.length+')':'')]];
       return filters.map(function(f){
         var isActive=dashFilter===f[0];
         return '<button class="btn '+(isActive?'b-nv':'b-gh')+' xs" style="font-size:11px" data-act="dash-task-filter" data-filter="'+f[0]+'">'+f[1]+'</button>';
@@ -580,11 +580,11 @@ function renderDash(){
     (function(){
       var allDone=DB.tasks.filter(function(t){return isdone(t)&&(window.DASH_USER_FILTER==='All'||(t.Assignee||'Clinton')===window.DASH_USER_FILTER);});
       var upcoming=myT.filter(function(t){
-        if(!clean(t.DueDate)) return true;
-        var d=new Date(t.DueDate); d.setHours(0,0,0,0); return d>=today;
+        if(!clean(t.DueDate)) return false;
+        var d=new Date(t.DueDate); d.setHours(0,0,0,0); return d>today;
       });
-      var show=dashFilter==='overdue'?overdue:dashFilter==='upcoming'?upcoming:dashFilter==='completed'?allDone:myT;
-      if(show.length===0) return '<div class="empty" style="padding:20px">'+(dashFilter==='overdue'?'No overdue tasks ✅':dashFilter==='upcoming'?'No upcoming tasks ✅':dashFilter==='completed'?'No completed tasks yet':'No open tasks ✅')+'</div>';
+      var show=dashFilter==='today'?dueToday:dashFilter==='overdue'?overdue:dashFilter==='upcoming'?upcoming:dashFilter==='completed'?allDone:dueToday;
+      if(show.length===0) return '<div class="empty" style="padding:20px">'+(dashFilter==='today'?'Nothing due today ✅':dashFilter==='overdue'?'No overdue tasks ✅':dashFilter==='upcoming'?'No upcoming tasks ✅':'No completed tasks yet')+'</div>';
       return show.map(function(t){
         var c='';
         if(clean(t.DueDate)){var d=new Date(t.DueDate);d.setHours(0,0,0,0);if(d<today)c='rose';else if(d.getTime()===today.getTime())c='sage';}
@@ -1059,27 +1059,34 @@ function renderOverview(c,pols,roas,ctasks){
     '<div class="card"><div class="ch"><h2>📝 Notes</h2><button class="btn b-gh sm" data-act="edit-client" data-id="'+c.ID+'">Edit</button></div>'+
     '<div class="cb"><p style="font-size:13px;line-height:1.8;white-space:pre-wrap;color:#445">'+(c.Notes||'No notes yet.')+'</p></div></div>'+
     (function(){
-      var tf = window.CLIENT_TASK_FILTER || 'open';
+      var tf = window.CLIENT_TASK_FILTER || 'today';
       var allClientTasks = DB.tasks.filter(function(t){ return t.ClientName===c.Name; });
       var openTasks = allClientTasks.filter(function(t){ return !isdone(t); });
       var doneTasks = allClientTasks.filter(function(t){ return isdone(t); });
-      var today = new Date(); today.setHours(0,0,0,0);
-      var upcomingTasks = openTasks.filter(function(t){
-        if(!clean(t.DueDate)) return true;
-        var d=new Date(t.DueDate); d.setHours(0,0,0,0);
-        return d >= today;
+      var today2 = new Date(); today2.setHours(0,0,0,0);
+      var todayTasks = openTasks.filter(function(t){
+        if(!clean(t.DueDate)) return false;
+        var d=new Date(t.DueDate); d.setHours(0,0,0,0); return d.getTime()===today2.getTime();
       });
-      var showTasks = tf==='open' ? openTasks : tf==='completed' ? doneTasks : upcomingTasks;
-      var filters = [['open','Open'],['upcoming','Upcoming'],['completed','Completed']];
+      var upcomingTasks = openTasks.filter(function(t){
+        if(!clean(t.DueDate)) return false;
+        var d=new Date(t.DueDate); d.setHours(0,0,0,0); return d>today2;
+      });
+      var overdueTasks = openTasks.filter(function(t){
+        if(!clean(t.DueDate)) return false;
+        var d=new Date(t.DueDate); d.setHours(0,0,0,0); return d<today2;
+      });
+      var showTasks = tf==='today'?todayTasks:tf==='upcoming'?upcomingTasks:tf==='overdue'?overdueTasks:doneTasks;
+      var filters = [['today','Today'],['upcoming','Upcoming'],['overdue','Overdue'],['completed','Completed'+(doneTasks.length?' ('+doneTasks.length+')':'')]];
       return '<div class="card"><div class="ch"><h2>\u2705 Tasks</h2>'+
         '<div style="display:flex;gap:6px;align-items:center">'+
         filters.map(function(f){
-          return '<button class="btn '+(tf===f[0]?'b-nv':'b-gh')+' xs" data-act="client-task-filter" data-filter="'+f[0]+'">'+f[1]+(f[0]==='completed'&&doneTasks.length?' ('+doneTasks.length+')':'')+'</button>';
+          return '<button class="btn '+(tf===f[0]?'b-nv':'b-gh')+' xs" data-act="client-task-filter" data-filter="'+f[0]+'">'+f[1]+'</button>';
         }).join('')+
         '<button class="btn b-gd sm" data-act="open-task" data-client="'+c.Name+'">+ Task</button>'+
         '</div></div>'+
         '<div class="cb" style="padding:'+(showTasks.length?'0':'20px')+'">'+
-        (showTasks.length===0?'<div class="empty" style="padding:16px 0">'+(tf==='completed'?'No completed tasks yet':tf==='upcoming'?'No upcoming tasks':'No open tasks')+'</div>':
+        (showTasks.length===0?'<div class="empty" style="padding:16px 0">'+(tf==='today'?'Nothing due today ✅':tf==='upcoming'?'No upcoming tasks':tf==='overdue'?'No overdue tasks ✅':'No completed tasks yet')+'</div>':
         showTasks.map(function(t){return '<div style="padding:10px 16px">'+taskRow(t)+'</div>';}).join(''))+
         '</div></div>';
     })()+
