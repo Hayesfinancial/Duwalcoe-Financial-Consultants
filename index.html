@@ -163,6 +163,16 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--cream);c
     </div>
   </div>
 </div>
+<div class="ov" id="doctorMod">
+  <div class="modal" style="max-width:480px">
+    <div class="mh"><h3 id="doctorModT">Doctor / Medical Contact</h3><button class="xb" data-close="1">✕</button></div>
+    <div class="mb" id="doctorModB"></div>
+    <div class="mf">
+      <button class="btn b-gh sm" data-close="1">Cancel</button>
+      <button class="btn b-gd sm" data-save="doctor">💾 Save</button>
+    </div>
+  </div>
+</div>
 <div class="ov" id="polHistMod">
   <div class="modal" style="max-width:700px">
     <div class="mh"><h3 id="polHistT">Policy History</h3><button class="xb" data-close="1">✕</button></div>
@@ -699,7 +709,7 @@ function upgradeToClient(linkId){
     MaritalStatus: principal2 ? (principal2.MaritalStatus||'') : '',
     Occupation:'', Employer:'', Income:0,
     TaxNo:'', Smoker:'', RiskCategory:'Not Started',
-    Gender:'', TelHome:'', TelWork:'', Address:'', DriveUrl:'', Notes:'', BankDetails:'',
+    Gender:'', TelHome:'', TelWork:'', Address:'', DriveUrl:'', Notes:'', BankDetails:'', Doctors:'',
     ReviewDate:'',
     Anniversary: principal2 ? (principal2.Anniversary||'') : ''
   };
@@ -889,6 +899,36 @@ function renderOverview(c,pols,roas,ctasks){
           '<button class="btn '+(verified?'b-gh':'b-sg')+' xs" data-act="verify-bank" data-id="'+c.ID+'" data-idx="'+bi+'">'+( verified?'Unverify':'✅ Verify')+'</button>'+
           '<button class="btn b-gh xs" data-act="edit-bank" data-id="'+c.ID+'" data-idx="'+bi+'">Edit</button>'+
           '<button class="btn b-rd xs" data-act="del-bank" data-id="'+c.ID+'" data-idx="'+bi+'">Del</button>'+
+          '</div>'+
+          '</div>';
+      }).join('')+'</div>';
+    })()+
+    '</div>'+
+    // Doctors card
+    '<div class="card" style="margin-top:16px">'+
+    '<div class="ch"><h2>🩺 Doctors & Medical Contacts</h2>'+
+    '<button class="btn b-gd sm" data-act="add-doctor" data-id="'+c.ID+'">+ Add Doctor</button></div>'+
+    (function(){
+      var docs=[];
+      try{docs=c.Doctors?JSON.parse(c.Doctors):[];}catch(e){}
+      if(!docs.length) return '<div class="empty cb">No medical contacts added yet</div>';
+      return '<div class="cb" style="padding:0">'+docs.map(function(d,di){
+        return '<div style="padding:14px 16px;border-bottom:1px solid var(--smoke);display:flex;justify-content:space-between;align-items:flex-start">'+
+          '<div>'+
+          '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">'+
+          '<span style="font-weight:700;font-size:14px">'+( d.name||'—')+'</span>'+
+          bx('bx-sk',d.speciality||'GP')+
+          '</div>'+
+          '<div style="font-size:12px;color:#667;display:flex;gap:16px;flex-wrap:wrap">'+
+          (d.practice?'<span>🏥 '+d.practice+'</span>':'')+
+          (d.phone?'<span>📞 '+d.phone+'</span>':'')+
+          (d.address?'<span>📍 '+d.address+'</span>':'')+
+          '</div>'+
+          '</div>'+
+          '<div style="display:flex;gap:6px">'+
+          (d.phone?'<a href="tel:'+d.phone+'" class="btn b-sg xs">📞 Call</a>':'')+
+          '<button class="btn b-gh xs" data-act="edit-doctor" data-id="'+c.ID+'" data-idx="'+di+'">Edit</button>'+
+          '<button class="btn b-rd xs" data-act="del-doctor" data-id="'+c.ID+'" data-idx="'+di+'">Del</button>'+
           '</div>'+
           '</div>';
       }).join('')+'</div>';
@@ -1574,6 +1614,66 @@ function collectPolicyForm(){
   };
 }
 
+var DOCTOR_CLIENT_ID = null;
+var DOCTOR_IDX = null;
+
+function openDoctorModal(cid, idx){
+  DOCTOR_CLIENT_ID = cid;
+  DOCTOR_IDX = (idx !== undefined && idx !== null) ? idx : null;
+  var c = DB.clients.find(function(x){return String(x.ID)===String(cid);});
+  if(!c) return;
+  var docs = [];
+  try{docs=c.Doctors?JSON.parse(c.Doctors):[];}catch(e){}
+  var d = (DOCTOR_IDX !== null && docs[DOCTOR_IDX]) ? docs[DOCTOR_IDX] : {};
+  var specOpts = ['GP','Specialist','Cardiologist','Oncologist','Neurologist','Orthopaedic','Dentist','Ophthalmologist','Psychiatrist','Physiotherapist','Other'];
+  document.getElementById('doctorModT').textContent = DOCTOR_IDX !== null ? 'Edit Medical Contact' : 'Add Medical Contact';
+  document.getElementById('doctorModB').innerHTML =
+    '<div class="g2">'+
+    fld('fdocname','Doctor Name',d.name||'')+
+    fs('fdocspec','Speciality',specOpts,d.speciality||'GP')+
+    '</div>'+
+    fld('fdocpractice','Practice Name',d.practice||'')+
+    fld('fdocphone','Phone Number',d.phone||'')+
+    fld('fdocaddress','Address',d.address||'');
+  document.getElementById('doctorMod').classList.add('open');
+}
+
+function saveDoctor(){
+  var c = DB.clients.find(function(x){return String(x.ID)===String(DOCTOR_CLIENT_ID);});
+  if(!c) return;
+  var docs = [];
+  try{docs=c.Doctors?JSON.parse(c.Doctors):[];}catch(e){}
+  var d = {
+    name: g('fdocname'),
+    speciality: g('fdocspec'),
+    practice: g('fdocpractice'),
+    phone: g('fdocphone'),
+    address: g('fdocaddress')
+  };
+  if(!d.name){toast('Doctor name required','err');return;}
+  if(DOCTOR_IDX !== null) docs[DOCTOR_IDX] = d;
+  else docs.push(d);
+  c.Doctors = JSON.stringify(docs);
+  var i = DB.clients.findIndex(function(x){return String(x.ID)===String(DOCTOR_CLIENT_ID);});
+  if(i>=0) DB.clients[i]=c;
+  closeAll(); render();
+  post({action:'saveClient',client:c},function(){toast('Medical contact saved','ok');});
+}
+
+function deleteDoctor(cid, idx){
+  if(!confirm('Delete this medical contact?')) return;
+  var c = DB.clients.find(function(x){return String(x.ID)===String(cid);});
+  if(!c) return;
+  var docs = [];
+  try{docs=c.Doctors?JSON.parse(c.Doctors):[];}catch(e){}
+  docs.splice(idx,1);
+  c.Doctors = JSON.stringify(docs);
+  var i = DB.clients.findIndex(function(x){return String(x.ID)===String(cid);});
+  if(i>=0) DB.clients[i]=c;
+  render();
+  post({action:'saveClient',client:c},function(){toast('Medical contact deleted','ok');});
+}
+
 var BANK_CLIENT_ID = null;
 var BANK_IDX = null;
 
@@ -2002,6 +2102,7 @@ document.addEventListener('click', function(e){
       else if(save==='client-fna')saveClient(true);
       else if(save==='policy')savePolicy();
       else if(save==='bank')saveBank();
+      else if(save==='doctor')saveDoctor();
       else if(save==='roa')saveROA();
       else if(save==='task')saveTask();
       else if(save==='fam')saveFamMember();
@@ -2022,6 +2123,9 @@ document.addEventListener('click', function(e){
         case 'edit-policy':    openPolicyModal(cid,parseInt(idx)); break;
         case 'pol-history':    openPolicyHistory(cid,parseInt(idx)); break;
         case 'add-bank':       openBankModal(id); break;
+        case 'add-doctor':     openDoctorModal(id); break;
+        case 'edit-doctor':    openDoctorModal(id,parseInt(idx)); break;
+        case 'del-doctor':     deleteDoctor(id,parseInt(idx)); break;
         case 'edit-bank':      openBankModal(id,parseInt(idx)); break;
         case 'verify-bank':    verifyBank(id,parseInt(idx)); break;
         case 'del-bank':       deleteBank(id,parseInt(idx)); break;
