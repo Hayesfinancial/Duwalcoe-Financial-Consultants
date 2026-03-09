@@ -2053,40 +2053,35 @@ function savePolicy(){
 }
 
 function logAnnualReview(){
-  var existing=polsFor(EPC);
-  var oldPol=(EPI!==null&&existing[EPI])?existing[EPI]:null;
-  if(!oldPol){toast('Save policy first before logging a review','err');return;}
+  // Use the original snapshot taken when modal was first opened
+  if(!window.POL_ORIGINAL_SNAP){toast('Cannot log review — please close and reopen the policy','err');return;}
+  var note=prompt('Review note (e.g. "Premium change May 2026"):');
+  if(note===null)return;
+  // Snapshot current form values as the NEW state
   var current=collectPolicyForm();
   var snap=snapshotPolicy(current);
   snap.type='review';
-  // Use the snapshot taken when modal was opened — these are the TRUE original values
-  var oldSnap=window.POL_ORIGINAL_SNAP||snapshotPolicy(oldPol);
+  snap.note=note;
+  // Store old values from the original snapshot (taken when modal opened)
+  var oldSnap=window.POL_ORIGINAL_SNAP;
   snap.oldPremium=oldSnap.premium;
   snap.oldDeath=oldSnap.death;
   snap.oldDisability=oldSnap.disability;
   snap.oldDread=oldSnap.dread;
   snap.oldFundValue=oldSnap.fundValue;
-  var oldInfo = window.POL_ORIGINAL_SNAP ? ('Old premium: R'+window.POL_ORIGINAL_SNAP.premium+' | New premium: R'+snap.premium) : 'No original snapshot found';
-  var note=prompt('Review note\n('+oldInfo+'):');
-  if(note===null)return;
-  snap.note=note;
+  // Find the policy in DB
+  var existing=polsFor(EPC);
+  var oldPol=(EPI!==null&&existing[EPI])?existing[EPI]:null;
+  if(!oldPol){toast('Policy not found','err');return;}
   var history=[];
   try{history=JSON.parse(oldPol.ReviewHistory||'[]');}catch(e){}
   history.push(snap);
-  var gi=DB.policies.indexOf(oldPol);
-  if(gi>=0){
-    DB.policies[gi].ReviewHistory=JSON.stringify(history);
-    DB.policies[gi].LastUpdated=snap.date;
-    // Also update current values from form
-    var updated=collectPolicyForm();
-    updated.ID=oldPol.ID;updated.ClientID=EPC;updated.LastUpdated=snap.date;
-    updated.CapturedDate=oldPol.CapturedDate||snap.date;
-    updated.ReplacedBy=oldPol.ReplacedBy||'';updated.ReplacedDate=oldPol.ReplacedDate||'';
-    updated.ReviewHistory=JSON.stringify(history);
-    DB.policies[gi]=updated;
-    closeAll();render();
-    post({action:'savePolicy',policy:DB.policies[gi]},function(){toast('Review logged & policy updated','ok');});
-  }
+  // Store history on the DB object so Save Policy will include it
+  oldPol.ReviewHistory=JSON.stringify(history);
+  // Update the original snapshot so repeated reviews work correctly
+  window.POL_ORIGINAL_SNAP=snap;
+  // Stay in the modal — user must click Save Policy to commit
+  toast('Review logged — now click Save Policy to save','ok');
 }
 
 function replacePolicy(cid,idx){
