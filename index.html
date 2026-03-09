@@ -277,6 +277,8 @@ function syncNow() {
     // Also fall back to DB cache timestamps
     DB.clients.forEach(function(c){ if(!c.LastAccessed && lastAccessed[String(c.ID)]) c.LastAccessed=lastAccessed[String(c.ID)]; });
     try { localStorage.setItem('du_db', JSON.stringify(DB)); } catch(e){}
+    // Pull shared discussion board from server
+    if(d.discuss){try{localStorage.setItem('du_discuss',d.discuss);}catch(e){}}
     setSS('ok');
     render();
     toast('Synced — ' + DB.clients.length + ' clients','ok');
@@ -474,71 +476,165 @@ function renderDash(){
   var recentClients = DB.clients.filter(function(c){ return c.LastAccessed; })
     .slice().sort(function(a,b){ return (b.LastAccessed||0)-(a.LastAccessed||0); }).slice(0,8);
 
-  return '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px"><h1 style="font-family:\'DM Serif Display\',serif;font-size:22px;color:var(--navy)">Dashboard</h1><button class="btn b-gh sm" data-act="sync">🔄 Sync</button></div>'+
-  '<div class="g4">'+
-    '<div class="stat s-gd" style="cursor:pointer" data-act="go-clients"><div class="v">'+active.length+'</div><div class="l">Active Clients</div></div>'+
-    '<div class="stat s-sg"><div class="v">'+up.filter(function(u){return u.days<=30;}).length+'</div><div class="l">Reminders (30d)</div></div>'+
-    '<div class="stat s-sk"><div class="v">'+open.length+'</div><div class="l">Open Tasks</div></div>'+
-    '<div class="stat s-rd"><div class="v">'+reviewsDue+'</div><div class="l">Reviews Due (30d)</div></div>'+
-    '</div>'+
-    '<div class="g2">'+
+  // ── Weekly appointment circles (resets Monday) ──
+  var weekKey = (function(){
+    var d=new Date(); var day=d.getDay(); var diff=d.getDate()-(day===0?6:day-1);
+    var mon=new Date(d); mon.setDate(diff); return 'du_appts_'+mon.toISOString().slice(0,10);
+  })();
+  var appts = [false,false,false];
+  try{ var _a=JSON.parse(localStorage.getItem(weekKey)||'[]'); if(Array.isArray(_a)) appts=_a; }catch(e){}
 
-    // LEFT: Reminders
-    '<div class="card"><div class="ch"><h2>📅 Reminders (60 days)</h2></div><div class="cb">'+
-    (up.length===0?'<div class="empty">Nothing coming up 🎉</div>':
-    up.slice(0,10).map(function(u){
+  // ── Discussion board (shared via Apps Script) ──
+  var discuss = [];
+  try{ discuss = JSON.parse(localStorage.getItem('du_discuss')||'[]'); }catch(e){}
+
+  function apptCircles(){
+    return appts.map(function(on,i){
+      return '<div onclick="toggleAppt('+i+')" style="cursor:pointer;width:54px;height:54px;border-radius:50%;'+
+        (on?'background:var(--sage);border:3px solid var(--sage);':'background:#fff;border:3px solid #ccc;')+
+        'display:flex;align-items:center;justify-content:center;font-size:26px;transition:all .2s;box-shadow:0 2px 8px rgba(0,0,0,.08)">'+
+        (on?'😊':'<span style="color:#ddd;font-size:28px">○</span>')+
+        '</div>';
+    }).join('');
+  }
+
+  return '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">'+
+  '<h1 style="font-family:\'DM Serif Display\',serif;font-size:22px;color:var(--navy)">Dashboard</h1>'+
+  '<button class="btn b-gh sm" data-act="sync">🔄 Sync</button></div>'+
+
+  // ── TOP: Stats bar ──
+  '<div class="g4" style="margin-bottom:12px">'+
+    '<div class="stat s-gd" style="cursor:pointer;padding:10px" data-act="go-clients"><div class="v" style="font-size:18px">'+active.length+'</div><div class="l" style="font-size:10px">Active Clients</div></div>'+
+    '<div class="stat s-sg" style="padding:10px"><div class="v" style="font-size:18px">'+up.filter(function(u){return u.days<=30;}).length+'</div><div class="l" style="font-size:10px">Reminders (30d)</div></div>'+
+    '<div class="stat s-sk" style="padding:10px"><div class="v" style="font-size:18px">'+open.length+'</div><div class="l" style="font-size:10px">Open Tasks</div></div>'+
+    '<div class="stat s-rd" style="padding:10px"><div class="v" style="font-size:18px">'+reviewsDue+'</div><div class="l" style="font-size:10px">Reviews Due</div></div>'+
+  '</div>'+
+
+  // ── GOALS ROW: Appointment circles + Discussion board ──
+  '<div class="g2" style="margin-bottom:12px">'+
+
+    '<div class="card" style="padding:0">'+
+    '<div class="ch" style="padding:10px 16px"><h2 style="font-size:13px">🎯 This Week\'s Appointments</h2>'+
+    '<span style="font-size:11px;color:#aaa">'+(appts.filter(Boolean).length)+'/3 booked</span></div>'+
+    '<div style="display:flex;justify-content:space-around;align-items:center;padding:14px 20px;gap:12px">'+
+    apptCircles()+
+    '</div>'+
+    '<div style="padding:6px 16px 12px;display:flex;justify-content:center">'+
+    '<button onclick="resetAppts()" style="font-size:11px;color:#bbb;background:none;border:none;cursor:pointer">Reset week</button>'+
+    '</div></div>'+
+
+    '<div class="card" style="padding:0">'+
+    '<div class="ch" style="padding:10px 16px"><h2 style="font-size:13px">💬 Discussion Board</h2>'+
+    '<button class="btn b-gd xs" onclick="addDiscussPost()">+ Post</button></div>'+
+    '<div style="max-height:140px;overflow-y:auto;padding:0" id="discussList">'+
+    (discuss.length===0?'<div class="empty" style="padding:12px">Nothing posted yet &#8212; use this as your shared whiteboard</div>':
+    discuss.map(function(p,pi){
+      return '<div style="display:flex;align-items:flex-start;gap:8px;padding:8px 12px;border-bottom:1px solid var(--smoke)">'+
+        '<div style="flex:1">'+
+        '<div style="font-size:12px;font-weight:600;color:var(--navy)">'+p.text+'</div>'+
+        '<div style="font-size:10px;color:#aaa;margin-top:2px">'+p.by+' · '+p.date+'</div>'+
+        '</div>'+
+        '<button onclick="deleteDiscussPost('+pi+')" style="background:none;border:none;cursor:pointer;color:#ccc;font-size:14px;padding:0 2px;flex-shrink:0">✕</button>'+
+        '</div>';
+    }).join(''))+
+    '</div></div>'+
+  '</div>'+
+
+  // ── MAIN: Reminders + Tasks (scrollable) ──
+  '<div class="g2">'+
+
+    '<div class="card" style="padding:0">'+
+    '<div class="ch" style="padding:10px 16px"><h2 style="font-size:13px">📅 Reminders (60 days)</h2></div>'+
+    '<div style="max-height:260px;overflow-y:auto">'+
+    (up.length===0?'<div class="empty" style="padding:12px">Nothing coming up 🎉</div>':
+    up.map(function(u){
       var col=u.days<=7?'var(--rose)':u.days<=14?'var(--gold)':'var(--sage)';
-      return '<div class="ri" style="cursor:pointer" data-act="open-client" data-id="'+u.id+'">'+
+      return '<div class="ri" style="cursor:pointer;padding:8px 12px" data-act="open-client" data-id="'+u.id+'">'+
         '<div class="rdot" style="background:'+u.col+';flex-shrink:0"></div>'+
-        '<div style="flex:1"><div style="font-weight:600">'+u.name+'</div>'+
-        '<div style="font-size:11px;color:#889;display:flex;gap:8px;flex-wrap:wrap">'+
-        '<span>'+u.type+'</span>'+
-        (u.cell?'<span>📱 '+u.cell+'</span>':'')+
-        '</div></div>'+
-        '<div style="font-weight:700;font-size:12px;color:'+col+'">'+
+        '<div style="flex:1"><div style="font-weight:600;font-size:13px">'+u.name+'</div>'+
+        '<div style="font-size:11px;color:#889">'+u.type+'</div></div>'+
+        '<div style="font-weight:700;font-size:11px;color:'+col+'">'+
         (u.days===0?'Today!':u.days===1?'Tomorrow':'In '+u.days+'d')+'</div></div>';
-    }).join(''))+'</div></div>'+
+    }).join(''))+
+    '</div></div>'+
 
-    // RIGHT: Tasks
-    '<div class="card">'+
-    '<div class="ch"><h2>✅ My Tasks</h2>'+btn('btn b-gd xs','open-task','+ Task')+'</div>'+
-    '<div style="display:flex;gap:6px;padding:8px 16px;border-bottom:1px solid var(--smoke)">'+
+    '<div class="card" style="padding:0">'+
+    '<div class="ch" style="padding:10px 16px"><h2 style="font-size:13px">✅ My Tasks</h2>'+
+    '<div style="display:flex;gap:4px;align-items:center">'+
     ['All','Clinton','Wife','Daughter'].map(function(u){
-      var active=window.DASH_USER_FILTER===u;
-      return '<button class="btn '+(active?'b-nv':'b-gh')+' xs" data-act="dash-user-filter" data-filter="'+u+'">'+u+'</button>';
+      var isAct=window.DASH_USER_FILTER===u;
+      return '<button class="btn '+(isAct?'b-nv':'b-gh')+' xs" style="font-size:10px;padding:3px 7px" data-act="dash-user-filter" data-filter="'+u+'">'+u+'</button>';
     }).join('')+
-    '</div>'+
-    (overdue.length?'<div style="background:#fde8e8;border-left:4px solid var(--rose);padding:10px 16px;font-size:13px;font-weight:700;color:var(--rose);cursor:pointer" data-act="dash-task-filter" data-filter="overdue">🚨 '+overdue.length+' overdue — click to view</div>':'')+
-    '<div style="display:flex;gap:6px;padding:10px 16px;border-bottom:1px solid var(--smoke)">'+
+    '<button class="btn b-gd xs" style="font-size:10px;padding:3px 7px" data-act="open-task">+ Task</button>'+
+    '</div></div>'+
+    (overdue.length?'<div style="background:#fde8e8;border-left:3px solid var(--rose);padding:6px 12px;font-size:12px;font-weight:700;color:var(--rose);cursor:pointer" data-act="dash-task-filter" data-filter="overdue">🚨 '+overdue.length+' overdue</div>':'')+
+    '<div style="display:flex;gap:4px;padding:6px 12px;border-bottom:1px solid var(--smoke)">'+
     ['today','overdue','all'].map(function(f){
       var isActive=dashFilter===f;
       var label=f==='today'?'Today':f==='overdue'?'Overdue':'All';
-      return '<button class="btn '+(isActive?'b-nv':'b-gh')+' xs" data-act="dash-task-filter" data-filter="'+f+'">'+label+'</button>';
+      return '<button class="btn '+(isActive?'b-nv':'b-gh')+' xs" style="font-size:10px;padding:3px 7px" data-act="dash-task-filter" data-filter="'+f+'">'+label+'</button>';
     }).join('')+
     '</div>'+
-    '<div class="cb">'+
+    '<div style="max-height:200px;overflow-y:auto">'+
     (function(){
       var show=dashFilter==='today'?dueToday:dashFilter==='overdue'?overdue:myT;
-      if(show.length===0) return '<div class="empty">'+(dashFilter==='today'?'No tasks due today ✅':dashFilter==='overdue'?'No overdue tasks ✅':'No open tasks ✅')+'</div>';
+      if(show.length===0) return '<div class="empty" style="padding:12px">'+(dashFilter==='today'?'No tasks due today ✅':dashFilter==='overdue'?'No overdue tasks ✅':'No open tasks ✅')+'</div>';
       return show.map(function(t){
         var c='';
-        if(clean(t.DueDate)){
-          var d=new Date(t.DueDate); d.setHours(0,0,0,0);
-          if(d<today) c='rose'; else if(d.getTime()===today.getTime()) c='sage';
-        }
+        if(clean(t.DueDate)){var d=new Date(t.DueDate);d.setHours(0,0,0,0);if(d<today)c='rose';else if(d.getTime()===today.getTime())c='sage';}
         return taskRowColored(t,c);
       }).join('');
     })()+
     '</div></div>'+
-    '</div>'+
+  '</div>'+
 
-    // BOTTOM: Recent Clients (only shows if any have been opened)
-    '<div class="card">'+
-    '<div class="ch"><h2>🕐 Recent Clients</h2>'+btn('btn b-gh sm','go-clients','View All →')+'</div>'+
-    (recentClients.length===0?
-      '<div class="empty" style="padding:16px">Open a client record to start tracking recent activity</div>':
-      clientTable(recentClients, true))+
-    '</div>';
+  // BOTTOM: Recent Clients
+  '<div class="card" style="margin-top:12px">'+
+  '<div class="ch"><h2>🕐 Recent Clients</h2>'+btn('btn b-gh sm','go-clients','View All →')+'</div>'+
+  (recentClients.length===0?'<div class="empty" style="padding:16px">Open a client record to start tracking recent activity</div>':clientTable(recentClients,true))+
+  '</div>';
+}
+
+function toggleAppt(i){
+  var weekKey=(function(){var d=new Date();var day=d.getDay();var diff=d.getDate()-(day===0?6:day-1);var mon=new Date(d);mon.setDate(diff);return 'du_appts_'+mon.toISOString().slice(0,10);})();
+  var appts=[false,false,false];
+  try{var _a=JSON.parse(localStorage.getItem(weekKey)||'[]');if(Array.isArray(_a))appts=_a;}catch(e){}
+  appts[i]=!appts[i];
+  localStorage.setItem(weekKey,JSON.stringify(appts));
+  render();
+}
+
+function resetAppts(){
+  var weekKey=(function(){var d=new Date();var day=d.getDay();var diff=d.getDate()-(day===0?6:day-1);var mon=new Date(d);mon.setDate(diff);return 'du_appts_'+mon.toISOString().slice(0,10);})();
+  localStorage.setItem(weekKey,JSON.stringify([false,false,false]));
+  render();
+}
+
+function addDiscussPost(){
+  var text=prompt('What do you want to post to the board?');
+  if(!text||!text.trim()) return;
+  var discuss=[];
+  try{discuss=JSON.parse(localStorage.getItem('du_discuss')||'[]');}catch(e){}
+  discuss.unshift({text:text.trim(),by:cu(),date:new Date().toLocaleDateString('en-ZA',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})});
+  localStorage.setItem('du_discuss',JSON.stringify(discuss));
+  // Sync to Apps Script so all users see it
+  post({action:'saveDiscuss',posts:JSON.stringify(discuss)},function(r){
+    if(r&&r.posts){localStorage.setItem('du_discuss',r.posts);}
+    render();
+  });
+  render();
+}
+
+function deleteDiscussPost(idx){
+  var discuss=[];
+  try{discuss=JSON.parse(localStorage.getItem('du_discuss')||'[]');}catch(e){}
+  discuss.splice(idx,1);
+  localStorage.setItem('du_discuss',JSON.stringify(discuss));
+  post({action:'saveDiscuss',posts:JSON.stringify(discuss)},function(r){
+    if(r&&r.posts){localStorage.setItem('du_discuss',r.posts);}
+    render();
+  });
+  render();
 }
 
 // CLIENTS PAGE
