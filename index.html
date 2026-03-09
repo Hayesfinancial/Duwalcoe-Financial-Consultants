@@ -583,8 +583,7 @@ function renderDash(){
 
     // RIGHT: Discussion whiteboard
     '<div class="card" style="padding:0;display:flex;flex-direction:column">'+
-    '<div class="ch" style="padding:10px 16px"><h2>💬 Board</h2>'+
-    '<button class="btn b-gd xs" onclick="addDiscussPost()">+ Add</button></div>'+
+    '<div class="ch" style="padding:10px 16px"><h2>💬 Board</h2></div>'+
     // Whiteboard area — lined paper feel
     '<div style="flex:1;min-height:360px;max-height:420px;overflow-y:auto;background:#fffef5;padding:12px 16px;display:flex;flex-direction:column;gap:0;border-bottom:1px solid var(--smoke)">'+
     (discuss.length===0?
@@ -593,7 +592,7 @@ function renderDash(){
         var userColor=p.by==='Clinton'?'#1a2a4a':p.by==='Wife'?'#2e7d5a':'#7c3aed';
         return '<div style="display:flex;gap:6px;align-items:baseline;padding:7px 0;border-bottom:1px solid #f0ede0;line-height:1.5">'+
           '<span style="font-size:10px;font-weight:700;color:'+userColor+';flex-shrink:0;min-width:44px">'+p.by+'</span>'+
-          '<span style="font-size:13px;color:#333;flex:1;white-space:pre-wrap">'+p.text+'</span>'+
+          '<span contenteditable="true" onblur="editDiscussPost('+pi+',this.innerText)" style="font-size:13px;color:#333;flex:1;white-space:pre-wrap;outline:none;border-radius:4px;padding:1px 3px;cursor:text" title="Click to edit">'+p.text+'</span>'+
           '<button onclick="deleteDiscussPost('+pi+')" style="background:none;border:none;cursor:pointer;color:#ddd;font-size:12px;flex-shrink:0;padding:0 2px" title="Delete">✕</button>'+
           '</div>';
       }).join(''))+
@@ -667,19 +666,19 @@ function resetAppts(){
   render();
 }
 
-function addDiscussPost(){
-  var text=prompt('What do you want to post to the board?');
-  if(!text||!text.trim()) return;
+function editDiscussPost(idx, newText){
+  newText = (newText||'').trim();
   var discuss=[];
   try{discuss=JSON.parse(localStorage.getItem('du_discuss')||'[]');}catch(e){}
-  discuss.unshift({text:text.trim(),by:cu(),date:new Date().toLocaleDateString('en-ZA',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})});
+  if(!discuss[idx]) return;
+  if(!newText){ deleteDiscussPost(idx); return; }
+  if(newText === discuss[idx].text) return; // no change
+  discuss[idx].text = newText;
   localStorage.setItem('du_discuss',JSON.stringify(discuss));
-  // Sync to Apps Script so all users see it
   post({action:'saveDiscuss',posts:JSON.stringify(discuss)},function(r){
     if(r&&r.posts){localStorage.setItem('du_discuss',r.posts);}
-    render();
   });
-  render();
+  // Don't re-render — contenteditable already shows the new text
 }
 
 function deleteDiscussPost(idx){
@@ -1997,22 +1996,26 @@ function openPolicyHistory(cid,idx){
           '</div></div>';
       }
       // Show: OLD value (what it was before) with "now R xxx" showing what it changed to
+      // Use null/undefined check (not ||) so empty-string old values are preserved correctly
+      function defined(v){ return v !== undefined && v !== null; }
       function chgRow(oldV,newV,lbl){
-        if(!newV&&!oldV) return '';
-        var changed=oldV&&newV&&String(oldV)!==String(newV);
+        var displayOld = defined(oldV) ? oldV : newV;
+        var displayNew = newV;
+        if(!displayNew && !displayOld) return '';
+        var changed = defined(oldV) && defined(newV) && String(oldV) !== String(newV);
         return '<div><span style="color:#888">'+lbl+'</span>'+
-          '<div style="font-weight:600">'+R(oldV||newV)+
-          (changed?'<span style="font-size:10px;color:var(--sage);margin-left:6px">→ now '+R(newV)+'</span>':'')+
+          '<div style="font-weight:600">'+R(displayOld)+
+          (changed ? '<span style="font-size:10px;color:var(--sage);margin-left:6px">→ now '+R(displayNew)+'</span>' : '')+
           '</div></div>';
       }
-      html+=chgRow(h.oldPremium||h.premium, h.premium,'Premium'+(h.frequency?' / '+h.frequency:''));
-      html+=chgRow(h.oldDeath||h.death, h.death,'Death Cover');
-      html+=chgRow(h.oldDisability||h.disability, h.disability,'Disability');
-      html+=chgRow(h.oldDread||h.dread, h.dread,'Dread Disease');
-      html+=chgRow(h.oldFundValue||h.fundValue, h.fundValue,'Fund Value');
-      html+=chgRow(h.oldLoanAmount||h.loanAmount, h.loanAmount,'Loan / Business Cover');
-      if(h.premEsc||h.oldPremEsc) html+=chgRow(h.oldPremEsc||h.premEsc, h.premEsc,'Premium Escalation');
-      if(h.benEsc||h.oldBenEsc) html+=chgRow(h.oldBenEsc||h.benEsc, h.benEsc,'Benefit Escalation');
+      html+=chgRow(defined(h.oldPremium)?h.oldPremium:h.premium, h.premium,'Premium'+(h.frequency?' / '+h.frequency:''));
+      html+=chgRow(defined(h.oldDeath)?h.oldDeath:h.death, h.death,'Death Cover');
+      html+=chgRow(defined(h.oldDisability)?h.oldDisability:h.disability, h.disability,'Disability');
+      html+=chgRow(defined(h.oldDread)?h.oldDread:h.dread, h.dread,'Dread Disease');
+      html+=chgRow(defined(h.oldFundValue)?h.oldFundValue:h.fundValue, h.fundValue,'Fund Value');
+      html+=chgRow(defined(h.oldLoanAmount)?h.oldLoanAmount:h.loanAmount, h.loanAmount,'Loan / Business Cover');
+      if(h.premEsc||h.oldPremEsc) html+=chgRow(defined(h.oldPremEsc)?h.oldPremEsc:h.premEsc, h.premEsc,'Premium Escalation');
+      if(h.benEsc||h.oldBenEsc) html+=chgRow(defined(h.oldBenEsc)?h.oldBenEsc:h.benEsc, h.benEsc,'Benefit Escalation');
       if(h.loanAmount) html+='<div><span style="color:#888">Loan/Cover</span><div style="font-weight:600">'+R(h.loanAmount)+'</div></div>';
       html+='</div>';
       if(h.note) html+='<div style="padding:6px 14px;border-top:1px solid #eee;font-size:12px;color:#555;font-style:italic">'+h.note+'</div>';
@@ -2094,8 +2097,10 @@ function logAnnualReview(){
   history.push(snap);
   // Store history on the DB object so Save Policy will include it
   oldPol.ReviewHistory=JSON.stringify(history);
-  // Update the original snapshot so repeated reviews work correctly
-  window.POL_ORIGINAL_SNAP=snap;
+  // Update the original snapshot so repeated reviews work correctly.
+  // Use a clean snapshot (no type/note/old* fields) so the next review
+  // treats the just-logged values as the new baseline.
+  window.POL_ORIGINAL_SNAP=snapshotPolicy(current);
   // Stay in the modal — user must click Save Policy to commit
   toast('Review logged — now click Save Policy to save','ok');
 }
