@@ -252,6 +252,7 @@ var EPC = null; // edit policy client id
 var EPI = null; // edit policy index
 var RC = null;  // roa client id
 var TC = '';    // task client name
+var PREV_PAGE = 'clients'; // page before entering client profile
 
 // ══ NETWORK ══════════════════════════════════════════════════
 function syncNow() {
@@ -393,7 +394,7 @@ function goPage(p){
   render();
 }
 function openClient(id){
-  SEL=id; CTAB='overview'; PAGE='client';
+  SEL=id; CTAB='overview'; PREV_PAGE=PAGE; PAGE='client';
   // Track last accessed - write to dedicated key so it survives full DB resyncs
   var c=DB.clients.find(function(x){return String(x.ID)===String(id);});
   if(c){
@@ -648,13 +649,25 @@ function deleteDiscussPost(idx){
 
 // CLIENTS PAGE
 function renderClients(){
-  var list=SRCH?DB.clients.filter(function(c){
+  // Refresh LastAccessed from per-user store before sorting
+  try{
+    var _ra=JSON.parse(localStorage.getItem(recentKey())||'{}');
+    DB.clients.forEach(function(c){ if(_ra[String(c.ID)]) c.LastAccessed=_ra[String(c.ID)]; });
+  }catch(e){}
+  var base=DB.clients.slice().sort(function(a,b){
+    // Recently accessed first, then alphabetical for the rest
+    if(a.LastAccessed&&!b.LastAccessed) return -1;
+    if(!a.LastAccessed&&b.LastAccessed) return 1;
+    if(a.LastAccessed&&b.LastAccessed) return b.LastAccessed-a.LastAccessed;
+    return (a.Name||'').localeCompare(b.Name||'');
+  });
+  var list=SRCH?base.filter(function(c){
     var q=SRCH.toLowerCase();
     return (c.Name||'').toLowerCase().indexOf(q)>=0||
            String(c.IDNumber||'').indexOf(q)>=0||
            (c.Email||'').toLowerCase().indexOf(q)>=0||
            String(c.Cell||'').indexOf(q)>=0;
-  }):DB.clients;
+  }):base;
   return '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">'+
     '<h1 style="font-family:\'DM Serif Display\',serif;font-size:22px;color:var(--navy)">Clients ('+list.length+')</h1>'+
     btn('btn b-gd','open-new-client','+ New Client')+
@@ -697,7 +710,7 @@ function renderProfile(){
   if(!c){goPage('clients');return '';}
   var pols=polsFor(c.ID), roas=roasFor(c.ID), ctasks=tasksFor(c.Name);
   return '<div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">'+
-    btn('btn b-gh sm','go-clients','← Back')+
+    '<button class="btn b-gh sm" onclick="goPage(PREV_PAGE||\' clients\')">← Back</button>'+
     '<h1 style="font-family:\'DM Serif Display\',serif;font-size:20px;color:var(--navy)">'+c.Name+'</h1>'+
     '</div>'+
     '<div class="phdr">'+
