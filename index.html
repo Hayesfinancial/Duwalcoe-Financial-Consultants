@@ -148,8 +148,16 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--cream);c
     <div class="mb" id="pModB"></div>
     <div class="mf">
       <button class="btn b-gh sm" data-close="1">Cancel</button>
+      <button class="btn b-sk sm" onclick="logAnnualReview()">📅 Log Annual Review</button>
       <button class="btn b-gd sm" data-save="policy">💾 Save Policy</button>
     </div>
+  </div>
+</div>
+<div class="ov" id="polHistMod">
+  <div class="modal" style="max-width:700px">
+    <div class="mh"><h3 id="polHistT">Policy History</h3><button class="xb" data-close="1">✕</button></div>
+    <div class="mb" id="polHistB"></div>
+    <div class="mf"><button class="btn b-gh sm" data-close="1">Close</button></div>
   </div>
 </div>
 <div class="ov" id="tMod">
@@ -850,7 +858,39 @@ function renderPolicies(c,pols){
     '<div style="display:flex;gap:8px">'+
     '<button class="btn b-gh sm" data-act="view-schedule" data-cid="'+c.ID+'">🖨 Print Schedule</button>'+
     '<button class="btn b-gd sm" data-act="open-new-policy" data-cid="'+c.ID+'">+ Add Policy</button></div></div>'+
-    (pols.length===0?'<div class="empty cb">No policies yet</div>':
+    (function(){
+      var active=pols.filter(function(p){return p.Status!=='Replaced';});
+      var replaced=pols.filter(function(p){return p.Status==='Replaced';});
+      function polTable(pp,showReplace){
+        return '<div style="overflow:hidden"><table class="tbl"><thead><tr>'+
+        '<th>Insurer</th><th>Product</th><th>Policy No.</th><th>Type</th><th>Benefit</th><th>Premium</th><th>Status</th><th></th>'+
+        '</tr></thead><tbody>'+
+        pp.map(function(p,i){
+          var origIdx=pols.indexOf(p);
+          return '<tr>'+
+            '<td style="font-weight:600">'+(p.Insurer||'—')+'</td>'+
+            '<td>'+(p.Product||'—')+'</td>'+
+            '<td style="font-family:monospace;font-size:12px">'+(p.PolicyNo||'—')+'</td>'+
+            '<td>'+bx('bx-sk',p.Type||'—')+'</td>'+
+            '<td>'+(function(){
+              if(p.Type==='Business Assurance') return rnd(p.LoanAmount);
+              if(p.BenDeath) return rnd(p.BenDeath);
+              if(p.BenFundValue) return rnd(p.BenFundValue);
+              if(p.BenDisability) return rnd(p.BenDisability);
+              return '—';
+            })()+'</td>'+
+            '<td style="color:var(--sage);font-weight:600">'+rnd(p.Premium)+'</td>'+
+            '<td>'+bx(p.Status==='Active'?'bx-sg':p.Status==='Lapsed'?'bx-rd':'bx-gd',p.Status||'Active')+'</td>'+
+            '<td style="display:flex;gap:4px">'+
+            '<button class="btn b-gh xs" data-act="edit-policy" data-cid="'+c.ID+'" data-idx="'+origIdx+'">Edit</button>'+
+            '<button class="btn b-nv xs" data-act="pol-history" data-cid="'+c.ID+'" data-idx="'+origIdx+'">📋</button>'+
+            (showReplace?'<button class="btn b-rd xs" data-act="replace-policy" data-cid="'+c.ID+'" data-idx="'+origIdx+'">Replace</button>':'')+
+            '</td></tr>';
+        }).join('')+'</tbody></table></div>';
+      }
+      return (active.length===0?'<div class="empty cb">No policies yet</div>':polTable(active,true))+
+        (replaced.length?'<details style="margin-top:8px"><summary style="cursor:pointer;padding:10px 16px;font-size:12px;font-weight:700;color:#889;background:#f8f8f5">🔄 '+replaced.length+' Replaced Polic'+(replaced.length===1?'y':'ies')+'</summary>'+polTable(replaced,false)+'</details>':'');
+    })()+
     '<div style="overflow:hidden"><table class="tbl"><thead><tr>'+
     '<th>Insurer</th><th>Product</th><th>Policy No.</th><th>Type</th><th>Benefit</th><th>Premium</th><th>Status</th><th></th>'+
     '</tr></thead><tbody>'+
@@ -869,7 +909,11 @@ function renderPolicies(c,pols){
         })()+'</td>'+
         '<td style="color:var(--sage);font-weight:600">'+rnd(p.Premium)+'</td>'+
         '<td>'+bx(p.Status==='Active'?'bx-sg':p.Status==='Lapsed'?'bx-rd':'bx-gd',p.Status||'Active')+'</td>'+
-        '<td><button class="btn b-gh xs" data-act="edit-policy" data-cid="'+c.ID+'" data-idx="'+i+'">Edit</button></td>'+
+        '<td style="display:flex;gap:4px">'+
+        '<button class="btn b-gh xs" data-act="edit-policy" data-cid="'+c.ID+'" data-idx="'+i+'">Edit</button>'+
+        '<button class="btn b-nv xs" data-act="pol-history" data-cid="'+c.ID+'" data-idx="'+i+'">📋</button>'+
+        '<button class="btn b-rd xs" data-act="replace-policy" data-cid="'+c.ID+'" data-idx="'+i+'">Replace</button>'+
+        '</td>'+
         '</tr>';
     }).join('')+'</tbody></table></div>')+
     '</div>';
@@ -1510,6 +1554,79 @@ function collectPolicyForm(){
   };
 }
 
+function openPolicyHistory(cid,idx){
+  var pols=polsFor(cid);
+  var p=pols[idx];
+  if(!p)return;
+  var history=[];
+  try{history=JSON.parse(p.ReviewHistory||'[]');}catch(e){}
+
+  function R(v){if(!v||v==='0'||v==='None')return '—';var n=parseFloat(String(v).replace(/[^0-9.-]/g,''));return isNaN(n)?String(v):'R '+Math.round(n).toLocaleString('en-ZA');}
+
+  document.getElementById('polHistT').textContent=(p.Insurer||'Policy')+' — History';
+  var html='';
+
+  // Current values card
+  html+='<div style="border:2px solid #c8a84b;border-radius:8px;margin-bottom:16px;overflow:hidden">';
+  html+='<div style="background:#c8a84b;color:#fff;padding:8px 14px;font-weight:700;font-size:12px;text-transform:uppercase">Current Values</div>';
+  html+='<div style="display:grid;grid-template-columns:1fr 1fr;padding:12px 14px;gap:8px;font-size:13px">';
+  html+='<div><span style="color:#888;font-size:11px">Premium</span><div style="font-weight:700">'+R(p.Premium)+(p.Frequency?' / '+p.Frequency:'')+'</div></div>';
+  if(p.BenDeath) html+='<div><span style="color:#888;font-size:11px">Death Cover</span><div style="font-weight:700">'+R(p.BenDeath)+'</div></div>';
+  if(p.BenDisability) html+='<div><span style="color:#888;font-size:11px">Disability</span><div style="font-weight:700">'+R(p.BenDisability)+'</div></div>';
+  if(p.BenDreadDisease) html+='<div><span style="color:#888;font-size:11px">Dread Disease</span><div style="font-weight:700">'+R(p.BenDreadDisease)+'</div></div>';
+  if(p.BenFundValue) html+='<div><span style="color:#888;font-size:11px">Fund Value</span><div style="font-weight:700">'+R(p.BenFundValue)+'</div></div>';
+  if(p.LoanAmount) html+='<div><span style="color:#888;font-size:11px">Loan/Cover Amount</span><div style="font-weight:700">'+R(p.LoanAmount)+'</div></div>';
+  html+='<div><span style="color:#888;font-size:11px">Last Updated</span><div style="font-weight:700">'+(p.LastUpdated||p.CapturedDate||'—')+'</div></div>';
+  if(p.ReplacedPolicyNo) html+='<div style="grid-column:1/-1"><span style="color:#888;font-size:11px">Replaces Policy</span><div style="font-weight:700;color:var(--sage)">'+p.ReplacedPolicyNo+'</div></div>';
+  html+='</div></div>';
+
+  // History entries
+  if(history.length===0){
+    html+='<div style="text-align:center;padding:24px;color:#aaa;font-size:13px">No review history yet — use "Log Annual Review" when Hollard sends the annual escalation letter.</div>';
+  } else {
+    html+='<div style="font-size:12px;font-weight:700;text-transform:uppercase;color:#888;margin-bottom:8px">History (newest first)</div>';
+    history.slice().reverse().forEach(function(h){
+      var isReplace=h.type==='replaced';
+      var color=isReplace?'#b45309':'#1a2a4a';
+      html+='<div style="border:1px solid #eee;border-radius:8px;margin-bottom:10px;overflow:hidden">';
+      html+='<div style="background:'+color+';color:#fff;padding:7px 14px;display:flex;justify-content:space-between;font-size:12px">';
+      html+='<span style="font-weight:700">'+(isReplace?'🔄 Policy Replaced':'📅 Annual Review')+'</span>';
+      html+='<span>'+h.date+' · '+( h.by||'')+'</span></div>';
+      html+='<div style="display:grid;grid-template-columns:1fr 1fr;padding:10px 14px;gap:6px;font-size:12px">';
+      html+='<div><span style="color:#888">Premium</span><div style="font-weight:600">'+R(h.premium)+(h.frequency?' / '+h.frequency:'')+'</div></div>';
+      if(h.death) html+='<div><span style="color:#888">Death Cover</span><div style="font-weight:600">'+R(h.death)+'</div></div>';
+      if(h.disability) html+='<div><span style="color:#888">Disability</span><div style="font-weight:600">'+R(h.disability)+'</div></div>';
+      if(h.dread) html+='<div><span style="color:#888">Dread Disease</span><div style="font-weight:600">'+R(h.dread)+'</div></div>';
+      if(h.fundValue) html+='<div><span style="color:#888">Fund Value</span><div style="font-weight:600">'+R(h.fundValue)+'</div></div>';
+      if(h.loanAmount) html+='<div><span style="color:#888">Loan/Cover</span><div style="font-weight:600">'+R(h.loanAmount)+'</div></div>';
+      html+='</div>';
+      if(h.note) html+='<div style="padding:6px 14px;border-top:1px solid #eee;font-size:12px;color:#555;font-style:italic">'+h.note+'</div>';
+      html+='</div>';
+    });
+  }
+
+  document.getElementById('polHistB').innerHTML=html;
+  document.getElementById('polHistMod').classList.add('open');
+}
+
+function snapshotPolicy(pol){
+  // Returns a lightweight snapshot of current policy values for history
+  return {
+    date: new Date().toISOString().slice(0,10),
+    by: cu(),
+    premium: pol.Premium||'',
+    frequency: pol.Frequency||'',
+    death: pol.BenDeath||'',
+    disability: pol.BenDisability||'',
+    dread: pol.BenDreadDisease||'',
+    fundValue: pol.BenFundValue||'',
+    loanAmount: pol.LoanAmount||'',
+    incomeBenefits: pol.IncomeBenefits||'',
+    premEsc: pol.PremEscalation||'',
+    benEsc: pol.BenEscalation||''
+  };
+}
+
 function savePolicy(){
   if(!g('pi')){toast('Insurer required','err');return;}
   var now=new Date().toISOString().slice(0,10);
@@ -1520,28 +1637,82 @@ function savePolicy(){
   pol.ClientID=EPC;
   pol.LastUpdated=now;
   pol.CapturedDate=oldPol?(oldPol.CapturedDate||now):now;
-  pol.ReplacedBy=oldPol?oldPol.ReplacedBy:'';
+  pol.ReplacedBy=oldPol?oldPol.ReplacedBy:(window.REPLACING_POL_ID||'');
   pol.ReplacedDate=oldPol?oldPol.ReplacedDate:'';
+  pol.ReplacedPolicyNo=oldPol?oldPol.ReplacedPolicyNo:(window.REPLACING_POL_NO||'');
+  if(!oldPol&&window.REPLACING_POL_ID){window.REPLACING_POL_ID=null;window.REPLACING_POL_NO=null;}
+  // Keep existing history, don't overwrite
+  pol.ReviewHistory=oldPol?(oldPol.ReviewHistory||''):'';
   if(EPI!==null&&oldPol){var gi=DB.policies.indexOf(oldPol);if(gi>=0)DB.policies[gi]=pol;}
   else DB.policies.push(pol);
   closeAll();render();
   post({action:'savePolicy',policy:pol},function(){toast('Policy saved','ok');});
 }
 
+function logAnnualReview(){
+  var existing=polsFor(EPC);
+  var oldPol=(EPI!==null&&existing[EPI])?existing[EPI]:null;
+  if(!oldPol){toast('Save policy first before logging a review','err');return;}
+  var current=collectPolicyForm();
+  var snap=snapshotPolicy(current);
+  snap.type='review';
+  // Add review note
+  var note=prompt('Review notes (e.g. "Annual escalation May 2026 — premium increased from R10,553 to R11,843"):');
+  if(note===null)return;
+  snap.note=note;
+  var history=[];
+  try{history=JSON.parse(oldPol.ReviewHistory||'[]');}catch(e){}
+  history.push(snap);
+  var gi=DB.policies.indexOf(oldPol);
+  if(gi>=0){
+    DB.policies[gi].ReviewHistory=JSON.stringify(history);
+    DB.policies[gi].LastUpdated=snap.date;
+    // Also update current values from form
+    var updated=collectPolicyForm();
+    updated.ID=oldPol.ID;updated.ClientID=EPC;updated.LastUpdated=snap.date;
+    updated.CapturedDate=oldPol.CapturedDate||snap.date;
+    updated.ReplacedBy=oldPol.ReplacedBy||'';updated.ReplacedDate=oldPol.ReplacedDate||'';
+    updated.ReviewHistory=JSON.stringify(history);
+    DB.policies[gi]=updated;
+    closeAll();render();
+    post({action:'savePolicy',policy:DB.policies[gi]},function(){toast('Annual review logged & policy updated','ok');});
+  }
+}
+
 function replacePolicy(cid,idx){
   var pols=polsFor(cid);
   var old=pols[idx];
   if(!old)return;
-  if(!confirm('This will archive the current policy and open a new one. Continue?'))return;
+  if(!confirm('This will archive '+old.Insurer+' policy '+( old.PolicyNo||'')+ ' and open a new replacement. Continue?'))return;
   var gi=DB.policies.indexOf(old);
   var now=new Date().toISOString().slice(0,10);
-  if(gi>=0){DB.policies[gi].Status='Replaced';DB.policies[gi].ReplacedDate=now;}
+  // Snapshot the old policy before archiving
+  var snap=snapshotPolicy(old);
+  snap.type='replaced';
+  snap.note='Policy replaced on '+now+' by '+cu();
+  var history=[];
+  try{history=JSON.parse(old.ReviewHistory||'[]');}catch(e){}
+  history.push(snap);
+  if(gi>=0){
+    DB.policies[gi].Status='Replaced';
+    DB.policies[gi].ReplacedDate=now;
+    DB.policies[gi].ReviewHistory=JSON.stringify(history);
+  }
   post({action:'savePolicy',policy:DB.policies[gi]},function(){});
+  // Open new policy pre-filled with old details, linked back
   EPC=cid;EPI=null;
-  document.getElementById('pModT').textContent='New Policy — Replacing '+old.PolicyNo;
-  buildPolicyForm({Insurer:old.Insurer,Type:old.Type,Product:old.Product});
+  window.REPLACING_POL_ID=old.ID;
+  window.REPLACING_POL_NO=old.PolicyNo||old.Insurer;
+  document.getElementById('pModT').textContent='Replacement Policy — was '+old.Insurer+' '+( old.PolicyNo||'');
+  // Pre-fill with all old values so adviser just changes what's different
+  var prefill=Object.assign({},old,{
+    ID:'',PolicyNo:'',Status:'Active',StartDate:now,
+    ReplacedBy:old.ID,ReplacedPolicyNo:old.PolicyNo,
+    ReviewHistory:'',CapturedDate:now
+  });
+  buildPolicyForm(prefill);
   document.getElementById('pMod').classList.add('open');
-  toast('Old policy archived — capture replacement details','ok');
+  toast('Old policy archived — update the details for the new policy','ok');
 }
 
 
@@ -1742,6 +1913,8 @@ document.addEventListener('click', function(e){
         case 'go-clients':     goPage('clients'); break;
         case 'open-new-policy':openPolicyModal(cid); break;
         case 'edit-policy':    openPolicyModal(cid,parseInt(idx)); break;
+        case 'pol-history':    openPolicyHistory(cid,parseInt(idx)); break;
+        case 'replace-policy': replacePolicy(cid,parseInt(idx)); break;
         case 'open-roa':       openROAModal(cid); break;
         case 'open-task':      openTaskModal(el.getAttribute('data-client')||''); break;
         case 'toggle-task':    toggleTask(id, el.getAttribute('data-done')==='true'); break;
