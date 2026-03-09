@@ -428,7 +428,7 @@ function goPage(p){
   render();
 }
 function openClient(id){
-  SEL=id; CTAB='overview'; PAGE='client';
+  SEL=id; CTAB='overview'; PAGE='client'; window.CLIENT_TASK_FILTER='open';
   // Track last accessed - write to dedicated key so it survives full DB resyncs
   var c=DB.clients.find(function(x){return String(x.ID)===String(id);});
   if(c){
@@ -1046,12 +1046,31 @@ function renderOverview(c,pols,roas,ctasks){
     '<div style="display:flex;flex-direction:column;gap:16px">'+
     '<div class="card"><div class="ch"><h2>📝 Notes</h2><button class="btn b-gh sm" data-act="edit-client" data-id="'+c.ID+'">Edit</button></div>'+
     '<div class="cb"><p style="font-size:13px;line-height:1.8;white-space:pre-wrap;color:#445">'+(c.Notes||'No notes yet.')+'</p></div></div>'+
-    '<div class="card"><div class="ch"><h2>✅ Tasks</h2>'+
-    '<button class="btn b-gd sm" data-act="open-task" data-client="'+c.Name+'">+ Task</button></div>'+
-    '<div class="cb" style="padding:'+(ctasks.length?'0':'20px')+'">'+
-    (ctasks.length===0?'<div class="empty" style="padding:16px 0">No open tasks</div>':
-    ctasks.map(function(t){return '<div style="padding:10px 16px">'+taskRow(t)+'</div>';}).join(''))+
-    '</div></div>'+
+    (function(){
+      var tf = window.CLIENT_TASK_FILTER || 'open';
+      var allClientTasks = DB.tasks.filter(function(t){ return t.ClientName===c.Name; });
+      var openTasks = allClientTasks.filter(function(t){ return !isdone(t); });
+      var doneTasks = allClientTasks.filter(function(t){ return isdone(t); });
+      var today = new Date(); today.setHours(0,0,0,0);
+      var upcomingTasks = openTasks.filter(function(t){
+        if(!clean(t.DueDate)) return true;
+        var d=new Date(t.DueDate); d.setHours(0,0,0,0);
+        return d >= today;
+      });
+      var showTasks = tf==='open' ? openTasks : tf==='completed' ? doneTasks : upcomingTasks;
+      var filters = [['open','Open'],['upcoming','Upcoming'],['completed','Completed']];
+      return '<div class="card"><div class="ch"><h2>\u2705 Tasks</h2>'+
+        '<div style="display:flex;gap:6px;align-items:center">'+
+        filters.map(function(f){
+          return '<button class="btn '+(tf===f[0]?'b-nv':'b-gh')+' xs" data-act="client-task-filter" data-filter="'+f[0]+'">'+f[1]+(f[0]==='completed'&&doneTasks.length?' ('+doneTasks.length+')':'')+'</button>';
+        }).join('')+
+        '<button class="btn b-gd sm" data-act="open-task" data-client="'+c.Name+'">+ Task</button>'+
+        '</div></div>'+
+        '<div class="cb" style="padding:'+(showTasks.length?'0':'20px')+'">'+
+        (showTasks.length===0?'<div class="empty" style="padding:16px 0">'+(tf==='completed'?'No completed tasks yet':tf==='upcoming'?'No upcoming tasks':'No open tasks')+'</div>':
+        showTasks.map(function(t){return '<div style="padding:10px 16px">'+taskRow(t)+'</div>';}).join(''))+
+        '</div></div>';
+    })()+
     // Bank Details card
     '<div class="card" style="margin-top:16px">'+
     '<div class="ch"><h2>🏦 Bank Accounts</h2>'+
@@ -2361,6 +2380,7 @@ document.addEventListener('click', function(e){
         case 'task-filter':    TASK_FILTER=el.getAttribute('data-filter'); render(); break;
         case 'task-user-filter': window.TASK_USER_FILTER=el.getAttribute('data-filter'); render(); break;
         case 'dash-task-filter': window.DASH_TASK_FILTER=el.getAttribute('data-filter'); render(); break;
+        case 'client-task-filter': window.CLIENT_TASK_FILTER=el.getAttribute('data-filter'); render(); break;
         case 'dash-user-filter': window.DASH_USER_FILTER=el.getAttribute('data-filter'); render(); break;
         case 'toggle-replaced':   window.SHOW_REPLACED_POLS=!window.SHOW_REPLACED_POLS; render(); break;
         case 'replace-policy':    replacePolicy(el.getAttribute('data-cid'),parseInt(el.getAttribute('data-idx'))); break;
