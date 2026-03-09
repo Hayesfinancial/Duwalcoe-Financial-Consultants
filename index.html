@@ -277,10 +277,19 @@ function syncNow() {
     }catch(e){}
     try { localStorage.setItem('du_db', JSON.stringify(DB)); } catch(e){}
     // Pull shared discussion board from server
-    if(d.discuss){try{localStorage.setItem('du_discuss',d.discuss);}catch(e){}}
+    if(d.discuss && d.discuss !== ''){
+      try{
+        // d.discuss is a JSON string — store it and verify it parses
+        JSON.parse(d.discuss); // validate
+        localStorage.setItem('du_discuss', d.discuss);
+      }catch(e){
+        // if invalid JSON, ignore and keep local copy
+      }
+    }
     setSS('ok');
     render();
     toast('Synced — ' + DB.clients.length + ' clients','ok');
+    if(!window._discussTimer) startDiscussAutoRefresh();
   };
   var old = document.getElementById('__duScript');
   if(old) old.parentNode.removeChild(old);
@@ -296,6 +305,32 @@ function syncNow() {
     } catch(e){ render(); }
   };
   document.head.appendChild(s);
+}
+
+function startDiscussAutoRefresh(){
+  if(window._discussTimer) clearInterval(window._discussTimer);
+  window._discussTimer = setInterval(function(){
+    // Silent background fetch of discuss only — no toast, no full render flicker
+    var cbName = '__duDiscuss_' + Date.now();
+    var s = document.createElement('script');
+    window[cbName] = function(d){
+      delete window[cbName];
+      try{ document.head.removeChild(s); }catch(e){}
+      if(d && d.discuss && d.discuss !== ''){
+        try{
+          JSON.parse(d.discuss);
+          var current = localStorage.getItem('du_discuss')||'[]';
+          if(d.discuss !== current){
+            localStorage.setItem('du_discuss', d.discuss);
+            if(PAGE==='dash') render(); // only re-render if on dashboard
+          }
+        }catch(e){}
+      }
+    };
+    s.src = SURL + '?action=getAll&callback=' + cbName + '&t=' + Date.now();
+    s.onerror = function(){ delete window[cbName]; try{document.head.removeChild(s);}catch(e){}; };
+    document.head.appendChild(s);
+  }, 5 * 60 * 1000); // every 5 minutes
 }
 
 function post(data, cb) {
@@ -475,13 +510,14 @@ function renderDash(){
   var recentClients = DB.clients.filter(function(c){ return c.LastAccessed; })
     .slice().sort(function(a,b){ return (b.LastAccessed||0)-(a.LastAccessed||0); }).slice(0,8);
 
-  // ── Weekly appointment circles (resets Monday) ──
+  // ── Weekly appointment circles (resets Monday, 15 total) ──
   var weekKey = (function(){
     var d=new Date(); var day=d.getDay(); var diff=d.getDate()-(day===0?6:day-1);
     var mon=new Date(d); mon.setDate(diff); return 'du_appts_'+mon.toISOString().slice(0,10);
   })();
-  var appts = [false,false,false];
+  var appts = new Array(15).fill(false);
   try{ var _a=JSON.parse(localStorage.getItem(weekKey)||'[]'); if(Array.isArray(_a)) appts=_a; }catch(e){}
+  while(appts.length<15) appts.push(false);
 
   // ── Discussion board (shared via Apps Script) ──
   var discuss = [];
@@ -491,13 +527,15 @@ function renderDash(){
   '<h1 style="font-family:\'DM Serif Display\',serif;font-size:22px;color:var(--navy)">Dashboard</h1>'+
   '<div style="display:flex;align-items:center;gap:10px">'+
   // Appointment checkboxes inline in header
-  '<div style="display:flex;align-items:center;gap:14px;background:#fff;border:1px solid var(--smoke);border-radius:8px;padding:6px 14px">'+
-  '<span style="font-size:11px;font-weight:700;color:#aaa;text-transform:uppercase;letter-spacing:.5px">This week</span>'+
-  ['Appt 1','Appt 2','Appt 3'].map(function(lbl,i){
-    return '<label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:12px;color:'+(appts[i]?'var(--sage)':'#888')+';font-weight:'+(appts[i]?'700':'400')+'">'+
-      '<input type="checkbox" '+(appts[i]?'checked':'')+' onchange="toggleAppt('+i+')" style="width:14px;height:14px;cursor:pointer;accent-color:var(--sage)">'+lbl+'</label>';
+  '<div style="display:flex;align-items:center;gap:8px;background:#fff;border:1px solid var(--smoke);border-radius:8px;padding:6px 12px">'+
+  '<span style="font-size:11px;font-weight:700;color:#aaa;letter-spacing:.3px">Appts</span>'+
+  '<span style="font-size:11px;font-weight:700;color:var(--sage)">'+appts.filter(Boolean).length+'/15</span>'+
+  '<div style="display:flex;gap:3px;flex-wrap:wrap;max-width:220px">'+
+  appts.map(function(on,i){
+    return '<input type="checkbox" title="Appt '+(i+1)+'" '+(on?'checked':'')+' onchange="toggleAppt('+i+')" style="width:14px;height:14px;cursor:pointer;accent-color:var(--sage);margin:1px">';
   }).join('')+
-  '<button onclick="resetAppts()" style="font-size:10px;color:#ccc;background:none;border:none;cursor:pointer;padding:0;margin-left:4px">↺</button>'+
+  '</div>'+
+  '<button onclick="resetAppts()" title="Reset week" style="font-size:11px;color:#ccc;background:none;border:none;cursor:pointer;padding:0">↺</button>'+
   '</div>'+
   '<button class="btn b-gh sm" data-act="sync">🔄 Sync</button>'+
   '</div></div>'+
@@ -625,7 +663,7 @@ function toggleAppt(i){
 
 function resetAppts(){
   var weekKey=(function(){var d=new Date();var day=d.getDay();var diff=d.getDate()-(day===0?6:day-1);var mon=new Date(d);mon.setDate(diff);return 'du_appts_'+mon.toISOString().slice(0,10);})();
-  localStorage.setItem(weekKey,JSON.stringify([false,false,false]));
+  localStorage.setItem(weekKey,JSON.stringify(new Array(15).fill(false)));
   render();
 }
 
