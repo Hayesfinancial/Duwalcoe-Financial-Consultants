@@ -502,7 +502,7 @@ function renderDash(){
     var d=new Date(t.DueDate); d.setHours(0,0,0,0);
     return d.getTime()===today.getTime();
   });
-  var dashFilter = window.DASH_TASK_FILTER||'today';
+  var dashFilter = window.DASH_TASK_FILTER||'open';
   if(!window.DASH_USER_FILTER) window.DASH_USER_FILTER=cu();
   var reviewsDue=DB.clients.filter(function(c){var d=daysTo(c.ReviewDate);return d!==null&&d<=30;}).length;
 
@@ -561,18 +561,30 @@ function renderDash(){
     }).join('')+
     '<button class="btn b-gd xs" style="font-size:10px;padding:3px 8px" data-act="open-task">+ Task</button>'+
     '</div></div>'+
-    (overdue.length?'<div style="background:#fde8e8;border-left:3px solid var(--rose);padding:6px 14px;font-size:12px;font-weight:700;color:var(--rose);cursor:pointer" data-act="dash-task-filter" data-filter="overdue">🚨 '+overdue.length+' overdue — tap to view</div>':'')+
+    (overdue.length&&dashFilter!=='overdue'?'<div style="background:#fde8e8;border-left:3px solid var(--rose);padding:6px 14px;font-size:12px;font-weight:700;color:var(--rose);cursor:pointer" data-act="dash-task-filter" data-filter="overdue">🚨 '+overdue.length+' overdue — tap to view</div>':'')+
     '<div style="display:flex;gap:4px;padding:8px 14px;border-bottom:1px solid var(--smoke)">'+
-    ['today','overdue','all'].map(function(f){
-      var isActive=dashFilter===f;
-      var label=f==='today'?'Due Today':f==='overdue'?'Overdue':'All Open';
-      return '<button class="btn '+(isActive?'b-nv':'b-gh')+' xs" style="font-size:11px" data-act="dash-task-filter" data-filter="'+f+'">'+label+'</button>';
-    }).join('')+
+    (function(){
+      var allDone=DB.tasks.filter(function(t){return isdone(t)&&(window.DASH_USER_FILTER==='All'||(t.Assignee||'Clinton')===window.DASH_USER_FILTER);});
+      var upcoming=myT.filter(function(t){
+        if(!clean(t.DueDate)) return true;
+        var d=new Date(t.DueDate); d.setHours(0,0,0,0); return d>=today;
+      });
+      var filters=[['open','Open'],['upcoming','Upcoming'],['overdue','Overdue'],['completed','Completed'+(allDone.length?' ('+allDone.length+')':'')]];
+      return filters.map(function(f){
+        var isActive=dashFilter===f[0];
+        return '<button class="btn '+(isActive?'b-nv':'b-gh')+' xs" style="font-size:11px" data-act="dash-task-filter" data-filter="'+f[0]+'">'+f[1]+'</button>';
+      }).join('');
+    })()+
     '</div>'+
     '<div style="max-height:380px;overflow-y:auto">'+
     (function(){
-      var show=dashFilter==='today'?dueToday:dashFilter==='overdue'?overdue:myT;
-      if(show.length===0) return '<div class="empty" style="padding:20px">'+(dashFilter==='today'?'Nothing due today ✅':dashFilter==='overdue'?'No overdue tasks ✅':'No open tasks ✅')+'</div>';
+      var allDone=DB.tasks.filter(function(t){return isdone(t)&&(window.DASH_USER_FILTER==='All'||(t.Assignee||'Clinton')===window.DASH_USER_FILTER);});
+      var upcoming=myT.filter(function(t){
+        if(!clean(t.DueDate)) return true;
+        var d=new Date(t.DueDate); d.setHours(0,0,0,0); return d>=today;
+      });
+      var show=dashFilter==='overdue'?overdue:dashFilter==='upcoming'?upcoming:dashFilter==='completed'?allDone:myT;
+      if(show.length===0) return '<div class="empty" style="padding:20px">'+(dashFilter==='overdue'?'No overdue tasks ✅':dashFilter==='upcoming'?'No upcoming tasks ✅':dashFilter==='completed'?'No completed tasks yet':'No open tasks ✅')+'</div>';
       return show.map(function(t){
         var c='';
         if(clean(t.DueDate)){var d=new Date(t.DueDate);d.setHours(0,0,0,0);if(d<today)c='rose';else if(d.getTime()===today.getTime())c='sage';}
