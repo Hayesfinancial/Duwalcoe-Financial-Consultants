@@ -291,6 +291,15 @@ function syncNow() {
         // if invalid JSON, ignore and keep local copy
       }
     }
+    // Load appts from server
+    if(d.appts){
+      try{
+        var serverAppts = JSON.parse(d.appts);
+        Object.keys(serverAppts).forEach(function(k){
+          localStorage.setItem('du_appts_srv_'+k, serverAppts[k]);
+        });
+      }catch(e){}
+    }
     setSS('ok');
     render();
     toast('Synced — ' + DB.clients.length + ' clients','ok');
@@ -526,12 +535,13 @@ function renderDash(){
     .slice().sort(function(a,b){ return (b.LastAccessed||0)-(a.LastAccessed||0); }).slice(0,8);
 
   // ── Weekly appointment circles (resets Monday, 15 total) ──
-  var weekKey = (function(){
-    var d=new Date(); var day=d.getDay(); var diff=d.getDate()-(day===0?6:day-1);
-    var mon=new Date(d); mon.setDate(diff); return 'du_appts_'+mon.toISOString().slice(0,10);
-  })();
+  var weekKey = getWeekKey();
+  var localApptKey = 'du_appts_'+cu()+'_'+weekKey;
   var appts = new Array(15).fill(false);
-  try{ var _a=JSON.parse(localStorage.getItem(weekKey)||'[]'); if(Array.isArray(_a)) appts=_a; }catch(e){}
+  // Try local first, then fall back to server-synced data
+  var _localRaw = localStorage.getItem(localApptKey);
+  if(!_localRaw){ _localRaw = localStorage.getItem('du_appts_srv_'+cu()+'_'+weekKey)||null; }
+  try{ var _a=JSON.parse(_localRaw||'[]'); if(Array.isArray(_a)) appts=_a; }catch(e){}
   while(appts.length<15) appts.push(false);
 
   // ── Discussion board (shared via Apps Script) ──
@@ -684,18 +694,29 @@ function quickPost(){
   render();
 }
 
+function getWeekKey(){
+  var d=new Date(); var day=d.getDay(); var diff=d.getDate()-(day===0?6:day-1);
+  var mon=new Date(d); mon.setDate(diff); return mon.toISOString().slice(0,10);
+}
+
 function toggleAppt(i){
-  var weekKey=(function(){var d=new Date();var day=d.getDay();var diff=d.getDate()-(day===0?6:day-1);var mon=new Date(d);mon.setDate(diff);return 'du_appts_'+mon.toISOString().slice(0,10);})();
-  var appts=[false,false,false];
-  try{var _a=JSON.parse(localStorage.getItem(weekKey)||'[]');if(Array.isArray(_a))appts=_a;}catch(e){}
+  var weekKey = getWeekKey();
+  var localKey = 'du_appts_'+cu()+'_'+weekKey;
+  var appts = new Array(15).fill(false);
+  try{ var _a=JSON.parse(localStorage.getItem(localKey)||'[]'); if(Array.isArray(_a)) appts=_a; }catch(e){}
+  while(appts.length<15) appts.push(false);
   appts[i]=!appts[i];
-  localStorage.setItem(weekKey,JSON.stringify(appts));
+  localStorage.setItem(localKey, JSON.stringify(appts));
+  post({action:'saveAppts', user:cu(), weekKey:weekKey, appts:JSON.stringify(appts)}, function(){});
   render();
 }
 
 function resetAppts(){
-  var weekKey=(function(){var d=new Date();var day=d.getDay();var diff=d.getDate()-(day===0?6:day-1);var mon=new Date(d);mon.setDate(diff);return 'du_appts_'+mon.toISOString().slice(0,10);})();
-  localStorage.setItem(weekKey,JSON.stringify(new Array(15).fill(false)));
+  var weekKey = getWeekKey();
+  var localKey = 'du_appts_'+cu()+'_'+weekKey;
+  var empty = JSON.stringify(new Array(15).fill(false));
+  localStorage.setItem(localKey, empty);
+  post({action:'saveAppts', user:cu(), weekKey:weekKey, appts:empty}, function(){});
   render();
 }
 
