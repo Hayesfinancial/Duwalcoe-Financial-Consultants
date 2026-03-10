@@ -2924,14 +2924,65 @@ function openPolicySchedule(cid){
            '</div>';
   }
 
+  // ── Aggregate cover totals from all active personal policies ──
+  var allPols = groups.personal.pols.concat(groups.ra.pols).concat(groups.invest.pols).concat(groups.medical.pols).concat(groups.other.pols);
+  var covDeath=0, covDis=0, covDD=0, covIP=0;
+  allPols.forEach(function(p){
+    covDeath += N(p.BenDeath);
+    covDis   += N(p.BenDisability);
+    covDD    += N(p.BenDreadDisease);
+    try{ var ib=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):[]; ib.forEach(function(r){ covIP+=N(r.amount); }); }catch(e){}
+  });
+
+  // Business assurance — group by BizType
+  var bizGroups = {};
+  groups.business.pols.forEach(function(p){
+    var bt = p.BizType || 'Business Assurance';
+    if(!bizGroups[bt]) bizGroups[bt]=0;
+    bizGroups[bt] += N(p.LoanAmount||0) + N(p.BenDeath||0);
+  });
+
+  function R2(n){ return n>0 ? 'R '+Math.round(n).toLocaleString('en-ZA') : null; }
+
+  function summaryBlock(title, color, rows){
+    var s = '<div style="flex:1;min-width:220px;border:1px solid #e8e4d8;border-radius:8px;overflow:hidden">';
+    s += '<div style="background:'+color+';color:#fff;padding:8px 14px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px">'+title+'</div>';
+    rows.forEach(function(r){
+      if(!r.val) return;
+      s += '<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 14px;border-bottom:1px solid #f0f0ec">';
+      s += '<span style="font-size:12px;color:#667">'+r.lbl+'</span>';
+      s += '<span style="font-size:13px;font-weight:700;color:#1a2a4a">'+r.val+'</span>';
+      s += '</div>';
+    });
+    s += '</div>';
+    return s;
+  }
+
   doc+='<div style="border:2px solid #c8a84b;border-radius:10px;margin-bottom:28px;overflow:hidden">';
-  doc+='<div style="background:#c8a84b;color:#fff;padding:10px 20px;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.8px">Premium Summary</div>';
+  doc+='<div style="background:#c8a84b;color:#fff;padding:10px 20px;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.8px">Portfolio Summary</div>';
+  doc+='<div style="padding:16px;display:flex;flex-wrap:wrap;gap:12px">';
 
-  if(totMonthly>0) doc+=summaryRow('Total Monthly Premiums', totMonthly, true, '#1a2a4a');
-  if(totAnnual>0)  doc+=summaryRow('Annual Premiums', totAnnual, false, '#2563ab');
-  if(totOnce>0)    doc+=summaryRow('Once-Off / Lump Sum', totOnce, false, '#b45309');
+  // Premiums block
+  var premRows = [];
+  if(totMonthly>0) premRows.push({lbl:'Monthly premiums', val:R2(totMonthly)});
+  if(totAnnual>0)  premRows.push({lbl:'Annual premiums', val:R2(totAnnual)});
+  if(totOnce>0)    premRows.push({lbl:'Once-off / Lump sum', val:R2(totOnce)});
+  if(premRows.length) doc+=summaryBlock('Cost', '#1a2a4a', premRows);
 
-  doc+='</div>';
+  // Personal cover block
+  var covRows = [];
+  if(covDeath>0) covRows.push({lbl:'Life cover', val:R2(covDeath)});
+  if(covDis>0)   covRows.push({lbl:'Capital disability', val:R2(covDis)});
+  if(covDD>0)    covRows.push({lbl:'Dread disease', val:R2(covDD)});
+  if(covIP>0)    covRows.push({lbl:'Income protection /pm', val:R2(covIP)});
+  if(covRows.length) doc+=summaryBlock('Personal Cover', '#2e7d5a', covRows);
+
+  // Business assurance block(s)
+  Object.keys(bizGroups).forEach(function(bt){
+    if(bizGroups[bt]>0) doc+=summaryBlock('Business — '+bt, '#b45309', [{lbl:'Cover amount', val:R2(bizGroups[bt])}]);
+  });
+
+  doc+='</div></div>';
 
   // ── POLICY SECTIONS ──
   doc+=buildSection(groups.personal, '#1a2a4a');
