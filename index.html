@@ -2774,8 +2774,7 @@ function openPolicySchedule(cid){
   function toMonthly(p){
     var n=N(p.Premium); var f=p.Frequency||'Monthly';
     if(f==='Quarterly') return n/3;
-    if(f==='Annually') return n/12;
-    return 0; // Once Off and anything else = excluded from monthly
+    return 0; // Annually, Once Off and anything else = excluded from monthly
   }
 
   var totLife=0, totRA=0, totInv=0, totMed=0, totBiz=0, totOther=0;
@@ -2793,35 +2792,36 @@ function openPolicySchedule(cid){
   // Use objects to allow pass-by-ref
   var tL={val:0},tR={val:0},tI={val:0},tM={val:0},tB={val:0},tO={val:0};
   var tLM={val:0},tRM={val:0},tIM={val:0},tMM={val:0},tBM={val:0},tOM={val:0};
+  function isNonMonthly(p){ var f=p.Frequency||'Monthly'; return f==='Once Off'||f==='Lump Sum'||f==='Annually'||f==='Quarterly'; }
   groups.personal.pols.forEach(function(p){
     var n=N(p.Premium); tL.val+=n;
-    if(p.Frequency==='Once Off'||p.Frequency==='Lump Sum') nonMonthly.push(p);
-    else tLM.val+=(isMonthly(p)?n:toMonthly(p));
+    if(isNonMonthly(p)) nonMonthly.push(p);
+    else tLM.val+=n;
   });
   groups.ra.pols.forEach(function(p){
     var n=N(p.Premium); tR.val+=n;
-    if(p.Frequency==='Once Off'||p.Frequency==='Lump Sum') nonMonthly.push(p);
-    else tRM.val+=(isMonthly(p)?n:toMonthly(p));
+    if(isNonMonthly(p)) nonMonthly.push(p);
+    else tRM.val+=n;
   });
   groups.invest.pols.forEach(function(p){
     var n=N(p.Premium); tI.val+=n;
-    if(p.Frequency==='Once Off'||p.Frequency==='Lump Sum') nonMonthly.push(p);
-    else tIM.val+=(isMonthly(p)?n:toMonthly(p));
+    if(isNonMonthly(p)) nonMonthly.push(p);
+    else tIM.val+=n;
   });
   groups.medical.pols.forEach(function(p){
     var n=N(p.Premium); tM.val+=n;
-    if(p.Frequency==='Once Off'||p.Frequency==='Lump Sum') nonMonthly.push(p);
-    else tMM.val+=(isMonthly(p)?n:toMonthly(p));
+    if(isNonMonthly(p)) nonMonthly.push(p);
+    else tMM.val+=n;
   });
   groups.business.pols.forEach(function(p){
     var n=N(p.Premium); tB.val+=n;
-    if(p.Frequency==='Once Off'||p.Frequency==='Lump Sum') nonMonthly.push(p);
-    else tBM.val+=(isMonthly(p)?n:toMonthly(p));
+    if(isNonMonthly(p)) nonMonthly.push(p);
+    else tBM.val+=n;
   });
   groups.other.pols.forEach(function(p){
     var n=N(p.Premium); tO.val+=n;
-    if(p.Frequency==='Once Off'||p.Frequency==='Lump Sum') nonMonthly.push(p);
-    else tOM.val+=(isMonthly(p)?n:toMonthly(p));
+    if(isNonMonthly(p)) nonMonthly.push(p);
+    else tOM.val+=n;
   });
 
   var totLife=tL.val, totRA=tR.val, totInv=tI.val, totMed=tM.val, totBiz=tB.val, totOther=tO.val;
@@ -2908,61 +2908,30 @@ function openPolicySchedule(cid){
   doc+='<div style="text-align:right;font-size:12px;color:#666"><strong style="color:#1a2a4a;display:block;font-size:14px">Clinton Hayes</strong>Duwalcoe Financial Consultants CC<br>FSP No: 9978<br>clinton@duwalcoe.co.za<br>083 608 5617<br><br>'+today+'</div></div>';
 
   // ── PREMIUM SUMMARY BOX ──
-  doc+='<div style="border:2px solid #c8a84b;border-radius:10px;padding:18px 20px;margin-bottom:28px;background:#fffdf5">';
-  doc+='<div style="font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:#c8a84b;margin-bottom:14px">Premium Summary</div>';
-  doc+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:0;border:1px solid #eee;border-radius:6px;overflow:hidden">';
+  // Separate nonMonthly into annual vs once-off
+  var annualPols = nonMonthly.filter(function(p){ return p.Frequency==='Annually'; });
+  var oncePols   = nonMonthly.filter(function(p){ return p.Frequency!=='Annually'; });
+  var totAnnual  = annualPols.reduce(function(s,p){ return s+N(p.Premium); }, 0);
+  var totOnce    = oncePols.reduce(function(s,p){ return s+N(p.Premium); }, 0);
+  var totMonthly = totPersonalM + totBizM;
 
-  // 3-col row: label | monthly equiv | actual/frequency
-  function sumRow(lbl, monthly, actual, freq, bold){
-    var st=bold?'font-weight:700;background:#f5f5f0':'';
-    var mStr=monthly>0?'R '+Math.round(monthly).toLocaleString('en-ZA'):'—';
-    var aStr=actual>0?'R '+Math.round(actual).toLocaleString('en-ZA')+(freq&&freq!=='Monthly'?' / '+freq:''):'—';
-    return '<div style="padding:8px 14px;border-bottom:1px solid #eee;'+st+'">'+lbl+'</div>'+
-           '<div style="padding:8px 14px;border-bottom:1px solid #eee;text-align:right;color:#2e7d5a;'+st+'">'+mStr+'</div>'+
-           '<div style="padding:8px 14px;border-bottom:1px solid #eee;text-align:right;color:#666;font-size:12px;'+st+'">'+aStr+'</div>';
+  function summaryRow(lbl, val, bold, color){
+    var st = bold ? 'font-weight:700;font-size:15px;' : 'font-size:14px;';
+    var col = color || '#1a2a4a';
+    return '<div style="display:flex;justify-content:space-between;align-items:center;padding:12px 20px;border-bottom:1px solid #eee;'+st+'color:'+col+'">' +
+           '<span>'+lbl+'</span>' +
+           '<span>R '+Math.round(val).toLocaleString('en-ZA')+'</span>' +
+           '</div>';
   }
 
-  // Switch to 3-col grid
-  doc=doc.replace('grid-template-columns:1fr 1fr','grid-template-columns:2fr 1fr 1fr');
+  doc+='<div style="border:2px solid #c8a84b;border-radius:10px;margin-bottom:28px;overflow:hidden">';
+  doc+='<div style="background:#c8a84b;color:#fff;padding:10px 20px;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.8px">Premium Summary</div>';
 
-  // Column headers
-  doc+='<div style="grid-column:1/-1;display:grid;grid-template-columns:2fr 1fr 1fr;background:#e8e4d8">';
-  doc+='<div style="padding:5px 14px;font-size:10px;font-weight:700;text-transform:uppercase;color:#888">Category</div>';
-  doc+='<div style="padding:5px 14px;font-size:10px;font-weight:700;text-transform:uppercase;color:#2e7d5a;text-align:right">Monthly Cost</div>';
-  doc+='<div style="padding:5px 14px;font-size:10px;font-weight:700;text-transform:uppercase;color:#888;text-align:right">Actual Premium</div>';
+  if(totMonthly>0) doc+=summaryRow('Total Monthly Premiums', totMonthly, true, '#1a2a4a');
+  if(totAnnual>0)  doc+=summaryRow('Annual Premiums', totAnnual, false, '#2563ab');
+  if(totOnce>0)    doc+=summaryRow('Once-Off / Lump Sum', totOnce, false, '#b45309');
+
   doc+='</div>';
-
-  // Personal section
-  doc+='<div style="grid-column:1/-1;background:#1a2a4a;color:#fff;padding:7px 14px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px">Personal Policies — Your Responsibility</div>';
-  if(tL.val>0)  doc+=sumRow('Life & Risk Cover', totLifeM, totLife, '', false);
-  if(tR.val>0)  doc+=sumRow('Retirement Annuities & Preservation', totRAM, totRA, '', false);
-  if(tI.val>0)  doc+=sumRow('Investments & Savings', totInvM, totInv, '', false);
-  if(tM.val>0)  doc+=sumRow('Medical Aid', totMedM, totMed, '', false);
-  if(tO.val>0)  doc+=sumRow('Other', totOtherM, totOther, '', false);
-  doc+=sumRow('Total Personal /pm', totPersonalM, totPersonalM, '', true);
-
-  // Business section (only if exists)
-  if(tB.val>0){
-    doc+='<div style="grid-column:1/-1;background:#b45309;color:#fff;padding:7px 14px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px">Business Assurance — Usually Employer / Company Funded</div>';
-    doc+=sumRow('Business Assurance', totBizM, totBiz, '', false);
-    doc+=sumRow('Total Business /pm', totBizM, totBizM, '', true);
-  }
-
-  // Grand total
-  doc+='<div style="grid-column:1/-1;height:2px;background:#c8a84b"></div>';
-  doc+=sumRow('TOTAL MONTHLY COST TO CLIENT', totPersonalM, totPersonalM, '', true);
-
-  // Once-off / lump sum note
-  if(nonMonthly.length){
-    doc+='<div style="grid-column:1/-1;background:#fef3c7;padding:10px 14px;border-top:2px solid #f59e0b">';
-    doc+='<div style="font-size:11px;font-weight:700;text-transform:uppercase;color:#92400e;margin-bottom:6px">Once-Off / Lump Sum Contributions (excluded from monthly total)</div>';
-    nonMonthly.forEach(function(p){
-      doc+='<div style="font-size:12px;padding:3px 0;display:flex;justify-content:space-between"><span>'+(p.Insurer||'')+(p.Product?' — '+p.Product:'')+'</span><span style="font-weight:700">R '+Math.round(N(p.Premium)).toLocaleString('en-ZA')+(p.Frequency?' ('+p.Frequency+')':'')+'</span></div>';
-    });
-    doc+='</div>';
-  }
-
-  doc+='</div></div>';
 
   // ── POLICY SECTIONS ──
   doc+=buildSection(groups.personal, '#1a2a4a');
