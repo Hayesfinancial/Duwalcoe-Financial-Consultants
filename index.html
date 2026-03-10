@@ -735,7 +735,16 @@ function dashSearchGo(id){
   openClient(id);
 }
 
-function toggleAppt(i){
+function convertLead(id){
+  var c = DB.clients.find(function(x){ return String(x.ID)===String(id); });
+  if(!c) return;
+  if(!confirm('Convert '+c.Name+' from Lead to Client?')) return;
+  c.IsLead = 'No';
+  c.Status = c.Status||'Active';
+  post({action:'saveClient', client:c}, function(){ toast(c.Name+' converted to client ✅','ok'); });
+  window.CLIENT_LIST_FILTER = 'clients';
+  render();
+}
   var weekKey = getWeekKey();
   var localKey = 'du_appts_'+cu()+'_'+weekKey;
   var appts = new Array(15).fill(false);
@@ -790,52 +799,62 @@ function renderClients(){
     var _ra=JSON.parse(localStorage.getItem(recentKey())||'{}');
     DB.clients.forEach(function(c){ if(_ra[String(c.ID)]) c.LastAccessed=_ra[String(c.ID)]; });
   }catch(e){}
+  if(!window.CLIENT_LIST_FILTER) window.CLIENT_LIST_FILTER = 'clients';
   var base=DB.clients.slice().sort(function(a,b){
-    // Recently accessed first, then alphabetical for the rest
     if(a.LastAccessed&&!b.LastAccessed) return -1;
     if(!a.LastAccessed&&b.LastAccessed) return 1;
     if(a.LastAccessed&&b.LastAccessed) return b.LastAccessed-a.LastAccessed;
     return (a.Name||'').localeCompare(b.Name||'');
   });
-  var list=SRCH?base.filter(function(c){
+  var isLeads = window.CLIENT_LIST_FILTER === 'leads';
+  var filtered = base.filter(function(c){ return isLeads ? c.IsLead==='Yes' : c.IsLead!=='Yes'; });
+  var list=SRCH?filtered.filter(function(c){
     var q=SRCH.toLowerCase();
     return (c.Name||'').toLowerCase().indexOf(q)>=0||
            String(c.IDNumber||'').indexOf(q)>=0||
            (c.Email||'').toLowerCase().indexOf(q)>=0||
            String(c.Cell||'').indexOf(q)>=0;
-  }):base;
+  }):filtered;
+  var clientCount = base.filter(function(c){ return c.IsLead!=='Yes'; }).length;
+  var leadCount   = base.filter(function(c){ return c.IsLead==='Yes'; }).length;
   return '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">'+
-    '<h1 style="font-family:\'DM Serif Display\',serif;font-size:22px;color:var(--navy)">Clients ('+list.length+')</h1>'+
-    btn('btn b-gd','open-new-client','+ New Client')+
+    '<h1 style="font-family:\'DM Serif Display\',serif;font-size:22px;color:var(--navy)">'+(isLeads?'Leads':'Clients')+' ('+list.length+')</h1>'+
+    '<div style="display:flex;gap:6px;align-items:center">'+
+    '<div style="display:flex;gap:0;border:1.5px solid var(--mist);border-radius:8px;overflow:hidden">'+
+    '<button class="btn xs" data-act="client-list-filter" data-filter="clients" style="border-radius:0;border:none;'+(isLeads?'background:#f5f7fa;color:#889':'background:var(--navy);color:#fff')+';padding:5px 14px;font-weight:700">👥 Clients ('+clientCount+')</button>'+
+    '<button class="btn xs" data-act="client-list-filter" data-filter="leads" style="border-radius:0;border:none;border-left:1.5px solid var(--mist);'+(isLeads?'background:var(--navy);color:#fff':'background:#f5f7fa;color:#889')+';padding:5px 14px;font-weight:700">🎯 Leads ('+leadCount+')</button>'+
+    '</div>'+
+    (isLeads ? btn('btn b-gd','open-new-lead','+ New Lead') : btn('btn b-gd','open-new-client','+ New Client'))+
+    '</div>'+
     '</div>'+
     '<div class="sb"><span style="color:#aaa">🔍</span>'+
     '<input type="text" id="srchBox" value="'+SRCH+'" placeholder="Search name, ID number, email, cell…">'+
     '</div>'+
-    '<div class="card" style="overflow:hidden" id="clientTableWrap">'+clientTable(list,false)+'</div>';
+    '<div class="card" style="overflow:hidden" id="clientTableWrap">'+clientTable(list,false,isLeads)+'</div>';
 }
 
-function clientTable(list,mini){
-  if(!list.length)return '<div class="empty">No clients found</div>';
+function clientTable(list,mini,isLeads){
+  if(!list.length)return '<div class="empty">'+(isLeads?'No leads yet — add your first lead':'No clients found')+'</div>';
   return '<table class="tbl"><thead><tr>'+
-    '<th>Client</th><th>ID Number</th>'+(mini?'':'<th>Date of Birth</th>')+'<th>Review Date</th><th>Status</th><th>Policies</th><th></th>'+
+    '<th>'+(isLeads?'Lead':'Client')+'</th><th>Cell</th>'+(mini?'':'<th>Email</th>')+'<th>Status</th><th>'+(isLeads?'Tasks':'Policies')+'</th><th></th>'+
     '</tr></thead><tbody>'+
     list.map(function(c){
       var rev=daysTo(c.ReviewDate);
-      var bd=daysTo(c.DOB);
       var np=polsFor(c.ID).filter(function(p){return p.Status!=='Replaced';}).length;
+      var nt=DB.tasks.filter(function(t){return !isdone(t)&&(t.ClientName===c.Name);}).length;
       var em=clean(c.Email);
-      var idnum=clean(c.IDNumber);
       return '<tr class="row" data-act="open-client" data-id="'+c.ID+'">'+
         '<td><div style="display:flex;align-items:center;gap:10px">'+
-        '<div style="width:32px;height:32px;border-radius:50%;background:var(--navy);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:var(--gold);flex-shrink:0">'+ini(c.Name)+'</div>'+
-        '<div><div style="font-weight:600">'+(clean(c.Title)?c.Title+' ':''  )+(c.Name||'—')+'</div>'+(em?'<div style="font-size:11px;color:#889">'+em+'</div>':'')+'</div>'+
+        '<div style="width:32px;height:32px;border-radius:50%;background:'+(isLeads?'#d97706':'var(--navy)')+';display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:#fff;flex-shrink:0">'+ini(c.Name)+'</div>'+
+        '<div><div style="font-weight:600">'+(c.Name||'—')+'</div>'+(em&&!mini?'<div style="font-size:11px;color:#889">'+em+'</div>':'')+'</div>'+
         '</div></td>'+
-        '<td style="font-family:monospace;font-size:12px">'+(idnum||'—')+'</td>'+
-        (mini?'':'<td>'+(clean(c.DOB)?fdate(c.DOB)+(bd!==null&&bd<=30?' <span style="color:var(--gold);font-size:10px;font-weight:700">🎂 '+bd+'d</span>':''):'—')+'</td>')+
-        '<td>'+(clean(c.ReviewDate)?fdate(c.ReviewDate)+(rev!==null&&rev<=30?' '+bx('bx-rd','Due'):''):'—')+'</td>'+
-        '<td>'+bx(c.Status==='Active'?'bx-sg':'bx-gr',c.Status||'Active')+'</td>'+
-        '<td>'+bx('bx-gr',np+' pols')+'</td>'+
-        '<td><button class="btn b-gh xs" data-act="edit-client" data-id="'+c.ID+'">Edit</button></td>'+
+        '<td style="font-size:12px">'+(clean(c.Cell)?c.Cell:'—')+'</td>'+
+        (!mini?'<td style="font-size:12px">'+(em||'—')+'</td>':'')+
+        '<td>'+bx(isLeads?'bx-gd':'bx-sg',isLeads?'🎯 Lead':(c.Status||'Active'))+'</td>'+
+        '<td>'+(isLeads?bx('bx-gr',nt+' tasks'):bx('bx-gr',np+' pols'))+'</td>'+
+        '<td style="display:flex;gap:4px">'+
+        (isLeads?'<button class="btn b-sg xs" data-act="convert-lead" data-id="'+c.ID+'">✅ Convert</button>':'')+
+        '<button class="btn b-gh xs" data-act="edit-client" data-id="'+c.ID+'">Edit</button></td>'+
         '</tr>';
     }).join('')+'</tbody></table>';
 }
@@ -861,9 +880,9 @@ function renderProfile(){
     (clean(c.Email)?'<span>✉️ '+c.Email+'</span>':'')+
     '</div></div>'+
     '<div style="display:flex;flex-direction:column;gap:8px;align-items:flex-end">'+
-    btn('btn b-gd sm','fna','📊 Open FNA')+
+    (c.IsLead==='Yes'?'<span style="background:#fef3c7;color:#d97706;border-radius:10px;padding:3px 12px;font-size:11px;font-weight:700">🎯 Lead</span>':'')+
+    (c.IsLead==='Yes'?'<button class="btn b-sg sm" data-act="convert-lead" data-id="'+c.ID+'">✅ Convert to Client</button>':btn('btn b-gd sm','fna','📊 Open FNA'))+
     '<button class="btn b-gh sm" style="color:#fff;border-color:#334466" data-act="edit-client" data-id="'+c.ID+'">✏️ Edit</button>'+
-    ''+
     '</div></div>'+
     '<div class="tabs">'+
     '<div class="tab'+(CTAB==='overview'?' on':'')+'" data-act="tab" data-tab="overview">Overview</div>'+
@@ -1555,12 +1574,13 @@ function refreshChildRows(){
   }).join('');
 }
 
-function openClientModal(id){
+function openClientModal(id, isLead){
   EC=id||null;
   NEW_CHILDREN=[];
   var c=id?DB.clients.find(function(x){return x.ID===id;})||{}:{};
+  if(!id && isLead) c.IsLead='Yes';
   var isNew=!id;
-  document.getElementById('cModT').textContent=id?'Edit Client':'New Client Intake';
+  document.getElementById('cModT').textContent=id?(c.IsLead==='Yes'?'Edit Lead':'Edit Client'):(isLead?'New Lead':'New Client Intake');
   document.getElementById('cMod').querySelector('.modal').style.maxWidth='780px';
 
   document.getElementById('cModB').innerHTML=
@@ -1585,7 +1605,8 @@ function openClientModal(id){
     fdp('fann','Marriage / Anniversary Date',c.Anniversary||'')+
     fs('fedu','Education Level',['','School - no matric','Matric','Diploma / Certificate','Degree','Post Graduate','Other'],c.Education||'')+
     fld('fqual','Qualification Detail',c.Qualification||'')+
-    fs('fst','Status',['Active','Inactive','Lead'],c.Status||'Active')+
+    fs('fst','Status',['Active','Inactive'],c.Status||'Active')+
+    fs('fisleadst','Lead Status',['No','Yes'],c.IsLead||'No')+
     '</div>'+
 
     // SECTION: Contact & Work
@@ -1684,7 +1705,7 @@ function saveClient(openFNA){
     Gender:getRadio('fgen')||g('fgen'),Smoker:getRadio('fsm')||g('fsm'),
     Education:g('fedu'),Qualification:g('fqual'),TelHome:g('ftelh'),TelWork:g('ftelw'),
     SpouseName:g('fspname'),SpouseIDNumber:g('fspid'),SpouseDOB:g('fspdob'),SpouseCell:g('fspcell'),SpouseEmail:g('fspemail'),
-    Address:g('fadr'),DriveUrl:g('fdr'),Notes:g('fnt'),RiskCategory:g('frc'),Adviser:cu()};
+    Address:g('fadr'),DriveUrl:g('fdr'),Notes:g('fnt'),RiskCategory:g('frc'),Adviser:cu(),IsLead:g('fisleadst')||'No'};
   // Preserve BankDetails and Doctors — not editable via client form, managed separately
   var _existing=DB.clients.find(function(x){return String(x.ID)===String(id);});
   if(_existing){
@@ -2572,6 +2593,9 @@ document.addEventListener('click', function(e){
         case 'open-client':    openClient(id); break;
         case 'edit-client':    openClientModal(id); break;
         case 'open-new-client':openClientModal(); break;
+        case 'open-new-lead':  openClientModal(null, true); break;
+        case 'convert-lead':   convertLead(id); break;
+        case 'client-list-filter': window.CLIENT_LIST_FILTER=el.getAttribute('data-filter'); render(); break;
         case 'go-clients':     goPage('clients'); break;
         case 'open-new-policy':openPolicyModal(cid); break;
         case 'edit-policy':    openPolicyModal(cid,parseInt(idx)); break;
