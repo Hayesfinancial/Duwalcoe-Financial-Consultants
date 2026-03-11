@@ -2045,7 +2045,12 @@ function buildPolicyForm(p){
   html+=fld('ppay','Payer',p.Payer);
   html+='</div>';
   html+=sec('Beneficiaries');
-  html+='<div style="font-size:11px;color:#889;margin-bottom:8px">Add one row per beneficiary. Percentages should total 100%.</div>';
+  html+='<div style="font-size:11px;color:#889;margin-bottom:6px">'+
+    'Beneficiary type determines estate duty treatment. Percentages should total 100%.<br>'+
+    '<span style="color:#2e7d32;font-weight:600">Spouse</span> = 4(q) deductible &nbsp;·&nbsp; '+
+    '<span style="color:#b45309;font-weight:600">Estate</span> = dutiable, funds estate expenses &nbsp;·&nbsp; '+
+    '<span style="color:#c62828;font-weight:600">Third Party</span> = dutiable, apportionable'+
+    '</div>';
   html+='<div id="polBensWrap">'+renderPolBens()+'</div>';
   html+='<button type="button" class="btn b-gh sm" style="margin-top:6px" onclick="addPolBen()">+ Add Beneficiary</button>';
 
@@ -2057,22 +2062,74 @@ function buildPolicyForm(p){
   document.getElementById('pModB').innerHTML=html;
 }
 
+// Build list of known names for current client (spouse + family links)
+function getKnownBeneficiaries(){
+  var names = [];
+  var c = DB.clients.find(function(x){ return String(x.ID)===String(EPC); });
+  if(c){
+    if(c.SpouseName && c.SpouseName.trim()) names.push({name:c.SpouseName.trim(), type:'Spouse'});
+    // Family links (children etc)
+    DB.links.filter(function(l){ return String(l.PrincipalID)===String(EPC)||String(l.ClientID)===String(EPC); })
+      .forEach(function(l){ if(l.Name && l.Name.trim()) names.push({name:l.Name.trim(), type:'Third Party'}); });
+  }
+  return names;
+}
+
+// Estate duty category label
+function estDutyLabel(type){
+  if(type==='Spouse')      return {label:'4(q) — not dutiable', color:'#2e7d32'};
+  if(type==='Estate')      return {label:'Dutiable — estate expenses', color:'#b45309'};
+  return                          {label:'Dutiable — apportionable', color:'#c62828'};
+}
+
 function renderPolBens(){
   if(POL_BENS.length===0) return '<div style="font-size:12px;color:#aaa;padding:6px 0">No beneficiaries added yet.</div>';
-  var benTypes=['Estate','Spouse','Children','Third Party','Business','Other'];
+  // 3 estate duty categories only
+  var benTypes=['Spouse','Estate','Third Party'];
+  var known = getKnownBeneficiaries();
+
   return POL_BENS.map(function(b,i){
-    return '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">'+
-      '<select onchange="POL_BENS['+i+'].type=this.value" style="border:1.5px solid var(--mist);border-radius:7px;padding:7px 10px;font-family:inherit;font-size:13px;min-width:140px">'+
-      benTypes.map(function(o){return '<option value="'+o+'"'+(b.type===o?' selected':'')+'>'+o+'</option>';}).join('')+
+    var duty = estDutyLabel(b.type||'Third Party');
+    // Build name datalist for autocomplete
+    var listId = 'ben_names_'+i;
+    var datalist = '<datalist id="'+listId+'">'+known.map(function(k){
+      return '<option value="'+k.name+'"></option>';
+    }).join('')+'</datalist>';
+
+    // Auto-fill button if spouse selected and spouse name known
+    var autoFill = '';
+    if(b.type==='Spouse' && known.length>0 && known[0].type==='Spouse'){
+      autoFill = '<button type="button" onclick="POL_BENS['+i+'].name=\''+known[0].name+'\';document.getElementById(\'polBensWrap\').innerHTML=renderPolBens()" '+
+        'style="background:var(--navy);color:#fff;border:none;border-radius:6px;padding:7px 10px;cursor:pointer;font-size:11px;white-space:nowrap;flex-shrink:0">Auto-fill</button>';
+    }
+
+    return '<div style="background:var(--smoke);border-radius:8px;padding:10px 12px;margin-bottom:8px">'+
+      datalist+
+      '<div style="display:flex;gap:8px;align-items:center">'+
+      // Type dropdown
+      '<select onchange="POL_BENS['+i+'].type=this.value;if(this.value===\'Spouse\'){var k=getKnownBeneficiaries();if(k.length&&k[0].type===\'Spouse\')POL_BENS['+i+'].name=k[0].name;}document.getElementById(\'polBensWrap\').innerHTML=renderPolBens()" '+
+        'style="border:1.5px solid var(--mist);border-radius:7px;padding:7px 10px;font-family:inherit;font-size:13px;min-width:130px">'+
+      benTypes.map(function(o){return '<option value="'+o+'"'+(( b.type||'Third Party')===o?' selected':'')+'>'+o+'</option>';}).join('')+
       '</select>'+
-      '<input type="text" value="'+(b.name||'')+'" placeholder="Name / details (e.g. Jane Smith)" onchange="POL_BENS['+i+'].name=this.value" style="flex:2;border:1.5px solid var(--mist);border-radius:7px;padding:7px 10px;font-family:inherit;font-size:13px">'+
-      '<input type="text" value="'+(b.pct||'')+'" placeholder="%" onchange="POL_BENS['+i+'].pct=this.value" style="width:64px;border:1.5px solid var(--mist);border-radius:7px;padding:7px 10px;font-family:inherit;font-size:13px;text-align:center">'+
-      '<button type="button" onclick="POL_BENS.splice('+i+',1);document.getElementById(\'polBensWrap\').innerHTML=renderPolBens()" style="background:var(--rose);color:#fff;border:none;border-radius:6px;padding:6px 10px;cursor:pointer;font-size:12px;font-weight:700;flex-shrink:0">✕</button>'+
+      // Name input with datalist autocomplete
+      '<input type="text" value="'+(b.name||'')+'" list="'+listId+'" placeholder="Beneficiary name" '+
+        'onchange="POL_BENS['+i+'].name=this.value" '+
+        'style="flex:2;border:1.5px solid var(--mist);border-radius:7px;padding:7px 10px;font-family:inherit;font-size:13px">'+
+      autoFill+
+      // Percentage
+      '<input type="text" value="'+(b.pct||'')+'" placeholder="%" onchange="POL_BENS['+i+'].pct=this.value" '+
+        'style="width:58px;border:1.5px solid var(--mist);border-radius:7px;padding:7px 10px;font-family:inherit;font-size:13px;text-align:center">'+
+      '<button type="button" onclick="POL_BENS.splice('+i+',1);document.getElementById(\'polBensWrap\').innerHTML=renderPolBens()" '+
+        'style="background:var(--rose);color:#fff;border:none;border-radius:6px;padding:6px 10px;cursor:pointer;font-size:12px;font-weight:700;flex-shrink:0">✕</button>'+
+      '</div>'+
+      // Estate duty indicator
+      '<div style="font-size:11px;font-weight:600;color:'+duty.color+';margin-top:6px;padding-left:2px">⚖ '+duty.label+'</div>'+
       '</div>';
   }).join('');
 }
+
 function addPolBen(){
-  POL_BENS.push({type:'Estate',name:'',pct:''});
+  POL_BENS.push({type:'Third Party',name:'',pct:''});
   document.getElementById('polBensWrap').innerHTML=renderPolBens();
 }
 
@@ -2865,7 +2922,17 @@ function openPolicySchedule(cid){
   function buildCard(p, color){
     var bens=[];
     try{bens=p.Beneficiaries?JSON.parse(p.Beneficiaries):[];}catch(e){}
-    var benStr=bens.length?bens.map(function(b){return (b.name||b.type)+(b.pct?' ('+b.pct+'%)':'');}).join(', '):'—';
+    // Build beneficiary display with estate duty colour coding
+    var benStr='—';
+    if(bens.length){
+      benStr=bens.map(function(b){
+        var t=b.type||'Third Party';
+        var col=t==='Spouse'?'#2e7d32':t==='Estate'?'#b45309':'#c62828';
+        var duty=t==='Spouse'?'4(q)':t==='Estate'?'Dutiable':'Dutiable';
+        return '<span style="color:'+col+';font-weight:600">'+(b.name||t)+(b.pct?' ('+b.pct+'%)':'')+'</span>'+
+               '<span style="color:'+col+';font-size:10px;margin-left:3px">['+duty+']</span>';
+      }).join(', ');
+    }
     var incBens=[];
     try{incBens=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):[];}catch(e){}
 
@@ -2877,6 +2944,7 @@ function openPolicySchedule(cid){
     s+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:0">';
 
     function cell(lbl,val){return '<div style="padding:7px 14px;border-bottom:1px solid #eef"><div style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:.4px">'+lbl+'</div><div style="font-weight:600;font-size:13px;margin-top:1px">'+val+'</div></div>';}
+    function cellHTML(lbl,val){return '<div style="padding:7px 14px;border-bottom:1px solid #eef"><div style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:.4px">'+lbl+'</div><div style="font-size:13px;margin-top:1px">'+val+'</div></div>';}
 
     s+=cell('Policy No', V(p.PolicyNo));
     s+=cell('Inception Date', FD(p.StartDate));
@@ -2908,8 +2976,9 @@ function openPolicySchedule(cid){
       s+='</tbody></table></div>';
     }
 
-    s+='<div style="padding:8px 14px;border-top:1px solid #eef;background:#fafaf8;display:flex;gap:20px">';
-    s+='<div><span style="font-size:10px;color:#888;text-transform:uppercase">Beneficiaries</span><div style="font-size:13px;font-weight:600;margin-top:1px">'+benStr+'</div></div></div>';
+    s+='<div style="padding:8px 14px;border-top:1px solid #eef;background:#fafaf8">';
+    s+='<div style="font-size:10px;color:#888;text-transform:uppercase;margin-bottom:4px">Beneficiaries</div>';
+    s+='<div style="font-size:13px;line-height:1.8">'+benStr+'</div></div>';
     if(p.Notes) s+='<div style="padding:6px 14px;border-top:1px solid #eef;font-size:12px;color:#667;font-style:italic">'+p.Notes+'</div>';
     s+='</div>';
     return s;
