@@ -164,7 +164,7 @@ table input:focus, table select:focus { outline: none; border-color: var(--gold)
 <div class="tabbar" id="tabBar"></div>
 <div class="content" id="content"></div>
 <div class="footer">
-  <div class="footer-l" id="statusBar">FSP No: 9978 · Clinton Hayes · <a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="85e6e9ecebf1eaebc5e1f0f2e4e9e6eae0abe6eaabffe4">[email&#160;protected]</a></div>
+  <div class="footer-l" id="statusBar">FSP No: 9978 · Clinton Hayes · <a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="b3d0dfdaddc7dcddf3d7c6c4d2dfd0dcd69dd0dc9dc9d2">[email&#160;protected]</a></div>
   <div class="footer-r">
     <button class="btn btn-ghost btn-sm" onclick="prevTab()">← Back</button>
     <button class="btn btn-gold btn-sm" onclick="nextTab()">Next →</button>
@@ -443,14 +443,18 @@ var S = JSON.parse(JSON.stringify(DEFAULTS));
 // URL param injection (called from CRM)
 (function () {
   var params = new URLSearchParams(window.location.search);
-
-  // Load saved state first (preserves any prior session edits)
   var saved = document.getElementById('saved-data').textContent;
   if (saved && saved !== 'null') {
     try { S = deepMerge(JSON.parse(JSON.stringify(DEFAULTS)), JSON.parse(saved)); } catch(e) {}
+  } else {
+    try {
+      var lsKey = null;
+      if (params.get('id')) lsKey = 'du_fna_' + params.get('id');
+      else if (params.get('name')) lsKey = 'du_fna_' + decodeURIComponent(params.get('name')).replace(/\s+/g,'_');
+      var lsSaved = lsKey ? localStorage.getItem(lsKey) : null;
+      if (lsSaved) { S = deepMerge(JSON.parse(JSON.stringify(DEFAULTS)), JSON.parse(lsSaved)); }
+    } catch(e) {}
   }
-
-  // Overlay CRM params — CRM is always source of truth for client details
   if (params.get('name'))      S.cli.name      = decodeURIComponent(params.get('name'));
   if (params.get('id'))        S.cli.id        = params.get('id');
   if (params.get('dob')) {
@@ -466,32 +470,23 @@ var S = JSON.parse(JSON.stringify(DEFAULTS));
   if (params.get('edu'))       S.cli.education  = decodeURIComponent(params.get('edu'));
   if (params.get('spouse'))    S.cli.spouseName = decodeURIComponent(params.get('spouse'));
   if (params.get('spousedob')) S.cli.spouseDob  = decodeURIComponent(params.get('spousedob'));
-
-  // Policies from CRM — auto-populate existingCover on the Summary tab
   if (params.get('pols')) {
     try {
       var pols = JSON.parse(decodeURIComponent(params.get('pols')));
       if (!S.existingCover) S.existingCover = {death:'',disability:'',dread:'',ipPM:'',totalPrem:''};
-      var totDeath=0, totDis=0, totDD=0, totIP=0, totPrem=0;
+      var totDeath=0,totDis=0,totDD=0,totIP=0,totPrem=0;
       pols.forEach(function(p){
-        var n = function(v){ return parseFloat(String(v||'').replace(/[^0-9.\-]/g,''))||0; };
-        if (p.Type !== 'Business Assurance') {
-          totDeath += n(p.BenDeath);
-          totDis   += n(p.BenDisability);
-          totDD    += n(p.BenDreadDisease);
-        }
-        try {
-          var ib = p.IncomeBenefits ? JSON.parse(p.IncomeBenefits) : [];
-          ib.forEach(function(r){ totIP += n(r.amount); });
-        } catch(e){}
-        var f = p.Frequency||'Monthly';
-        if (f==='Monthly'||f==='') totPrem += n(p.Premium);
+        var n=function(v){return parseFloat(String(v||'').replace(/[^0-9.\-]/g,''))||0;};
+        if(p.Type!=='Business Assurance'){totDeath+=n(p.BenDeath);totDis+=n(p.BenDisability);totDD+=n(p.BenDreadDisease);}
+        try{var ib=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):[];ib.forEach(function(r){totIP+=n(r.amount);});}catch(e){}
+        var f=p.Frequency||'Monthly';
+        if(f==='Monthly'||f==='') totPrem+=n(p.Premium);
       });
-      if (totDeath>0) S.existingCover.death      = String(Math.round(totDeath));
-      if (totDis>0)   S.existingCover.disability  = String(Math.round(totDis));
-      if (totDD>0)    S.existingCover.dread        = String(Math.round(totDD));
-      if (totIP>0)    S.existingCover.ipPM         = String(Math.round(totIP));
-      if (totPrem>0)  S.existingCover.totalPrem    = String(Math.round(totPrem));
+      if(totDeath>0) S.existingCover.death     =String(Math.round(totDeath));
+      if(totDis>0)   S.existingCover.disability=String(Math.round(totDis));
+      if(totDD>0)    S.existingCover.dread      =String(Math.round(totDD));
+      if(totIP>0)    S.existingCover.ipPM       =String(Math.round(totIP));
+      if(totPrem>0)  S.existingCover.totalPrem  =String(Math.round(totPrem));
     } catch(e) {}
   }
 })();
@@ -512,7 +507,17 @@ function deepMerge(base, over) {
 // SAVE / LOAD / NEW
 // ═══════════════════════════════════════════════════════════
 function persist() {
-  document.getElementById('saved-data').textContent = JSON.stringify(S);
+  var json = JSON.stringify(S);
+  document.getElementById('saved-data').textContent = json;
+  var key = 'du_fna_' + (S.cli.id || S.cli.name.replace(/\s+/g,'_') || 'draft');
+  try { localStorage.setItem(key, json); } catch(e) {}
+}
+
+function autoSave() {
+  persist();
+  var t = new Date().toLocaleTimeString('en-ZA',{hour:'2-digit',minute:'2-digit'});
+  var bar = document.getElementById('statusBar');
+  if(bar) bar.textContent = 'FSP No: 9978 · Clinton Hayes · Auto-saved ' + t;
 }
 function saveFile() {
   persist();
@@ -1616,7 +1621,8 @@ function generateROA() {
   win.document.write(html); win.document.close();
 }
 
-// ════════════════════════════════════════════════════════�render();
+// INIT
+render();
 setInterval(autoSave, 60000);
 document.addEventListener('visibilitychange', function(){ if(document.hidden) autoSave(); });
 </script>
