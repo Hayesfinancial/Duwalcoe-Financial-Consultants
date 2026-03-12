@@ -435,7 +435,10 @@ var DEFAULTS = {
   retNotes: '',
 
   // ROA
-  roaNotes: ''
+  roaNotes: '',
+
+  // Policies imported from CRM via URL
+  importedPols: []
 };
 
 var S = JSON.parse(JSON.stringify(DEFAULTS));
@@ -482,6 +485,8 @@ var S = JSON.parse(JSON.stringify(DEFAULTS));
   if (params.get('pols')) {
     try {
       var pols = JSON.parse(decodeURIComponent(params.get('pols')));
+      // Store the raw policy array for the Policy Schedule tab
+      S.importedPols = pols;
       if (!S.existingCover) S.existingCover = {death:'',disability:'',dread:'',ipPM:'',totalPrem:''};
       var totDeath=0,totDis=0,totDD=0,totIP=0,totPrem=0;
       pols.forEach(function(p){
@@ -550,7 +555,7 @@ function status(msg) {
 // ═══════════════════════════════════════════════════════════
 // NAVIGATION
 // ═══════════════════════════════════════════════════════════
-var TABS = ['Client', 'Scope', 'Income', 'Assets', 'Needs', 'Retirement', 'Summary', 'ROA'];
+var TABS = ['Client', 'Scope', 'Income', 'Assets', 'Needs', 'Retirement', 'Policies', 'Summary', 'ROA'];
 var activeTab = 0;
 function go(i)    { persist(); activeTab = i; render(); }
 function nextTab(){ if (activeTab < TABS.length-1) { persist(); activeTab++; render(); window.scrollTo(0,0); } }
@@ -701,7 +706,7 @@ function render() {
   });
   var c = document.getElementById('content');
   c.innerHTML = '';
-  var builders = [buildClient, buildScope, buildIncome, buildAssets, buildNeeds, buildRetirement, buildSummary, buildROATab];
+  var builders = [buildClient, buildScope, buildIncome, buildAssets, buildNeeds, buildRetirement, buildPolicies, buildSummary, buildROATab];
   c.appendChild(builders[activeTab]());
 }
 
@@ -1417,7 +1422,220 @@ function buildRetirement() {
 }
 
 // ═══════════════════════════════════════════════════════════
-// TAB 6 — SUMMARY & GAPS
+// TAB 6 — POLICY SCHEDULE (imported from CRM)
+// ═══════════════════════════════════════════════════════════
+function buildPolicies() {
+  var s = div();
+
+  var pols = S.importedPols || [];
+
+  if (pols.length === 0) {
+    var noPolInf = div('info');
+    noPolInf.innerHTML = 'No policies have been imported. Open this FNA from the client profile in the CRM to automatically load active policies.<br><br>Policies shown here are <strong>read-only</strong> — edit them in the CRM.';
+    s.appendChild(noPolInf);
+    return s;
+  }
+
+  var inf = div('info');
+  inf.innerHTML = 'Active policies imported from CRM. Read-only — edit in the CRM. ' +
+    '<strong>' + pols.length + ' polic' + (pols.length === 1 ? 'y' : 'ies') + '</strong> on record.';
+  s.appendChild(inf);
+
+  // ── Group definitions (mirrors CRM policy schedule)
+  var raTypes  = ['Retirement Annuity','Pension Fund','Provident Fund','Pension Preservation','Provident Preservation'];
+  var invTypes = ['Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment',
+                  'Unit Trust','Tax Free Savings','Living Annuity'];
+  var medTypes = ['Medical Aid','Medical Gap Cover','Hospital Plan'];
+
+  var groups = {
+    personal:  { label: 'Personal Life & Risk',   color: '#1a2a4a', pols: [] },
+    ra:        { label: 'Retirement Annuities & Pension', color: '#374151', pols: [] },
+    inv:       { label: 'Investments',             color: '#374151', pols: [] },
+    medical:   { label: 'Medical',                 color: '#374151', pols: [] },
+    business:  { label: 'Business Assurance',      color: '#374151', pols: [] },
+    other:     { label: 'Other',                   color: '#374151', pols: [] }
+  };
+
+  pols.forEach(function(p) {
+    var t = p.Type || '';
+    if (t === 'Business Assurance')         groups.business.pols.push(p);
+    else if (raTypes.indexOf(t) > -1)       groups.ra.pols.push(p);
+    else if (invTypes.indexOf(t) > -1)      groups.inv.pols.push(p);
+    else if (medTypes.indexOf(t) > -1)      groups.medical.pols.push(p);
+    else if (t === 'Other')                 groups.other.pols.push(p);
+    else                                    groups.personal.pols.push(p);
+  });
+
+  // ── Helper: format premium with frequency
+  function fmtPrem(p) {
+    var n = N(p.Premium);
+    if (!n) return '—';
+    var freq = p.Frequency || 'Monthly';
+    var suffix = freq === 'Monthly' ? '/pm' : freq === 'Annual' ? '/pa' : '/' + freq.toLowerCase();
+    return Rfmt(n) + ' ' + suffix;
+  }
+
+  // ── Helper: benefit label for a policy
+  function benefitSummary(p) {
+    var parts = [];
+    var raTypes2 = ['Retirement Annuity','Pension Fund','Provident Fund','Pension Preservation','Provident Preservation'];
+    var invTypes2 = ['Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment',
+                     'Unit Trust','Tax Free Savings','Living Annuity'];
+    var t = p.Type || '';
+    if (raTypes2.indexOf(t) > -1 || invTypes2.indexOf(t) > -1) {
+      if (N(p.BenDeath))    parts.push('Death: ' + Rfmt(p.BenDeath));
+      // Investment/RA — no disability/dread typically, just death benefit
+    } else {
+      if (N(p.BenDeath))        parts.push('Death: '      + Rfmt(p.BenDeath));
+      if (N(p.BenDisability))   parts.push('Disability: ' + Rfmt(p.BenDisability));
+      if (N(p.BenDreadDisease)) parts.push('Dread: '      + Rfmt(p.BenDreadDisease));
+      // Income benefits
+      try {
+        var ib = p.IncomeBenefits ? JSON.parse(p.IncomeBenefits) : [];
+        ib.forEach(function(r) {
+          if (N(r.amount)) parts.push((r.type || 'IP') + ': ' + Rfmt(r.amount) + '/pm');
+        });
+      } catch(e) {}
+    }
+    return parts.length ? parts.join(' · ') : '—';
+  }
+
+  // ── Helper: beneficiary display
+  function fmtBen(p) {
+    var name = p.Beneficiary || '';
+    var type = p.BeneficiaryType || '';
+    var dutiable = p.EstateDutiable || '';
+    var parts = [];
+    if (name) parts.push(name);
+    if (type && type !== name) parts.push('(' + type + ')');
+    if (dutiable === 'Yes') parts.push('⚖ Dutiable');
+    else if (dutiable === 'No') parts.push('✓ Not dutiable');
+    return parts.length ? parts.join(' ') : '—';
+  }
+
+  // ── Render each group
+  var totalPrem = 0;
+
+  Object.keys(groups).forEach(function(gk) {
+    var grp = groups[gk];
+    if (grp.pols.length === 0) return;
+
+    // Group header
+    var gh = div('stitle');
+    gh.textContent = grp.label + ' (' + grp.pols.length + ')';
+    s.appendChild(gh);
+
+    // Table
+    var tbl = document.createElement('table');
+    var thead = document.createElement('thead');
+    thead.innerHTML = '<tr>' +
+      '<th>Insurer</th>' +
+      '<th>Policy No.</th>' +
+      '<th>Type</th>' +
+      '<th>Benefits</th>' +
+      '<th>Premium</th>' +
+      '<th>Beneficiary / Estate</th>' +
+      '</tr>';
+    tbl.appendChild(thead);
+
+    var tbody = document.createElement('tbody');
+    grp.pols.forEach(function(p) {
+      var tr = document.createElement('tr');
+
+      // Insurer
+      var td1 = document.createElement('td');
+      td1.style.fontWeight = '600';
+      td1.textContent = p.Insurer || '—';
+      tr.appendChild(td1);
+
+      // Policy No
+      var td2 = document.createElement('td');
+      td2.style.fontFamily = 'monospace';
+      td2.style.fontSize = '12px';
+      td2.textContent = p.PolicyNo || '—';
+      tr.appendChild(td2);
+
+      // Type
+      var td3 = document.createElement('td');
+      td3.textContent = p.Type || '—';
+      tr.appendChild(td3);
+
+      // Benefits
+      var td4 = document.createElement('td');
+      td4.style.fontSize = '11px';
+      td4.style.color = 'var(--sub)';
+      td4.textContent = benefitSummary(p);
+      tr.appendChild(td4);
+
+      // Premium
+      var td5 = document.createElement('td');
+      td5.style.whiteSpace = 'nowrap';
+      td5.style.fontWeight = '600';
+      td5.textContent = fmtPrem(p);
+      tr.appendChild(td5);
+      // Accumulate monthly premiums
+      if ((p.Frequency || 'Monthly') === 'Monthly') totalPrem += N(p.Premium);
+
+      // Beneficiary / Estate
+      var td6 = document.createElement('td');
+      td6.style.fontSize = '11px';
+      var benText = fmtBen(p);
+      // Colour-code estate dutiable
+      if (p.EstateDutiable === 'Yes') {
+        td6.style.color = 'var(--orange)';
+      } else if (p.EstateDutiable === 'No') {
+        td6.style.color = 'var(--green)';
+      } else {
+        td6.style.color = 'var(--sub)';
+      }
+      td6.textContent = benText;
+      tr.appendChild(td6);
+
+      tbody.appendChild(tr);
+    });
+    tbl.appendChild(tbody);
+    var tw = div('twrap');
+    tw.appendChild(tbl);
+    s.appendChild(tw);
+  });
+
+  // ── Total premiums summary
+  if (totalPrem > 0) {
+    var totCards = div('cards c3');
+    totCards.style.marginTop = '20px';
+
+    var c1 = div('card');
+    c1.innerHTML = '<div class="lbl">Total Monthly Premiums</div><div class="val">' + Rfmt(totalPrem) + '</div>';
+    totCards.appendChild(c1);
+
+    // Annual cost
+    var c2 = div('card');
+    c2.innerHTML = '<div class="lbl">Annual Premium Cost</div><div class="val">' + Rfmt(totalPrem * 12) + '</div>';
+    totCards.appendChild(c2);
+
+    // Count
+    var c3 = div('card');
+    c3.innerHTML = '<div class="lbl">Active Policies</div><div class="val">' + pols.length + '</div>';
+    totCards.appendChild(c3);
+
+    s.appendChild(totCards);
+  }
+
+  // ── Estate / beneficiary legend
+  var legend = div('info');
+  legend.style.marginTop = '16px';
+  legend.innerHTML =
+    '<strong>Beneficiary legend:</strong> ' +
+    '<span style="color:var(--orange)">⚖ Dutiable</span> — benefit forms part of estate (estate duty applies) &nbsp;|&nbsp; ' +
+    '<span style="color:var(--green)">✓ Not dutiable</span> — benefit paid direct (outside estate) &nbsp;|&nbsp; ' +
+    '<span style="color:var(--sub)">No colour</span> — EstateDutiable not captured in CRM';
+  s.appendChild(legend);
+
+  return s;
+}
+
+// ═══════════════════════════════════════════════════════════
+// TAB 7 — SUMMARY & GAPS
 // ═══════════════════════════════════════════════════════════
 function buildSummary() {
   var s = div();
@@ -1503,7 +1721,7 @@ function buildGapRow(label, need, have) {
 }
 
 // ═══════════════════════════════════════════════════════════
-// TAB 7 — ROA
+// TAB 8 — ROA
 // ═══════════════════════════════════════════════════════════
 function buildROATab() {
   var s = div();
