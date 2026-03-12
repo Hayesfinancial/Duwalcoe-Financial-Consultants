@@ -438,7 +438,11 @@ var DEFAULTS = {
   roaNotes: '',
 
   // Policies imported from CRM via URL
-  importedPols: []
+  importedPols: [],
+
+  // Estate planning — dutiable asset overrides (keyed by desc)
+  estateAssets: [],
+  estateNotes: ''
 };
 
 var S = JSON.parse(JSON.stringify(DEFAULTS));
@@ -555,7 +559,7 @@ function status(msg) {
 // ═══════════════════════════════════════════════════════════
 // NAVIGATION
 // ═══════════════════════════════════════════════════════════
-var TABS = ['Client', 'Scope', 'Income', 'Assets', 'Needs', 'Retirement', 'Policies', 'Summary', 'ROA'];
+var TABS = ['Client', 'Scope', 'Income', 'Assets', 'Needs', 'Retirement', 'Policies', 'Estate', 'Summary', 'ROA'];
 var activeTab = 0;
 function go(i)    { persist(); activeTab = i; render(); }
 function nextTab(){ if (activeTab < TABS.length-1) { persist(); activeTab++; render(); window.scrollTo(0,0); } }
@@ -706,7 +710,7 @@ function render() {
   });
   var c = document.getElementById('content');
   c.innerHTML = '';
-  var builders = [buildClient, buildScope, buildIncome, buildAssets, buildNeeds, buildRetirement, buildPolicies, buildSummary, buildROATab];
+  var builders = [buildClient, buildScope, buildIncome, buildAssets, buildNeeds, buildRetirement, buildPolicies, buildEstate, buildSummary, buildROATab];
   c.appendChild(builders[activeTab]());
 }
 
@@ -1422,220 +1426,608 @@ function buildRetirement() {
 }
 
 // ═══════════════════════════════════════════════════════════
-// TAB 6 — POLICY SCHEDULE (imported from CRM)
 // ═══════════════════════════════════════════════════════════
+// TAB 6 — POLICY SCHEDULE (fully editable in FNA)
+// ═══════════════════════════════════════════════════════════
+var POL_TYPES = [
+  'Life / Income Protector','Business Assurance',
+  'Retirement Annuity','Pension Fund','Provident Fund','Pension Preservation','Provident Preservation',
+  'Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment',
+  'Unit Trust','Tax Free Savings','Living Annuity',
+  'Medical Aid','Other'
+];
+var POL_RA_TYPES  = ['Retirement Annuity','Pension Fund','Provident Fund','Pension Preservation','Provident Preservation'];
+var POL_INV_TYPES = ['Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment','Unit Trust','Tax Free Savings','Living Annuity'];
+
 function buildPolicies() {
   var s = div();
 
-  var pols = S.importedPols || [];
-
-  if (pols.length === 0) {
-    var noPolInf = div('info');
-    noPolInf.innerHTML = 'No policies have been imported. Open this FNA from the client profile in the CRM to automatically load active policies.<br><br>Policies shown here are <strong>read-only</strong> — edit them in the CRM.';
-    s.appendChild(noPolInf);
-    return s;
-  }
+  if (!S.importedPols) S.importedPols = [];
+  var pols = S.importedPols;
 
   var inf = div('info');
-  inf.innerHTML = 'Active policies imported from CRM. Read-only — edit in the CRM. ' +
-    '<strong>' + pols.length + ' polic' + (pols.length === 1 ? 'y' : 'ies') + '</strong> on record.';
+  inf.innerHTML = 'All fields are editable here for scenario planning. ' +
+    'Changes are <strong>FNA only</strong> — the CRM is not affected. ' +
+    (pols.length ? '<strong>' + pols.length + ' polic' + (pols.length === 1 ? 'y' : 'ies') + '</strong> loaded from CRM.' :
+      'No policies loaded. Add below or open from a CRM client profile.');
   s.appendChild(inf);
 
-  // ── Group definitions (mirrors CRM policy schedule)
-  var raTypes  = ['Retirement Annuity','Pension Fund','Provident Fund','Pension Preservation','Provident Preservation'];
-  var invTypes = ['Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment',
-                  'Unit Trust','Tax Free Savings','Living Annuity'];
-  var medTypes = ['Medical Aid','Medical Gap Cover','Hospital Plan'];
-
-  var groups = {
-    personal:  { label: 'Personal Life & Risk',   color: '#1a2a4a', pols: [] },
-    ra:        { label: 'Retirement Annuities & Pension', color: '#374151', pols: [] },
-    inv:       { label: 'Investments',             color: '#374151', pols: [] },
-    medical:   { label: 'Medical',                 color: '#374151', pols: [] },
-    business:  { label: 'Business Assurance',      color: '#374151', pols: [] },
-    other:     { label: 'Other',                   color: '#374151', pols: [] }
-  };
-
-  pols.forEach(function(p) {
-    var t = p.Type || '';
-    if (t === 'Business Assurance')         groups.business.pols.push(p);
-    else if (raTypes.indexOf(t) > -1)       groups.ra.pols.push(p);
-    else if (invTypes.indexOf(t) > -1)      groups.inv.pols.push(p);
-    else if (medTypes.indexOf(t) > -1)      groups.medical.pols.push(p);
-    else if (t === 'Other')                 groups.other.pols.push(p);
-    else                                    groups.personal.pols.push(p);
+  // ── Render each policy as an editable card
+  pols.forEach(function(p, i) {
+    s.appendChild(buildPolCard(p, i));
   });
 
-  // ── Helper: format premium with frequency
-  function fmtPrem(p) {
-    var n = N(p.Premium);
-    if (!n) return '—';
-    var freq = p.Frequency || 'Monthly';
-    var suffix = freq === 'Monthly' ? '/pm' : freq === 'Annual' ? '/pa' : '/' + freq.toLowerCase();
-    return Rfmt(n) + ' ' + suffix;
-  }
-
-  // ── Helper: benefit label for a policy
-  function benefitSummary(p) {
-    var parts = [];
-    var raTypes2 = ['Retirement Annuity','Pension Fund','Provident Fund','Pension Preservation','Provident Preservation'];
-    var invTypes2 = ['Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment',
-                     'Unit Trust','Tax Free Savings','Living Annuity'];
-    var t = p.Type || '';
-    if (raTypes2.indexOf(t) > -1 || invTypes2.indexOf(t) > -1) {
-      if (N(p.BenDeath))    parts.push('Death: ' + Rfmt(p.BenDeath));
-      // Investment/RA — no disability/dread typically, just death benefit
-    } else {
-      if (N(p.BenDeath))        parts.push('Death: '      + Rfmt(p.BenDeath));
-      if (N(p.BenDisability))   parts.push('Disability: ' + Rfmt(p.BenDisability));
-      if (N(p.BenDreadDisease)) parts.push('Dread: '      + Rfmt(p.BenDreadDisease));
-      // Income benefits
-      try {
-        var ib = p.IncomeBenefits ? JSON.parse(p.IncomeBenefits) : [];
-        ib.forEach(function(r) {
-          if (N(r.amount)) parts.push((r.type || 'IP') + ': ' + Rfmt(r.amount) + '/pm');
-        });
-      } catch(e) {}
-    }
-    return parts.length ? parts.join(' · ') : '—';
-  }
-
-  // ── Helper: beneficiary display
-  function fmtBen(p) {
-    var name = p.Beneficiary || '';
-    var type = p.BeneficiaryType || '';
-    var dutiable = p.EstateDutiable || '';
-    var parts = [];
-    if (name) parts.push(name);
-    if (type && type !== name) parts.push('(' + type + ')');
-    if (dutiable === 'Yes') parts.push('⚖ Dutiable');
-    else if (dutiable === 'No') parts.push('✓ Not dutiable');
-    return parts.length ? parts.join(' ') : '—';
-  }
-
-  // ── Render each group
-  var totalPrem = 0;
-
-  Object.keys(groups).forEach(function(gk) {
-    var grp = groups[gk];
-    if (grp.pols.length === 0) return;
-
-    // Group header
-    var gh = div('stitle');
-    gh.textContent = grp.label + ' (' + grp.pols.length + ')';
-    s.appendChild(gh);
-
-    // Table
-    var tbl = document.createElement('table');
-    var thead = document.createElement('thead');
-    thead.innerHTML = '<tr>' +
-      '<th>Insurer</th>' +
-      '<th>Policy No.</th>' +
-      '<th>Type</th>' +
-      '<th>Benefits</th>' +
-      '<th>Premium</th>' +
-      '<th>Beneficiary / Estate</th>' +
-      '</tr>';
-    tbl.appendChild(thead);
-
-    var tbody = document.createElement('tbody');
-    grp.pols.forEach(function(p) {
-      var tr = document.createElement('tr');
-
-      // Insurer
-      var td1 = document.createElement('td');
-      td1.style.fontWeight = '600';
-      td1.textContent = p.Insurer || '—';
-      tr.appendChild(td1);
-
-      // Policy No
-      var td2 = document.createElement('td');
-      td2.style.fontFamily = 'monospace';
-      td2.style.fontSize = '12px';
-      td2.textContent = p.PolicyNo || '—';
-      tr.appendChild(td2);
-
-      // Type
-      var td3 = document.createElement('td');
-      td3.textContent = p.Type || '—';
-      tr.appendChild(td3);
-
-      // Benefits
-      var td4 = document.createElement('td');
-      td4.style.fontSize = '11px';
-      td4.style.color = 'var(--sub)';
-      td4.textContent = benefitSummary(p);
-      tr.appendChild(td4);
-
-      // Premium
-      var td5 = document.createElement('td');
-      td5.style.whiteSpace = 'nowrap';
-      td5.style.fontWeight = '600';
-      td5.textContent = fmtPrem(p);
-      tr.appendChild(td5);
-      // Accumulate monthly premiums
-      if ((p.Frequency || 'Monthly') === 'Monthly') totalPrem += N(p.Premium);
-
-      // Beneficiary / Estate
-      var td6 = document.createElement('td');
-      td6.style.fontSize = '11px';
-      var benText = fmtBen(p);
-      // Colour-code estate dutiable
-      if (p.EstateDutiable === 'Yes') {
-        td6.style.color = 'var(--orange)';
-      } else if (p.EstateDutiable === 'No') {
-        td6.style.color = 'var(--green)';
-      } else {
-        td6.style.color = 'var(--sub)';
-      }
-      td6.textContent = benText;
-      tr.appendChild(td6);
-
-      tbody.appendChild(tr);
+  // ── Add policy button
+  s.appendChild(addBtn('+ Add Policy / What-if Scenario', function() {
+    S.importedPols.push({
+      Insurer:'', PolicyNo:'', Type:'Life / Income Protector', Product:'',
+      Premium:'', Frequency:'Monthly',
+      BenDeath:'', BenDisability:'', BenDreadDisease:'', IncomeBenefits:'[]',
+      Beneficiary:'', BeneficiaryType:'', EstateDutiable:''
     });
-    tbl.appendChild(tbody);
-    var tw = div('twrap');
-    tw.appendChild(tbl);
-    s.appendChild(tw);
-  });
+    render();
+  }));
 
-  // ── Total premiums summary
-  if (totalPrem > 0) {
+  // ── Premium totals
+  var totalPrem = pols.reduce(function(sum, p) {
+    return sum + ((p.Frequency || 'Monthly') === 'Monthly' ? N(p.Premium) : 0);
+  }, 0);
+
+  if (totalPrem > 0 || pols.length > 0) {
     var totCards = div('cards c3');
     totCards.style.marginTop = '20px';
-
-    var c1 = div('card');
-    c1.innerHTML = '<div class="lbl">Total Monthly Premiums</div><div class="val">' + Rfmt(totalPrem) + '</div>';
-    totCards.appendChild(c1);
-
-    // Annual cost
-    var c2 = div('card');
-    c2.innerHTML = '<div class="lbl">Annual Premium Cost</div><div class="val">' + Rfmt(totalPrem * 12) + '</div>';
-    totCards.appendChild(c2);
-
-    // Count
-    var c3 = div('card');
-    c3.innerHTML = '<div class="lbl">Active Policies</div><div class="val">' + pols.length + '</div>';
-    totCards.appendChild(c3);
-
+    var c1 = div('card'); c1.innerHTML = '<div class="lbl">Total Monthly Premiums</div><div class="val">' + Rfmt(totalPrem) + '</div>'; totCards.appendChild(c1);
+    var c2 = div('card'); c2.innerHTML = '<div class="lbl">Annual Premium Cost</div><div class="val">' + Rfmt(totalPrem * 12) + '</div>'; totCards.appendChild(c2);
+    var c3 = div('card'); c3.innerHTML = '<div class="lbl">Policies on Record</div><div class="val">' + pols.length + '</div>'; totCards.appendChild(c3);
     s.appendChild(totCards);
   }
 
-  // ── Estate / beneficiary legend
-  var legend = div('info');
-  legend.style.marginTop = '16px';
-  legend.innerHTML =
-    '<strong>Beneficiary legend:</strong> ' +
-    '<span style="color:var(--orange)">⚖ Dutiable</span> — benefit forms part of estate (estate duty applies) &nbsp;|&nbsp; ' +
-    '<span style="color:var(--green)">✓ Not dutiable</span> — benefit paid direct (outside estate) &nbsp;|&nbsp; ' +
-    '<span style="color:var(--sub)">No colour</span> — EstateDutiable not captured in CRM';
-  s.appendChild(legend);
+  return s;
+}
+
+function buildPolCard(p, i) {
+  var t = p.Type || 'Life / Income Protector';
+  var isRA  = POL_RA_TYPES.indexOf(t) > -1;
+  var isInv = POL_INV_TYPES.indexOf(t) > -1;
+  var isMed = (t === 'Medical Aid');
+  var isBiz = (t === 'Business Assurance');
+  var isRisk = !isRA && !isInv && !isMed && !isBiz && t !== 'Other';
+
+  var card = div();
+  card.style.cssText = 'background:#fff;border:1.5px solid var(--mist);border-radius:9px;padding:16px;margin-bottom:14px';
+
+  // ── Card header: insurer name + type badge + delete
+  var ch = div();
+  ch.style.cssText = 'display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px;gap:12px';
+
+  var chLeft = div();
+  chLeft.style.cssText = 'display:flex;flex-direction:column;gap:4px;flex:1';
+
+  // Insurer text input (large, prominent)
+  var insurerInp = document.createElement('input');
+  insurerInp.type = 'text';
+  insurerInp.value = p.Insurer || '';
+  insurerInp.placeholder = 'Insurer / Company';
+  insurerInp.style.cssText = 'border:none;border-bottom:2px solid var(--mist);border-radius:0;padding:4px 0;font-size:15px;font-weight:700;color:var(--navy);font-family:inherit;width:100%;background:transparent;outline:none';
+  insurerInp.addEventListener('input', function(e) { S.importedPols[i].Insurer = e.target.value; });
+  insurerInp.addEventListener('focus', function(e) { e.target.style.borderBottomColor = 'var(--gold)'; });
+  insurerInp.addEventListener('blur',  function(e) { e.target.style.borderBottomColor = 'var(--mist)'; });
+  chLeft.appendChild(insurerInp);
+
+  // Type select (below insurer)
+  var typeSel = document.createElement('select');
+  typeSel.style.cssText = 'border:var(--border);border-radius:5px;padding:4px 8px;font-size:11px;font-weight:700;color:var(--sub);font-family:inherit;background:var(--smoke);cursor:pointer';
+  POL_TYPES.forEach(function(o) {
+    var opt = document.createElement('option');
+    opt.value = o; opt.textContent = o;
+    if (o === t) opt.selected = true;
+    typeSel.appendChild(opt);
+  });
+  typeSel.addEventListener('change', function(e) { S.importedPols[i].Type = e.target.value; render(); });
+  chLeft.appendChild(typeSel);
+  ch.appendChild(chLeft);
+
+  // Delete button
+  var db = delBtn(function() { S.importedPols.splice(i, 1); render(); });
+  ch.appendChild(db);
+  card.appendChild(ch);
+
+  // ── Row 1: Policy No, Product, Status
+  var r1 = g3();
+  r1.appendChild(fld('Policy / Contract No', p, 'PolicyNo'));
+  r1.appendChild(fld('Product / Plan Name',  p, 'Product'));
+  r1.appendChild(sfld('Status', p, 'Status', ['Active','Lapsed','Paid Up','Cancelled']));
+  card.appendChild(r1);
+
+  // ── Row 2: Premium + Frequency
+  var r2 = g3();
+  r2.appendChild(rfld('Premium / Contribution', p, 'Premium'));
+  r2.appendChild(sfld('Frequency', p, 'Frequency', ['Monthly','Quarterly','Annually','Once Off']));
+  card.appendChild(r2);
+
+  // ── Benefits section — varies by type
+  if (isRisk || t === 'Life / Income Protector') {
+    var bst = el('div','stitle','Benefits');
+    bst.style.marginTop = '10px';
+    card.appendChild(bst);
+
+    var rb1 = g3();
+    rb1.appendChild(rfld('Death / Life Cover',    p, 'BenDeath'));
+    rb1.appendChild(rfld('Capital Disability',    p, 'BenDisability'));
+    rb1.appendChild(rfld('Dread Disease Cover',   p, 'BenDreadDisease'));
+    card.appendChild(rb1);
+
+    // Income benefits (simplified — monthly amount)
+    var ipWrap = div();
+    ipWrap.style.cssText = 'margin-top:4px';
+    var ipLbl = el('label','','Income Protection / Monthly Benefit');
+    ipLbl.style.cssText = 'font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--sub);display:block;margin-bottom:4px';
+    ipWrap.appendChild(ipLbl);
+
+    // Parse existing IP rows
+    var ipRows = [];
+    try { ipRows = p.IncomeBenefits ? JSON.parse(p.IncomeBenefits) : []; } catch(e) { ipRows = []; }
+
+    var ipTbl = document.createElement('table');
+    var ipTbody = document.createElement('tbody');
+    ipRows.forEach(function(r, ri) {
+      var tr = document.createElement('tr');
+      // Type
+      var t1 = document.createElement('td');
+      var tSel = document.createElement('select');
+      tSel.style.cssText = 'border:var(--border);border-radius:5px;padding:5px 7px;font-family:inherit;font-size:12px;width:100%';
+      ['Income Protection','Temporary IP','Death Income','Sickness Benefit','Hospital Income','Other'].forEach(function(o) {
+        var opt = document.createElement('option'); opt.value = o; opt.textContent = o;
+        if (r.type === o) opt.selected = true;
+        tSel.appendChild(opt);
+      });
+      tSel.addEventListener('change', function(e) {
+        try { var rows = JSON.parse(S.importedPols[i].IncomeBenefits||'[]'); rows[ri].type = e.target.value; S.importedPols[i].IncomeBenefits = JSON.stringify(rows); } catch(ex) {}
+      });
+      t1.appendChild(tSel); tr.appendChild(t1);
+      // Amount
+      var t2 = document.createElement('td');
+      var rw = div('td-r'); rw.appendChild(el('span','rp','R'));
+      var aInp = document.createElement('input'); aInp.type = 'text'; aInp.inputMode = 'numeric';
+      aInp.value = r.amount || ''; aInp.placeholder = '0';
+      aInp.addEventListener('input', function(e) {
+        try { var rows = JSON.parse(S.importedPols[i].IncomeBenefits||'[]'); rows[ri].amount = e.target.value; S.importedPols[i].IncomeBenefits = JSON.stringify(rows); } catch(ex) {}
+      });
+      rw.appendChild(aInp); t2.appendChild(rw); tr.appendChild(t2);
+      // Delete
+      var t3 = document.createElement('td');
+      t3.appendChild(delBtn(function() {
+        try { var rows = JSON.parse(S.importedPols[i].IncomeBenefits||'[]'); rows.splice(ri,1); S.importedPols[i].IncomeBenefits = JSON.stringify(rows); render(); } catch(ex) { render(); }
+      }));
+      tr.appendChild(t3);
+      ipTbody.appendChild(tr);
+    });
+    ipTbl.appendChild(ipTbody);
+    ipWrap.appendChild(ipTbl);
+    ipWrap.appendChild(addBtn('+ Add IP Benefit Row', function() {
+      try {
+        var rows = JSON.parse(S.importedPols[i].IncomeBenefits||'[]');
+        rows.push({type:'Income Protection', amount:''});
+        S.importedPols[i].IncomeBenefits = JSON.stringify(rows);
+        render();
+      } catch(ex) { render(); }
+    }));
+    card.appendChild(ipWrap);
+  }
+
+  if (isRA || isInv) {
+    var bst2 = el('div','stitle','Fund / Death Benefit');
+    bst2.style.marginTop = '10px';
+    card.appendChild(bst2);
+    var rb2 = g2();
+    rb2.appendChild(rfld('Current Fund Value', p, 'FundValue'));
+    rb2.appendChild(rfld('Death Benefit',      p, 'BenDeath'));
+    card.appendChild(rb2);
+  }
+
+  // ── Beneficiary section
+  var benSt = el('div','stitle','Beneficiary & Estate Routing');
+  benSt.style.marginTop = '10px';
+  card.appendChild(benSt);
+
+  var btr = div();
+  btr.style.cssText = 'display:grid;grid-template-columns:2fr 1fr 1fr;gap:14px;margin-bottom:10px';
+
+  // Beneficiary name
+  btr.appendChild(fld('Beneficiary Name', p, 'Beneficiary', { placeholder: 'e.g. Jane Hayes' }));
+
+  // BeneficiaryType select with colour indicator
+  var btWrap = div('f');
+  var btLbl = el('label','','Beneficiary Type');
+  btWrap.appendChild(btLbl);
+  var btSel = document.createElement('select');
+  btSel.style.cssText = 'border:var(--border);border-radius:6px;padding:8px 10px;font-family:inherit;font-size:13px;color:var(--text);background:var(--white)';
+  ['','Spouse','Estate','Third Party'].forEach(function(o) {
+    var opt = document.createElement('option');
+    opt.value = o;
+    opt.textContent = o || '— Select —';
+    if ((p.BeneficiaryType || '') === o) opt.selected = true;
+    btSel.appendChild(opt);
+  });
+  btSel.addEventListener('change', function(e) {
+    S.importedPols[i].BeneficiaryType = e.target.value;
+    // Auto-set EstateDutiable based on type
+    if (e.target.value === 'Spouse')       { S.importedPols[i].EstateDutiable = 'No'; }
+    else if (e.target.value === 'Estate')  { S.importedPols[i].EstateDutiable = 'Yes'; }
+    else if (e.target.value === 'Third Party') { S.importedPols[i].EstateDutiable = 'No'; }
+    render();
+  });
+  btWrap.appendChild(btSel);
+  btr.appendChild(btWrap);
+
+  // EstateDutiable
+  var edWrap = div('f');
+  var edLbl = el('label','','Estate Dutiable');
+  edWrap.appendChild(edLbl);
+  var edSel = document.createElement('select');
+  edSel.style.cssText = 'border:var(--border);border-radius:6px;padding:8px 10px;font-family:inherit;font-size:13px;font-weight:700';
+  var edVal = p.EstateDutiable || '';
+  if (edVal === 'Yes') edSel.style.color = 'var(--orange)';
+  else if (edVal === 'No') edSel.style.color = 'var(--green)';
+  ['','Yes','No'].forEach(function(o) {
+    var opt = document.createElement('option');
+    opt.value = o; opt.textContent = o || '— ?';
+    if (edVal === o) opt.selected = true;
+    edSel.appendChild(opt);
+  });
+  edSel.addEventListener('change', function(e) {
+    S.importedPols[i].EstateDutiable = e.target.value;
+    e.target.style.color = e.target.value === 'Yes' ? 'var(--orange)' : e.target.value === 'No' ? 'var(--green)' : 'var(--sub)';
+  });
+  edWrap.appendChild(edSel);
+  btr.appendChild(edWrap);
+  card.appendChild(btr);
+
+  // ── Beneficiary routing explanation
+  var bt = p.BeneficiaryType || '';
+  if (bt) {
+    var routeInf = div();
+    routeInf.style.cssText = 'padding:8px 12px;border-radius:6px;font-size:12px;margin-bottom:6px';
+    if (bt === 'Spouse') {
+      routeInf.style.cssText += ';background:#f0fdf4;color:#166534;border:1px solid #86efac';
+      routeInf.innerHTML = '✓ <strong>Section 4(q):</strong> Paid direct to spouse — not dutiable, outside estate. No estate duty on this benefit.';
+    } else if (bt === 'Estate') {
+      routeInf.style.cssText += ';background:#fff7ed;color:#92400e;border:1px solid #fed7aa';
+      routeInf.innerHTML = '⚖ <strong>Routed to Estate:</strong> This benefit forms part of the dutiable estate. Estate duty and executor fees will apply.';
+    } else if (bt === 'Third Party') {
+      routeInf.style.cssText += ';background:#eff6ff;color:#1e40af;border:1px solid #bfdbfe';
+      routeInf.innerHTML = '→ <strong>Third Party:</strong> Paid direct to named beneficiary — outside estate. No estate duty on this benefit.';
+    }
+    card.appendChild(routeInf);
+  }
+
+  return card;
+}
+
+// ═══════════════════════════════════════════════════════════
+// TAB 7 — ESTATE PLANNING
+// ═══════════════════════════════════════════════════════════
+function buildEstate() {
+  var s = div();
+
+  var inf = div('info');
+  inf.innerHTML = 'Estate duty is calculated on the <strong>dutiable estate</strong>. ' +
+    'Adjust beneficiary routing on the Policies tab to model different outcomes. ' +
+    'Asset dutiable amounts can be overridden below.';
+  s.appendChild(inf);
+
+  // ── SA Estate Duty constants
+  var ABATEMENT   = 3500000;   // Primary abatement R3.5m
+  var DUTY_RATE1  = 0.20;      // 20% on first R30m dutiable
+  var DUTY_RATE2  = 0.25;      // 25% above R30m
+  var DUTY_THRESH = 30000000;
+  var EXEC_RATE   = 0.04025;   // 3.5% + VAT (15%) = 4.025%
+
+  // ── SECTION 1: Assets
+  s.appendChild(stitle('Dutiable Assets'));
+
+  var assetNote = div('info');
+  assetNote.innerHTML = 'Assets are drawn from the Assets tab. Override the dutiable amount if an asset is held in a trust, CC, or is otherwise excluded. ' +
+    'Set to <strong>0</strong> to exclude entirely.';
+  s.appendChild(assetNote);
+
+  // Build a working list from Assets tab data
+  // Each row: { desc, fullVal, dutiableAmt (editable) }
+  // We reconcile with S.estateAssets (persisted overrides) by desc key
+
+  function getOverride(desc) {
+    if (!S.estateAssets) S.estateAssets = [];
+    var found = S.estateAssets.filter(function(a) { return a.desc === desc; })[0];
+    return found || null;
+  }
+  function setOverride(desc, dutiable) {
+    if (!S.estateAssets) S.estateAssets = [];
+    var idx = -1;
+    S.estateAssets.forEach(function(a, i) { if (a.desc === desc) idx = i; });
+    if (idx > -1) S.estateAssets[idx].dutiable = dutiable;
+    else S.estateAssets.push({ desc: desc, dutiable: dutiable });
+  }
+
+  // Collect all assets from tab 3
+  var allAssets = [];
+  S.props.forEach(function(p) {
+    if (!p.desc && !N(p.val)) return;
+    var desc = p.desc || 'Property';
+    var ov = getOverride(desc);
+    allAssets.push({ desc: desc, fullVal: N(p.val), dutiable: ov ? ov.dutiable : String(N(p.val)), bond: N(p.bond) });
+  });
+  S.vehicles.forEach(function(v) {
+    if (!v.desc && !N(v.val)) return;
+    var desc = v.desc || 'Vehicle';
+    var ov = getOverride(desc);
+    allAssets.push({ desc: desc, fullVal: N(v.val), dutiable: ov ? ov.dutiable : String(N(v.val)), bond: N(v.finance) });
+  });
+  S.otherAssets.forEach(function(a) {
+    if (!a.desc && !N(a.val)) return;
+    var desc = a.desc || 'Asset';
+    var ov = getOverride(desc);
+    allAssets.push({ desc: desc, fullVal: N(a.val), dutiable: ov ? ov.dutiable : String(N(a.val)), bond: 0 });
+  });
+
+  if (allAssets.length === 0) {
+    var noA = div('info');
+    noA.textContent = 'No assets captured. Add properties, vehicles, and other assets on the Assets tab.';
+    s.appendChild(noA);
+  } else {
+    var aTbl = document.createElement('table');
+    var aThead = document.createElement('thead');
+    aThead.innerHTML = '<tr><th>Asset</th><th>Full Value</th><th>Dutiable Amount</th><th>Notes</th></tr>';
+    aTbl.appendChild(aThead);
+    var aTbody = document.createElement('tbody');
+
+    allAssets.forEach(function(a) {
+      var tr = document.createElement('tr');
+
+      var td1 = document.createElement('td'); td1.style.fontWeight = '600'; td1.textContent = a.desc; tr.appendChild(td1);
+
+      var td2 = document.createElement('td'); td2.textContent = Rfmt(a.fullVal); td2.style.color = 'var(--sub)'; tr.appendChild(td2);
+
+      var td3 = document.createElement('td');
+      var rw = div('td-r'); rw.appendChild(el('span','rp','R'));
+      var inp = document.createElement('input'); inp.type = 'text'; inp.inputMode = 'numeric';
+      inp.value = a.dutiable; inp.placeholder = '0';
+      inp.addEventListener('input', function(e) { setOverride(a.desc, e.target.value); });
+      inp.addEventListener('blur', function(e) { setOverride(a.desc, e.target.value); render(); });
+      rw.appendChild(inp); td3.appendChild(rw); tr.appendChild(td3);
+
+      var td4 = document.createElement('td');
+      td4.style.fontSize = '11px'; td4.style.color = 'var(--sub)';
+      if (N(a.dutiable) < a.fullVal && N(a.dutiable) >= 0) {
+        td4.textContent = a.bond > 0 ? 'Bond: ' + Rfmt(a.bond) : 'Partially excluded';
+        if (N(a.dutiable) === 0) td4.textContent = 'Excluded (trust/CC?)';
+      } else if (a.bond > 0) {
+        td4.textContent = 'Bond outstanding: ' + Rfmt(a.bond) + ' (reduce dutiable if applicable)';
+      }
+      tr.appendChild(td4);
+
+      aTbody.appendChild(tr);
+    });
+    aTbl.appendChild(aTbody);
+    var aTw = div('twrap'); aTw.appendChild(aTbl); s.appendChild(aTw);
+  }
+
+  // ── SECTION 2: Retirement assets (outside estate — display only)
+  var retTotal = S.retAssets.reduce(function(sum, r) { return sum + N(r.currentVal); }, 0);
+  if (retTotal > 0) {
+    s.appendChild(stitle('Retirement Assets (Outside Estate)'));
+    var retNote = div('info');
+    retNote.innerHTML = 'RA / pension fund values are <strong>excluded from estate duty</strong> (Pension Funds Act s.37C — paid at trustee discretion). ' +
+      'Shown for liquidity context only.';
+    s.appendChild(retNote);
+    var retCards = div('cards c3');
+    S.retAssets.forEach(function(r) {
+      if (!N(r.currentVal)) return;
+      var c = div('card');
+      c.innerHTML = '<div class="lbl">' + (r.desc || 'Retirement fund') + '</div><div class="val">' + Rfmt(r.currentVal) + '</div>' +
+        '<div class="sub">Outside estate</div>';
+      retCards.appendChild(c);
+    });
+    s.appendChild(retCards);
+  }
+
+  // ── SECTION 3: Policy death benefits — routing summary
+  s.appendChild(stitle('Policy Death Benefits — Routing'));
+
+  var pols = S.importedPols || [];
+  var section4q  = 0;  // To spouse — s.4(q) deduction
+  var toEstate   = 0;  // Into estate (dutiable)
+  var toThird    = 0;  // Direct to 3rd party
+  var toBiz      = 0;  // Business assurance
+
+  pols.forEach(function(p) {
+    var ben = N(p.BenDeath);
+    if (!ben) {
+      // For RAs/investments, use FundValue if no BenDeath
+      ben = N(p.FundValue);
+    }
+    if (!ben) return;
+    var bt = p.BeneficiaryType || '';
+    if (bt === 'Spouse')       section4q += ben;
+    else if (bt === 'Estate')  toEstate  += ben;
+    else if (bt === 'Third Party') toThird += ben;
+    else                       toBiz     += ben;
+  });
+
+  if (pols.length === 0) {
+    var noPol = div('info'); noPol.textContent = 'No policies captured. Add policies on the Policies tab.';
+    s.appendChild(noPol);
+  } else {
+    var polRouteCards = div('cards');
+    polRouteCards.style.gridTemplateColumns = 'repeat(4,1fr)';
+    [
+      { l: 'Section 4(q) — Spouse', v: section4q, c: 'ok',  sub: 'Not dutiable' },
+      { l: 'To Estate',              v: toEstate,  c: 'warn', sub: 'Dutiable' },
+      { l: 'Third Party Direct',     v: toThird,   c: '',     sub: 'Not dutiable' },
+      { l: 'Business Assurance',     v: toBiz,     c: '',     sub: 'Outside estate' }
+    ].forEach(function(x) {
+      var c = div('card');
+      c.innerHTML = '<div class="lbl">' + x.l + '</div>' +
+        '<div class="val ' + x.c + '">' + (x.v > 0 ? Rfmt(x.v) : '—') + '</div>' +
+        '<div class="sub">' + x.sub + '</div>';
+      polRouteCards.appendChild(c);
+    });
+    s.appendChild(polRouteCards);
+  }
+
+  // ── SECTION 4: Estate duty calculation
+  s.appendChild(stitle('Estate Duty Calculation'));
+
+  // Gross dutiable estate = dutiable assets + estate-routed policy benefits - liabilities
+  var totalDutiableAssets = allAssets.reduce(function(sum, a) { return sum + N(a.dutiable); }, 0);
+  var totalLiabs = S.props.reduce(function(sum, p) { return sum + N(p.bond); }, 0) +
+                   S.vehicles.reduce(function(sum, v) { return sum + N(v.finance); }, 0) +
+                   S.liabilities.reduce(function(sum, l) { return sum + N(l.bal); }, 0);
+
+  var grossEstate    = totalDutiableAssets + toEstate;
+  var netEstate      = Math.max(0, grossEstate - totalLiabs);
+  var sec4qDed       = Math.min(section4q, netEstate);  // can't exceed net estate
+  var afterSpouse    = Math.max(0, netEstate - sec4qDed);
+  var afterAbatement = Math.max(0, afterSpouse - ABATEMENT);
+
+  // Estate duty
+  var estateDuty = 0;
+  if (afterAbatement > 0) {
+    if (afterAbatement <= DUTY_THRESH) {
+      estateDuty = afterAbatement * DUTY_RATE1;
+    } else {
+      estateDuty = DUTY_THRESH * DUTY_RATE1 + (afterAbatement - DUTY_THRESH) * DUTY_RATE2;
+    }
+  }
+
+  // Executor fees on gross estate (gross assets, not net)
+  var execFees = grossEstate * EXEC_RATE;
+
+  // Total estate costs
+  var totalEstateCosts = estateDuty + execFees;
+
+  // Liquidity: cash-type assets + estate-routed policies vs costs
+  // Cash/liquid = investments and other assets not properties/vehicles (rough proxy)
+  var liquidAssets = S.otherAssets.reduce(function(sum, a) { return sum + N(a.val); }, 0) + toEstate;
+  var liquidityGap = liquidAssets - totalEstateCosts;
+
+  // ── Calculation breakdown display
+  var calcBox = div();
+  calcBox.style.cssText = 'background:var(--navy);color:#fff;border-radius:9px;padding:18px 20px;margin-bottom:16px';
+
+  function calcRow(label, val, indent, highlight, borderTop) {
+    var row = div();
+    row.style.cssText = 'display:flex;justify-content:space-between;padding:4px 0;font-size:13px' +
+      (indent ? ';padding-left:20px' : '') +
+      (borderTop ? ';border-top:1px solid #334;margin-top:8px;padding-top:10px' : '') +
+      (highlight ? ';font-size:15px;font-weight:700' : '');
+    var lSpan = el('span','',label);
+    var vSpan = el('span','', val);
+    vSpan.style.color = highlight ? 'var(--gold)' : '#ccd6f6';
+    row.appendChild(lSpan); row.appendChild(vSpan);
+    calcBox.appendChild(row);
+  }
+
+  function calcRowSub(label, val) {
+    var row = div();
+    row.style.cssText = 'display:flex;justify-content:space-between;padding:3px 0 3px 16px;font-size:11px;color:#8899bb';
+    row.innerHTML = '<span>' + label + '</span><span>' + val + '</span>';
+    calcBox.appendChild(row);
+  }
+
+  calcRow('Gross Estate', Rfmt(grossEstate));
+  calcRowSub('Dutiable assets', Rfmt(totalDutiableAssets));
+  calcRowSub('+ Estate-routed policy benefits', Rfmt(toEstate));
+
+  calcRow('Less: Liabilities', '− ' + Rfmt(totalLiabs), true);
+  calcRow('Net Estate', Rfmt(netEstate), false, false, true);
+
+  if (section4q > 0) {
+    calcRow('Less: Section 4(q) — spouse bequest', '− ' + Rfmt(sec4qDed), true);
+  }
+  if (afterSpouse !== netEstate) {
+    calcRow('After 4(q) deduction', Rfmt(afterSpouse), false, false, true);
+  }
+
+  calcRow('Less: Primary abatement', '− ' + Rfmt(Math.min(afterSpouse, ABATEMENT)), true);
+  calcRow('Dutiable amount', Rfmt(afterAbatement), false, false, true);
+
+  if (afterAbatement > 0) {
+    if (afterAbatement <= DUTY_THRESH) {
+      calcRowSub('Rate: 20% on R' + (DUTY_THRESH/1000000) + 'm', '');
+    } else {
+      calcRowSub('20% on first R30m + 25% on balance', '');
+    }
+  }
+
+  calcRow('Estate Duty', Rfmt(estateDuty), false, false, true);
+  calcRow('Executor fees (~4.025% of gross estate)', Rfmt(execFees), true);
+  calcRow('Total Estate Costs', Rfmt(totalEstateCosts), false, true, true);
+  s.appendChild(calcBox);
+
+  // ── Liquidity analysis
+  s.appendChild(stitle('Liquidity Analysis'));
+  var liqNote = div('info');
+  liqNote.innerHTML = 'The estate needs <strong>liquid funds</strong> to pay duty and executor fees without forcing asset sales. ' +
+    'Estate-routed policy benefits contribute to estate liquidity.';
+  s.appendChild(liqNote);
+
+  var liqCards = div('cards c3');
+  var lc1 = div('card');
+  lc1.innerHTML = '<div class="lbl">Estate Costs (Duty + Fees)</div><div class="val bad">' + Rfmt(totalEstateCosts) + '</div>';
+  liqCards.appendChild(lc1);
+  var lc2 = div('card');
+  lc2.innerHTML = '<div class="lbl">Liquid / Policy Assets in Estate</div><div class="val">' + Rfmt(Math.max(0, liquidAssets)) + '</div>';
+  liqCards.appendChild(lc2);
+  var lc3 = div('card');
+  lc3.innerHTML = '<div class="lbl">Liquidity ' + (liquidityGap >= 0 ? 'Surplus' : 'Shortfall') + '</div>' +
+    '<div class="val ' + (liquidityGap >= 0 ? 'ok' : 'bad') + '">' + Rfmt(Math.abs(liquidityGap)) + '</div>';
+  liqCards.appendChild(lc3);
+  s.appendChild(liqCards);
+
+  if (liquidityGap < 0) {
+    var liqAlert = div('alert');
+    liqAlert.innerHTML = '⚠ <strong>Liquidity shortfall of ' + Rfmt(Math.abs(liquidityGap)) + '.</strong> ' +
+      'The estate may need to sell assets to fund duty and executor fees. ' +
+      'Consider routing additional life cover to the estate, or an estate liquidity policy.';
+    s.appendChild(liqAlert);
+  } else {
+    var liqOk = div('info');
+    liqOk.style.cssText = 'background:#f0fdf4;border-color:#86efac;color:#166534';
+    liqOk.innerHTML = '✓ <strong>Estate is liquid.</strong> Sufficient funds available to cover duty and executor fees without forced asset sales.';
+    s.appendChild(liqOk);
+  }
+
+  // ── What each beneficiary receives
+  s.appendChild(stitle('Beneficiary Outcome Summary'));
+
+  var outCards = div('cards c2');
+  outCards.style.marginTop = '0';
+
+  // Spouse receives: 4(q) policies + residual estate after all costs and bequests
+  var estateResidual = Math.max(0, netEstate - sec4qDed - totalEstateCosts);
+  var c_spouse = div('card');
+  c_spouse.innerHTML = '<div class="lbl">Spouse receives</div>' +
+    '<div class="val ok">' + Rfmt(section4q + estateResidual) + '</div>' +
+    '<div class="sub">Section 4(q) policies: ' + Rfmt(section4q) + '<br>Estate residual: ' + Rfmt(estateResidual) + '</div>';
+  outCards.appendChild(c_spouse);
+
+  var c_third = div('card');
+  c_third.innerHTML = '<div class="lbl">Third party beneficiaries</div>' +
+    '<div class="val">' + Rfmt(toThird) + '</div>' +
+    '<div class="sub">Paid direct — no estate duty</div>';
+  outCards.appendChild(c_third);
+
+  s.appendChild(outCards);
+
+  // ── Estate planning notes
+  s.appendChild(stitle('Estate Planning Notes'));
+  s.appendChild(txfld('Notes / recommendations', S, 'estateNotes'));
 
   return s;
 }
 
 // ═══════════════════════════════════════════════════════════
-// TAB 7 — SUMMARY & GAPS
+// TAB 8 — SUMMARY & GAPS
 // ═══════════════════════════════════════════════════════════
 function buildSummary() {
   var s = div();
@@ -1721,7 +2113,7 @@ function buildGapRow(label, need, have) {
 }
 
 // ═══════════════════════════════════════════════════════════
-// TAB 8 — ROA
+// TAB 9 — ROA
 // ═══════════════════════════════════════════════════════════
 function buildROATab() {
   var s = div();
