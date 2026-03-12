@@ -158,6 +158,7 @@ table input:focus, table select:focus { outline: none; border-color: var(--gold)
   <div class="hdr-client" id="hdrClient">New Client</div>
   <div class="hdr-actions">
     <button class="btn btn-ghost btn-sm" onclick="newClient()">New</button>
+    <button class="btn btn-ghost btn-sm" onclick="refreshFromCRM()" title="Re-pull policies and personal details from CRM without losing FNA data">↻ CRM</button>
     <button class="btn btn-ghost btn-sm" onclick="saveFile()">💾 Save</button>
   </div>
 </div>
@@ -371,11 +372,18 @@ var DEFAULTS = {
   incNotes: '',
 
   // Assets & Liabilities
-  props:      [],  // { desc, val, bond, bondPM, rental, baseCost, notes }
-  vehicles:   [],  // { desc, val, finance, notes }
-  otherAssets:[], // { desc, val, type, notes }
+  props:      [],  // { desc, val, bond, bondPM, rental, rentalEsc, baseCost, soldAtDeath, soldAtRetirement, notes }
+  vehicles:   [],  // { desc, val, finance, soldAtDeath, notes }
+  otherAssets:[], // { desc, val, type, soldAtDeath, soldAtRetirement, notes }
   liabilities:[], // { desc, bal, pmt, notes }
   assetNotes: '',
+
+  // Accrual (OCP with accrual marriages)
+  accrual: {
+    clientStartVal: '0',   // Client's estate at start of marriage
+    spouseStartVal: '0',   // Spouse's estate at start of marriage
+    spouseCurrentAssets: '0' // Spouse's current gross assets for accrual calc
+  },
 
   // NEEDS
   // Death — liabilities (paid from estate/cover before income needs)
@@ -451,75 +459,137 @@ var S = JSON.parse(JSON.stringify(DEFAULTS));
 (function () {
   var params = new URLSearchParams(window.location.search);
   var saved = document.getElementById('saved-data').textContent;
+  var hasSavedState = false;
+
   if (saved && saved !== 'null') {
-    try { S = deepMerge(JSON.parse(JSON.stringify(DEFAULTS)), JSON.parse(saved)); } catch(e) {}
+    try { S = deepMerge(JSON.parse(JSON.stringify(DEFAULTS)), JSON.parse(saved)); hasSavedState = true; } catch(e) {}
   } else {
     try {
       var lsKey = null;
       if (params.get('id')) lsKey = 'du_fna_' + params.get('id');
       else if (params.get('name')) lsKey = 'du_fna_' + decodeURIComponent(params.get('name')).replace(/\s+/g,'_');
       var lsSaved = lsKey ? localStorage.getItem(lsKey) : null;
-      if (lsSaved) { S = deepMerge(JSON.parse(JSON.stringify(DEFAULTS)), JSON.parse(lsSaved)); }
+      if (lsSaved) { S = deepMerge(JSON.parse(JSON.stringify(DEFAULTS)), JSON.parse(lsSaved)); hasSavedState = true; }
     } catch(e) {}
   }
-  if (params.get('name'))      S.cli.name      = decodeURIComponent(params.get('name'));
-  if (params.get('id'))        S.cli.id        = params.get('id');
+
+  // Store the raw URL params so the "Refresh from CRM" button can re-apply them
+  window._crmParams = params;
+
+  // Name and ID always update from URL (display only — not FNA data)
+  if (params.get('name')) S.cli.name = decodeURIComponent(params.get('name'));
+  if (params.get('id'))   S.cli.id   = params.get('id');
+
+  // If we have a saved state, DON'T overwrite FNA data from URL.
+  // The user may have edited income, policies etc — those are preserved.
+  // A "Refresh from CRM" button lets them deliberately pull fresh data.
+  if (hasSavedState) return;
+
+  // Fresh FNA — seed everything from URL params
   if (params.get('dob')) {
     var rawDob = params.get('dob');
-    // Handle ISO timestamp e.g. 1980-04-15T22:00:00.000Z -> extract date part only
     if (rawDob.indexOf('T') > -1) rawDob = rawDob.split('T')[0];
     var d = rawDob.split('-');
     if (d.length === 3) S.cli.dob = d[2] + '/' + d[1] + '/' + d[0];
     else S.cli.dob = rawDob;
   }
-  if (params.get('income'))    S.cli.grossPM    = params.get('income');
-  if (params.get('gender'))    S.cli.gender     = decodeURIComponent(params.get('gender'));
+  if (params.get('income')) {
+    var incVal = params.get('income');
+    if (!S.incRows) S.incRows = [];
+    if (S.incRows.length === 0) S.incRows.push({ src: 'Salary / drawings', pm: '' });
+    if (!S.incRows[0].pm) S.incRows[0].pm = incVal;
+    S.cli.grossPM = incVal;
+  }
+  if (params.get('gender'))  S.cli.gender    = decodeURIComponent(params.get('gender'));
   if (params.get('smoker')) {
     var sm = decodeURIComponent(params.get('smoker'));
-    if (sm === 'Yes') S.cli.smoker = 'Smoker';
-    else if (sm === 'No') S.cli.smoker = 'Non-smoker';
-    else S.cli.smoker = sm;
+    S.cli.smoker = (sm === 'Yes') ? 'Smoker' : (sm === 'No') ? 'Non-smoker' : sm;
   }
-  if (params.get('marital'))   S.cli.marital    = decodeURIComponent(params.get('marital'));
-  if (params.get('occ'))       S.cli.occ        = decodeURIComponent(params.get('occ'));
-  if (params.get('edu'))       S.cli.education  = decodeURIComponent(params.get('edu'));
-  if (params.get('spouse'))    S.cli.spouseName = decodeURIComponent(params.get('spouse'));
+  if (params.get('marital')) S.cli.marital   = decodeURIComponent(params.get('marital'));
+  if (params.get('occ'))     S.cli.occ       = decodeURIComponent(params.get('occ'));
+  if (params.get('edu'))     S.cli.education = decodeURIComponent(params.get('edu'));
+  if (params.get('spouse'))  S.cli.spouseName= decodeURIComponent(params.get('spouse'));
   if (params.get('spousedob')) {
     var rawSpDob = decodeURIComponent(params.get('spousedob'));
     if (rawSpDob.indexOf('T') > -1) rawSpDob = rawSpDob.split('T')[0];
     var sd = rawSpDob.split('-');
-    if (sd.length === 3) S.cli.spouseDob = sd[2] + '/' + sd[1] + '/' + sd[0];
-    else S.cli.spouseDob = rawSpDob;
+    S.cli.spouseDob = (sd.length === 3) ? sd[2] + '/' + sd[1] + '/' + sd[0] : rawSpDob;
   }
   if (params.get('domdate')) {
     var rawDom = decodeURIComponent(params.get('domdate'));
-    // Handle ISO timestamp e.g. 2005-03-15T22:00:00.000Z -> extract date part only
     if (rawDom.indexOf('T') > -1) rawDom = rawDom.split('T')[0];
-    // Convert YYYY-MM-DD to the HTML date input format (which IS YYYY-MM-DD — keep as-is)
     S.cli.domDate = rawDom;
   }
   if (params.get('pols')) {
     try {
       var pols = JSON.parse(decodeURIComponent(params.get('pols')));
-      // Store the raw policy array for the Policy Schedule tab
-      S.importedPols = pols;
-      if (!S.existingCover) S.existingCover = {death:'',disability:'',dread:'',ipPM:'',totalPrem:''};
-      var totDeath=0,totDis=0,totDD=0,totIP=0,totPrem=0;
-      pols.forEach(function(p){
-        var n=function(v){return parseFloat(String(v||'').replace(/[^0-9.\-]/g,''))||0;};
-        if(p.Type!=='Business Assurance'){totDeath+=n(p.BenDeath);totDis+=n(p.BenDisability);totDD+=n(p.BenDreadDisease);}
-        try{var ib=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):[];ib.forEach(function(r){totIP+=n(r.amount);});}catch(e){}
-        var f=p.Frequency||'Monthly';
-        if(f==='Monthly'||f==='') totPrem+=n(p.Premium);
-      });
-      if(totDeath>0) S.existingCover.death     =String(Math.round(totDeath));
-      if(totDis>0)   S.existingCover.disability=String(Math.round(totDis));
-      if(totDD>0)    S.existingCover.dread      =String(Math.round(totDD));
-      if(totIP>0)    S.existingCover.ipPM       =String(Math.round(totIP));
-      if(totPrem>0)  S.existingCover.totalPrem  =String(Math.round(totPrem));
+      applyPolsFromCRM(pols);
     } catch(e) {}
   }
 })();
+
+// Applies CRM policy data to state — used on fresh load and on "Refresh from CRM"
+function applyPolsFromCRM(pols) {
+  S.importedPols = pols;
+  if (!S.existingCover) S.existingCover = {death:'',disability:'',dread:'',ipPM:'',totalPrem:''};
+  var totDeath=0,totDis=0,totDD=0,totIP=0,totPrem=0;
+  pols.forEach(function(p){
+    var n=function(v){return parseFloat(String(v||'').replace(/[^0-9.\-]/g,''))||0;};
+    if(p.Type!=='Business Assurance'){totDeath+=n(p.BenDeath);totDis+=n(p.BenDisability);totDD+=n(p.BenDreadDisease);}
+    try{var ib=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):[];ib.forEach(function(r){totIP+=n(r.amount);});}catch(e){}
+    var f=p.Frequency||'Monthly';
+    if(f==='Monthly'||f==='') totPrem+=n(p.Premium);
+  });
+  if(totDeath>0) S.existingCover.death     =String(Math.round(totDeath));
+  if(totDis>0)   S.existingCover.disability=String(Math.round(totDis));
+  if(totDD>0)    S.existingCover.dread      =String(Math.round(totDD));
+  if(totIP>0)    S.existingCover.ipPM       =String(Math.round(totIP));
+  if(totPrem>0)  S.existingCover.totalPrem  =String(Math.round(totPrem));
+}
+
+// Called by the "Refresh from CRM" button — re-applies URL params over current state
+function refreshFromCRM() {
+  if (!confirm('Refresh policies and personal details from CRM?\n\nYour FNA data (assets, needs, retirement etc) will be preserved. Only CRM fields (policies, income, personal details) will be updated.')) return;
+  var params = window._crmParams;
+  if (!params) { alert('No CRM parameters found. Open this FNA from the CRM.'); return; }
+  if (params.get('name')) S.cli.name = decodeURIComponent(params.get('name'));
+  if (params.get('id'))   S.cli.id   = params.get('id');
+  if (params.get('dob')) {
+    var rawDob = params.get('dob');
+    if (rawDob.indexOf('T') > -1) rawDob = rawDob.split('T')[0];
+    var d2 = rawDob.split('-');
+    if (d2.length === 3) S.cli.dob = d2[2] + '/' + d2[1] + '/' + d2[0];
+  }
+  if (params.get('income')) {
+    var incVal2 = params.get('income');
+    if (S.incRows && S.incRows.length > 0) S.incRows[0].pm = incVal2;
+    S.cli.grossPM = incVal2;
+  }
+  if (params.get('gender'))  S.cli.gender    = decodeURIComponent(params.get('gender'));
+  if (params.get('marital')) S.cli.marital   = decodeURIComponent(params.get('marital'));
+  if (params.get('spouse'))  S.cli.spouseName= decodeURIComponent(params.get('spouse'));
+  if (params.get('spousedob')) {
+    var rawSpDob2 = decodeURIComponent(params.get('spousedob'));
+    if (rawSpDob2.indexOf('T') > -1) rawSpDob2 = rawSpDob2.split('T')[0];
+    var sd2 = rawSpDob2.split('-');
+    if (sd2.length === 3) S.cli.spouseDob = sd2[2] + '/' + sd2[1] + '/' + sd2[0];
+  }
+  if (params.get('domdate')) {
+    var rawDom2 = decodeURIComponent(params.get('domdate'));
+    if (rawDom2.indexOf('T') > -1) rawDom2 = rawDom2.split('T')[0];
+    S.cli.domDate = rawDom2;
+  }
+  if (params.get('pols')) {
+    try { applyPolsFromCRM(JSON.parse(decodeURIComponent(params.get('pols')))); } catch(e) {}
+  }
+  // Reset seeded flags so policies re-seed beneficiaries
+  if (S.importedPols) S.importedPols.forEach(function(p){ p._bensSeeded = false; });
+  // Reset retirement assets so they re-seed from new policies
+  S.retAssets = [];
+  persist();
+  render();
+  status('✓ Refreshed from CRM');
+}
 
 function deepMerge(base, over) {
   if (typeof over !== 'object' || over === null) return over !== undefined ? over : base;
@@ -879,69 +949,108 @@ function buildScope() {
 function buildIncome() {
   var s = div();
 
-  s.appendChild(stitle('Primary Income & Tax'));
-  var rg1 = g2();
-  // Gross income field with tax calc on blur
-  var gf = div('f');
-  var glb = el('label','','Gross Monthly Salary / Drawings (R/pm)');
-  var gw = div('rw'); var grp = el('span','rp','R');
-  var ginp = document.createElement('input'); ginp.type='text'; ginp.inputMode='numeric';
-  ginp.value = S.cli.grossPM || ''; ginp.placeholder='0';
-  ginp.addEventListener('input', function(e){ S.cli.grossPM = e.target.value; });
-  ginp.addEventListener('blur', function(e){
-    S.cli.grossPM = e.target.value;
-    if (N(S.cli.grossPM) > 0) {
-      var t = taxBreakdown(S.cli.grossPM);
-      if (t) { S.cli.nettPM = String(t.nettPM); render(); }
+  // Auto-sync rental income rows from Properties tab
+  // Rows with src starting with "Rental:" are managed automatically
+  var rentalSrcs = S.props.filter(function(p){ return N(p.rental) > 0; })
+                           .map(function(p){ return 'Rental: ' + (p.desc||'Property'); });
+  // Remove stale auto rental rows (property deleted or rental cleared)
+  S.incRows = S.incRows.filter(function(r){
+    if (r._auto) return rentalSrcs.indexOf(r.src) > -1;
+    return true;
+  });
+  // Add missing rental rows
+  rentalSrcs.forEach(function(src) {
+    var exists = S.incRows.filter(function(r){ return r.src === src; })[0];
+    if (!exists) {
+      var prop = S.props.filter(function(p){ return 'Rental: '+(p.desc||'Property') === src; })[0];
+      S.incRows.push({ src: src, pm: prop ? String(Math.round(N(prop.rental))) : '', _auto: true });
+    } else {
+      // Keep pm in sync with current rental value
+      var prop2 = S.props.filter(function(p){ return 'Rental: '+(p.desc||'Property') === src; })[0];
+      if (prop2) exists.pm = String(Math.round(N(prop2.rental)));
     }
   });
-  gw.appendChild(grp); gw.appendChild(ginp); gf.appendChild(glb); gf.appendChild(gw);
-  rg1.appendChild(gf);
-  rg1.appendChild(sfld('Retirement Age', S.cli, 'retAge', ['55','60','63','65','67','70']));
-  s.appendChild(rg1);
 
-  // Tax breakdown
-  if (N(S.cli.grossPM) > 0) {
-    var t = taxBreakdown(S.cli.grossPM);
+  s.appendChild(stitle('Income Sources'));
+  var incInf = div('info');
+  incInf.innerHTML = 'Enter all monthly income sources. ' +
+    'The <strong>first row (Salary / drawings)</strong> is used for the tax calculation and needs analysis.';
+  s.appendChild(incInf);
+
+  var itbl = document.createElement('table');
+  itbl.innerHTML = '<thead><tr><th>Source</th><th>Gross R per month</th><th></th></tr></thead>';
+  var ib = document.createElement('tbody');
+  S.incRows.forEach(function(r, i) {
+    var tr = document.createElement('tr');
+
+    // Source description
+    var t1 = document.createElement('td');
+    var si = document.createElement('input'); si.type = 'text'; si.value = r.src || '';
+    si.placeholder = i === 0 ? 'Salary / drawings' : 'e.g. Rental income';
+    si.addEventListener('input', function(e) { S.incRows[i].src = e.target.value; });
+    t1.appendChild(si); tr.appendChild(t1);
+
+    // Amount — blur on row 0 triggers tax recalc
+    var t2 = document.createElement('td');
+    var rw = div('td-r'); rw.appendChild(el('span', 'rp', 'R'));
+    var vi = document.createElement('input'); vi.type = 'text'; vi.inputMode = 'numeric';
+    vi.value = r.pm || ''; vi.placeholder = '0';
+    vi.addEventListener('input', function(e) { S.incRows[i].pm = e.target.value; });
+    vi.addEventListener('blur', function(e) {
+      S.incRows[i].pm = e.target.value;
+      if (i === 0) {
+        // Keep S.cli.grossPM in sync for downstream calcs
+        S.cli.grossPM = e.target.value;
+        var t = taxBreakdown(e.target.value);
+        if (t) S.cli.nettPM = String(t.nettPM);
+      }
+      render();
+    });
+    rw.appendChild(vi); t2.appendChild(rw); tr.appendChild(t2);
+
+    // Delete (don't allow deleting row 0 — salary row must stay)
+    var t3 = document.createElement('td');
+    if (i > 0) t3.appendChild(delBtn(function() { S.incRows.splice(i, 1); render(); }));
+    tr.appendChild(t3);
+
+    ib.appendChild(tr);
+  });
+  itbl.appendChild(ib);
+  var itw = div('twrap'); itw.appendChild(itbl); s.appendChild(itw);
+  s.appendChild(addBtn('+ Add Income Source', function() {
+    S.incRows.push({ src: '', pm: '' }); render();
+  }));
+
+  // Tax breakdown — always off row 0 (salary/drawings)
+  var salaryGross = N(S.incRows[0] && S.incRows[0].pm);
+  if (salaryGross > 0) {
+    var t = taxBreakdown(salaryGross);
     if (t) {
-      S.cli.nettPM = String(t.nettPM);
+      S.cli.grossPM = String(salaryGross);
+      S.cli.nettPM  = String(t.nettPM);
       var tb = div('taxbox');
+      tb.style.marginTop = '12px';
       tb.innerHTML =
-        '<div class="tr"><span>Gross income p/m</span><span>' + Rfmt(t.grossPM) + '</span></div>' +
+        '<div class="tr"><span>Gross salary / drawings</span><span>' + Rfmt(t.grossPM) + '</span></div>' +
         '<div class="tr"><span>PAYE (income tax)</span><span>− ' + Rfmt(t.taxPM) + '</span></div>' +
         '<div class="tr"><span>UIF</span><span>− ' + Rfmt(t.uifPM) + '</span></div>' +
-        '<div class="tr tot"><span>Estimated nett p/m</span><span>' + Rfmt(t.nettPM) + '</span></div>';
+        '<div class="tr tot"><span>Estimated nett salary p/m</span><span>' + Rfmt(t.nettPM) + '</span></div>';
       s.appendChild(tb);
     }
   }
 
-  s.appendChild(stitle('Other Income Sources'));
-  var otherInf = div('info');
-  otherInf.textContent = 'Add rental income, investment income, spouse income, or any other regular income streams below.';
-  s.appendChild(otherInf);
-  var itbl = document.createElement('table');
-  itbl.innerHTML = '<thead><tr><th>Source</th><th>R per month (nett)</th><th></th></tr></thead>';
-  var ib = document.createElement('tbody');
-  S.incRows.forEach(function(r,i){
-    var tr = document.createElement('tr');
-    var t1 = document.createElement('td'); var si = document.createElement('input'); si.type='text'; si.value=r.src||''; si.placeholder='e.g. Rental income, spouse salary';
-    si.addEventListener('input',function(e){S.incRows[i].src=e.target.value;}); t1.appendChild(si); tr.appendChild(t1);
-    var t2 = document.createElement('td'); var rw=div('td-r'); rw.appendChild(el('span','rp','R'));
-    var vi = document.createElement('input'); vi.type='text'; vi.inputMode='numeric'; vi.value=r.pm||''; vi.placeholder='0';
-    vi.addEventListener('input',function(e){S.incRows[i].pm=e.target.value;}); rw.appendChild(vi); t2.appendChild(rw); tr.appendChild(t2);
-    var t3=document.createElement('td'); t3.appendChild(delBtn(function(){S.incRows.splice(i,1);render();})); tr.appendChild(t3);
-    ib.appendChild(tr);
-  });
-  itbl.appendChild(ib); var itw=div('twrap'); itw.appendChild(itbl); s.appendChild(itw);
-  s.appendChild(addBtn('+ Add Income Source', function(){S.incRows.push({src:'',pm:''});render();}));
+  // Retirement age (needs to live somewhere accessible — put it here neatly)
+  var retRow = g2(); retRow.style.marginTop = '14px';
+  retRow.appendChild(sfld('Retirement Age', S.cli, 'retAge', ['55','60','63','65','67','70']));
+  s.appendChild(retRow);
 
-  // Total income = nett salary + other sources
-  var nettSalary = N(S.cli.nettPM);
-  var otherIncome = S.incRows.reduce(function(sum,r){return sum+N(r.pm);},0);
-  var totInc = nettSalary + otherIncome;
+  // Total income summary
+  var nettSalary  = N(S.cli.nettPM);
+  var otherIncome = S.incRows.slice(1).reduce(function(sum, r) { return sum + N(r.pm); }, 0);
+  var totInc      = nettSalary + otherIncome;
 
-  if(totInc > 0){
-    var ti = div('info'); ti.style.marginTop='12px';
+  if (totInc > 0) {
+    var ti = div('info'); ti.style.marginTop = '4px';
     ti.innerHTML =
       'Nett salary: <strong>' + Rfmt(nettSalary) + '</strong>' +
       (otherIncome > 0 ? ' + Other income: <strong>' + Rfmt(otherIncome) + '</strong>' : '') +
@@ -950,16 +1059,18 @@ function buildIncome() {
   }
 
   s.appendChild(stitle('Monthly Expenses'));
-  var eg=g2();
+  var eg = g2();
   eg.appendChild(rfld('Total monthly expenses', S, 'expenses'));
   var surplus = totInc - N(S.expenses);
-  var sf=div('f'); var slb=el('label','','Monthly surplus / shortfall');
-  var si2=document.createElement('input'); si2.type='text'; si2.readOnly=true;
-  si2.value = totInc>0 && N(S.expenses)>0 ? (surplus>=0?'+ ':'')+Rfmt(surplus) : '';
-  si2.style.fontWeight='700';
-  si2.style.color = surplus>=0?'var(--green)':'var(--red)';
-  sf.appendChild(slb); sf.appendChild(si2);
-  eg.appendChild(sf); s.appendChild(eg);
+  var sf = div('f');
+  sf.appendChild(el('label', '', 'Monthly surplus / shortfall'));
+  var si2 = document.createElement('input'); si2.type = 'text'; si2.readOnly = true;
+  si2.value = totInc > 0 && N(S.expenses) > 0 ? (surplus >= 0 ? '+ ' : '') + Rfmt(surplus) : '';
+  si2.style.fontWeight = '700';
+  si2.style.color = surplus >= 0 ? 'var(--green)' : 'var(--red)';
+  sf.appendChild(si2);
+  eg.appendChild(sf);
+  s.appendChild(eg);
 
   s.appendChild(txfld('Income notes', S, 'incNotes'));
   return s;
@@ -990,35 +1101,78 @@ function buildAssets() {
     r2.appendChild(rfld('Rental Income /pm',p, 'rental'));
     r2.appendChild(rfld('Base Cost (CGT)',  p, 'baseCost'));
     card.appendChild(r2);
+    // Purpose tick boxes + rental escalation
+    var r3 = div(); r3.style.cssText = 'display:flex;flex-wrap:wrap;gap:16px;align-items:center;margin-top:10px;padding-top:10px;border-top:1px solid var(--mist)';
+    function chk(lbl, obj, field) {
+      var wrap = div(); wrap.style.cssText='display:flex;align-items:center;gap:6px;cursor:pointer';
+      var cb = document.createElement('input'); cb.type='checkbox'; cb.checked=!!obj[field];
+      cb.addEventListener('change',function(e){S.props[i][field]=e.target.checked;render();});
+      var lb = el('label','',lbl); lb.style.cssText='font-size:12px;cursor:pointer;color:var(--navy)';
+      wrap.appendChild(cb); wrap.appendChild(lb);
+      return wrap;
+    }
+    r3.appendChild(chk('Sold at death', p, 'soldAtDeath'));
+    r3.appendChild(chk('Sold at retirement', p, 'soldAtRetirement'));
+    if (N(p.rental) > 0) {
+      var renEscWrap = div(); renEscWrap.style.cssText='display:flex;align-items:center;gap:6px';
+      var renLb = el('label','','Rental esc %'); renLb.style.cssText='font-size:12px;color:var(--navy);white-space:nowrap';
+      var renInp = document.createElement('input'); renInp.type='text'; renInp.inputMode='numeric';
+      renInp.value = p.rentalEsc||'6'; renInp.style.cssText='width:52px;padding:4px 6px;border:1.5px solid var(--mist);border-radius:5px;font-size:12px';
+      renInp.addEventListener('input',function(e){S.props[i].rentalEsc=e.target.value;});
+      renEscWrap.appendChild(renLb); renEscWrap.appendChild(renInp);
+      renEscWrap.appendChild(el('label','','% p.a.')).style='font-size:11px;color:var(--sub)';
+      r3.appendChild(renEscWrap);
+    }
+    card.appendChild(r3);
     s.appendChild(card);
   });
-  s.appendChild(addBtn('+ Add Property', function(){S.props.push({desc:'',val:'',bond:'',bondPM:'',rental:'',baseCost:''});render();}));
+  s.appendChild(addBtn('+ Add Property', function(){S.props.push({desc:'',val:'',bond:'',bondPM:'',rental:'',rentalEsc:'6',baseCost:'',soldAtDeath:false,soldAtRetirement:false});render();}));
 
   // ── Vehicles
   s.appendChild(stitle('Vehicles'));
   S.vehicles.forEach(function(v,i){
-    var row=div(); row.style.cssText='display:grid;grid-template-columns:2fr 1fr 1fr 36px;gap:12px;align-items:end;background:#fff;border:var(--border);border-radius:7px;padding:12px;margin-bottom:8px';
+    var card=div(); card.style.cssText='background:#fff;border:var(--border);border-radius:8px;padding:12px;margin-bottom:8px';
+    var row=div(); row.style.cssText='display:grid;grid-template-columns:2fr 1fr 1fr 36px;gap:12px;align-items:end';
     var df=div('f'); df.appendChild(el('label','','Description'));
     var di=document.createElement('input'); di.type='text'; di.value=v.desc||''; di.placeholder='e.g. Toyota Fortuner';
     di.addEventListener('input',function(e){S.vehicles[i].desc=e.target.value;}); df.appendChild(di); row.appendChild(df);
     row.appendChild(rfld('Market Value',      v,'val'));
     row.appendChild(rfld('Finance Outstanding',v,'finance'));
     var dd=div(); dd.appendChild(delBtn(function(){S.vehicles.splice(i,1);render();})); row.appendChild(dd);
-    s.appendChild(row);
+    card.appendChild(row);
+    var vr2=div(); vr2.style.cssText='display:flex;gap:16px;align-items:center;margin-top:10px;padding-top:10px;border-top:1px solid var(--mist)';
+    var vcb=document.createElement('input'); vcb.type='checkbox'; vcb.checked=!!v.soldAtDeath;
+    vcb.addEventListener('change',function(e){S.vehicles[i].soldAtDeath=e.target.checked;render();});
+    var vlb=el('label','','Sold / realised at death'); vlb.style.cssText='font-size:12px;cursor:pointer;color:var(--navy)';
+    vr2.appendChild(vcb); vr2.appendChild(vlb);
+    card.appendChild(vr2);
+    s.appendChild(card);
   });
-  s.appendChild(addBtn('+ Add Vehicle', function(){S.vehicles.push({desc:'',val:'',finance:''});render();}));
+  s.appendChild(addBtn('+ Add Vehicle', function(){S.vehicles.push({desc:'',val:'',finance:'',soldAtDeath:false});render();}));
 
   // ── Other Assets
   s.appendChild(stitle('Other Assets'));
   S.otherAssets.forEach(function(a,i){
-    var row=div(); row.style.cssText='display:grid;grid-template-columns:2fr 1fr 1fr 36px;gap:12px;align-items:end;background:#fff;border:var(--border);border-radius:7px;padding:12px;margin-bottom:8px';
+    var card=div(); card.style.cssText='background:#fff;border:var(--border);border-radius:8px;padding:12px;margin-bottom:8px';
+    var row=div(); row.style.cssText='display:grid;grid-template-columns:2fr 1fr 1fr 36px;gap:12px;align-items:end';
     var df=div('f'); df.appendChild(el('label','','Description'));
     var di=document.createElement('input'); di.type='text'; di.value=a.desc||''; di.placeholder='e.g. Listed shares, business interest';
     di.addEventListener('input',function(e){S.otherAssets[i].desc=e.target.value;}); df.appendChild(di); row.appendChild(df);
     row.appendChild(rfld('Value', a, 'val'));
     row.appendChild(sfld('Type', a, 'type', ['Investment','Business Interest','Inheritance','Personal','Other']));
     var dd=div(); dd.appendChild(delBtn(function(){S.otherAssets.splice(i,1);render();})); row.appendChild(dd);
-    s.appendChild(row);
+    card.appendChild(row);
+    var ar2=div(); ar2.style.cssText='display:flex;gap:16px;align-items:center;margin-top:10px;padding-top:10px;border-top:1px solid var(--mist)';
+    var acb1=document.createElement('input'); acb1.type='checkbox'; acb1.checked=!!a.soldAtDeath;
+    acb1.addEventListener('change',function(e){S.otherAssets[i].soldAtDeath=e.target.checked;render();});
+    var alb1=el('label','','Realised at death'); alb1.style.cssText='font-size:12px;cursor:pointer;color:var(--navy)';
+    ar2.appendChild(acb1); ar2.appendChild(alb1);
+    var acb2=document.createElement('input'); acb2.type='checkbox'; acb2.checked=!!a.soldAtRetirement;
+    acb2.addEventListener('change',function(e){S.otherAssets[i].soldAtRetirement=e.target.checked;render();});
+    var alb2=el('label','','Available at retirement'); alb2.style.cssText='font-size:12px;cursor:pointer;color:var(--navy)';
+    ar2.appendChild(acb2); ar2.appendChild(alb2);
+    card.appendChild(ar2);
+    s.appendChild(card);
   });
   s.appendChild(addBtn('+ Add Asset', function(){S.otherAssets.push({desc:'',val:'',type:'Investment'});render();}));
 
@@ -1526,7 +1680,7 @@ function buildPolicies() {
     render();
   }));
 
-  // ── Premium totals
+  // ── Premium totals + affordability projection
   var totalPrem = pols.reduce(function(sum, p) {
     return sum + ((p.Frequency || 'Monthly') === 'Monthly' ? N(p.Premium) : 0);
   }, 0);
@@ -1538,6 +1692,58 @@ function buildPolicies() {
     var c2 = div('card'); c2.innerHTML = '<div class="lbl">Annual Premium Cost</div><div class="val">' + Rfmt(totalPrem * 12) + '</div>'; totCards.appendChild(c2);
     var c3 = div('card'); c3.innerHTML = '<div class="lbl">Policies on Record</div><div class="val">' + pols.length + '</div>'; totCards.appendChild(c3);
     s.appendChild(totCards);
+
+    // Premium affordability at retirement
+    var cliAge  = ageFrom(S.cli.dob);
+    var retAge  = N(S.cli.retAge) || 65;
+    var yrsToRet = cliAge ? Math.max(0, retAge - cliAge) : null;
+    if (yrsToRet !== null && yrsToRet > 0 && totalPrem > 0) {
+      s.appendChild(stitle('Premium Affordability at Retirement'));
+      var afford = div('info');
+      afford.innerHTML = 'Each policy escalates at its own rate. Projection shows estimated premium at retirement age <strong>' + retAge + '</strong> ' +
+        '(' + yrsToRet + ' years from now). This is critical for budgeting retirement income.';
+      s.appendChild(afford);
+
+      var affTbl = document.createElement('table');
+      affTbl.innerHTML = '<thead><tr><th>Policy</th><th>Current premium</th><th>Esc %</th><th>At retirement (est.)</th></tr></thead>';
+      var affTb = document.createElement('tbody');
+      var totalAtRet = 0;
+      pols.forEach(function(pol, j) {
+        if ((pol.Frequency||'Monthly') !== 'Monthly') return;
+        var prem = N(pol.Premium);
+        if (!prem) return;
+        var esc = N(pol.premEsc) || 0;
+        var future = esc > 0 ? Math.round(prem * Math.pow(1 + esc/100, yrsToRet)) : prem;
+        totalAtRet += future;
+        var tr2 = document.createElement('tr');
+        tr2.innerHTML =
+          '<td>' + (pol.Insurer||'—') + (pol.Type ? ' <span style="font-size:11px;color:var(--sub)">'+pol.Type+'</span>' : '') + '</td>' +
+          '<td>' + Rfmt(prem) + '</td>' +
+          '<td><input type="text" inputmode="numeric" value="' + (pol.premEsc||'') + '" placeholder="0" style="width:52px;padding:4px 6px;border:1.5px solid var(--mist);border-radius:5px;font-size:12px" ' +
+            'data-idx="'+j+'" onblur="S.importedPols[this.dataset.idx].premEsc=this.value;render()" oninput="S.importedPols[this.dataset.idx].premEsc=this.value"> %</td>' +
+          '<td style="font-weight:700;color:' + (future > prem * 2 ? 'var(--red)' : 'var(--navy)') + '">' + Rfmt(future) + '</td>';
+        affTb.appendChild(tr2);
+      });
+      var trTot = document.createElement('tr');
+      trTot.style.cssText = 'border-top:2px solid var(--navy);font-weight:700';
+      trTot.innerHTML = '<td colspan="3">Total premiums at retirement</td><td style="color:var(--gold)">' + Rfmt(totalAtRet) + ' /pm</td>';
+      affTb.appendChild(trTot);
+      affTbl.appendChild(affTb);
+      var affTw = div('twrap'); affTw.appendChild(affTbl); s.appendChild(affTw);
+
+      var nettAtRet = N(S.cli.nettPM);
+      if (nettAtRet > 0 && totalAtRet > 0) {
+        var premPct = Math.round(totalAtRet / nettAtRet * 100);
+        var afford2 = div('info'); afford2.style.marginTop = '8px';
+        afford2.style.background = premPct > 20 ? '#fef2f2' : '#f0fdf4';
+        afford2.style.borderColor = premPct > 20 ? '#fca5a5' : '#86efac';
+        afford2.style.color = premPct > 20 ? '#991b1b' : '#166534';
+        afford2.innerHTML = 'Estimated premiums at retirement = <strong>' + Rfmt(totalAtRet) + ' /pm</strong> (' +
+          premPct + '% of current nett income of ' + Rfmt(nettAtRet) + '). ' +
+          (premPct > 20 ? '⚠ Premium burden is high relative to current income.' : '✓ Premium burden appears manageable.');
+        s.appendChild(afford2);
+      }
+    }
   }
 
   return s;
@@ -1974,7 +2180,52 @@ function buildEstate() {
     s.appendChild(polRouteCards);
   }
 
-  // ── SECTION 4: Estate duty calculation
+  // ── SECTION 4: Accrual Claim (OCP with Accrual marriages)
+  var isOCP = (S.cli.marital || '').toLowerCase().indexOf('accrual') > -1 ||
+              (S.cli.marital || '').toLowerCase().indexOf('community') > -1;
+  var accrualClaim = 0;
+
+  if (isOCP || N(S.accrual.spouseCurrentAssets) > 0) {
+    s.appendChild(stitle('Accrual Claim (OCP with Accrual)'));
+    var accrNote = div('info');
+    accrNote.innerHTML = 'For OCP with accrual marriages: if the client\'s estate accrual exceeds the spouse\'s accrual, ' +
+      'half the difference is payable to the surviving spouse from the estate before estate duty. ' +
+      '<strong>Accrual claim reduces the dutiable estate.</strong>';
+    s.appendChild(accrNote);
+
+    var accrGrid = g3();
+    accrGrid.appendChild(rfld('Client estate at marriage (R)', S.accrual, 'clientStartVal'));
+    accrGrid.appendChild(rfld('Spouse estate at marriage (R)', S.accrual, 'spouseStartVal'));
+    accrGrid.appendChild(rfld('Spouse\'s current gross assets (R)', S.accrual, 'spouseCurrentAssets'));
+    s.appendChild(accrGrid);
+
+    // Accrual = current estate - estate at start of marriage
+    var clientGross = totalDutiableAssets + toEstate; // same as grossEstate below
+    var clientAccrual = Math.max(0, clientGross - N(S.accrual.clientStartVal));
+    var spouseAccrual = Math.max(0, N(S.accrual.spouseCurrentAssets) - N(S.accrual.spouseStartVal));
+
+    if (clientAccrual > spouseAccrual) {
+      accrualClaim = (clientAccrual - spouseAccrual) / 2;
+    }
+
+    var accrCards = div('cards c3'); accrCards.style.marginTop = '10px';
+    var ac1 = div('card');
+    ac1.innerHTML = '<div class="lbl">Client Accrual</div><div class="val">' + Rfmt(clientAccrual) + '</div>' +
+      '<div class="sub">Current estate − start value</div>';
+    accrCards.appendChild(ac1);
+    var ac2 = div('card');
+    ac2.innerHTML = '<div class="lbl">Spouse Accrual</div><div class="val">' + Rfmt(spouseAccrual) + '</div>' +
+      '<div class="sub">Current assets − start value</div>';
+    accrCards.appendChild(ac2);
+    var ac3 = div('card');
+    ac3.innerHTML = '<div class="lbl">Accrual Claim Payable</div><div class="val ' + (accrualClaim > 0 ? 'warn' : '') + '">' +
+      (accrualClaim > 0 ? Rfmt(accrualClaim) : '—') + '</div>' +
+      '<div class="sub">½ × (Client − Spouse) accrual</div>';
+    accrCards.appendChild(ac3);
+    s.appendChild(accrCards);
+  }
+
+  // ── SECTION 5: Estate duty calculation
   s.appendChild(stitle('Estate Duty Calculation'));
 
   // Gross dutiable estate = dutiable assets + estate-routed policy benefits - liabilities
@@ -1987,7 +2238,10 @@ function buildEstate() {
   var netEstate      = Math.max(0, grossEstate - totalLiabs);
   var sec4qDed       = Math.min(section4q, netEstate);  // can't exceed net estate
   var afterSpouse    = Math.max(0, netEstate - sec4qDed);
-  var afterAbatement = Math.max(0, afterSpouse - ABATEMENT);
+  // Accrual deduction (payable before estate duty is calculated)
+  var accrualDed     = Math.min(accrualClaim, afterSpouse);
+  var afterAccrual   = Math.max(0, afterSpouse - accrualDed);
+  var afterAbatement = Math.max(0, afterAccrual - ABATEMENT);
 
   // Estate duty
   var estateDuty = 0;
@@ -2047,8 +2301,11 @@ function buildEstate() {
   if (afterSpouse !== netEstate) {
     calcRow('After 4(q) deduction', Rfmt(afterSpouse), false, false, true);
   }
-
-  calcRow('Less: Primary abatement', '− ' + Rfmt(Math.min(afterSpouse, ABATEMENT)), true);
+  if (accrualClaim > 0) {
+    calcRow('Less: Accrual claim (OCP)', '− ' + Rfmt(accrualDed), true);
+    calcRow('After accrual deduction', Rfmt(afterAccrual), false, false, true);
+  }
+  calcRow('Less: Primary abatement', '− ' + Rfmt(Math.min(afterAccrual, ABATEMENT)), true);
   calcRow('Dutiable amount', Rfmt(afterAbatement), false, false, true);
 
   if (afterAbatement > 0) {
