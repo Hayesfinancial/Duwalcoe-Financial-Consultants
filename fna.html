@@ -234,6 +234,41 @@ function calcTaxPA(grossPA) {
   return Math.max(0, tax - PRIMARY_REBATE);
 }
 
+function calcMarginalRate(grossPA) {
+  var g = N(grossPA);
+  for (var i = 0; i < TAX_BRACKETS.length; i++) {
+    if (g <= TAX_BRACKETS[i].limit) return TAX_BRACKETS[i].rate;
+  }
+  return TAX_BRACKETS[TAX_BRACKETS.length - 1].rate;
+}
+
+// Full breakdown: salary (subject to UIF) + other taxable income (rental etc — PAYE but no UIF)
+function taxBreakdownFull(salaryGrossPM, otherTaxablePM) {
+  var sal   = N(salaryGrossPM);
+  var other = N(otherTaxablePM);
+  var totalGrossPM = sal + other;
+  if (totalGrossPM <= 0) return null;
+  var totalGrossPA = totalGrossPM * 12;
+  var taxPA = calcTaxPA(totalGrossPA);
+  var uifPA = Math.min(sal * 12 * UIF_RATE, UIF_MAX_ANNUAL); // UIF on salary portion only
+  var taxPM = Math.round(taxPA / 12);
+  var uifPM = Math.round(uifPA / 12);
+  return {
+    salaryGrossPM:  sal,
+    otherTaxablePM: other,
+    totalGrossPM:   totalGrossPM,
+    taxPM:          taxPM,
+    uifPM:          uifPM,
+    nettPM:         Math.round(totalGrossPM - taxPM - uifPM),
+    marginalRate:   calcMarginalRate(totalGrossPA)
+  };
+}
+
+// Legacy single-arg wrapper for callers that only have salary gross
+function taxBreakdown(grossPM) {
+  return taxBreakdownFull(N(grossPM), 0);
+}
+
 function grossFromNett(nettPM) {
   // Find gross monthly that yields nettPM after PAYE and UIF
   // Iterate: guess gross, compute nett, adjust
@@ -249,20 +284,6 @@ function grossFromNett(nettPM) {
     gross += diff * 0.7;
   }
   return Math.round(gross);
-}
-
-function taxBreakdown(grossPM) {
-  var g = N(grossPM);
-  if (g <= 0) return null;
-  var grossPA = g * 12;
-  var taxPA = calcTaxPA(grossPA);
-  var uifPA = Math.min(grossPA * UIF_RATE, UIF_MAX_ANNUAL);
-  return {
-    grossPM: g,
-    taxPM: Math.round(taxPA / 12),
-    uifPM: Math.round(uifPA / 12),
-    nettPM: Math.round(g - taxPA / 12 - uifPA / 12)
-  };
 }
 
 // ── CAPITALISATION ────────────────────────────────────────
@@ -374,7 +395,7 @@ var DEFAULTS = {
   // Assets & Liabilities
   props:      [],  // { desc, val, bond, bondPM, rental, rentalEsc, baseCost, soldAtDeath, soldAtRetirement, notes }
   vehicles:   [],  // { desc, val, finance, soldAtDeath, notes }
-  otherAssets:[], // { desc, val, type, soldAtDeath, soldAtRetirement, notes }
+  otherAssets:[], // { desc, val, type, soldAtDeath, retirementRole, retirementIncomePM, growthRate, notes }
   liabilities:[], // { desc, bal, pmt, notes }
   assetNotes: '',
 
@@ -963,98 +984,136 @@ function buildIncome() {
     var exists = S.incRows.filter(function(r){ return r.src === src; })[0];
     if (!exists) {
       var prop = S.props.filter(function(p){ return 'Rental: '+(p.desc||'Property') === src; })[0];
-      S.incRows.push({ src: src, pm: prop ? String(Math.round(N(prop.rental))) : '', _auto: true });
+      S.incRows.push({ src: src, pm: prop ? String(Math.round(N(prop.rental))) : '', _auto: true, _taxable: true });
     } else {
-      // Keep pm in sync with current rental value
       var prop2 = S.props.filter(function(p){ return 'Rental: '+(p.desc||'Property') === src; })[0];
       if (prop2) exists.pm = String(Math.round(N(prop2.rental)));
+      exists._taxable = true; // mark as taxable
     }
   });
 
   s.appendChild(stitle('Income Sources'));
   var incInf = div('info');
-  incInf.innerHTML = 'Enter all monthly income sources. ' +
-    'The <strong>first row (Salary / drawings)</strong> is used for the tax calculation and needs analysis.';
+  incInf.innerHTML = 'The <strong>first row (Salary / drawings)</strong> drives the PAYE calculation. ' +
+    'Rental income rows (from the Assets tab) are automatically included in taxable income — ' +
+    'this affects your marginal rate and RA deduction benefit. ' +
+    'Add other income below; tick the <strong>Taxable</strong> box if it\'s subject to income tax.';
   s.appendChild(incInf);
 
   var itbl = document.createElement('table');
-  itbl.innerHTML = '<thead><tr><th>Source</th><th>Gross R per month</th><th></th></tr></thead>';
+  itbl.innerHTML = '<thead><tr><th>Source</th><th>Gross R/pm</th><th>Taxable</th><th></th></tr></thead>';
   var ib = document.createElement('tbody');
   S.incRows.forEach(function(r, i) {
     var tr = document.createElement('tr');
 
-    // Source description
+    // Source description (read-only for auto rental rows)
     var t1 = document.createElement('td');
-    var si = document.createElement('input'); si.type = 'text'; si.value = r.src || '';
-    si.placeholder = i === 0 ? 'Salary / drawings' : 'e.g. Rental income';
-    si.addEventListener('input', function(e) { S.incRows[i].src = e.target.value; });
-    t1.appendChild(si); tr.appendChild(t1);
+    if (r._auto) {
+      var autoLbl = document.createElement('span');
+      autoLbl.textContent = r.src;
+      autoLbl.style.cssText = 'font-size:12px;color:var(--sub);font-style:italic';
+      t1.appendChild(autoLbl);
+    } else {
+      var si = document.createElement('input'); si.type = 'text'; si.value = r.src || '';
+      si.placeholder = i === 0 ? 'Salary / drawings' : 'e.g. Investment income, spouse salary';
+      si.addEventListener('input', function(e) { S.incRows[i].src = e.target.value; });
+      t1.appendChild(si);
+    }
+    tr.appendChild(t1);
 
-    // Amount — blur on row 0 triggers tax recalc
+    // Amount
     var t2 = document.createElement('td');
     var rw = div('td-r'); rw.appendChild(el('span', 'rp', 'R'));
     var vi = document.createElement('input'); vi.type = 'text'; vi.inputMode = 'numeric';
     vi.value = r.pm || ''; vi.placeholder = '0';
-    vi.addEventListener('input', function(e) { S.incRows[i].pm = e.target.value; });
+    vi.readOnly = !!r._auto; // auto rows are read-only (driven by Assets tab)
+    if (r._auto) vi.style.color = 'var(--sub)';
+    vi.addEventListener('input', function(e) { if (!S.incRows[i]._auto) S.incRows[i].pm = e.target.value; });
     vi.addEventListener('blur', function(e) {
-      S.incRows[i].pm = e.target.value;
-      if (i === 0) {
-        // Keep S.cli.grossPM in sync for downstream calcs
-        S.cli.grossPM = e.target.value;
-        var t = taxBreakdown(e.target.value);
-        if (t) S.cli.nettPM = String(t.nettPM);
-      }
+      if (!S.incRows[i]._auto) S.incRows[i].pm = e.target.value;
       render();
     });
     rw.appendChild(vi); t2.appendChild(rw); tr.appendChild(t2);
 
-    // Delete (don't allow deleting row 0 — salary row must stay)
-    var t3 = document.createElement('td');
-    if (i > 0) t3.appendChild(delBtn(function() { S.incRows.splice(i, 1); render(); }));
-    tr.appendChild(t3);
+    // Taxable checkbox (row 0 always taxable; auto rental always taxable — both locked)
+    var t3 = document.createElement('td'); t3.style.textAlign = 'center';
+    var tcb = document.createElement('input'); tcb.type = 'checkbox';
+    var isTaxable = (i === 0) || !!r._taxable;
+    tcb.checked = isTaxable;
+    tcb.disabled = (i === 0 || !!r._auto); // can't untick salary or auto rental
+    tcb.addEventListener('change', function(e) { S.incRows[i]._taxable = e.target.checked; render(); });
+    t3.appendChild(tcb); tr.appendChild(t3);
+
+    // Delete
+    var t4 = document.createElement('td');
+    if (i > 0 && !r._auto) t4.appendChild(delBtn(function() { S.incRows.splice(i, 1); render(); }));
+    tr.appendChild(t4);
 
     ib.appendChild(tr);
   });
   itbl.appendChild(ib);
   var itw = div('twrap'); itw.appendChild(itbl); s.appendChild(itw);
   s.appendChild(addBtn('+ Add Income Source', function() {
-    S.incRows.push({ src: '', pm: '' }); render();
+    S.incRows.push({ src: '', pm: '', _taxable: false }); render();
   }));
 
-  // Tax breakdown — always off row 0 (salary/drawings)
-  var salaryGross = N(S.incRows[0] && S.incRows[0].pm);
-  if (salaryGross > 0) {
-    var t = taxBreakdown(salaryGross);
+  // ── Tax calculation: salary + all taxable other income together
+  var salaryGross    = N(S.incRows[0] && S.incRows[0].pm);
+  var otherTaxable   = S.incRows.slice(1).reduce(function(sum, r) {
+    return sum + (r._taxable ? N(r.pm) : 0);
+  }, 0);
+  var nonTaxable     = S.incRows.slice(1).reduce(function(sum, r) {
+    return sum + (!r._taxable ? N(r.pm) : 0);
+  }, 0);
+
+  if (salaryGross > 0 || otherTaxable > 0) {
+    var t = taxBreakdownFull(salaryGross, otherTaxable);
     if (t) {
       S.cli.grossPM = String(salaryGross);
       S.cli.nettPM  = String(t.nettPM);
       var tb = div('taxbox');
       tb.style.marginTop = '12px';
       tb.innerHTML =
-        '<div class="tr"><span>Gross salary / drawings</span><span>' + Rfmt(t.grossPM) + '</span></div>' +
+        '<div class="tr"><span>Gross salary / drawings</span><span>' + Rfmt(t.salaryGrossPM) + '</span></div>' +
+        (t.otherTaxablePM > 0 ?
+          '<div class="tr"><span>Other taxable income (rental etc)</span><span>+ ' + Rfmt(t.otherTaxablePM) + '</span></div>' +
+          '<div class="tr"><span>Total taxable income p/m</span><span>' + Rfmt(t.totalGrossPM) + '</span></div>'
+          : '') +
         '<div class="tr"><span>PAYE (income tax)</span><span>− ' + Rfmt(t.taxPM) + '</span></div>' +
-        '<div class="tr"><span>UIF</span><span>− ' + Rfmt(t.uifPM) + '</span></div>' +
-        '<div class="tr tot"><span>Estimated nett salary p/m</span><span>' + Rfmt(t.nettPM) + '</span></div>';
+        '<div class="tr"><span>UIF (on salary only)</span><span>− ' + Rfmt(t.uifPM) + '</span></div>' +
+        '<div class="tr tot"><span>Estimated nett income p/m</span><span>' + Rfmt(t.nettPM) + '</span></div>' +
+        (t.otherTaxablePM > 0 ?
+          '<div class="tr" style="font-size:11px;color:#aab;margin-top:4px"><span>Marginal rate (combined income)</span><span>' +
+          Math.round(t.marginalRate * 100) + '%</span></div>'
+          : '');
       s.appendChild(tb);
+
+      if (t.otherTaxablePM > 0) {
+        var raNote = div('info');
+        raNote.style.cssText = 'font-size:11px;background:#eff6ff;border-color:#bfdbfe;color:#1e40af;margin-top:6px';
+        raNote.innerHTML = '💡 <strong>RA tax benefit:</strong> At a marginal rate of ' + Math.round(t.marginalRate * 100) +
+          '%, an RA contribution of R10 000/pm saves approximately <strong>' +
+          Rfmt(Math.round(10000 * t.marginalRate)) + ' in tax per month</strong>. ' +
+          'Rental income pushes the marginal rate up — contributing to an RA is more tax-efficient.';
+        s.appendChild(raNote);
+      }
     }
   }
 
-  // Retirement age (needs to live somewhere accessible — put it here neatly)
+  // Retirement age
   var retRow = g2(); retRow.style.marginTop = '14px';
   retRow.appendChild(sfld('Retirement Age', S.cli, 'retAge', ['55','60','63','65','67','70']));
   s.appendChild(retRow);
 
   // Total income summary
-  var nettSalary  = N(S.cli.nettPM);
-  var otherIncome = S.incRows.slice(1).reduce(function(sum, r) { return sum + N(r.pm); }, 0);
-  var totInc      = nettSalary + otherIncome;
+  var nettIncome = N(S.cli.nettPM);
+  var totInc     = nettIncome + nonTaxable; // nett already includes rental nett via taxBreakdownFull
 
   if (totInc > 0) {
     var ti = div('info'); ti.style.marginTop = '4px';
-    ti.innerHTML =
-      'Nett salary: <strong>' + Rfmt(nettSalary) + '</strong>' +
-      (otherIncome > 0 ? ' + Other income: <strong>' + Rfmt(otherIncome) + '</strong>' : '') +
-      ' = Total nett income: <strong>' + Rfmt(totInc) + ' /pm</strong>';
+    ti.innerHTML = 'Total nett income: <strong>' + Rfmt(nettIncome) + '</strong>' +
+      (nonTaxable > 0 ? ' + Non-taxable: <strong>' + Rfmt(nonTaxable) + '</strong>' : '') +
+      ' = <strong>' + Rfmt(totInc) + ' /pm</strong>';
     s.appendChild(ti);
   }
 
@@ -1156,25 +1215,61 @@ function buildAssets() {
     var card=div(); card.style.cssText='background:#fff;border:var(--border);border-radius:8px;padding:12px;margin-bottom:8px';
     var row=div(); row.style.cssText='display:grid;grid-template-columns:2fr 1fr 1fr 36px;gap:12px;align-items:end';
     var df=div('f'); df.appendChild(el('label','','Description'));
-    var di=document.createElement('input'); di.type='text'; di.value=a.desc||''; di.placeholder='e.g. Listed shares, business interest';
+    var di=document.createElement('input'); di.type='text'; di.value=a.desc||''; di.placeholder='e.g. Listed shares, farm, business';
     di.addEventListener('input',function(e){S.otherAssets[i].desc=e.target.value;}); df.appendChild(di); row.appendChild(df);
-    row.appendChild(rfld('Value', a, 'val'));
-    row.appendChild(sfld('Type', a, 'type', ['Investment','Business Interest','Inheritance','Personal','Other']));
+    row.appendChild(rfld('Current Value', a, 'val'));
+    row.appendChild(sfld('Type', a, 'type', ['Investment','Business Interest','Farm / Agricultural','Inheritance','Personal','Other']));
     var dd=div(); dd.appendChild(delBtn(function(){S.otherAssets.splice(i,1);render();})); row.appendChild(dd);
     card.appendChild(row);
-    var ar2=div(); ar2.style.cssText='display:flex;gap:16px;align-items:center;margin-top:10px;padding-top:10px;border-top:1px solid var(--mist)';
+
+    // Row 2: retirement role + growth rate + death flag
+    var ar2=div(); ar2.style.cssText='display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin-top:10px;padding-top:10px;border-top:1px solid var(--mist)';
+
+    // Retirement role — dropdown, not checkbox (farm ≠ sold)
+    var roleFld = div('f'); roleFld.style.minWidth='220px';
+    roleFld.appendChild(el('label','','Role at retirement'));
+    var roleSel = document.createElement('select');
+    roleSel.style.cssText='border:1.5px solid var(--mist);border-radius:7px;padding:7px 10px;font-size:13px;font-family:inherit;width:100%';
+    ['Not included','Sold — capital to retirement','Generates income (farm/business)','Capital available (not sold)'].forEach(function(opt){
+      var o = document.createElement('option'); o.value = opt; o.textContent = opt;
+      if ((a.retirementRole||'Not included') === opt) o.selected = true;
+      roleSel.appendChild(o);
+    });
+    roleSel.addEventListener('change',function(e){S.otherAssets[i].retirementRole=e.target.value;render();});
+    roleFld.appendChild(roleSel); ar2.appendChild(roleFld);
+
+    // Monthly income if income-generating
+    if ((a.retirementRole||'') === 'Generates income (farm/business)') {
+      var incFld = div('f'); incFld.style.minWidth='150px';
+      incFld.appendChild(el('label','','Monthly income R/pm'));
+      var incInp = document.createElement('input'); incInp.type='text'; incInp.inputMode='numeric';
+      incInp.value = a.retirementIncomePM||''; incInp.placeholder='0';
+      incInp.style.cssText='border:1.5px solid var(--mist);border-radius:7px;padding:7px 10px;font-size:13px;font-family:inherit;width:100%';
+      incInp.addEventListener('input',function(e){S.otherAssets[i].retirementIncomePM=e.target.value;});
+      incFld.appendChild(incInp); ar2.appendChild(incFld);
+    }
+
+    // Growth rate per asset (for projected value at retirement)
+    var grFld = div('f'); grFld.style.minWidth='130px';
+    grFld.appendChild(el('label','','Growth rate % p.a.'));
+    var grInp = document.createElement('input'); grInp.type='text'; grInp.inputMode='numeric';
+    grInp.value = a.growthRate||''; grInp.placeholder = 'Default: '+S.assump.growth+'%';
+    grInp.style.cssText='border:1.5px solid var(--mist);border-radius:7px;padding:7px 10px;font-size:13px;font-family:inherit;width:100%';
+    grInp.addEventListener('input',function(e){S.otherAssets[i].growthRate=e.target.value;});
+    grFld.appendChild(grInp); ar2.appendChild(grFld);
+
+    // Realised at death tick
+    var deathWrap=div(); deathWrap.style.cssText='display:flex;align-items:center;gap:6px;margin-top:4px';
     var acb1=document.createElement('input'); acb1.type='checkbox'; acb1.checked=!!a.soldAtDeath;
     acb1.addEventListener('change',function(e){S.otherAssets[i].soldAtDeath=e.target.checked;render();});
     var alb1=el('label','','Realised at death'); alb1.style.cssText='font-size:12px;cursor:pointer;color:var(--navy)';
-    ar2.appendChild(acb1); ar2.appendChild(alb1);
-    var acb2=document.createElement('input'); acb2.type='checkbox'; acb2.checked=!!a.soldAtRetirement;
-    acb2.addEventListener('change',function(e){S.otherAssets[i].soldAtRetirement=e.target.checked;render();});
-    var alb2=el('label','','Available at retirement'); alb2.style.cssText='font-size:12px;cursor:pointer;color:var(--navy)';
-    ar2.appendChild(acb2); ar2.appendChild(alb2);
+    deathWrap.appendChild(acb1); deathWrap.appendChild(alb1);
+    ar2.appendChild(deathWrap);
+
     card.appendChild(ar2);
     s.appendChild(card);
   });
-  s.appendChild(addBtn('+ Add Asset', function(){S.otherAssets.push({desc:'',val:'',type:'Investment'});render();}));
+  s.appendChild(addBtn('+ Add Asset', function(){S.otherAssets.push({desc:'',val:'',type:'Investment',retirementRole:'Not included',growthRate:''});render();}));
 
   // ── Other Liabilities
   s.appendChild(stitle('Other Liabilities'));
@@ -1602,6 +1697,34 @@ function buildRetirement() {
       return sum+projectFund(r.currentVal,r.monthlyContrib,esc,gr,yrsToR);
     },0);
 
+    // Project other assets that will be sold or are capital-available at retirement
+    var otherCapAtRet = 0;
+    var otherIncAtRet = 0; // monthly income from income-generating assets (today's R — inflated below)
+    S.otherAssets.forEach(function(a){
+      var role = a.retirementRole || 'Not included';
+      if (role === 'Not included') return;
+      var gr = N(a.growthRate) > 0 ? a.growthRate : S.assump.growth;
+      var projVal = N(a.val) * Math.pow(1 + pct(gr), yrsToR);
+      if (role === 'Sold — capital to retirement') {
+        otherCapAtRet += Math.round(projVal);
+      } else if (role === 'Capital available (not sold)') {
+        otherCapAtRet += Math.round(projVal); // not sold but available as backstop
+      } else if (role === 'Generates income (farm/business)') {
+        // Show projected income as monthly amount (inflated at CPI)
+        var incToday = N(a.retirementIncomePM);
+        otherIncAtRet += incToday > 0 ? Math.round(incToday * Math.pow(1 + pct(S.assump.cpi), yrsToR)) : 0;
+      }
+    });
+
+    // Also project rental income from properties at retirement
+    var rentalAtRet = 0;
+    S.props.forEach(function(p){
+      if (!p.soldAtRetirement && N(p.rental) > 0) {
+        var esc2 = N(p.rentalEsc) > 0 ? p.rentalEsc : S.assump.cpi;
+        rentalAtRet += Math.round(N(p.rental) * Math.pow(1 + pct(esc2), yrsToR));
+      }
+    });
+
     var monthlyNeedToday=N(S.retIncomeToday)+N(S.retMedAidToday)+N(S.retOtherMonthly);
     var lumpSumNeedToday=S.retLumps.reduce(function(sum,r){return sum+N(r.amt);},0);
 
@@ -1609,26 +1732,88 @@ function buildRetirement() {
     var monthlyAtRet=monthlyNeedToday>0?monthlyNeedToday*Math.pow(1+pct(S.assump.cpi),yrsToR):0;
     var lumpAtRet=lumpSumNeedToday>0?lumpSumNeedToday*Math.pow(1+pct(S.assump.cpi),yrsToR):0;
 
-    // Capital needed for income in retirement
-    var capForIncome=retirementCapitalNeeded(monthlyNeedToday,yrsToR,yrsInRet,S.assump.cpi,S.assump.retReturn);
-    var totalCapNeeded=capForIncome+lumpAtRet;
-    var gap=totalProj-totalCapNeeded;
+    // Monthly income from other sources at retirement reduces capital needed
+    var totalMonthlyOtherAtRet = otherIncAtRet + rentalAtRet; // already inflated
+    var monthlyGapAtRet = Math.max(0, monthlyAtRet - totalMonthlyOtherAtRet);
 
-    if(monthlyNeedToday>0||totalProj>0){
+    // Capital needed only for the income gap not covered by ongoing income sources
+    var capForIncome = retirementCapitalNeeded(
+      monthlyGapAtRet > 0 ? monthlyGapAtRet / Math.pow(1+pct(S.assump.cpi), yrsToR) : 0,
+      yrsToR, yrsInRet, S.assump.cpi, S.assump.retReturn
+    );
+    var totalCapAvail  = totalProj + otherCapAtRet;
+    var totalCapNeeded = capForIncome + lumpAtRet;
+    var gap = totalCapAvail - totalCapNeeded;
+
+    if(monthlyNeedToday>0||totalProj>0||otherCapAtRet>0){
       s.appendChild(stitle('Retirement Projection Summary'));
+
+      // Show non-RA income sources if any
+      if (totalMonthlyOtherAtRet > 0) {
+        var incSrcBox = div('info');
+        incSrcBox.style.cssText = 'background:#f0fdf4;border-color:#86efac;color:#166534;margin-bottom:10px';
+        incSrcBox.innerHTML = '✓ <strong>Other income at retirement:</strong> ';
+        var parts = [];
+        if (rentalAtRet > 0) parts.push('Rental: <strong>' + Rfmt(rentalAtRet) + '/pm</strong> (inflated at esc rate)');
+        if (otherIncAtRet > 0) parts.push('Business/farm income: <strong>' + Rfmt(otherIncAtRet) + '/pm</strong> (inflated at CPI)');
+        incSrcBox.innerHTML += parts.join(' · ');
+        incSrcBox.innerHTML += ' — this reduces the capital needed from your RA/investment funds.';
+        s.appendChild(incSrcBox);
+      }
+
       var cards2=div('cards'); cards2.style.marginTop='0';
       var cd=[
-        {l:'Projected fund at ret.',v:totalProj,c:''},
-        {l:'Monthly need (at retirement)',v:monthlyAtRet,c:''},
-        {l:'Capital required',v:totalCapNeeded,c:''},
-        {l:'Surplus / shortfall',v:gap,c:gap>=0?'ok':'bad'}
+        {l:'RA/Investment fund at ret.',v:totalProj,c:'',sub:null},
+        {l:'Other capital at retirement',v:otherCapAtRet,c:'',sub:otherCapAtRet>0?'Sold/available assets':'—'},
+        {l:'Total capital available',v:totalCapAvail,c:'ok',sub:null},
+        {l:'Monthly need (at retirement)',v:monthlyAtRet,c:'',sub:'Before other income'},
+        {l:'Monthly covered by other sources',v:totalMonthlyOtherAtRet,c:totalMonthlyOtherAtRet>0?'ok':'',sub:'Rental + farm/business'},
+        {l:'Capital needed from funds',v:totalCapNeeded,c:'',sub:'For uncovered income + lumps'},
+        {l:'Surplus / Shortfall',v:gap,c:gap>=0?'ok':'bad',sub:null}
       ];
       cd.forEach(function(x){
-        var c=div('card'); c.innerHTML='<div class="lbl">'+x.l+'</div><div class="val '+x.c+'">'+Rfmt(x.v)+'</div>'; cards2.appendChild(c);
+        var c=div('card');
+        c.innerHTML='<div class="lbl">'+x.l+'</div><div class="val '+x.c+'">'+Rfmt(Math.abs(x.v))+(x.v<0&&x.l.indexOf('Surplus')>-1?' ▼':'')+( x.v===0&&x.l.indexOf('Other')>-1?'<span style="font-size:12px;color:var(--sub)"> —</span>':'')+
+          '</div>'+(x.sub?'<div class="sub">'+x.sub+'</div>':'');
+        cards2.appendChild(c);
       });
       s.appendChild(cards2);
-      var rdet=div('info');
-      rdet.innerHTML='Assumptions: CPI '+S.assump.cpi+'% · Growth '+S.assump.growth+'% · Return on capital in retirement '+S.assump.retReturn+'% · Life expectancy 85 · Years in retirement: '+yrsInRet;
+
+      // Other asset projections detail table
+      var hasOtherRet = S.otherAssets.some(function(a){ return (a.retirementRole||'Not included') !== 'Not included'; }) ||
+                        S.props.some(function(p){ return N(p.rental) > 0 && !p.soldAtRetirement; });
+      if (hasOtherRet) {
+        s.appendChild(el('div','',''));
+        var otherTbl = document.createElement('table');
+        otherTbl.innerHTML = '<thead><tr><th>Asset</th><th>Current value</th><th>Growth %</th><th>Projected at retirement</th><th>Role</th></tr></thead>';
+        var otherTb = document.createElement('tbody');
+        S.otherAssets.forEach(function(a){
+          var role = a.retirementRole || 'Not included';
+          if (role === 'Not included') return;
+          var gr = N(a.growthRate) > 0 ? a.growthRate : S.assump.growth;
+          var projV = Math.round(N(a.val) * Math.pow(1+pct(gr), yrsToR));
+          var tr3 = document.createElement('tr');
+          tr3.innerHTML = '<td>'+( a.desc||'Asset')+'</td><td>'+Rfmt(a.val)+'</td><td>'+gr+'%</td><td style="font-weight:700">'+Rfmt(projV)+'</td>' +
+            '<td style="font-size:11px;color:var(--sub)">'+role+'</td>';
+          otherTb.appendChild(tr3);
+        });
+        S.props.forEach(function(p){
+          if (!N(p.rental) || p.soldAtRetirement) return;
+          var esc3 = N(p.rentalEsc) > 0 ? p.rentalEsc : S.assump.cpi;
+          var projRent = Math.round(N(p.rental) * Math.pow(1+pct(esc3), yrsToR));
+          var trR = document.createElement('tr');
+          trR.innerHTML = '<td>'+(p.desc||'Property')+' (rental)</td><td>'+Rfmt(p.rental)+'/pm</td><td>'+esc3+'%</td><td style="font-weight:700">'+Rfmt(projRent)+'/pm</td>' +
+            '<td style="font-size:11px;color:var(--sub)">Ongoing income</td>';
+          otherTb.appendChild(trR);
+        });
+        otherTbl.appendChild(otherTb);
+        var otw = div('twrap'); otw.appendChild(otherTbl); s.appendChild(otw);
+      }
+
+      var rdet=div('info'); rdet.style.marginTop='8px';
+      rdet.innerHTML='Assumptions: CPI '+S.assump.cpi+'% · RA/fund growth default '+S.assump.growth+
+        '% · Drawdown rate in retirement '+S.assump.retReturn+'% · Life expectancy 85 · Years in retirement: '+yrsInRet+
+        '<br><span style="font-size:11px">Blank growth rates on retirement cards use the default '+S.assump.growth+'%. Blank other-asset growth uses the same default.</span>';
       s.appendChild(rdet);
     }
   }
