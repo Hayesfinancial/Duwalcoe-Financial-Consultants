@@ -484,8 +484,20 @@ var S = JSON.parse(JSON.stringify(DEFAULTS));
   if (params.get('occ'))       S.cli.occ        = decodeURIComponent(params.get('occ'));
   if (params.get('edu'))       S.cli.education  = decodeURIComponent(params.get('edu'));
   if (params.get('spouse'))    S.cli.spouseName = decodeURIComponent(params.get('spouse'));
-  if (params.get('spousedob')) S.cli.spouseDob  = decodeURIComponent(params.get('spousedob'));
-  if (params.get('domdate'))   S.cli.domDate    = decodeURIComponent(params.get('domdate'));
+  if (params.get('spousedob')) {
+    var rawSpDob = decodeURIComponent(params.get('spousedob'));
+    if (rawSpDob.indexOf('T') > -1) rawSpDob = rawSpDob.split('T')[0];
+    var sd = rawSpDob.split('-');
+    if (sd.length === 3) S.cli.spouseDob = sd[2] + '/' + sd[1] + '/' + sd[0];
+    else S.cli.spouseDob = rawSpDob;
+  }
+  if (params.get('domdate')) {
+    var rawDom = decodeURIComponent(params.get('domdate'));
+    // Handle ISO timestamp e.g. 2005-03-15T22:00:00.000Z -> extract date part only
+    if (rawDom.indexOf('T') > -1) rawDom = rawDom.split('T')[0];
+    // Convert YYYY-MM-DD to the HTML date input format (which IS YYYY-MM-DD — keep as-is)
+    S.cli.domDate = rawDom;
+  }
   if (params.get('pols')) {
     try {
       var pols = JSON.parse(decodeURIComponent(params.get('pols')));
@@ -762,9 +774,8 @@ function buildClient() {
   r4.appendChild(fld('Spouse / Partner Name', S.cli, 'spouseName', { placeholder: 'Full name' }));
   s.appendChild(r4);
 
-  var r5 = g3();
+  var r5 = g2();
   r5.appendChild(fld('Spouse DOB (DD/MM/YYYY)', S.cli, 'spouseDob', { placeholder: '01/01/1982' }));
-  r5.appendChild(fld('Spouse Occupation', S.cli, 'spouseOcc', { placeholder: 'e.g. Teacher' }));
   s.appendChild(r5);
 
   s.appendChild(stitle('Dependants'));
@@ -868,11 +879,11 @@ function buildScope() {
 function buildIncome() {
   var s = div();
 
-  s.appendChild(stitle('Gross Income & Tax'));
-  var rg1 = g3();
+  s.appendChild(stitle('Primary Income & Tax'));
+  var rg1 = g2();
   // Gross income field with tax calc on blur
   var gf = div('f');
-  var glb = el('label','','Gross Income (R/pm)');
+  var glb = el('label','','Gross Monthly Salary / Drawings (R/pm)');
   var gw = div('rw'); var grp = el('span','rp','R');
   var ginp = document.createElement('input'); ginp.type='text'; ginp.inputMode='numeric';
   ginp.value = S.cli.grossPM || ''; ginp.placeholder='0';
@@ -886,7 +897,6 @@ function buildIncome() {
   });
   gw.appendChild(grp); gw.appendChild(ginp); gf.appendChild(glb); gf.appendChild(gw);
   rg1.appendChild(gf);
-  rg1.appendChild(rfld('Nett Income (R/pm)', S.cli, 'nettPM'));
   rg1.appendChild(sfld('Retirement Age', S.cli, 'retAge', ['55','60','63','65','67','70']));
   s.appendChild(rg1);
 
@@ -894,6 +904,7 @@ function buildIncome() {
   if (N(S.cli.grossPM) > 0) {
     var t = taxBreakdown(S.cli.grossPM);
     if (t) {
+      S.cli.nettPM = String(t.nettPM);
       var tb = div('taxbox');
       tb.innerHTML =
         '<div class="tr"><span>Gross income p/m</span><span>' + Rfmt(t.grossPM) + '</span></div>' +
@@ -904,13 +915,16 @@ function buildIncome() {
     }
   }
 
-  s.appendChild(stitle('All Income Sources'));
+  s.appendChild(stitle('Other Income Sources'));
+  var otherInf = div('info');
+  otherInf.textContent = 'Add rental income, investment income, spouse income, or any other regular income streams below.';
+  s.appendChild(otherInf);
   var itbl = document.createElement('table');
-  itbl.innerHTML = '<thead><tr><th>Source</th><th>R per month</th><th></th></tr></thead>';
+  itbl.innerHTML = '<thead><tr><th>Source</th><th>R per month (nett)</th><th></th></tr></thead>';
   var ib = document.createElement('tbody');
   S.incRows.forEach(function(r,i){
     var tr = document.createElement('tr');
-    var t1 = document.createElement('td'); var si = document.createElement('input'); si.type='text'; si.value=r.src||''; si.placeholder='Source description';
+    var t1 = document.createElement('td'); var si = document.createElement('input'); si.type='text'; si.value=r.src||''; si.placeholder='e.g. Rental income, spouse salary';
     si.addEventListener('input',function(e){S.incRows[i].src=e.target.value;}); t1.appendChild(si); tr.appendChild(t1);
     var t2 = document.createElement('td'); var rw=div('td-r'); rw.appendChild(el('span','rp','R'));
     var vi = document.createElement('input'); vi.type='text'; vi.inputMode='numeric'; vi.value=r.pm||''; vi.placeholder='0';
@@ -921,20 +935,27 @@ function buildIncome() {
   itbl.appendChild(ib); var itw=div('twrap'); itw.appendChild(itbl); s.appendChild(itw);
   s.appendChild(addBtn('+ Add Income Source', function(){S.incRows.push({src:'',pm:''});render();}));
 
-  var totInc = S.incRows.reduce(function(sum,r){return sum+N(r.pm);},0);
-  if(totInc>0){
-    var ti=div('info'); ti.style.marginTop='12px';
-    ti.textContent='Total income: '+Rfmt(totInc)+' /pm';
+  // Total income = nett salary + other sources
+  var nettSalary = N(S.cli.nettPM);
+  var otherIncome = S.incRows.reduce(function(sum,r){return sum+N(r.pm);},0);
+  var totInc = nettSalary + otherIncome;
+
+  if(totInc > 0){
+    var ti = div('info'); ti.style.marginTop='12px';
+    ti.innerHTML =
+      'Nett salary: <strong>' + Rfmt(nettSalary) + '</strong>' +
+      (otherIncome > 0 ? ' + Other income: <strong>' + Rfmt(otherIncome) + '</strong>' : '') +
+      ' = Total nett income: <strong>' + Rfmt(totInc) + ' /pm</strong>';
     s.appendChild(ti);
   }
 
   s.appendChild(stitle('Monthly Expenses'));
   var eg=g2();
   eg.appendChild(rfld('Total monthly expenses', S, 'expenses'));
-  var surplus = totInc-N(S.expenses);
+  var surplus = totInc - N(S.expenses);
   var sf=div('f'); var slb=el('label','','Monthly surplus / shortfall');
   var si2=document.createElement('input'); si2.type='text'; si2.readOnly=true;
-  si2.value = totInc>0&&N(S.expenses)>0 ? (surplus>=0?'+ ':'')+Rfmt(surplus) : '';
+  si2.value = totInc>0 && N(S.expenses)>0 ? (surplus>=0?'+ ':'')+Rfmt(surplus) : '';
   si2.style.fontWeight='700';
   si2.style.color = surplus>=0?'var(--green)':'var(--red)';
   sf.appendChild(slb); sf.appendChild(si2);
@@ -1050,7 +1071,23 @@ function buildNeeds() {
   // ── DEATH ──────────────────────────────────────────────
   if(S.scope.death){
     s.appendChild(stitle('Death — Liabilities to be Settled'));
-    var inf2=div('info'); inf2.textContent='These amounts are paid from the estate / life cover before any income needs are funded.'; s.appendChild(inf2);
+    var inf2=div('info'); inf2.innerHTML='These amounts are paid from the estate / life cover before any income needs are funded. ' +
+      'Bond and vehicle finance amounts are <strong>pre-filled from the Assets tab</strong> — edit if needed.'; s.appendChild(inf2);
+
+    // Auto-sync bond and vehicle finance from Assets tab into deathLiabs
+    // We do this by description key — only update if the Assets tab has values
+    var totalBond = S.props.reduce(function(sum,p){return sum+N(p.bond);},0);
+    var totalVehicleFinance = S.vehicles.reduce(function(sum,v){return sum+N(v.finance);},0);
+    var totalOtherLiabs = S.liabilities.reduce(function(sum,l){return sum+N(l.bal);},0);
+
+    // Find and update the bond row
+    var bondRow = S.deathLiabs.filter(function(r){return r.desc==='Bond / mortgage';})[0];
+    if(bondRow && totalBond > 0) bondRow.amt = String(Math.round(totalBond));
+
+    // Find and update vehicle finance row
+    var vehRow = S.deathLiabs.filter(function(r){return r.desc==='Vehicle finance';})[0];
+    if(vehRow && totalVehicleFinance > 0) vehRow.amt = String(Math.round(totalVehicleFinance));
+
     var lt=document.createElement('table');
     lt.innerHTML='<thead><tr><th>Description</th><th>Amount</th><th></th></tr></thead>';
     var lb2=document.createElement('tbody');
@@ -1317,7 +1354,28 @@ function buildRetirement() {
 
   // ── Retirement assets
   s.appendChild(stitle('Retirement Assets (RAs, Pension Funds, Investments)'));
-  var inf2=div('info'); inf2.textContent='These assets project forward to retirement. Policies already captured in the CRM can be referenced here — enter current fund value and monthly contribution.'; s.appendChild(inf2);
+
+  // Auto-seed retAssets from imported RA/pension/investment policies if retAssets is empty
+  var raPolTypes = ['Retirement Annuity','Pension Fund','Provident Fund','Pension Preservation','Provident Preservation',
+                    'Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment',
+                    'Unit Trust','Tax Free Savings','Living Annuity'];
+  if (S.retAssets.length === 0 && S.importedPols && S.importedPols.length > 0) {
+    S.importedPols.forEach(function(p) {
+      if (raPolTypes.indexOf(p.Type) > -1) {
+        S.retAssets.push({
+          desc: (p.Insurer ? p.Insurer + ' — ' : '') + (p.Type || 'Policy'),
+          currentVal: p.BenFundValue || '',
+          monthlyContrib: p.Premium && (p.Frequency === 'Monthly' || !p.Frequency) ? p.Premium : '',
+          contribEsc: '',
+          growthRate: ''
+        });
+      }
+    });
+  }
+
+  var inf2=div('info'); inf2.innerHTML='These assets project forward to retirement. ' +
+    (S.retAssets.length > 0 ? 'Pre-populated from imported policies — ' : '') +
+    'Enter or update current fund values and monthly contributions.'; s.appendChild(inf2);
 
   S.retAssets.forEach(function(r,i){
     var card=div(); card.style.cssText='background:#fff;border:var(--border);border-radius:8px;padding:14px;margin-bottom:10px';
@@ -1620,12 +1678,50 @@ function buildPolCard(p, i) {
     bst2.style.marginTop = '10px';
     card.appendChild(bst2);
     var rb2 = g2();
-    rb2.appendChild(rfld('Current Fund Value', p, 'FundValue'));
+    rb2.appendChild(rfld('Current Fund Value', p, 'BenFundValue'));
     rb2.appendChild(rfld('Death Benefit',      p, 'BenDeath'));
     card.appendChild(rb2);
+    // Also show premium as contribution label
+    var premNote = div('info');
+    premNote.style.cssText = 'font-size:11px;padding:6px 10px;margin-top:-4px';
+    premNote.textContent = 'Premium field above = monthly contribution for this fund.';
+    card.appendChild(premNote);
   }
 
-  // ── Beneficiary section
+  if (isBiz) {
+    var bstBiz = el('div','stitle','Business Assurance Details');
+    bstBiz.style.marginTop = '10px';
+    card.appendChild(bstBiz);
+    var rbBiz = g3();
+    rbBiz.appendChild(sfld('Business Type', p, 'BizType', ['','Buy & Sell','Keyman','Contingent Liability']));
+    rbBiz.appendChild(rfld('Cover / Loan Amount', p, 'LoanAmount'));
+    rbBiz.appendChild(rfld('Death Benefit', p, 'BenDeath'));
+    card.appendChild(rbBiz);
+    var bizNote = div('info');
+    bizNote.style.cssText = 'font-size:11px;padding:6px 10px;margin-top:-4px;background:#eff6ff;border-color:#bfdbfe;color:#1e40af';
+    bizNote.innerHTML = '<strong>Buy &amp; Sell</strong> pays to co-shareholder · <strong>Keyman</strong> pays to business · <strong>Contingent Liability</strong> settles business debt. None form part of personal estate.';
+    card.appendChild(bizNote);
+  }
+  // Parse Beneficiaries array (CRM format) on first render to seed BeneficiaryType/Beneficiary
+  if (p.Beneficiaries && !p._bensSeeded) {
+    try {
+      var bensArr = JSON.parse(p.Beneficiaries);
+      if (bensArr && bensArr.length > 0) {
+        // Use the first (primary) beneficiary to seed the simple fields
+        var primaryBen = bensArr[0];
+        if (!p.BeneficiaryType && primaryBen.type) p.BeneficiaryType = primaryBen.type;
+        if (!p.Beneficiary && primaryBen.name)     p.Beneficiary     = primaryBen.name;
+        // Auto-set EstateDutiable from type if not set
+        if (!p.EstateDutiable) {
+          if (p.BeneficiaryType === 'Spouse')        p.EstateDutiable = 'No';
+          else if (p.BeneficiaryType === 'Estate')   p.EstateDutiable = 'Yes';
+          else if (p.BeneficiaryType === 'Third Party') p.EstateDutiable = 'No';
+        }
+        p._bensSeeded = true;
+      }
+    } catch(e) {}
+  }
+
   var benSt = el('div','stitle','Beneficiary & Estate Routing');
   benSt.style.marginTop = '10px';
   card.appendChild(benSt);
@@ -1841,9 +1937,13 @@ function buildEstate() {
 
   pols.forEach(function(p) {
     var ben = N(p.BenDeath);
-    if (!ben) {
-      // For RAs/investments, use FundValue if no BenDeath
-      ben = N(p.FundValue);
+    if (!ben && (POL_RA_TYPES.indexOf(p.Type) > -1 || POL_INV_TYPES.indexOf(p.Type) > -1)) {
+      ben = N(p.BenFundValue);  // Use fund value for RA/investments
+    }
+    if (p.Type === 'Business Assurance') {
+      // Business assurance goes to toBiz regardless of beneficiary — outside personal estate
+      toBiz += N(p.LoanAmount) || N(p.BenDeath);
+      return; // skip personal routing
     }
     if (!ben) return;
     var bt = p.BeneficiaryType || '';
