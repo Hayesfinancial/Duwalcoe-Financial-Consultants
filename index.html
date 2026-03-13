@@ -256,6 +256,7 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--cream);c
     <textarea id="notepad-text" placeholder="Type notes here… switching tabs auto-inserts a section label." style="width:100%;height:220px;border:none;outline:none;padding:12px 14px;font-size:13px;font-family:'DM Sans',sans-serif;color:var(--ink);resize:none;line-height:1.7;background:#fffef8"></textarea>
     <div style="padding:8px 10px;border-top:1px solid var(--smoke);display:flex;gap:6px;background:#fafaf6">
       <button id="notepad-task-btn" class="btn b-nv xs" style="flex:1">+ Create Task</button>
+      <button id="notepad-save-btn" class="btn b-sg xs" style="flex:1" title="Append to client's permanent notes with timestamp">💾 Save to Notes</button>
       <button id="notepad-clear-btn" class="btn b-gh xs">Clear</button>
     </div>
   </div>
@@ -3444,6 +3445,34 @@ if(checkAuth()) bootApp();
     if(!confirm('Clear notes for this client?')) return;
     textarea.value = '';
     if(SEL) clearNote(SEL);
+  });
+
+  document.getElementById('notepad-save-btn').addEventListener('click', function(){
+    if(!SEL){ toast('No client open','err'); return; }
+    var text = textarea.value.trim();
+    if(!text){ toast('Nothing to save','err'); return; }
+    var c = DB.clients.find(function(x){ return String(x.ID)===String(SEL); });
+    if(!c){ toast('Client not found','err'); return; }
+    // Build timestamped entry
+    var now = new Date();
+    var dateStr = now.toLocaleDateString('en-ZA',{day:'numeric',month:'long',year:'numeric'});
+    var timeStr = now.toLocaleTimeString('en-ZA',{hour:'2-digit',minute:'2-digit'});
+    var entry = '[' + dateStr + ' ' + timeStr + ' — ' + cu() + ']\n' + text;
+    // Append to existing notes — never overwrite
+    var existing = (c.Notes || '').trim();
+    c.Notes = existing ? existing + '\n\n' + entry : entry;
+    // Update in DB
+    var idx = DB.clients.findIndex(function(x){ return String(x.ID)===String(SEL); });
+    if(idx >= 0) DB.clients[idx].Notes = c.Notes;
+    // Save to Google Sheets
+    post({action:'saveClient', client:c}, function(){
+      toast('Saved to client notes ✅','ok');
+    });
+    // Clear the notepad scratchpad after saving
+    textarea.value = '';
+    if(SEL) clearNote(SEL);
+    // Refresh the profile if on overview tab so notes appear immediately
+    if(PAGE === 'client' && CTAB === 'overview') render();
   });
 
   var dragging = false, dragOffX = 0, dragOffY = 0;
