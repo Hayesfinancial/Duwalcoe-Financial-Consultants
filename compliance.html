@@ -827,8 +827,16 @@
       <div class="divider"></div>
       <div class="section-title" style="font-size:1rem">Section F: Adviser Declaration</div>
       <div class="field-group">
-        <label>Products client elected NOT to accept</label>
-        <textarea id="roa-declined" placeholder="List any recommendations the client declined (leave blank if none)..." oninput="updatePreviews()"></textarea>
+        <label>Client's response to recommendations</label>
+        <select id="roa-declined" onchange="updatePreviews()">
+          <option value="Accepted">All recommendations accepted</option>
+          <option value="Not Accepted">Recommendations not accepted</option>
+          <option value="Partially Accepted">Recommendations partially accepted</option>
+        </select>
+      </div>
+      <div class="field-group" id="declinedReasonBlock" style="display:none">
+        <label>Products NOT accepted / reasons</label>
+        <textarea id="roa-declinedReason" placeholder="List which recommendations were not accepted and reasons..." oninput="updatePreviews()"></textarea>
       </div>
       <div class="field-row">
         <div class="field-group">
@@ -868,6 +876,29 @@
           <option value="YES">Yes</option>
           <option value="NO">No</option>
         </select>
+      </div>
+
+      <div class="divider"></div>
+      <div class="section-title" style="font-size:1rem">Signatures</div>
+      <div class="field-row">
+        <div class="field-group">
+          <label>Client Name (print)</label>
+          <input type="text" id="roa-sigClientName" placeholder="Full name" oninput="updatePreviews()">
+        </div>
+        <div class="field-group">
+          <label>Client Signature Date</label>
+          <input type="date" id="roa-sigClientDate" onchange="updatePreviews()">
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field-group">
+          <label>Adviser Name</label>
+          <input type="text" id="roa-sigAdviser" value="Clinton Hayes" readonly>
+        </div>
+        <div class="field-group">
+          <label>Adviser Signature Date</label>
+          <input type="date" id="roa-sigAdviserDate" onchange="updatePreviews()">
+        </div>
       </div>
 
       <button class="download-btn" onclick="downloadROA()">
@@ -916,6 +947,15 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   document.getElementById('fnaReasonBlock').style.display = 'none';
 
+  document.getElementById('roa-declined').addEventListener('change', function() {
+    document.getElementById('declinedReasonBlock').style.display =
+      (this.value === 'Not Accepted' || this.value === 'Partially Accepted') ? 'block' : 'none';
+    updatePreviews();
+  });
+
+  // Pre-fill adviser sig date with today
+  document.getElementById('roa-sigAdviserDate').value = document.getElementById('meetingDate').value;
+
   document.getElementById('meetingDate').addEventListener('change', function() {
     const d = this.value ? formatDate(this.value) : '';
     document.getElementById('csa-date').value = d;
@@ -948,14 +988,7 @@ function buildNeedsTable() {
         </select>
       </td>
       <td><input type="text" id="need-${i}-short" placeholder="R" oninput="updatePreviews()"></td>
-      <td>
-        <select id="need-${i}-rev" onchange="updatePreviews()">
-          <option value="">—</option>
-          <option>P</option>
-          <option>L</option>
-          <option>P/L</option>
-        </select>
-      </td>
+      <td><input type="date" id="need-${i}-rev" onchange="updatePreviews()" style="width:100%;padding:4px;border:1px solid var(--border);border-radius:4px;font-size:0.75rem;font-family:inherit"></td>
     `;
     tbody.appendChild(tr);
   });
@@ -1162,22 +1195,31 @@ function renderCSAPreview() {
 }
 
 function renderROAPreview() {
-  const name  = v('roa-clientName') || '[Client Name]';
-  const date  = v('roa-date') || '[Date]';
-  const obj   = v('roa-objectives') || '—';
-  const fin   = v('roa-finSituation') || '—';
-  const exp   = v('roa-prodExp') || '—';
-  const rec   = v('roa-recommended') || '—';
-  const mot   = v('roa-motivation') || '—';
-  const hi    = v('roa-highlighted') || '—';
-  const dec   = v('roa-declined') || 'None';
-  const cons  = v('roa-consequences');
-  const fna   = v('roa-fnaCompleted');
-  const fnaNot= v('roa-fnaReason');
-  const pol1  = v('roa-pol1');
-  const pol2  = v('roa-pol2');
-  const com   = v('roa-comments') || '—';
-  const copy  = v('roa-copyReq');
+  const name       = v('roa-clientName') || '[Client Name]';
+  const date       = v('roa-date') || '[Date]';
+  const obj        = v('roa-objectives') || '—';
+  const fin        = v('roa-finSituation') || '—';
+  const exp        = v('roa-prodExp') || '—';
+  const rec        = v('roa-recommended') || '—';
+  const mot        = v('roa-motivation') || '—';
+  const hi         = v('roa-highlighted') || '—';
+  const dec        = v('roa-declined') || 'Accepted';
+  const decReason  = v('roa-declinedReason');
+  const cons       = v('roa-consequences');
+  const fna        = v('roa-fnaCompleted');
+  const fnaNot     = v('roa-fnaReason');
+  const pol1       = v('roa-pol1');
+  const pol2       = v('roa-pol2');
+  const com        = v('roa-comments') || '—';
+  const copy       = v('roa-copyReq');
+  const sigCName   = v('roa-sigClientName') || name;
+  const sigCDate   = v('roa-sigClientDate') ? formatDate(v('roa-sigClientDate')) : '___________________';
+  const sigADate   = v('roa-sigAdviserDate') ? formatDate(v('roa-sigAdviserDate')) : '___________________';
+
+  function fmtRevDate(val) {
+    if (!val) return '—';
+    try { return formatDate(val); } catch(e) { return val; }
+  }
 
   let needsRows = NEEDS_ROWS.map((n, i) => {
     return `<tr>
@@ -1186,7 +1228,7 @@ function renderROAPreview() {
       <td>${v(`need-${i}-pri`) || '—'}</td>
       <td>${v(`need-${i}-addr`) || '—'}</td>
       <td>${v(`need-${i}-short`) || '—'}</td>
-      <td>${v(`need-${i}-rev`) || '—'}</td>
+      <td>${fmtRevDate(v(`need-${i}-rev`))}</td>
     </tr>`;
   }).join('');
 
@@ -1196,45 +1238,47 @@ function renderROAPreview() {
   }).join('');
 
   return `${logoRow()}
-  <h1>Life and Investment Product — Record of Advice</h1>
-  <table style="margin-bottom:8px"><tbody>
-    <tr><td style="width:50%"><strong>Client:</strong> ${name}</td><td><strong>Adviser:</strong> Clinton Hayes</td></tr>
+  <h1>Life and Investment Product Client Advice Record</h1>
+  <table style="margin-bottom:6px"><tbody>
+    <tr><td style="width:50%"><strong>Client Name:</strong> ${name}</td><td><strong>Advisor Name:</strong> Clinton Hayes</td></tr>
     <tr><td><strong>Date:</strong> ${date}</td><td><strong>FSP No:</strong> 9978</td></tr>
   </tbody></table>
-  <p style="font-size:7.5px;font-style:italic">In terms of FAIS, we are required to provide you with a Record of Advice confirming the advisory process recently undertaken. You are entitled to a copy of this document.</p>
+  <p style="font-size:7.5px;font-style:italic;border:1px solid #ddd;padding:4px;background:#fafafa">In terms of the Financial Advisory and Intermediary Services Act, we are required to provide you, the client, with a <strong>Record of Advice</strong>. This document is intended as confirmation of the advisory process that you recently undertook with your advisor. If you have any questions in respect of the content, please contact your advisor. You are entitled to <strong>a copy of this document for your own records</strong>.</p>
 
-  <h2>A — Summary of Client Information</h2>
-  <p><strong>Objectives:</strong> ${obj}</p>
+  <h2>SECTION A: Summary of Information Obtained from the Client</h2>
+  <p><strong>Client's Objectives:</strong> ${obj}</p>
   <p><strong>Financial Situation:</strong> ${fin}</p>
-  <p><strong>Product Experience:</strong> ${exp}</p>
+  <p><strong>Current Product Experience:</strong> ${exp}</p>
 
-  <h2>B — Needs &amp; Goals Identified</h2>
-  <table><thead><tr><th>Need</th><th>Amount (R)</th><th>Priority</th><th>Addressed</th><th>Shortfall</th><th>Review</th></tr></thead><tbody>${needsRows}</tbody></table>
+  <h2>SECTION B: Needs &amp; Goals Identified</h2>
+  <table><thead><tr><th>Financial Planning Need</th><th>Needs / Quantified</th><th>Priority</th><th>Fully / Partially Addressed</th><th>Shortfall</th><th>Review Date</th></tr></thead><tbody>${needsRows}</tbody></table>
 
-  <h2>C — Products Considered</h2>
+  <h2>SECTION C: Products Considered</h2>
   ${companies ? `<table><thead><tr><th>Company</th><th>Product</th><th>Premium</th><th>Quote on File</th></tr></thead><tbody>${companies}</tbody></table>` : '<p>—</p>'}
 
-  <h2>D — Recommendation &amp; Motivation</h2>
-  <p><strong>Recommended:</strong> ${rec}</p>
-  <p><strong>Motivation:</strong> ${mot}</p>
+  <h2>SECTION D: Initial Recommendation / Advice &amp; Motivation</h2>
+  <p><strong>Products / Funds Recommended and/or Selected by Client:</strong> ${rec}</p>
+  <p><strong>Motivation for Recommendations:</strong> ${mot}</p>
 
-  <h2>E — Important Information Highlighted</h2>
+  <h2>SECTION E: Important Information Highlighted to the Client</h2>
   <p>${hi}</p>
 
-  <h2>F — Adviser Declaration</h2>
-  <p><strong>Products declined by client:</strong> ${dec}</p>
-  <p><strong>Consequences explained:</strong> ${cons} &nbsp;&nbsp; <strong>FNA completed:</strong> ${fna}</p>
-  ${fna === 'N' && fnaNot ? `<p><strong>FNA not done — reason:</strong> ${fnaNot}</p>` : ''}
+  <h2>SECTION F: Financial Adviser's Declaration</h2>
+  <p><strong>Client's response to recommendations:</strong> ${dec}</p>
+  ${decReason ? `<p><strong>Details:</strong> ${decReason}</p>` : ''}
+  <p><strong>Consequences clearly explained to client (Y/N):</strong> ${cons} &nbsp;&nbsp;&nbsp; <strong>FNA completed (Y/N):</strong> ${fna}</p>
+  ${fna === 'N' && fnaNot ? `<p><strong>If FNA NOT done — reason:</strong> ${fnaNot}</p>` : ''}
 
   <h2>Additional Comments</h2>
-  ${pol1 ? `<p><strong>Policy/Investment 1:</strong> ${pol1}</p>` : ''}
-  ${pol2 ? `<p><strong>Policy/Investment 2:</strong> ${pol2}</p>` : ''}
-  <p>${com}</p>
-  <p><strong>Client requires copy:</strong> ${copy}</p>
+  <p>The above declarations apply to the purchase of the following products:</p>
+  ${pol1 ? `<p><strong>Policy / Investment No. 1:</strong> ${pol1}</p>` : '<p><strong>Policy / Investment No. 1:</strong> ___________________</p>'}
+  ${pol2 ? `<p><strong>Policy / Investment No. 2:</strong> ${pol2}</p>` : '<p><strong>Policy / Investment No. 2:</strong> ___________________</p>'}
+  <p><strong>Comments:</strong> ${com}</p>
+  <p>You are entitled to a copy of this document for your own records, please mail to me: <strong>${copy}</strong></p>
 
-  <div class="sig-row">
-    <div class="sig-block">Client: ${name}<br>Signature: ___________________<br>Date: ___________________</div>
-    <div class="sig-block">Adviser: Clinton Hayes<br>Signature: ___________________<br>Date: ___________________</div>
+  <div class="sig-row" style="margin-top:10px">
+    <div class="sig-block"><strong>Client Name:</strong> ${sigCName}<br>Client Signature: ___________________<br>Date: ${sigCDate}</div>
+    <div class="sig-block"><strong>Advisor's Name: Clinton Hayes</strong><br>Advisor's Signature: ___________________<br>Date: ${sigADate}</div>
   </div>`;
 }
 
@@ -1636,34 +1680,50 @@ function downloadCSA() {
 
 // ── ROA PDF ──
 function downloadROA() {
-  const name = v('roa-clientName') || 'Client';
-  const date = v('roa-date') || '—';
+  const name     = v('roa-clientName') || 'Client';
+  const date     = v('roa-date') || '—';
+  const sigCName = v('roa-sigClientName') || name;
+  const sigCDate = v('roa-sigClientDate') ? formatDate(v('roa-sigClientDate')) : '___________________';
+  const sigADate = v('roa-sigAdviserDate') ? formatDate(v('roa-sigAdviserDate')) : '___________________';
+
+  function fmtRevDate(val) {
+    if (!val) return '';
+    try { return formatDate(val); } catch(e) { return val; }
+  }
 
   makePDF((doc, f) => {
     f.drawHeader();
-    f.heading1('Life and Investment Product — Client Advice Record (ROA)');
+    f.heading1('Life and Investment Product Client Advice Record');
 
     f.keyVal([
       ['Client Name', name],
-      ['Adviser', 'Clinton Hayes'],
+      ['Advisor Name', 'Clinton Hayes'],
       ['Date', date],
       ['FSP No.', '9978'],
     ]);
 
-    doc.setFontSize(7.5);
-    doc.setFont('helvetica','italic');
-    doc.setTextColor(100,100,100);
-    doc.text('In terms of FAIS, we are required to provide you with a Record of Advice confirming the advisory process recently undertaken with your adviser.', f.margin, f.y());
-    f.setY(f.y() + 6);
+    // Full FAIS disclaimer box
+    f.checkPage(18);
+    const { margin, contentW, NAVY, BLACK, MUTED } = f;
+    let y = f.y();
+    doc.setFillColor(250,250,248);
+    doc.setDrawColor(200,200,200);
+    doc.setLineWidth(0.3);
+    doc.rect(margin, y, contentW, 16, 'FD');
+    doc.setFontSize(7.5); doc.setFont('helvetica','italic'); doc.setTextColor(60,60,60);
+    const disclaimer = 'In terms of the Financial Advisory and Intermediary Services Act, we are required to provide you, the client, with a Record of Advice. This document is intended as confirmation of the advisory process that you recently undertook with your advisor. If you have any questions in respect of the content, please contact your advisor. You are entitled to a copy of this document for your own records.';
+    const dLines = doc.splitTextToSize(disclaimer, contentW - 6);
+    dLines.forEach((line, li) => { doc.text(line, margin + 3, y + 5 + li * 3.8); });
+    f.setY(y + 18);
 
-    f.heading2('SECTION A — Summary of Information Obtained from the Client');
-    f.para('Objectives', v('roa-objectives') || '—');
+    f.heading2('SECTION A: SUMMARY OF INFORMATION OBTAINED FROM THE CLIENT');
+    f.para("Client's Objectives", v('roa-objectives') || '—');
     f.para('Financial Situation', v('roa-finSituation') || '—');
     f.para('Current Product Experience', v('roa-prodExp') || '—');
 
-    f.heading2('SECTION B — Needs & Goals Identified');
-    const nw = [f.contentW*0.18, f.contentW*0.17, f.contentW*0.1, f.contentW*0.18, f.contentW*0.17, f.contentW*0.2];
-    f.tableRow(['Need','Amount (R)','Priority','Addressed','Shortfall','Review'], nw, true);
+    f.heading2('SECTION B: NEEDS & GOALS IDENTIFIED');
+    const nw = [f.contentW*0.17, f.contentW*0.16, f.contentW*0.09, f.contentW*0.18, f.contentW*0.16, f.contentW*0.24];
+    f.tableRow(['Financial Planning Need','Needs / Quantified (R)','Priority','Fully/Partially Addressed','Shortfall','Review Date'], nw, true);
     NEEDS_ROWS.forEach((need, i) => {
       f.tableRow([
         need,
@@ -1671,13 +1731,13 @@ function downloadROA() {
         v(`need-${i}-pri`) || '',
         v(`need-${i}-addr`) || '',
         v(`need-${i}-short`) || '',
-        v(`need-${i}-rev`) || ''
+        fmtRevDate(v(`need-${i}-rev`))
       ], nw, false, i % 2 === 1);
     });
 
-    let y = f.y(); y += 3; f.setY(y);
+    let y2 = f.y(); y2 += 3; f.setY(y2);
 
-    f.heading2('SECTION C — Products Considered');
+    f.heading2('SECTION C: PRODUCTS CONSIDERED');
     const pw = [f.contentW*0.28, f.contentW*0.32, f.contentW*0.22, f.contentW*0.18];
     f.tableRow(['Company','Product','Premium (pm)','Quote on File'], pw, true);
     [1,2,3].forEach(n => {
@@ -1685,50 +1745,72 @@ function downloadROA() {
       if (co) f.tableRow([co, v(`c${n}-product`), v(`c${n}-premium`), v(`c${n}-quote`)], pw, false, n % 2 === 0);
     });
 
-    y = f.y(); y += 3; f.setY(y);
+    y2 = f.y(); y2 += 3; f.setY(y2);
 
-    f.heading2('SECTION D — Initial Recommendation / Advice & Motivation');
-    f.para('Products / Funds Recommended', v('roa-recommended') || '—');
+    f.heading2('SECTION D: INITIAL RECOMMENDATION / ADVICE & MOTIVATION');
+    f.para('Products/Funds Recommended and/or Selected by Client', v('roa-recommended') || '—');
     f.para('Motivation for Recommendations', v('roa-motivation') || '—');
 
-    f.heading2('SECTION E — Important Information Highlighted to the Client');
+    f.heading2('SECTION E: IMPORTANT INFORMATION HIGHLIGHTED TO THE CLIENT');
     f.para(null, v('roa-highlighted') || '—');
 
-    f.heading2('SECTION F — Financial Adviser\'s Declaration');
-    f.para('Products client elected not to accept', v('roa-declined') || 'None');
+    f.heading2("SECTION F: FINANCIAL ADVISER'S DECLARATION");
+    f.para("Client has elected:", v('roa-declined') || 'All recommendations accepted');
+    if (v('roa-declinedReason')) f.para('Details', v('roa-declinedReason'));
     f.keyVal([
-      ['Consequences explained to client', v('roa-consequences')],
-      ['Financial Needs Analysis completed', v('roa-fnaCompleted')],
-    ]);
+      ['The consequences have been clearly explained to the client (Y/N)', v('roa-consequences')],
+      ['A Financial Needs Analysis was completed (Y/N)', v('roa-fnaCompleted')],
+    ], 1);
     if (v('roa-fnaCompleted') === 'N' && v('roa-fnaReason')) {
-      f.para('Reason FNA not completed', v('roa-fnaReason'));
+      f.para('If FNA NOT done, provide reasons', v('roa-fnaReason'));
     }
 
     f.heading2('CLIENT DECLARATIONS');
+    doc.setFontSize(7); doc.setFont('helvetica','italic'); doc.setTextColor(80,80,80);
+    f.checkPage(6);
+    doc.text('(Please note that it is of utmost importance that you read this section carefully and understand it fully)', margin + 2, f.y());
+    f.setY(f.y() + 5);
+
     const decls = [
-      'I confirm that a Contact Stage Disclosure Letter has been provided to me.',
+      'I confirm that a Contact Stage Disclosure letter, setting out the Financial Advisor's full particulars, his experience and services offered, has been provided to me.',
       'I confirm that I required the Financial Advisor to render the financial services set out in the Service Level Agreement, a copy of which has been provided to me.',
-      'Where I elected not to take up the recommendation of a Full Financial Needs Analysis, I was advised that I should take particular care to consider whether the product(s) purchased are appropriate to my needs.',
-      'If I did not provide all information requested, I clearly understand there may be limitations on the appropriateness of the advice provided.',
-      'I understand that the accuracy of a Needs Analysis is dependent on the information I provided. Non-disclosures could result in inappropriate products being recommended.',
-      'I confirm that copies of Quotes, Fund Fact-sheets, marketing brochures and rates/benefit sheets were provided. All material terms and conditions were explained prior to any decision.',
-      'I have been informed of and understand all costs, charges, penalties, liquidity limitations and tax implications. I understand the risks/guarantees associated with the product(s) selected.',
+      'Where I elected not to take up the Financial Advisor's recommendation of a Full Financial Needs Analysis, I was advised and understand that I should take particular care to consider whether and ensure that the product(s) purchased or selected by me is/are appropriate to my needs, objectives and circumstances.',
+      'If I did not provide the Financial Advisor with any information requested, or there was insufficient time to conduct an analysis, I confirm that I clearly understand there may be limitations on the appropriateness of the advice provided, and I will take particular care to consider on my own whether the advice is appropriate considering my own financial objectives and current financial position.',
+      'I understand that the accuracy of a Needs Analysis is dependent on the information provided to or obtained by the Financial Advisor. The advice furnished and product recommendations made by the Financial Advisor are based largely on the information I provided. I understand that material non-disclosures and misrepresentations could result in inappropriate product(s) being recommended and purchased by me.',
+      'I confirm that I was provided with copies of Quote, Fund Fact-sheet(s), marketing brochures and rates and benefit sheets (med aid) for the product(s) selected. All material terms and conditions of the product(s) selected were explained to me prior to any decision made.',
+      'I have been informed of and understand all costs, charges, penalties, liquidity limitations and tax implications where applicable. I understand the risks / guarantees (or absence thereof) associated with the product(s) and/or underlying fund(s) selected.',
       'I confirm that all documents signed by me were fully completed prior to my signing them.',
-      'I confirm that the Financial Advisor warned me of the risks and consequences of non-disclosure and misrepresentation of information.',
-      'I confirm that the Financial Advisor has made enquiries as to whether the product(s) selected are intended to replace any existing financial products.',
-      'I acknowledge that I have an obligation to familiarise myself with the terms and conditions of the product(s) purchased.',
+      'I confirm that when I provided the Financial Advisor with the information required for any risk benefit application forms on my behalf, the Financial Advisor warned me orally of the risks and consequences of non-disclosure and misrepresentation of such information.',
+      'I confirm that the Financial Advisor has made enquiries to ascertain whether the product(s) selected are intended to replace any existing financial products held by me and where applicable, has informed me of the financial implications, costs and consequences of replacement.',
+      'Notwithstanding the information provided by the Advisor, I acknowledge that I have an obligation to familiarize myself with the terms and conditions of the product(s) that I have purchased.',
     ];
-    decls.forEach((d, i) => {
-      f.para(null, `${i+1}. ${d}`, 2);
-    });
+    decls.forEach((d, i) => { f.para(null, `${i+1}. ${d}`, 3); });
 
     f.heading2('ADDITIONAL COMMENTS');
-    if (v('roa-pol1')) f.para('Policy/Investment No. 1', v('roa-pol1'));
-    if (v('roa-pol2')) f.para('Policy/Investment No. 2', v('roa-pol2'));
-    f.para('Comments', v('roa-comments') || '—');
-    f.keyVal([['Client requires copy of this document', v('roa-copyReq')]]);
+    f.para('The above declarations apply to the purchase of the following products:', null);
+    f.para('Policy / Investment No. 1', v('roa-pol1') || '___________________');
+    f.para('Policy / Investment No. 2', v('roa-pol2') || '___________________');
+    if (v('roa-comments')) f.para('Comments', v('roa-comments'));
+    f.keyVal([['You are entitled to a copy of this document for your own records — please mail to me (Yes/No)', v('roa-copyReq')]], 1);
 
-    f.sigBlock();
+    // Signature block with dates
+    f.checkPage(30);
+    f.setY(f.y() + 6);
+    const mid = margin + contentW / 2;
+    doc.setDrawColor(...NAVY); doc.setLineWidth(0.3);
+    doc.line(margin, f.y(), mid - 5, f.y());
+    doc.line(mid + 5, f.y(), margin + contentW, f.y());
+    f.setY(f.y() + 4);
+    doc.setFontSize(8); doc.setFont('helvetica','bold'); doc.setTextColor(...NAVY);
+    doc.text(`Client Name: ${sigCName}`, margin, f.y());
+    doc.text('Advisor's Name: Clinton Hayes', mid + 5, f.y());
+    f.setY(f.y() + 5);
+    doc.setFont('helvetica','normal'); doc.setTextColor(...MUTED); doc.setFontSize(7.5);
+    doc.text('Client Signature: ___________________', margin, f.y());
+    doc.text('Advisor's Signature: ___________________', mid + 5, f.y());
+    f.setY(f.y() + 5);
+    doc.text(`Date: ${sigCDate}`, margin, f.y());
+    doc.text(`Date: ${sigADate}`, mid + 5, f.y());
 
   }, `ROA_${name.replace(/\s+/g,'_')}.pdf`);
 }
