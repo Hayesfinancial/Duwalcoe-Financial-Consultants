@@ -328,6 +328,12 @@ function syncNow() {
         });
       }catch(e){}
     }
+    // Load shared notes from server
+    if(d.notes){
+      try{
+        window._sharedNotes = typeof d.notes === "string" ? JSON.parse(d.notes) : d.notes;
+      }catch(e){ window._sharedNotes = {}; }
+    }
     setSS('ok');
     render();
     toast('Synced — ' + DB.clients.length + ' clients','ok');
@@ -3316,6 +3322,57 @@ if(checkAuth()) bootApp();
   var tooltip = document.getElementById('notepad-sel-tooltip');
   var minimised = false;
   var padNotes = {};
+  // Load notes from server sync (window._sharedNotes) + localStorage fallback
+  function loadAllNotes(){
+    try{
+      Object.keys(localStorage).forEach(function(k){
+        if(k.indexOf('du_note_')===0) padNotes[k.replace('du_note_','')]=localStorage.getItem(k);
+      });
+    }catch(e){}
+    // Overlay with server notes (server wins)
+    if(window._sharedNotes){
+      Object.keys(window._sharedNotes).forEach(function(k){
+        var n = window._sharedNotes[k];
+        if(n && n.text) padNotes[String(k)] = n.text;
+      });
+    }
+  }
+  loadAllNotes();
+
+  // Also reload notes whenever sync completes
+  var _origSyncNow = syncNow;
+  syncNow = function(){
+    _origSyncNow.apply(this, arguments);
+    setTimeout(function(){
+      if(window._sharedNotes){
+        Object.keys(window._sharedNotes).forEach(function(k){
+          var n = window._sharedNotes[k];
+          if(n && n.text) padNotes[String(k)] = n.text;
+        });
+        // Refresh displayed note if on a client page
+        if(PAGE==='client' && SEL){
+          var ta = document.getElementById('notepad-text');
+          if(ta) ta.value = padNotes[String(SEL)] || '';
+        }
+      }
+    }, 2000);
+  };
+
+  var _saveNoteTimer = null;
+  function saveNote(id, val){
+    padNotes[String(id)] = val;
+    try{ localStorage.setItem('du_note_'+String(id), val); }catch(e){}
+    // Debounce server save — wait 1.5s after last keystroke
+    if(_saveNoteTimer) clearTimeout(_saveNoteTimer);
+    _saveNoteTimer = setTimeout(function(){
+      post({action:'saveNote', clientId:id, text:val, by:cu()}, function(){});
+    }, 1500);
+  }
+  function clearNote(id){
+    delete padNotes[String(id)];
+    try{ localStorage.removeItem('du_note_'+String(id)); }catch(e){}
+    post({action:'saveNote', clientId:id, text:'', by:cu()}, function(){});
+  }
 
   var _origRender = render;
   render = function(){
@@ -3338,6 +3395,7 @@ if(checkAuth()) bootApp();
       var c = DB.clients.find(function(x){ return String(x.ID)===String(SEL); });
       document.getElementById('notepad-title').textContent = c ? c.Name.split(' ')[0] + ' — Notes' : 'Notes';
       textarea.value = padNotes[String(SEL)] || '';
+      textarea.scrollTop = textarea.scrollHeight;
     } else {
       pad.style.display = 'none';
       if(minimised){ pill.style.display = 'none'; minimised = false; }
@@ -3355,13 +3413,13 @@ if(checkAuth()) bootApp();
         var cur = textarea.value;
         textarea.value = cur + (cur && !cur.endsWith('\n') ? '\n' : '') + label;
         textarea.scrollTop = textarea.scrollHeight;
-        if(SEL) padNotes[String(SEL)] = textarea.value;
+        if(SEL) saveNote(SEL, textarea.value);
       }
     }
   }, 300);
 
   textarea.addEventListener('input', function(){
-    if(SEL) padNotes[String(SEL)] = textarea.value;
+    if(SEL) saveNote(SEL, textarea.value);
   });
 
   document.getElementById('notepad-min').addEventListener('click', function(){
@@ -3385,7 +3443,7 @@ if(checkAuth()) bootApp();
   document.getElementById('notepad-clear-btn').addEventListener('click', function(){
     if(!confirm('Clear notes for this client?')) return;
     textarea.value = '';
-    if(SEL) padNotes[String(SEL)] = '';
+    if(SEL) clearNote(SEL);
   });
 
   var dragging = false, dragOffX = 0, dragOffY = 0;
