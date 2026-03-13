@@ -244,6 +244,27 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--cream);c
 
 <div class="toast" id="toast"></div>
 
+<!-- ══ FLOATING NOTEPAD ══════════════════════════════════════ -->
+<div id="notepad" style="display:none;position:fixed;bottom:24px;right:24px;width:340px;background:#fff;border-radius:12px;box-shadow:0 8px 40px rgba(15,31,61,.22);border:1.5px solid var(--mist);z-index:8000;flex-direction:column;overflow:hidden">
+  <div id="notepad-header" style="background:var(--navy);padding:10px 14px;display:flex;align-items:center;gap:8px;cursor:grab;user-select:none">
+    <span style="font-size:14px">📝</span>
+    <span style="color:var(--gold);font-family:'DM Serif Display',serif;font-size:14px;flex:1" id="notepad-title">Notes</span>
+    <button id="notepad-min" title="Minimise" style="background:none;border:none;color:#8899bb;font-size:16px;cursor:pointer;padding:0 4px;line-height:1">—</button>
+    <button id="notepad-close" title="Close" style="background:none;border:none;color:#8899bb;font-size:16px;cursor:pointer;padding:0 4px;line-height:1">✕</button>
+  </div>
+  <div id="notepad-body" style="display:flex;flex-direction:column">
+    <textarea id="notepad-text" placeholder="Type notes here… switching tabs auto-inserts a section label." style="width:100%;height:220px;border:none;outline:none;padding:12px 14px;font-size:13px;font-family:'DM Sans',sans-serif;color:var(--ink);resize:none;line-height:1.7;background:#fffef8"></textarea>
+    <div style="padding:8px 10px;border-top:1px solid var(--smoke);display:flex;gap:6px;background:#fafaf6">
+      <button id="notepad-task-btn" class="btn b-nv xs" style="flex:1">+ Create Task</button>
+      <button id="notepad-clear-btn" class="btn b-gh xs">Clear</button>
+    </div>
+  </div>
+</div>
+<!-- Reopen pill -->
+<div id="notepad-pill" style="display:none;position:fixed;bottom:24px;right:24px;background:var(--navy);color:var(--gold);border-radius:20px;padding:7px 16px;font-size:12px;font-weight:700;cursor:pointer;z-index:8000;box-shadow:0 4px 16px rgba(15,31,61,.2);font-family:'DM Sans',sans-serif">📝 Notes</div>
+<!-- Selection tooltip -->
+<div id="notepad-sel-tooltip" style="display:none;position:fixed;z-index:9000;background:var(--navy);color:#fff;border-radius:7px;padding:5px 12px;font-size:12px;font-weight:600;cursor:pointer;box-shadow:0 4px 16px rgba(0,0,0,.2)">📋 Create task from selection</div>
+
 <script>
 // ══ CONFIG ═══════════════════════════════════════════════════
 var SURL = 'https://script.google.com/macros/s/AKfycbw_I8Md3snxG36VJb00gIIgbag_2-k0zUkkmzS15kDzpCO37RJSS16hTdhhpS_v5onr/exec';
@@ -3286,6 +3307,146 @@ document.getElementById('todayLbl').textContent=
 var su=localStorage.getItem('du_user');
 if(su)document.getElementById('userSel').value=su;
 if(checkAuth()) bootApp();
+
+// ══ FLOATING NOTEPAD ══════════════════════════════════════════
+(function(){
+  var pad = document.getElementById('notepad');
+  var pill = document.getElementById('notepad-pill');
+  var textarea = document.getElementById('notepad-text');
+  var tooltip = document.getElementById('notepad-sel-tooltip');
+  var minimised = false;
+  var padNotes = {};
+
+  var _origRender = render;
+  render = function(){
+    _origRender.apply(this, arguments);
+    updateNotepadVisibility();
+  };
+
+  var _origGoPage = goPage;
+  goPage = function(p){
+    _origGoPage.apply(this, arguments);
+    updateNotepadVisibility();
+  };
+
+  function updateNotepadVisibility(){
+    if(PAGE === 'client' && SEL){
+      if(!minimised){
+        pad.style.display = 'flex';
+        pill.style.display = 'none';
+      }
+      var c = DB.clients.find(function(x){ return String(x.ID)===String(SEL); });
+      document.getElementById('notepad-title').textContent = c ? c.Name.split(' ')[0] + ' — Notes' : 'Notes';
+      textarea.value = padNotes[String(SEL)] || '';
+    } else {
+      pad.style.display = 'none';
+      if(minimised){ pill.style.display = 'none'; minimised = false; }
+    }
+  }
+
+  var lastTab = '';
+  setInterval(function(){
+    if(PAGE !== 'client') return;
+    if(CTAB !== lastTab){
+      lastTab = CTAB;
+      if(SEL && textarea){
+        var label = '[' + CTAB.charAt(0).toUpperCase() + CTAB.slice(1) + ' — ' +
+          new Date().toLocaleTimeString('en-ZA',{hour:'2-digit',minute:'2-digit'}) + ']\n';
+        var cur = textarea.value;
+        textarea.value = cur + (cur && !cur.endsWith('\n') ? '\n' : '') + label;
+        textarea.scrollTop = textarea.scrollHeight;
+        if(SEL) padNotes[String(SEL)] = textarea.value;
+      }
+    }
+  }, 300);
+
+  textarea.addEventListener('input', function(){
+    if(SEL) padNotes[String(SEL)] = textarea.value;
+  });
+
+  document.getElementById('notepad-min').addEventListener('click', function(){
+    minimised = true;
+    pad.style.display = 'none';
+    if(PAGE === 'client') pill.style.display = 'block';
+  });
+
+  document.getElementById('notepad-close').addEventListener('click', function(){
+    minimised = true;
+    pad.style.display = 'none';
+    pill.style.display = 'none';
+  });
+
+  pill.addEventListener('click', function(){
+    minimised = false;
+    pill.style.display = 'none';
+    pad.style.display = 'flex';
+  });
+
+  document.getElementById('notepad-clear-btn').addEventListener('click', function(){
+    if(!confirm('Clear notes for this client?')) return;
+    textarea.value = '';
+    if(SEL) padNotes[String(SEL)] = '';
+  });
+
+  var dragging = false, dragOffX = 0, dragOffY = 0;
+  document.getElementById('notepad-header').addEventListener('mousedown', function(e){
+    if(e.target.tagName === 'BUTTON') return;
+    dragging = true;
+    var r = pad.getBoundingClientRect();
+    dragOffX = e.clientX - r.left;
+    dragOffY = e.clientY - r.top;
+    e.preventDefault();
+  });
+  document.addEventListener('mousemove', function(e){
+    if(!dragging) return;
+    var x = Math.max(0, Math.min(e.clientX - dragOffX, window.innerWidth - pad.offsetWidth));
+    var y = Math.max(0, Math.min(e.clientY - dragOffY, window.innerHeight - pad.offsetHeight));
+    pad.style.right = 'auto'; pad.style.bottom = 'auto';
+    pad.style.left = x + 'px'; pad.style.top = y + 'px';
+  });
+  document.addEventListener('mouseup', function(){ dragging = false; });
+
+  var selText = '';
+  textarea.addEventListener('mouseup', function(){
+    var sel = window.getSelection ? window.getSelection().toString().trim() : '';
+    if(!sel){ tooltip.style.display='none'; selText=''; return; }
+    selText = sel;
+    tooltip.style.display = 'block';
+    var pr = pad.getBoundingClientRect();
+    tooltip.style.left = (pr.left + 10) + 'px';
+    tooltip.style.top = (pr.top - 36) + 'px';
+  });
+  document.addEventListener('mousedown', function(e){
+    if(e.target !== tooltip && e.target !== textarea) tooltip.style.display='none';
+  });
+  tooltip.addEventListener('click', function(){
+    tooltip.style.display = 'none';
+    launchNotepadTask(selText);
+    selText = '';
+  });
+
+  document.getElementById('notepad-task-btn').addEventListener('click', function(){
+    var text = selText || getLastMeaningfulLine();
+    launchNotepadTask(text);
+  });
+
+  function getLastMeaningfulLine(){
+    var lines = (textarea.value||'').split('\n').map(function(l){return l.trim();}).filter(Boolean);
+    for(var i=lines.length-1;i>=0;i--){
+      if(!lines[i].startsWith('[')) return lines[i];
+    }
+    return '';
+  }
+
+  function launchNotepadTask(prefill){
+    var c = SEL ? DB.clients.find(function(x){ return String(x.ID)===String(SEL); }) : null;
+    openTaskModal(c ? c.Name : '');
+    setTimeout(function(){
+      var tt = document.getElementById('tt');
+      if(tt && prefill) tt.value = prefill.slice(0,120);
+    }, 80);
+  }
+})();
 </script>
 </body>
 </html>
