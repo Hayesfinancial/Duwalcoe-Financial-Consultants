@@ -165,14 +165,15 @@ table input:focus, table select:focus { outline: none; border-color: var(--gold)
 </div>
 <div class="tabbar" id="tabBar"></div>
 <div class="content" id="content"></div>
+<div id="statusBar" style="display:none"></div>
 <div class="footer">
-  <div class="footer-l" id="statusBar">FSP No: 9978 · Clinton Hayes · <a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="b3d0dfdaddc7dcddf3d7c6c4d2dfd0dcd69dd0dc9dc9d2">[email&#160;protected]</a></div>
-  <div class="footer-r">
-    <button class="btn btn-ghost btn-sm" onclick="prevTab()">← Back</button>
+  <button class="btn btn-ghost btn-sm" onclick="prevTab()" style="flex-shrink:0">← Back</button>
+  <div class="tabbar" id="tabBarBottom" style="flex:1;border-bottom:none;border-top:none;padding:0 4px;margin:0;background:transparent;justify-content:center"></div>
+  <div style="display:flex;gap:8px;flex-shrink:0">
     <button class="btn btn-gold btn-sm" onclick="nextTab()">Next →</button>
     <button class="btn btn-navy btn-sm" onclick="generateROA()">📄 ROA</button>
   </div>
-</div>
+</div>>
 
 <!-- Persisted data -->
 <div id="saved-data" style="display:none">null</div>
@@ -373,6 +374,7 @@ var DEFAULTS = {
   kids: [],
 
   // Scope
+  _needsTab: 'death',
   scope: {
     death: false, disability: false, dread: false, ip: false,
     retirement: false, investment: false, offshore: false,
@@ -825,10 +827,14 @@ function g4() { return div('g4'); }
 function render() {
   document.getElementById('hdrClient').textContent = S.cli.name || 'New Client';
   document.getElementById('tabBar').innerHTML = '';
+  var _tbb=document.getElementById('tabBarBottom'); if(_tbb) _tbb.innerHTML='';
   TABS.forEach(function (t, i) {
-    var tab = el('div', 'tab' + (i === activeTab ? ' on' : ''), t);
-    tab.addEventListener('click', function () { go(i); });
-    document.getElementById('tabBar').appendChild(tab);
+    ['tabBar','tabBarBottom'].forEach(function(barId){
+      var bar=document.getElementById(barId); if(!bar) return;
+      var tab = el('div', 'tab' + (i === activeTab ? ' on' : ''), t);
+      tab.addEventListener('click', function () { go(i); });
+      bar.appendChild(tab);
+    });
   });
   var c = document.getElementById('content');
   c.innerHTML = '';
@@ -1329,280 +1335,137 @@ function buildAssets() {
 // ═══════════════════════════════════════════════════════════
 function buildNeeds() {
   var s = div();
-  var inf=div('info'); inf.textContent='Capture what the client needs. The Summary tab compares these against existing cover from the CRM.'; s.appendChild(inf);
+  var tabs2 = ['death','disability','dread'];
+  var tabLabels = {'death':'Life Cover','disability':'Disability & IP','dread':'Dread Disease'};
 
-  var hasAny = S.scope.death||S.scope.disability||S.scope.dread||S.scope.ip;
-  if(!hasAny){
-    var wi=div('info'); wi.textContent='No needs areas selected. Go to the Scope tab and select the areas to discuss.'; s.appendChild(wi);
-  }
+  // Sub-tab bar
+  var subBar = div('tabbar'); subBar.style.cssText='margin-bottom:16px;border-bottom:2px solid var(--mist)';
+  tabs2.forEach(function(tk){
+    if(!S.scope[tk] && !(tk==='disability'&&S.scope.ip)) return;
+    var tb = el('div','tab'+(S._needsTab===tk?' on':''), tabLabels[tk]);
+    tb.addEventListener('click',function(){ S._needsTab=tk; render(); });
+    subBar.appendChild(tb);
+  });
+  s.appendChild(subBar);
 
-  // ── DEATH ──────────────────────────────────────────────
-  if(S.scope.death){
-    s.appendChild(stitle('Death — Liabilities to be Settled'));
-    var inf2=div('info'); inf2.innerHTML='These amounts are paid from the estate / life cover before any income needs are funded. ' +
-      'Bond and vehicle finance amounts are <strong>pre-filled from the Assets tab</strong> — edit if needed.'; s.appendChild(inf2);
+  var activeNeed = S._needsTab || 'death';
 
-    // Auto-sync bond and vehicle finance from Assets tab into deathLiabs
-    // We do this by description key — only update if the Assets tab has values
-    var totalBond = S.props.reduce(function(sum,p){return sum+N(p.bond);},0);
-    var totalVehicleFinance = S.vehicles.reduce(function(sum,v){return sum+N(v.finance);},0);
-    var totalOtherLiabs = S.liabilities.reduce(function(sum,l){return sum+N(l.bal);},0);
-
-    // Find and update the bond row
-    var bondRow = S.deathLiabs.filter(function(r){return r.desc==='Bond / mortgage';})[0];
-    if(bondRow && totalBond > 0) bondRow.amt = String(Math.round(totalBond));
-
-    // Find and update vehicle finance row
-    var vehRow = S.deathLiabs.filter(function(r){return r.desc==='Vehicle finance';})[0];
-    if(vehRow && totalVehicleFinance > 0) vehRow.amt = String(Math.round(totalVehicleFinance));
-
-    var lt=document.createElement('table');
-    lt.innerHTML='<thead><tr><th>Description</th><th>Amount</th><th></th></tr></thead>';
-    var lb2=document.createElement('tbody');
+  // ── LIFE COVER TAB
+  if (activeNeed === 'death' && S.scope.death) {
+    s.appendChild(stitle('Liabilities — payable on death'));
+    var inf1=div('info'); inf1.textContent='Bonds, loans, credit cards — amounts the estate must settle.'; s.appendChild(inf1);
     S.deathLiabs.forEach(function(r,i){
-      var tr=document.createElement('tr');
-      var t1=document.createElement('td'); var di=document.createElement('input'); di.type='text'; di.value=r.desc||'';
-      di.addEventListener('input',function(e){S.deathLiabs[i].desc=e.target.value;}); t1.appendChild(di); tr.appendChild(t1);
-      var t2=document.createElement('td'); var rw=div('td-r'); rw.appendChild(el('span','rp','R'));
-      var ai=document.createElement('input'); ai.type='text'; ai.inputMode='numeric'; ai.value=r.amt||''; ai.placeholder='0';
-      ai.addEventListener('input',function(e){S.deathLiabs[i].amt=e.target.value;}); rw.appendChild(ai); t2.appendChild(rw); tr.appendChild(t2);
-      var t3=document.createElement('td'); t3.appendChild(delBtn(function(){S.deathLiabs.splice(i,1);render();})); tr.appendChild(t3);
-      lb2.appendChild(tr);
+      var row=g3();
+      row.appendChild(fld('Description',r,'desc',{placeholder:'e.g. Home loan'}));
+      row.appendChild(rfld('Amount',r,'amt',{onblur:function(){render();}}));
+      row.appendChild(div());
+      var del=delBtn(function(){S.deathLiabs.splice(i,1);render();}); var dw=div('f'); dw.appendChild(del); row.appendChild(dw);
+      s.appendChild(row);
     });
-    lt.appendChild(lb2); var ltw=div('twrap'); ltw.appendChild(lt); s.appendChild(ltw);
-    s.appendChild(addBtn('+ Add Liability', function(){S.deathLiabs.push({desc:'',amt:''});render();}));
+    var ab1=addBtn('+ Add liability',function(){S.deathLiabs.push({desc:'',amt:''});render();}); s.appendChild(ab1);
 
-    var totLiabNeed=S.deathLiabs.reduce(function(sum,r){return sum+N(r.amt);},0);
-    if(totLiabNeed>0){
-      var tli=div('info'); tli.style.marginTop='8px';
-      tli.textContent='Total liabilities to settle: '+Rfmt(totLiabNeed); s.appendChild(tli);
-    }
+    s.appendChild(stitle('Income replacement needs'));
+    var inf2=div('info'); inf2.textContent='Monthly income the family needs. Enter nett — the system grosses up for tax.'; s.appendChild(inf2);
+    S.deathIncome.forEach(function(r,i){ buildIncomeNeedRow(s,r,i,'deathIncome'); });
+    var ab2=addBtn('+ Add income need',function(){S.deathIncome.push({desc:'',nettPM:'',grossPM:'',years:'',esc:'',drawdown:''});render();}); s.appendChild(ab2);
 
-    // ── Death income needs ──────────────────────────────
-    s.appendChild(stitle('Death — Income Needs (Capitalised)'));
-    var di2=div('info'); di2.innerHTML='Enter the <strong>nett monthly amount</strong> the beneficiary needs. The system will gross it up using tax tables, then capitalise the capital lump sum needed.'; s.appendChild(di2);
-
-    S.deathIncome.forEach(function(r,i){
-      buildIncomeNeedRow(s, r, i, 'deathIncome');
-    });
-    s.appendChild(addBtn('+ Add Income Need', function(){
-      S.deathIncome.push({desc:'',nettPM:'',grossPM:'',years:'',esc:'',drawdown:'',notes:''});render();
-    }));
-
-    // ── Death capital needs ─────────────────────────────
-    s.appendChild(stitle('Death — Once-off Capital Needs'));
-    var ct2=document.createElement('table');
-    ct2.innerHTML='<thead><tr><th>Description</th><th>Amount</th><th></th></tr></thead>';
-    var cb2=document.createElement('tbody');
+    s.appendChild(stitle('Capital requirements'));
+    var inf3=div('info'); inf3.textContent='Lump sums needed — education, emergency fund, bequests.'; s.appendChild(inf3);
     S.deathCapital.forEach(function(r,i){
-      var tr=document.createElement('tr');
-      var t1=document.createElement('td'); var di=document.createElement('input'); di.type='text'; di.value=r.desc||'';
-      di.addEventListener('input',function(e){S.deathCapital[i].desc=e.target.value;}); t1.appendChild(di); tr.appendChild(t1);
-      var t2=document.createElement('td'); var rw=div('td-r'); rw.appendChild(el('span','rp','R'));
-      var ai=document.createElement('input'); ai.type='text'; ai.inputMode='numeric'; ai.value=r.amt||''; ai.placeholder='0';
-      ai.addEventListener('input',function(e){S.deathCapital[i].amt=e.target.value;}); rw.appendChild(ai); t2.appendChild(rw); tr.appendChild(t2);
-      var t3=document.createElement('td'); t3.appendChild(delBtn(function(){S.deathCapital.splice(i,1);render();})); tr.appendChild(t3);
-      cb2.appendChild(tr);
+      var row=g3();
+      row.appendChild(fld('Description',r,'desc',{placeholder:'e.g. Education fund'}));
+      row.appendChild(rfld('Amount',r,'amt',{onblur:function(){render();}}));
+      row.appendChild(div());
+      var del=delBtn(function(){S.deathCapital.splice(i,1);render();}); var dw=div('f'); dw.appendChild(del); row.appendChild(dw);
+      s.appendChild(row);
     });
-    ct2.appendChild(cb2); var ctw2=div('twrap'); ctw2.appendChild(ct2); s.appendChild(ctw2);
-    s.appendChild(addBtn('+ Add Capital Need', function(){S.deathCapital.push({desc:'',amt:''});render();}));
+    var ab3=addBtn('+ Add capital need',function(){S.deathCapital.push({desc:'',amt:''});render();}); s.appendChild(ab3);
 
-    // Total death need summary
-    var totCapNeed=S.deathCapital.reduce(function(sum,r){return sum+N(r.amt);},0);
-    var totIncCap=S.deathIncome.reduce(function(sum,r){return sum+calcIncomeNeed(r);},0);
-    if(totLiabNeed>0||totIncCap>0||totCapNeed>0){
-      var ds=div('cards c3'); ds.style.marginTop='16px';
-      [{l:'Liabilities',v:totLiabNeed},{l:'Capitalised Income',v:totIncCap},{l:'Capital Needs',v:totCapNeed}].forEach(function(x){
-        var c=div('card'); c.innerHTML='<div class="lbl">'+x.l+'</div><div class="val">'+Rfmt(x.v)+'</div>'; ds.appendChild(c);
+    // Summary
+    var totLiab=S.deathLiabs.reduce(function(a,r){return a+N(r.amt);},0);
+    var totInc=S.deathIncome.reduce(function(a,r){return a+calcIncomeNeed(r);},0);
+    var totCap=S.deathCapital.reduce(function(a,r){return a+N(r.amt);},0);
+    var totalNeed=totLiab+totInc+totCap;
+    var totalHave=N(S.existingCover&&S.existingCover.death);
+    if(totalNeed>0){
+      var sumBox=div('calc-result'); sumBox.style.marginTop='16px';
+      sumBox.innerHTML='<div class="cr-row"><span>Liabilities</span><span class="gold">'+Rfmt(totLiab)+'</span></div>'+
+        '<div class="cr-row"><span>Income (capitalised)</span><span class="gold">'+Rfmt(totInc)+'</span></div>'+
+        '<div class="cr-row"><span>Capital needs</span><span class="gold">'+Rfmt(totCap)+'</span></div>'+
+        '<div class="cr-row big"><span>Total cover needed</span><span class="gold">'+Rfmt(totalNeed)+'</span></div>'+
+        '<div class="cr-row"><span>Existing cover</span><span class="gold">'+Rfmt(totalHave)+'</span></div>'+
+        '<div class="cr-row big"><span>'+(totalHave>=totalNeed?'Surplus':'Shortfall')+'</span><span style="color:'+(totalHave>=totalNeed?'var(--green)':'var(--red)')+'">'+Rfmt(Math.abs(totalHave-totalNeed))+'</span></div>';
+      s.appendChild(sumBox);
+    }
+  }
+
+  // ── DISABILITY & IP TAB
+  if (activeNeed === 'disability' && (S.scope.disability || S.scope.ip)) {
+    if(S.scope.ip) {
+      s.appendChild(stitle('Income Protection'));
+      var ipInf=div('info'); ipInf.textContent='Monthly income protection benefit needed.'; s.appendChild(ipInf);
+      var ipg=g3();
+      ipg.appendChild(rfld('Nett benefit needed /pm', S, 'ipNettPM', {onblur:function(){S.ipGrossPM=String(Math.round(grossFromNett(S.ipNettPM)));render();}}));
+      ipg.appendChild(rfld('Gross benefit /pm (auto)', S, 'ipGrossPM', {readonly:true}));
+      ipg.appendChild(div());
+      s.appendChild(ipg);
+      var ipg2=g3();
+      ipg2.appendChild(sfld('Waiting period', S, 'ipWait', ['1 month','3 months','6 months','12 months']));
+      ipg2.appendChild(sfld('Benefit period', S, 'ipBenefit', ['2 years','5 years','To age 60','To age 65','To age 70']));
+      s.appendChild(ipg2);
+    }
+    if(S.scope.disability) {
+      s.appendChild(stitle('Disability — income needs (capitalised)'));
+      S.disIncome.forEach(function(r,i){ buildIncomeNeedRow(s,r,i,'disIncome'); });
+      var dab=addBtn('+ Add income need',function(){S.disIncome.push({desc:'',nettPM:'',grossPM:'',years:'',esc:'',drawdown:''});render();}); s.appendChild(dab);
+      s.appendChild(stitle('Disability — lump sum capital needs'));
+      S.disCapital.forEach(function(r,i){
+        var row=g3();
+        row.appendChild(fld('Description',r,'desc',{placeholder:'e.g. Adapt home / vehicle'}));
+        row.appendChild(rfld('Amount',r,'amt',{onblur:function(){render();}}));
+        row.appendChild(div());
+        var del=delBtn(function(){S.disCapital.splice(i,1);render();}); var dw=div('f'); dw.appendChild(del); row.appendChild(dw);
+        s.appendChild(row);
       });
-      s.appendChild(ds);
-      var totCard=div('card'); totCard.style.cssText='margin-top:0;background:var(--navy);border-color:var(--navy)';
-      totCard.innerHTML='<div class="lbl" style="color:#8899bb">Total Death Cover Required</div><div class="val" style="color:var(--gold)">'+Rfmt(totLiabNeed+totIncCap+totCapNeed)+'</div>';
-      s.appendChild(totCard);
+      var dcab=addBtn('+ Add capital need',function(){S.disCapital.push({desc:'',amt:''});render();}); s.appendChild(dcab);
     }
-    s.appendChild(txfld('Death needs notes', S, 'deathNotes'));
+    var disInc=S.disIncome.reduce(function(a,r){return a+calcIncomeNeed(r);},0);
+    var disCap=S.disCapital.reduce(function(a,r){return a+N(r.amt);},0);
+    var disHave=N(S.existingCover&&S.existingCover.disability);
+    var disTotal=disInc+disCap;
+    if(disTotal>0||N(S.ipGrossPM)>0){
+      var disBox=div('calc-result'); disBox.style.marginTop='16px';
+      disBox.innerHTML=(N(S.ipGrossPM)>0?'<div class="cr-row"><span>IP benefit needed /pm</span><span class="gold">'+Rfmt(S.ipGrossPM)+'</span></div>':'')+
+        (disTotal>0?'<div class="cr-row big"><span>Lump sum needed</span><span class="gold">'+Rfmt(disTotal)+'</span></div>':'')+
+        '<div class="cr-row"><span>Existing disability cover</span><span class="gold">'+Rfmt(disHave)+'</span></div>'+
+        (disTotal>0?'<div class="cr-row big"><span>'+(disHave>=disTotal?'Surplus':'Shortfall')+'</span><span style="color:'+(disHave>=disTotal?'var(--green)':'var(--red)')+'">'+Rfmt(Math.abs(disHave-disTotal))+'</span></div>':'');
+      s.appendChild(disBox);
+    }
   }
 
-  // ── DISABILITY ─────────────────────────────────────────
-  if(S.scope.disability){
-    s.appendChild(stitle('Disability — Income Needs'));
-    var dii=div('info'); dii.textContent='Income protection is the primary recommendation. Capitalise for lump sum disability cover.'; s.appendChild(dii);
-    S.disIncome.forEach(function(r,i){
-      buildIncomeNeedRow(s,r,i,'disIncome');
-    });
-    s.appendChild(addBtn('+ Add Disability Income Need', function(){
-      S.disIncome.push({desc:'Monthly income replacement',nettPM:'',grossPM:'',years:'',esc:'',drawdown:'',notes:''});render();
-    }));
-
-    s.appendChild(stitle('Disability — Lump Sum Capital Needs'));
-    var dct=document.createElement('table');
-    dct.innerHTML='<thead><tr><th>Description</th><th>Amount</th><th></th></tr></thead>';
-    var dcb=document.createElement('tbody');
-    S.disCapital.forEach(function(r,i){
-      var tr=document.createElement('tr');
-      var t1=document.createElement('td'); var di=document.createElement('input'); di.type='text'; di.value=r.desc||'';
-      di.addEventListener('input',function(e){S.disCapital[i].desc=e.target.value;}); t1.appendChild(di); tr.appendChild(t1);
-      var t2=document.createElement('td'); var rw=div('td-r'); rw.appendChild(el('span','rp','R'));
-      var ai=document.createElement('input'); ai.type='text'; ai.inputMode='numeric'; ai.value=r.amt||''; ai.placeholder='0';
-      ai.addEventListener('input',function(e){S.disCapital[i].amt=e.target.value;}); rw.appendChild(ai); t2.appendChild(rw); tr.appendChild(t2);
-      var t3=document.createElement('td'); t3.appendChild(delBtn(function(){S.disCapital.splice(i,1);render();})); tr.appendChild(t3);
-      dcb.appendChild(tr);
-    });
-    dct.appendChild(dcb); var dctw=div('twrap'); dctw.appendChild(dct); s.appendChild(dctw);
-    s.appendChild(addBtn('+ Add Capital Need', function(){S.disCapital.push({desc:'',amt:''});render();}));
-    s.appendChild(txfld('Disability notes', S, 'disNotes'));
-  }
-
-  // ── DREAD DISEASE ──────────────────────────────────────
-  if(S.scope.dread){
-    s.appendChild(stitle('Dread Disease / Severe Illness'));
-    var drg=g2();
-    drg.appendChild(rfld('Cover Amount Required', S, 'dreadAmt'));
+  // ── DREAD DISEASE TAB
+  if (activeNeed === 'dread' && S.scope.dread) {
+    s.appendChild(stitle('Dread Disease / Trauma'));
+    var drInf=div('info'); drInf.textContent='Suggested: 18-24 months gross income, or cost of treatment + income for recovery period.'; s.appendChild(drInf);
+    var drg=g3();
+    drg.appendChild(rfld('Cover needed', S, 'dreadAmt', {onblur:function(){render();}}));
+    var dreadHave=N(S.existingCover&&S.existingCover.dread);
+    var drGap=dreadHave-N(S.dreadAmt);
+    drg.appendChild(rfld('Existing cover (auto)', {v:String(dreadHave)}, 'v', {readonly:true}));
+    drg.appendChild(div());
     s.appendChild(drg);
-    s.appendChild(txfld('Dread disease notes', S, 'dreadNotes'));
-  }
-
-  // ── INCOME PROTECTION ──────────────────────────────────
-  if(S.scope.ip){
-    s.appendChild(stitle('Income Protection'));
-    var ipinf=div('info');
-    ipinf.innerHTML='Enter the nett monthly benefit needed. Gross-up will be calculated.'; s.appendChild(ipinf);
-
-    var ipr=div();
-    ipr.style.cssText='background:#fff;border:var(--border);border-radius:8px;padding:16px;margin-bottom:14px';
-
-    // Nett PM field with gross-up on blur
-    var ipg=g3();
-    var ipf=div('f'); var iplb=el('label','','Nett Monthly Benefit Needed');
-    var iprw=div('rw'); iprw.appendChild(el('span','rp','R'));
-    var ipinp=document.createElement('input'); ipinp.type='text'; ipinp.inputMode='numeric';
-    ipinp.value=S.ipNettPM||''; ipinp.placeholder='0';
-    ipinp.addEventListener('input',function(e){S.ipNettPM=e.target.value;});
-    ipinp.addEventListener('blur',function(e){
-      S.ipNettPM=e.target.value;
-      if(N(S.ipNettPM)>0){S.ipGrossPM=String(grossFromNett(S.ipNettPM));render();}
-    });
-    iprw.appendChild(ipinp); ipf.appendChild(iplb); ipf.appendChild(iprw); ipg.appendChild(ipf);
-
-    var ipgf=div('f'); var ipglb=el('label','','Gross Equivalent (system calc)');
-    var ipgrw=div('rw'); ipgrw.appendChild(el('span','rp','R'));
-    var ipginp=document.createElement('input'); ipginp.type='text'; ipginp.readOnly=true;
-    ipginp.value=S.ipGrossPM||''; ipginp.style.background='#f5f5f0';
-    ipgrw.appendChild(ipginp); ipgf.appendChild(ipglb); ipgf.appendChild(ipgrw); ipg.appendChild(ipgf);
-
-    ipg.appendChild(sfld('Waiting Period', S, 'ipWait', ['7 days','2 weeks','1 month','3 months','6 months','1 year']));
-    ipr.appendChild(ipg);
-
-    var ipg2=g2();
-    ipg2.appendChild(sfld('Benefit Period', S, 'ipBenefit', ['1 year','2 years','5 years','To age 60','To age 65','To age 70','Whole of Life']));
-    ipr.appendChild(ipg2);
-
-    if(N(S.ipNettPM)>0&&N(S.ipGrossPM)>0){
-      var ipcr=div('calc-result');
-      ipcr.innerHTML='<div class="cr-row"><span>Nett monthly benefit</span><span class="gold">'+Rfmt(S.ipNettPM)+'</span></div>'+
-        '<div class="cr-row"><span>Gross equivalent (pre-tax)</span><span class="gold">'+Rfmt(S.ipGrossPM)+'</span></div>';
-      ipr.appendChild(ipcr);
+    if(N(S.dreadAmt)>0){
+      var drBox=div('calc-result'); drBox.style.marginTop='8px';
+      drBox.innerHTML='<div class="cr-row big"><span>Cover needed</span><span class="gold">'+Rfmt(S.dreadAmt)+'</span></div>'+
+        '<div class="cr-row"><span>Existing cover</span><span class="gold">'+Rfmt(dreadHave)+'</span></div>'+
+        '<div class="cr-row big"><span>'+(drGap>=0?'Surplus':'Shortfall')+'</span><span style="color:'+(drGap>=0?'var(--green)':'var(--red)')+'">'+Rfmt(Math.abs(drGap))+'</span></div>';
+      s.appendChild(drBox);
     }
-    s.appendChild(ipr);
-    s.appendChild(txfld('IP notes', S, 'ipNotes'));
   }
 
   return s;
 }
 
-// ── Income Need Row builder (shared for death and disability) ──
-function calcIncomeNeed(r){
-  if(!N(r.nettPM)&&!N(r.grossPM)) return 0;
-  var gross = N(r.grossPM) || grossFromNett(r.nettPM);
-  var esc = N(r.esc)>0 ? r.esc : S.assump.cpi;
-  var dr  = N(r.drawdown)>0 ? r.drawdown : S.assump.drawdown;
-  return capitalise(gross, r.years, esc, dr);
-}
-
-function buildIncomeNeedRow(parent, r, i, arrayKey){
-  var card=div(); card.style.cssText='background:#fff;border:var(--border);border-radius:8px;padding:14px;margin-bottom:10px';
-  var ch=div(); ch.style.cssText='display:flex;justify-content:space-between;align-items:center;margin-bottom:10px';
-
-  // Description
-  var df=div('f'); df.appendChild(el('label','','Description'));
-  var di=document.createElement('input'); di.type='text'; di.value=r.desc||''; di.placeholder='e.g. Spouse living expenses';
-  di.addEventListener('input',function(e){S[arrayKey][i].desc=e.target.value;}); df.appendChild(di);
-  ch.appendChild(df);
-  ch.appendChild(delBtn(function(){S[arrayKey].splice(i,1);render();}));
-  card.appendChild(ch);
-
-  var rg1=g4();
-
-  // Nett PM with gross-up on blur
-  var nf=div('f'); nf.appendChild(el('label','','Nett /pm (client states)'));
-  var nrw=div('rw'); nrw.appendChild(el('span','rp','R'));
-  var ninp=document.createElement('input'); ninp.type='text'; ninp.inputMode='numeric';
-  ninp.value=r.nettPM||''; ninp.placeholder='0';
-  ninp.addEventListener('input',function(e){S[arrayKey][i].nettPM=e.target.value;});
-  ninp.addEventListener('blur',function(e){
-    S[arrayKey][i].nettPM=e.target.value;
-    if(N(e.target.value)>0){S[arrayKey][i].grossPM=String(grossFromNett(e.target.value));render();}
-  });
-  nrw.appendChild(ninp); nf.appendChild(nrw); rg1.appendChild(nf);
-
-  // Gross PM (calc, overrideable)
-  var gf2=div('f'); gf2.appendChild(el('label','','Gross /pm (tax grossed-up)'));
-  var grw2=div('rw'); grw2.appendChild(el('span','rp','R'));
-  var ginp2=document.createElement('input'); ginp2.type='text'; ginp2.inputMode='numeric';
-  ginp2.value=r.grossPM||''; ginp2.placeholder='0'; ginp2.style.background='#f9f9f6';
-  ginp2.addEventListener('input',function(e){S[arrayKey][i].grossPM=e.target.value;});
-  ginp2.addEventListener('blur',function(e){S[arrayKey][i].grossPM=e.target.value;render();});
-  grw2.appendChild(ginp2); gf2.appendChild(grw2); rg1.appendChild(gf2);
-
-  // Years
-  var yf=div('f'); yf.appendChild(el('label','','Term (years)'));
-  var yi=document.createElement('input'); yi.type='text'; yi.inputMode='numeric';
-  yi.value=r.years||''; yi.placeholder='e.g. 20';
-  yi.addEventListener('input',function(e){S[arrayKey][i].years=e.target.value;});
-  yi.addEventListener('blur',function(e){S[arrayKey][i].years=e.target.value;render();});
-  yf.appendChild(yi); rg1.appendChild(yf);
-
-  // Escalation
-  var ef=div('f'); ef.appendChild(el('label','','Escalation % (blank=CPI)'));
-  var epw=div('pw'); var epp=el('span','pp','%');
-  var ei=document.createElement('input'); ei.type='text'; ei.inputMode='numeric';
-  ei.value=r.esc||''; ei.placeholder=S.assump.cpi;
-  ei.addEventListener('input',function(e){S[arrayKey][i].esc=e.target.value;});
-  ei.addEventListener('blur',function(e){S[arrayKey][i].esc=e.target.value;render();});
-  epw.appendChild(ei); epw.appendChild(epp); ef.appendChild(epw); rg1.appendChild(ef);
-  card.appendChild(rg1);
-
-  var rg2=g3();
-  // Drawdown rate
-  var drf=div('f'); drf.appendChild(el('label','','Drawdown % (blank='+S.assump.drawdown+'%)'));
-  var drpw=div('pw'); var drpp=el('span','pp','%');
-  var dri=document.createElement('input'); dri.type='text'; dri.inputMode='numeric';
-  dri.value=r.drawdown||''; dri.placeholder=S.assump.drawdown;
-  dri.addEventListener('input',function(e){S[arrayKey][i].drawdown=e.target.value;});
-  dri.addEventListener('blur',function(e){S[arrayKey][i].drawdown=e.target.value;render();});
-  drpw.appendChild(dri); drpw.appendChild(drpp); drf.appendChild(drpw); rg2.appendChild(drf);
-  card.appendChild(rg2);
-
-  // Calculated result
-  var gross=N(r.grossPM)||grossFromNett(r.nettPM);
-  if(gross>0&&N(r.years)>0){
-    var cap=calcIncomeNeed(r);
-    var monthly=monthlyFromCapital(cap,r.years,N(r.esc)>0?r.esc:S.assump.cpi,N(r.drawdown)>0?r.drawdown:S.assump.drawdown);
-    var cr=div('calc-result');
-    cr.innerHTML=
-      '<div class="cr-row"><span>Nett monthly amount</span><span class="gold">'+Rfmt(r.nettPM||gross)+'</span></div>'+
-      '<div class="cr-row"><span>Gross (pre-tax)</span><span class="gold">'+Rfmt(gross)+'</span></div>'+
-      '<div class="cr-row big"><span>Capital lump sum required</span><span class="gold">'+Rfmt(cap)+'</span></div>'+
-      '<div class="cr-row"><span style="font-size:11px;color:#8899bb">This capital at '+(N(r.drawdown)>0?r.drawdown:S.assump.drawdown)+'% drawdown produces '+Rfmt(monthly)+'/pm for '+r.years+' years at '+(N(r.esc)>0?r.esc:S.assump.cpi)+'% escalation</span></div>';
-    card.appendChild(cr);
-  }
-
-  parent.appendChild(card);
-}
-
-// ═══════════════════════════════════════════════════════════
-// TAB 5 — RETIREMENT
-// ═══════════════════════════════════════════════════════════
 function buildRetirement() {
   var s = div();
   if(!S.scope.retirement){
@@ -1635,7 +1498,7 @@ function buildRetirement() {
           currentVal: p.BenFundValue || '',
           monthlyContrib: p.Premium && (p.Frequency === 'Monthly' || !p.Frequency) ? p.Premium : '',
           contribEsc: '',
-          growthRate: ''
+          growthRate: p.GrowthRate || ''
         });
       }
     });
@@ -1885,7 +1748,9 @@ function buildPolicies() {
   }));
 
   // ── Premium totals + affordability projection
+  var _allInvBiz = POL_RA_TYPES.concat(POL_INV_TYPES).concat(['Business Assurance']);
   var totalPrem = pols.reduce(function(sum, p) {
+    if (_allInvBiz.indexOf(p.Type||'') > -1) return sum;
     return sum + ((p.Frequency || 'Monthly') === 'Monthly' ? N(p.Premium) : 0);
   }, 0);
 
@@ -1916,7 +1781,8 @@ function buildPolicies() {
         if ((pol.Frequency||'Monthly') !== 'Monthly') return;
         var prem = N(pol.Premium);
         if (!prem) return;
-        var esc = N(pol.premEsc) || 0;
+        var escRaw = String(pol.PremEscalation || pol.premEsc || '').replace(/,/g, '.').replace(/[^0-9.]/g, '');
+        var esc = parseFloat(escRaw) || 0;
         var future = esc > 0 ? Math.round(prem * Math.pow(1 + esc/100, yrsToRet)) : prem;
         totalAtRet += future;
         var tr2 = document.createElement('tr');
@@ -1925,7 +1791,7 @@ function buildPolicies() {
           '<td>' + Rfmt(prem) + '</td>' +
           '<td><input type="text" inputmode="numeric" value="' + (pol.premEsc||'') + '" placeholder="0" style="width:52px;padding:4px 6px;border:1.5px solid var(--mist);border-radius:5px;font-size:12px" ' +
             'data-idx="'+j+'" onblur="S.importedPols[this.dataset.idx].premEsc=this.value;render()" oninput="S.importedPols[this.dataset.idx].premEsc=this.value"> %</td>' +
-          '<td style="font-weight:700;color:' + (future > prem * 2 ? 'var(--red)' : 'var(--navy)') + '">' + Rfmt(future) + '</td>';
+          '<td style="font-weight:700;color:' + ((esc > 0 && esc > (N(S.assump.incEsc)||5)) ? 'var(--red)' : 'var(--navy)') + '">' + Rfmt(future) + '</td>';
         affTb.appendChild(tr2);
       });
       var trTot = document.createElement('tr');
@@ -1948,6 +1814,29 @@ function buildPolicies() {
         s.appendChild(afford2);
       }
     }
+  }
+
+  // Send ticked premiums to retirement needs
+  if (S.scope.retirement) {
+    var brow2 = div(); brow2.style.cssText='display:flex;gap:12px;margin-top:14px;flex-wrap:wrap';
+    var bSend = document.createElement('button');
+    bSend.className = 'btn btn-navy';
+    bSend.textContent = '→ Send ticked premiums to Retirement tab';
+    bSend.addEventListener('click', function() {
+      var toSend = (S.importedPols||[]).filter(function(p){
+        return p._retInclude && (p.Frequency||'Monthly')==='Monthly' && N(p.Premium)>0
+          && ['Business Assurance'].indexOf(p.Type||'') < 0;
+      });
+      if (!toSend.length) { alert('Tick the Ret checkbox on policies to include first.'); return; }
+      if (!S.retNeeds) S.retNeeds = [];
+      S.retNeeds = S.retNeeds.filter(function(r){ return !r._isPremRow; });
+      toSend.forEach(function(p){
+        S.retNeeds.push({ desc:(p.Insurer||'')+(p.Product?' — '+p.Product:'')+' premium', amtToday:String(Math.round(N(p.Premium))), esc:String(N(p.PremEscalation)||''), _isPremRow:true });
+      });
+      persist(); go(5);
+    });
+    brow2.appendChild(bSend);
+    s.appendChild(brow2);
   }
 
   return s;
@@ -1995,6 +1884,15 @@ function buildPolCard(p, i) {
   chLeft.appendChild(typeSel);
   ch.appendChild(chLeft);
 
+  // Retirement include tick
+  var rtickLbl = document.createElement('label');
+  rtickLbl.style.cssText='display:flex;align-items:center;gap:4px;font-size:10px;color:var(--sub);cursor:pointer;margin-left:4px;white-space:nowrap';
+  var rtickInp = document.createElement('input'); rtickInp.type='checkbox';
+  rtickInp.checked = !!p._retInclude;
+  rtickInp.addEventListener('change',function(e){ S.importedPols[i]._retInclude=e.target.checked; });
+  rtickLbl.appendChild(rtickInp);
+  rtickLbl.appendChild(document.createTextNode('Ret'));
+  ch.appendChild(rtickLbl);
   // Delete button
   var db = delBtn(function() { S.importedPols.splice(i, 1); render(); });
   ch.appendChild(db);
@@ -2087,14 +1985,15 @@ function buildPolCard(p, i) {
     var bst2 = el('div','stitle','Fund / Death Benefit');
     bst2.style.marginTop = '10px';
     card.appendChild(bst2);
-    var rb2 = g2();
+    var rb2 = g3();
     rb2.appendChild(rfld('Current Fund Value', p, 'BenFundValue'));
     rb2.appendChild(rfld('Death Benefit',      p, 'BenDeath'));
+    rb2.appendChild(pfld('Growth rate % (projection)', p, 'GrowthRate', {onblur:function(){render();}}));
     card.appendChild(rb2);
-    // Also show premium as contribution label
+    // Seed GrowthRate into retAssets on blur
     var premNote = div('info');
     premNote.style.cssText = 'font-size:11px;padding:6px 10px;margin-top:-4px';
-    premNote.textContent = 'Premium field above = monthly contribution for this fund.';
+    premNote.textContent = 'Premium = monthly contribution. Growth rate used for retirement projection.';
     card.appendChild(premNote);
   }
 
@@ -2592,90 +2491,203 @@ function buildEstate() {
 // ═══════════════════════════════════════════════════════════
 function buildSummary() {
   var s = div();
-  var inf=div('info'); inf.textContent='This tab reads policies from the CRM (passed via URL) or captured below. It shows needs vs existing cover and calculates gaps.'; s.appendChild(inf);
+  var inf=div('info'); inf.textContent='This tab summarises all needs versus existing cover. Complete the other tabs first.'; s.appendChild(inf);
 
-  // For now, policies are entered here as a quick summary table
-  // When linked from CRM they will be passed via URL params
-  s.appendChild(stitle('Existing Cover Summary'));
-  var inf2=div('info'); inf2.innerHTML='Enter cover amounts from existing policies. When opened from the client profile in the CRM, this will populate automatically.'; s.appendChild(inf2);
+  var pols = S.importedPols || [];
 
-  // Summary fields for existing cover
-  if(!S.existingCover) S.existingCover={death:'',disability:'',dread:'',ipPM:'',totalPrem:''};
-  var eg=g3();
-  eg.appendChild(rfld('Death Cover', S.existingCover, 'death'));
-  eg.appendChild(rfld('Disability Cover', S.existingCover, 'disability'));
-  eg.appendChild(rfld('Dread Disease', S.existingCover, 'dread'));
-  s.appendChild(eg);
-  var eg2=g3();
-  eg2.appendChild(rfld('Income Protection /pm', S.existingCover, 'ipPM'));
-  eg2.appendChild(rfld('Total Premiums /pm', S.existingCover, 'totalPrem'));
-  s.appendChild(eg2);
+  function pct(v){ return N(v)/100; }
+  function sTitle(t){ var d=el('div','stitle',t); d.style.margin='20px 0 10px'; s.appendChild(d); }
+  function sBox(){ var b=div(); b.style.cssText='background:#1a2a4a;color:#fff;border-radius:8px;padding:14px 16px;margin-bottom:14px'; s.appendChild(b); return b; }
+  function sRow(b,label,val,sub,total){
+    var r=div(); r.style.cssText='display:flex;justify-content:space-between;padding:'+(total?'8':'4')+'px 0'+(total?';border-top:1px solid #334;margin-top:6px':'');
+    var l=el('span','',label); l.style.cssText='color:#ccd6f6;font-size:'+(sub?'11':'12')+'px'+(sub?';padding-left:14px':'');
+    var v=el('span','',val); v.style.cssText='font-weight:'+(total?'700':'400')+';color:#c8a84b;font-size:'+(sub?'11':'12')+'px';
+    r.appendChild(l); r.appendChild(v); b.appendChild(r);
+  }
+  function gapBox(label,need,have){
+    var gap=have-need;
+    var b=div(); b.style.cssText='display:flex;justify-content:space-between;align-items:center;padding:10px 14px;border-radius:6px;margin-bottom:8px;background:'+(need>0?(gap>=0?'#f0fdf4':'#fef2f2'):'#f9f9f6')+';border:1px solid '+(need>0?(gap>=0?'#bbf7d0':'#fecaca'):'#e5e5e5');
+    var left=el('span','',label); left.style.cssText='font-weight:600;font-size:12px';
+    var right=div(); right.style.cssText='text-align:right';
+    var needSpan=el('div','','Need: '+(need>0?Rfmt(need):'—')); needSpan.style.cssText='font-size:11px;color:#555';
+    var haveSpan=el('div','','Have: '+(have>0?Rfmt(have):'—')); haveSpan.style.cssText='font-size:11px;color:#555';
+    var gapSpan=el('div','',need>0?(gap>=0?'\u25b2 '+Rfmt(gap)+' surplus':'\u25bc '+Rfmt(Math.abs(gap))+' shortfall'):'—');
+    gapSpan.style.cssText='font-weight:700;font-size:13px;color:'+(need>0?(gap>=0?'#16a34a':'#dc2626'):'#999');
+    right.appendChild(needSpan); right.appendChild(haveSpan); right.appendChild(gapSpan);
+    b.appendChild(left); b.appendChild(right); s.appendChild(b);
+  }
 
-  // ── Gap analysis
-  s.appendChild(stitle('Gap Analysis'));
-
-  // Death
-  var totLiabNeed=S.deathLiabs.reduce(function(sum,r){return sum+N(r.amt);},0);
-  var totIncCap=S.deathIncome.reduce(function(sum,r){return sum+calcIncomeNeed(r);},0);
-  var totCapNeed=S.deathCapital.reduce(function(sum,r){return sum+N(r.amt);},0);
-  var totalDeathNeed=totLiabNeed+totIncCap+totCapNeed;
-  var haveDeathCover=N(S.existingCover.death);
-
-  if(S.scope.death) s.appendChild(buildGapRow('Death Cover', totalDeathNeed, haveDeathCover));
-
-  // Disability
-  var disIncCap=S.disIncome.reduce(function(sum,r){return sum+calcIncomeNeed(r);},0);
-  var disCapNeed=S.disCapital.reduce(function(sum,r){return sum+N(r.amt);},0);
-  var totalDisNeed=disIncCap+disCapNeed;
-  if(S.scope.disability) s.appendChild(buildGapRow('Disability Cover', totalDisNeed, N(S.existingCover.disability)));
-
-  // Dread
-  if(S.scope.dread) s.appendChild(buildGapRow('Dread Disease', N(S.dreadAmt), N(S.existingCover.dread)));
-
-  // IP
-  if(S.scope.ip) s.appendChild(buildGapRow('Income Protection /pm', N(S.ipGrossPM||S.ipNettPM), N(S.existingCover.ipPM)));
-
-  // Retirement
-  if(S.scope.retirement){
-    var cliAge=ageFrom(S.cli.dob);
-    var retAge=N(S.cli.retAge)||65;
-    var yrsToR=cliAge?Math.max(0,retAge-cliAge):null;
-    var yrsInRet=85-retAge;
-    if(yrsToR!==null){
-      var totalProj=S.retAssets.reduce(function(sum,r){
-        if(!N(r.currentVal)&&!N(r.monthlyContrib)) return sum;
-        var gr=N(r.growthRate)>0?r.growthRate:S.assump.growth;
-        var esc=N(r.contribEsc)>0?r.contribEsc:S.assump.incEsc;
-        return sum+projectFund(r.currentVal,r.monthlyContrib,esc,gr,yrsToR);
-      },0);
-      var monthlyNeedToday=N(S.retIncomeToday)+N(S.retMedAidToday)+N(S.retOtherMonthly);
-      var lumpAtRet=S.retLumps.reduce(function(sum,r){return sum+N(r.amt);},0)*Math.pow(1+pct(S.assump.cpi),yrsToR);
-      var capForIncome=retirementCapitalNeeded(monthlyNeedToday,yrsToR,yrsInRet,S.assump.cpi,S.assump.retReturn);
-      s.appendChild(buildGapRow('Retirement Capital', capForIncome+lumpAtRet, totalProj));
+  // ── RISK NEEDS
+  if(S.scope.death||S.scope.disability||S.scope.dread||S.scope.ip){
+    sTitle('Risk Needs Summary');
+    if(S.scope.death){
+      var totLiab=S.deathLiabs.reduce(function(a,r){return a+N(r.amt);},0);
+      var totInc=S.deathIncome.reduce(function(a,r){return a+calcIncomeNeed(r);},0);
+      var totCap=S.deathCapital.reduce(function(a,r){return a+N(r.amt);},0);
+      var totalDeathNeed=totLiab+totInc+totCap;
+      var totalDeathHave=pols.reduce(function(a,p){return p.Type!=='Business Assurance'?a+N(p.BenDeath):a;},0);
+      gapBox('Life Cover',totalDeathNeed,totalDeathHave);
     }
+    if(S.scope.disability){
+      var disInc=S.disIncome.reduce(function(a,r){return a+calcIncomeNeed(r);},0);
+      var disCap=S.disCapital.reduce(function(a,r){return a+N(r.amt);},0);
+      var disHave=pols.reduce(function(a,p){return a+N(p.BenDisability);},0);
+      gapBox('Disability',disInc+disCap,disHave);
+    }
+    if(S.scope.dread){
+      var dreadHave=pols.reduce(function(a,p){return a+N(p.BenDreadDisease);},0);
+      gapBox('Dread Disease',N(S.dreadAmt),dreadHave);
+    }
+    if(S.scope.ip){
+      var ipHave=pols.reduce(function(a,p){
+        var ib=[]; try{ib=JSON.parse(p.IncomeBenefits||'[]');}catch(e){}
+        return a+ib.reduce(function(s,b){return s+N(b.amount);},0);
+      },0);
+      gapBox('Income Protection /pm',N(S.ipGrossPM||S.ipNettPM),ipHave);
+    }
+  }
+
+  // ── RETIREMENT SUMMARY
+  if(S.scope.retirement){
+    var cliAge=ageFrom(S.cli.dob), retAge=N(S.cli.retAge)||65;
+    var yrsToR2=cliAge?Math.max(0,retAge-cliAge):null;
+    var yrsInRet3=85-retAge;
+    if(yrsToR2&&yrsInRet3>0){
+      sTitle('Retirement Summary');
+      var mNeed3=0;
+      if(S.retNeeds&&S.retNeeds.length>0){
+        mNeed3=S.retNeeds.reduce(function(a,r){return a+N(r.amtToday);},0);
+      } else {
+        mNeed3=N(S.retIncomeToday)+N(S.retMedAidToday)+N(S.retOtherMonthly);
+      }
+      // Capitalise other income sources at retirement
+      var rentalAtRet3=0;
+      if(S.retRentalPM) rentalAtRet3=Math.round(N(S.retRentalPM)*Math.pow(1+pct(S.assump.cpi),yrsToR2));
+      var otherIncAtRet3=0;
+      (S.otherAssets||[]).forEach(function(a){
+        if((a.retirementRole||'')!=='Generates income (farm/business)') return;
+        if(N(a.retirementIncomePM)>0) otherIncAtRet3+=Math.round(N(a.retirementIncomePM)*Math.pow(1+pct(S.assump.cpi),yrsToR2));
+      });
+      var totalOtherInc3=rentalAtRet3+otherIncAtRet3;
+      var monthlyAtRet3=mNeed3>0?Math.round(mNeed3*Math.pow(1+pct(S.assump.cpi),yrsToR2)):0;
+      var monthlyGapAtRet3=Math.max(0,monthlyAtRet3-totalOtherInc3);
+      var monthlyGapToday3=monthlyGapAtRet3>0?monthlyGapAtRet3/Math.pow(1+pct(S.assump.cpi),yrsToR2):0;
+      var retTarget3=monthlyGapToday3>0?retirementCapitalNeeded(monthlyGapToday3,yrsToR2,yrsInRet3,S.assump.cpi,S.assump.retReturn):0;
+      var lumpAtRet3=(S.retLumps||[]).reduce(function(a,r){return a+N(r.amt);},0);
+      var totalCapNeeded3=retTarget3+lumpAtRet3;
+
+      // Project retirement assets
+      var totalCapAvail3=S.retAssets.reduce(function(a,r){
+        if(!N(r.currentVal)&&!N(r.monthlyContrib)) return a;
+        var gr=N(r.growthRate)>0?r.growthRate:S.assump.growth;
+        var esc2=N(r.contribEsc)>0?r.contribEsc:S.assump.incEsc;
+        return a+projectFund(r.currentVal,r.monthlyContrib,esc2,gr,yrsToR2);
+      },0);
+      var otherCapAtRet3=N(S.retOtherCapital);
+      totalCapAvail3+=otherCapAtRet3;
+      var retGap3=totalCapAvail3-totalCapNeeded3;
+
+      // Other income capitalised
+      var _rentalCap3=rentalAtRet3>0?retirementCapitalNeeded(rentalAtRet3/Math.pow(1+pct(S.assump.cpi),yrsToR2),yrsToR2,yrsInRet3,S.assump.cpi,S.assump.retReturn):0;
+      var _farmCap3=otherIncAtRet3>0?retirementCapitalNeeded(otherIncAtRet3/Math.pow(1+pct(S.assump.cpi),yrsToR2),yrsToR2,yrsInRet3,S.assump.cpi,S.assump.retReturn):0;
+      var _totalOtherCap3=Math.round(_rentalCap3+_farmCap3);
+      var grossCapNeed3=Math.round(totalCapNeeded3+_totalOtherCap3);
+
+      var retBox3=div(); retBox3.style.cssText='background:#1a2a4a;border-radius:8px;padding:14px 16px;margin-bottom:14px';
+      function r3Row(lbl,val,sub,bold){
+        var r=div(); r.style.cssText='display:flex;justify-content:space-between;padding:'+(bold?'7':'4')+'px 0'+(bold?';border-top:1px solid #334;margin-top:4px':'');
+        var l=el('span','',lbl); l.style.cssText='color:#ccd6f6;font-size:'+(sub?'11':'12')+'px'+(sub?';padding-left:14px':'');
+        var v=el('span','',val); v.style.cssText='font-size:'+(sub?'11':'12')+'px;color:#c8a84b'+(bold?';font-weight:700':'');
+        r.appendChild(l); r.appendChild(v); retBox3.appendChild(r);
+      }
+      function r3Sub(l,v){ r3Row(l,v,true,false); }
+      r3Row('Monthly income needed today', Rfmt(mNeed3)+' /pm');
+      r3Row('At retirement (age '+retAge+')', Rfmt(monthlyAtRet3)+' /pm');
+      if(totalOtherInc3>0){
+        r3Row('Less: ongoing income at retirement','',false,false);
+        if(rentalAtRet3>0) r3Sub('Rental — at retirement: '+Rfmt(rentalAtRet3)+'/pm','');
+        if(otherIncAtRet3>0) r3Sub('Farm/business — at retirement: '+Rfmt(otherIncAtRet3)+'/pm','');
+        r3Row('Net monthly gap', Rfmt(monthlyGapAtRet3)+' /pm');
+      }
+      r3Row('Gross capital needed','('+Rfmt(grossCapNeed3)+')',false,true);
+      r3Sub('Full capital to fund all income for '+yrsInRet3+' years','');
+      if(_totalOtherCap3>0){
+        r3Row('Less: ongoing income (capitalised)','',false,false);
+        if(_rentalCap3>0) r3Sub('Rental capitalised: '+Rfmt(Math.round(_rentalCap3)),'');
+        if(_farmCap3>0) r3Sub('Farm/business capitalised: '+Rfmt(Math.round(_farmCap3)),'');
+      }
+      r3Row('Net capital needed from funds','('+Rfmt(retTarget3)+')',false,true);
+      r3Sub('After deducting ongoing income sources','');
+      r3Row('Projected capital at retirement',Rfmt(totalCapAvail3),false,true);
+      S.retAssets.forEach(function(r){
+        if(N(r.currentVal)||N(r.monthlyContrib)){
+          var gr=N(r.growthRate)>0?r.growthRate:S.assump.growth;
+          var esc2=N(r.contribEsc)>0?r.contribEsc:S.assump.incEsc;
+          r3Sub((r.desc||'Fund')+(N(r.monthlyContrib)?' ('+Rfmt(r.monthlyContrib)+'/pm)':''),Rfmt(projectFund(r.currentVal,r.monthlyContrib,esc2,gr,yrsToR2)));
+        }
+      });
+      if(otherCapAtRet3>0) r3Sub('Other assets / property proceeds',Rfmt(otherCapAtRet3));
+      var rg3=div(); rg3.style.cssText='display:flex;justify-content:space-between;padding:8px 0;margin-top:8px;border-top:2px solid #445;font-size:14px;font-weight:700';
+      var rgl3=el('span','',retGap3>=0?'Overall position \u2014 Surplus':'Overall position \u2014 Shortfall');
+      var rgv3=el('span','',Rfmt(Math.abs(retGap3)));
+      rgl3.style.color='#ccd6f6'; rgv3.style.color=retGap3>=0?'#86efac':'#f87171';
+      rg3.appendChild(rgl3); rg3.appendChild(rgv3); retBox3.appendChild(rg3);
+      s.appendChild(retBox3);
+    }
+  }
+
+  // ── ESTATE SUMMARY
+  if(S.scope.estate){
+    sTitle('Estate Planning Summary');
+    var physAssets=(S.props||[]).reduce(function(a,p){return a+N(p.val);},0)
+      +(S.vehicles||[]).reduce(function(a,v){return a+N(v.val);},0)
+      +(S.otherAssets||[]).reduce(function(a,x){return a+N(x.val);},0);
+    var liabs=(S.props||[]).reduce(function(a,p){return a+N(p.bond);},0)
+      +(S.vehicles||[]).reduce(function(a,v){return a+N(v.finance);},0)
+      +(S.liabilities||[]).reduce(function(a,l){return a+N(l.bal);},0);
+    var s4q=0,estPols=0;
+    pols.forEach(function(p){
+      if(p.Type==='Business Assurance') return;
+      var b=N(p.BenDeath); if(!b) return;
+      if((p.BeneficiaryType||'')==='Spouse') s4q+=b;
+      else if((p.BeneficiaryType||'')==='Estate') estPols+=b;
+    });
+    var gross=physAssets+s4q+estPols;
+    var net=Math.max(0,gross-liabs);
+    var s4qDed=Math.min(s4q,net);
+    var afterS4q=Math.max(0,net-s4qDed);
+    var dutiable=Math.max(0,afterS4q-ABATEMENT);
+    var duty=dutiable<=DUTY_THRESH?dutiable*DUTY_RATE1:DUTY_THRESH*DUTY_RATE1+(dutiable-DUTY_THRESH)*DUTY_RATE2;
+    var execFees=(physAssets+estPols)*EXEC_RATE;
+
+    var estBox=div(); estBox.style.cssText='background:#1a2a4a;border-radius:8px;padding:14px 16px;margin-bottom:14px';
+    function e3Row(lbl,val,sub,bold){
+      var r=div(); r.style.cssText='display:flex;justify-content:space-between;padding:'+(bold?'7':'4')+'px 0'+(bold?';border-top:1px solid #334;margin-top:4px':'');
+      var l=el('span','',lbl); l.style.cssText='color:#ccd6f6;font-size:'+(sub?'11':'12')+'px'+(sub?';padding-left:14px':'');
+      var v=el('span','',val); v.style.cssText='font-size:'+(sub?'11':'12')+'px;color:#c8a84b'+(bold?';font-weight:700':'');
+      r.appendChild(l); r.appendChild(v); estBox.appendChild(r);
+    }
+    e3Row('Gross estate',Rfmt(gross));
+    if(liabs>0) e3Row('Less: liabilities','('+Rfmt(liabs)+')',false,false);
+    e3Row('Net estate',Rfmt(net),false,true);
+    if(s4qDed>0) e3Row('Less: s.4(q) spouse deduction','('+Rfmt(s4qDed)+')',false,false);
+    e3Row('Less: abatement','('+Rfmt(Math.min(afterS4q,ABATEMENT))+')',false,false);
+    e3Row('Dutiable amount',Rfmt(dutiable),false,true);
+    e3Row('Estate duty',Rfmt(Math.round(duty)),false,true);
+    e3Row('Executor fees (est.)',Rfmt(Math.round(execFees)),false,false);
+    e3Row('Total estate costs',Rfmt(Math.round(duty+execFees)),false,true);
+    // Spouse residue — informational only
+    var totalEstateCosts = Math.round(duty+execFees);
+    var spouseResidue = Math.max(0, net - s4qDed - totalEstateCosts);
+    if(spouseResidue>0){
+      e3Row('Estimated residue to spouse/estate',Rfmt(spouseResidue),false,false);
+    }
+    s.appendChild(estBox);
   }
 
   return s;
 }
 
-function buildGapRow(label, need, have) {
-  var gap=have-need;
-  var hasNeed=need>0;
-  var row=div('gap-row'+(hasNeed?(gap>=0?' ok':' bad'):''));
-  var gl=el('div','gl',label); row.appendChild(gl);
-  var gv=div('gv');
-  [{l:'Need',v:need},{l:'Have',v:have},{l:gap>=0?'Surplus':'Shortfall',v:Math.abs(gap)}].forEach(function(x,xi){
-    var d=div(); d.innerHTML='<div class="vl">'+x.l+'</div><div class="vn" style="color:'+(xi===2?(gap>=0?'var(--green)':'var(--red)'):'var(--navy)')+'">'+
-      (x.v>0?Rfmt(x.v):(xi===0?'Not captured':'—'))+'</div>';
-    gv.appendChild(d);
-  });
-  row.appendChild(gv);
-  return row;
-}
-
-// ═══════════════════════════════════════════════════════════
-// TAB 9 — ROA
-// ═══════════════════════════════════════════════════════════
 function buildROATab() {
   var s = div();
   if (!S.roa) S.roa = {};
