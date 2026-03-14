@@ -1878,6 +1878,7 @@ function buildRetirement() {
           S.retAssets.push({
             desc: (p.Insurer ? p.Insurer + ' — ' : '') + (p.Product || p.Type || 'Policy'),
             currentVal: p.BenFundValue || '',
+            growthRate: p.GrowthRate || '',
             monthlyContrib: (function(){
               var prem = parseFloat(String(p.Premium||'').replace(/[^0-9.]/g,''))||0;
               if (!prem) return '';
@@ -2598,143 +2599,154 @@ function buildPolCard(p, i) {
   r1.appendChild(sfld('Status', p, 'Status', ['Active','Lapsed','Paid Up','Cancelled']));
   card.appendChild(r1);
 
-  // ── Row 2: Premium + Frequency + Escalations
-  var r2 = g3();
-  r2.appendChild(rfld('Premium / Contribution', p, 'Premium'));
-  r2.appendChild(sfld('Frequency', p, 'Frequency', ['Monthly','Quarterly','Annually','Once Off']));
-  card.appendChild(r2);
-  var r2b = g3();
-  r2b.appendChild(pfld('Premium escalation %', p, 'PremEscalation', {onblur:function(){render();}}));
-  r2b.appendChild(pfld('Cover escalation %', p, 'BenEscalation', {onblur:function(){render();}}));
-  card.appendChild(r2b);
+  // ── TYPE-SPECIFIC FIELDS
+  // Each type shows only the fields relevant to it — no irrelevant fields
 
-  // ── Benefits section — varies by type
-  if (isRisk || t === 'Life / Income Protector') {
-    var bst = el('div','stitle','Benefits');
-    bst.style.marginTop = '10px';
-    card.appendChild(bst);
+  if (isMed) {
+    // ── MEDICAL AID
+    var rMed = g3();
+    rMed.appendChild(rfld('Monthly Premium', p, 'Premium'));
+    rMed.appendChild(fld('Plan / Product', p, 'MedPlan'));
+    rMed.appendChild(fld('Lives Covered', p, 'MedLives'));
+    card.appendChild(rMed);
 
-    var rb1 = g3();
-    rb1.appendChild(rfld('Death / Life Cover',    p, 'BenDeath'));
-    rb1.appendChild(rfld('Capital Disability',    p, 'BenDisability'));
-    rb1.appendChild(rfld('Dread Disease Cover',   p, 'BenDreadDisease'));
-    card.appendChild(rb1);
-
-    // Income benefits (simplified — monthly amount)
-    var ipWrap = div();
-    ipWrap.style.cssText = 'margin-top:4px';
-    var ipLbl = el('label','','Income Protection / Monthly Benefit');
-    ipLbl.style.cssText = 'font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--sub);display:block;margin-bottom:4px';
-    ipWrap.appendChild(ipLbl);
-
-    // Parse existing IP rows
-    var ipRows = [];
-    try { ipRows = p.IncomeBenefits ? JSON.parse(p.IncomeBenefits) : []; } catch(e) { ipRows = []; }
-
-    var ipTbl = document.createElement('table');
-    var ipTbody = document.createElement('tbody');
-    ipRows.forEach(function(r, ri) {
-      var tr = document.createElement('tr');
-      // Type
-      var t1 = document.createElement('td');
-      var tSel = document.createElement('select');
-      tSel.style.cssText = 'border:var(--border);border-radius:5px;padding:5px 7px;font-family:inherit;font-size:12px;width:100%';
-      ['Income Protection','Temporary IP','Death Income','Sickness Benefit','Hospital Income','Other'].forEach(function(o) {
-        var opt = document.createElement('option'); opt.value = o; opt.textContent = o;
-        if (r.type === o) opt.selected = true;
-        tSel.appendChild(opt);
-      });
-      tSel.addEventListener('change', function(e) {
-        try { var rows = JSON.parse(S.importedPols[i].IncomeBenefits||'[]'); rows[ri].type = e.target.value; S.importedPols[i].IncomeBenefits = JSON.stringify(rows); } catch(ex) {}
-      });
-      t1.appendChild(tSel); tr.appendChild(t1);
-      // Amount
-      var t2 = document.createElement('td');
-      var rw = div('td-r'); rw.appendChild(el('span','rp','R'));
-      var aInp = document.createElement('input'); aInp.type = 'text'; aInp.inputMode = 'numeric';
-      aInp.value = r.amount || ''; aInp.placeholder = '0';
-      aInp.addEventListener('input', function(e) {
-        try { var rows = JSON.parse(S.importedPols[i].IncomeBenefits||'[]'); rows[ri].amount = e.target.value; S.importedPols[i].IncomeBenefits = JSON.stringify(rows); } catch(ex) {}
-      });
-      rw.appendChild(aInp); t2.appendChild(rw); tr.appendChild(t2);
-      // Delete
-      var t3 = document.createElement('td');
-      t3.appendChild(delBtn(function() {
-        try { var rows = JSON.parse(S.importedPols[i].IncomeBenefits||'[]'); rows.splice(ri,1); S.importedPols[i].IncomeBenefits = JSON.stringify(rows); render(); } catch(ex) { render(); }
-      }));
-      tr.appendChild(t3);
-      ipTbody.appendChild(tr);
-    });
-    ipTbl.appendChild(ipTbody);
-    ipWrap.appendChild(ipTbl);
-    ipWrap.appendChild(addBtn('+ Add IP Benefit Row', function() {
-      try {
-        var rows = JSON.parse(S.importedPols[i].IncomeBenefits||'[]');
-        rows.push({type:'Income Protection', amount:''});
-        S.importedPols[i].IncomeBenefits = JSON.stringify(rows);
-        render();
-      } catch(ex) { render(); }
-    }));
-    card.appendChild(ipWrap);
-  }
-
-  if (isRA || isInv) {
-    var bst2 = el('div','stitle','Fund / Death Benefit');
-    bst2.style.marginTop = '10px';
-    card.appendChild(bst2);
-    var rb2 = g2();
-    rb2.appendChild(rfld('Current Fund Value', p, 'BenFundValue'));
-    rb2.appendChild(rfld('Death Benefit',      p, 'BenDeath'));
-    card.appendChild(rb2);
-    // Also show premium as contribution label
-    var premNote = div('info');
-    premNote.style.cssText = 'font-size:11px;padding:6px 10px;margin-top:-4px';
-    premNote.textContent = 'Premium field above = monthly contribution for this fund.';
-    card.appendChild(premNote);
-
-    // Include in retirement projection tick
-    // RAs and pension/provident funds default ON — they are core retirement vehicles
-    // Flexible investments, endowments, unit trusts default OFF — may have specific purpose
-    if (p.IncludeInRetirement === undefined || p.IncludeInRetirement === '') {
-      p.IncludeInRetirement = isRA ? 'Yes' : 'No';
-    }
-    var retRow = div(); retRow.style.cssText='display:flex;align-items:center;gap:8px;margin-top:8px;padding:8px 10px;border-radius:6px;background:'+(p.IncludeInRetirement==='Yes'?'#f0fdf4;border:1px solid #86efac':'#f8fafc;border:1px solid var(--mist)');
-    var retCb = document.createElement('input'); retCb.type='checkbox';
-    retCb.checked = (p.IncludeInRetirement === 'Yes');
-    retCb.addEventListener('change', function(e) {
-      S.importedPols[i].IncludeInRetirement = e.target.checked ? 'Yes' : 'No';
-      S.retAssets = []; // force retirement tab to re-seed on next render
-      render();
-    });
-    var retLbl = el('label','','');
-    retLbl.style.cssText='font-size:12px;cursor:pointer;color:var(--navy)';
-    retLbl.innerHTML = p.IncludeInRetirement==='Yes'
-      ? '<strong>&#10003; Included in retirement projection</strong>'
-      : '<span style="color:var(--sub)">Not included in retirement projection</span>';
-    retRow.appendChild(retCb); retRow.appendChild(retLbl);
-    if (p.IncludeInRetirement !== 'Yes') {
-      var retHint = el('span','','');
-      retHint.style.cssText='font-size:11px;color:var(--sub);margin-left:4px';
-      retHint.textContent = '— tick to include in retirement calculation';
-      retRow.appendChild(retHint);
-    }
-    card.appendChild(retRow);
-  }
-
-  if (isBiz) {
+  } else if (isBiz) {
+    // ── BUSINESS ASSURANCE — cover + type only (no premium escalation, no cover escalation)
+    if (!N(p.LoanAmount) && N(p.BenDeath)) p.LoanAmount = p.BenDeath;
+    var rBiz = g3();
+    rBiz.appendChild(rfld('Monthly Premium', p, 'Premium'));
+    rBiz.appendChild(sfld('Frequency', p, 'Frequency', ['Monthly','Quarterly','Annually','Once Off']));
+    card.appendChild(rBiz);
     var bstBiz = el('div','stitle','Business Assurance Details');
     bstBiz.style.marginTop = '10px';
     card.appendChild(bstBiz);
-    var rbBiz = g3();
-    rbBiz.appendChild(sfld('Business Type', p, 'BizType', ['','Buy & Sell','Keyman','Contingent Liability']));
-    rbBiz.appendChild(rfld('Cover / Loan Amount', p, 'LoanAmount'));
-    rbBiz.appendChild(rfld('Death Benefit', p, 'BenDeath'));
-    card.appendChild(rbBiz);
+    var rBiz2 = g2();
+    rBiz2.appendChild(sfld('Business Type', p, 'BizType', ['','Buy & Sell','Keyman','Contingent Liability']));
+    rBiz2.appendChild(rfld('Cover Amount', p, 'LoanAmount'));
+    card.appendChild(rBiz2);
     var bizNote = div('info');
     bizNote.style.cssText = 'font-size:11px;padding:6px 10px;margin-top:-4px;background:#eff6ff;border-color:#bfdbfe;color:#1e40af';
-    bizNote.innerHTML = '<strong>Buy &amp; Sell</strong> pays to co-shareholder · <strong>Keyman</strong> pays to business · <strong>Contingent Liability</strong> settles business debt. None form part of personal estate.';
+    bizNote.innerHTML = '<strong>Buy &amp; Sell</strong> pays to co-shareholder \u00b7 <strong>Keyman</strong> pays to business \u00b7 <strong>Contingent Liability</strong> settles business debt. None form part of personal estate.';
     card.appendChild(bizNote);
+
+  } else if (isRA || isInv) {
+    // ── RETIREMENT ANNUITY / INVESTMENT
+    // Contribution + frequency + contribution escalation + growth rate
+    var rInv1 = g3();
+    rInv1.appendChild(rfld(isRA ? 'Monthly Contribution' : 'Contribution / Premium', p, 'Premium'));
+    rInv1.appendChild(sfld('Frequency', p, 'Frequency', ['Monthly','Quarterly','Annually','Once Off']));
+    card.appendChild(rInv1);
+    var rInv2 = g3();
+    rInv2.appendChild(pfld('Contribution escalation %', p, 'PremEscalation', {onblur:function(){render();}}));
+    rInv2.appendChild(pfld('Growth rate % (for projection)', p, 'GrowthRate', {onblur:function(){render();}}));
+    card.appendChild(rInv2);
+
+    // Fund value — single field (no separate death benefit — for RA/inv it is the same)
+    var bst2 = el('div','stitle','Fund Value');
+    bst2.style.marginTop = '10px';
+    card.appendChild(bst2);
+    var rInv3 = g2();
+    rInv3.appendChild(rfld('Current Fund Value', p, 'BenFundValue'));
+    // BenDeath = fund value for RA/inv — keep in sync
+    var fvInp = rInv3.querySelector ? null : null; // set via listener below
+    card.appendChild(rInv3);
+
+    // Include in retirement projection tick
+    if (p.IncludeInRetirement === undefined || p.IncludeInRetirement === '') {
+      p.IncludeInRetirement = isRA ? 'Yes' : 'No';
+    }
+    var retRow = div();
+    retRow.style.cssText = 'display:flex;align-items:center;gap:8px;margin-top:8px;padding:8px 10px;border-radius:6px;background:' +
+      (p.IncludeInRetirement === 'Yes' ? '#f0fdf4;border:1px solid #86efac' : '#f8fafc;border:1px solid var(--mist)');
+    var retCb = document.createElement('input'); retCb.type = 'checkbox';
+    retCb.checked = (p.IncludeInRetirement === 'Yes');
+    retCb.addEventListener('change', function(e) {
+      S.importedPols[i].IncludeInRetirement = e.target.checked ? 'Yes' : 'No';
+      S.retAssets = [];
+      render();
+    });
+    var retLbl = el('label','','');
+    retLbl.style.cssText = 'font-size:12px;cursor:pointer;color:var(--navy)';
+    retLbl.innerHTML = p.IncludeInRetirement === 'Yes'
+      ? '<strong>&#10003; Included in retirement projection</strong>'
+      : '<span style="color:var(--sub)">Not included in retirement projection \u2014 tick to include</span>';
+    retRow.appendChild(retCb); retRow.appendChild(retLbl);
+    card.appendChild(retRow);
+
+  } else {
+    // ── RISK / LIFE / IP (default)
+    var rRisk1 = g3();
+    rRisk1.appendChild(rfld('Monthly Premium', p, 'Premium'));
+    rRisk1.appendChild(sfld('Frequency', p, 'Frequency', ['Monthly','Quarterly','Annually','Once Off']));
+    card.appendChild(rRisk1);
+    var rRisk2 = g3();
+    rRisk2.appendChild(pfld('Premium escalation %', p, 'PremEscalation', {onblur:function(){render();}}));
+    rRisk2.appendChild(pfld('Cover escalation %', p, 'BenEscalation', {onblur:function(){render();}}));
+    card.appendChild(rRisk2);
+
+    // Benefits
+    var bst = el('div','stitle','Benefits');
+    bst.style.marginTop = '10px';
+    card.appendChild(bst);
+    var rb1 = g3();
+    rb1.appendChild(rfld('Death / Life Cover',  p, 'BenDeath'));
+    rb1.appendChild(rfld('Capital Disability',  p, 'BenDisability'));
+    rb1.appendChild(rfld('Dread Disease Cover', p, 'BenDreadDisease'));
+    card.appendChild(rb1);
+
+    // Income Protection benefits
+    var ipRows = [];
+    try { ipRows = p.IncomeBenefits ? JSON.parse(p.IncomeBenefits) : []; } catch(e) { ipRows = []; }
+    if (ipRows.length > 0 || true) { // always show IP section for risk policies
+      var ipWrap = div(); ipWrap.style.cssText = 'margin-top:4px';
+      var ipLbl = el('label','','Income Protection / Monthly Benefit');
+      ipLbl.style.cssText = 'font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--sub);display:block;margin-bottom:4px';
+      ipWrap.appendChild(ipLbl);
+      var ipTbl = document.createElement('table');
+      var ipTbody = document.createElement('tbody');
+      ipRows.forEach(function(r, ri) {
+        var tr = document.createElement('tr');
+        var t1 = document.createElement('td');
+        var tSel = document.createElement('select');
+        tSel.style.cssText = 'border:var(--border);border-radius:5px;padding:5px 7px;font-family:inherit;font-size:12px;width:100%';
+        ['Income Protection','Temporary IP','Death Income','Sickness Benefit','Hospital Income','Other'].forEach(function(o) {
+          var opt = document.createElement('option'); opt.value = o; opt.textContent = o;
+          if (r.type === o) opt.selected = true;
+          tSel.appendChild(opt);
+        });
+        tSel.addEventListener('change', function(e) {
+          try { var rows = JSON.parse(S.importedPols[i].IncomeBenefits||'[]'); rows[ri].type = e.target.value; S.importedPols[i].IncomeBenefits = JSON.stringify(rows); } catch(ex) {}
+        });
+        t1.appendChild(tSel); tr.appendChild(t1);
+        var t2 = document.createElement('td');
+        var rw = div('td-r'); rw.appendChild(el('span','rp','R'));
+        var aInp = document.createElement('input'); aInp.type = 'text'; aInp.inputMode = 'numeric';
+        aInp.value = r.amount || ''; aInp.placeholder = '0';
+        aInp.addEventListener('input', function(e) {
+          try { var rows = JSON.parse(S.importedPols[i].IncomeBenefits||'[]'); rows[ri].amount = e.target.value; S.importedPols[i].IncomeBenefits = JSON.stringify(rows); } catch(ex) {}
+        });
+        rw.appendChild(aInp); t2.appendChild(rw); tr.appendChild(t2);
+        var t3 = document.createElement('td');
+        t3.appendChild(delBtn(function() {
+          try { var rows = JSON.parse(S.importedPols[i].IncomeBenefits||'[]'); rows.splice(ri,1); S.importedPols[i].IncomeBenefits = JSON.stringify(rows); render(); } catch(ex) { render(); }
+        }));
+        tr.appendChild(t3);
+        ipTbody.appendChild(tr);
+      });
+      ipTbl.appendChild(ipTbody);
+      ipWrap.appendChild(ipTbl);
+      ipWrap.appendChild(addBtn('+ Add IP Benefit Row', function() {
+        try {
+          var rows = JSON.parse(S.importedPols[i].IncomeBenefits||'[]');
+          rows.push({type:'Income Protection', amount:''});
+          S.importedPols[i].IncomeBenefits = JSON.stringify(rows);
+          render();
+        } catch(ex) { render(); }
+      }));
+      card.appendChild(ipWrap);
+    }
   }
+
   // Parse Beneficiaries array (CRM format) on first render to seed BeneficiaryType/Beneficiary
   if (p.Beneficiaries && !p._bensSeeded) {
     try {
