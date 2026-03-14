@@ -3220,22 +3220,26 @@ function buildSummary() {
   var retAge   = N(S.cli.retAge)||65;
   var yrsToR   = cliAge ? Math.max(0, retAge - cliAge) : 20;
 
-  // Personal policies for 'available' cover — all non-business policies
-  var availPols = pols.filter(function(p){ return p.Type !== 'Business Assurance'; });
-  var totalDeathCover = availPols.reduce(function(sum,p){ return sum + N(p.BenDeath); }, 0);
+  // Personal risk policies for death cover — exclude business assurance AND RA/investment types
+  // RA/investment policies are counted separately via raOnDeath to avoid double-counting
+  var allPolTypes = POL_RA_TYPES.concat(POL_INV_TYPES);
+  var riskPols = pols.filter(function(p){
+    return p.Type !== 'Business Assurance' && allPolTypes.indexOf(p.Type) === -1;
+  });
+  var totalDeathCover = riskPols.reduce(function(sum,p){ return sum + N(p.BenDeath); }, 0);
   var totalDisCover   = pols.reduce(function(sum,p){ return sum + N(p.BenDisability); }, 0);
   var totalDDCover    = pols.reduce(function(sum,p){ return sum + N(p.BenDreadDisease); }, 0);
 
-  // Liquid assets (realised on death)
+  // Liquid assets (realised on death) — investment-type other assets only
   var liquidOnDeath = S.otherAssets.reduce(function(sum,a){
     var t = (a.type||'').toLowerCase();
     var illiquid = t.indexOf('business')>-1 || t.indexOf('farm')>-1 || t.indexOf('personal')>-1;
     return sum + (illiquid ? 0 : N(a.val));
   }, 0);
 
-  // RA fund value available on death
+  // RA/investment fund values available on death
   var raOnDeath = pols.reduce(function(sum,p){
-    if (POL_RA_TYPES.indexOf(p.Type) > -1) return sum + N(p.BenFundValue);
+    if (allPolTypes.indexOf(p.Type) > -1) return sum + N(p.BenFundValue);
     return sum;
   }, 0);
 
@@ -3285,7 +3289,7 @@ function buildSummary() {
 
     // Capital available
     sumRow('Capital available', '', false, false, true);
-    availPols.forEach(function(p){
+    riskPols.forEach(function(p){
       if (N(p.BenDeath) > 0) {
         sumSub((p.Insurer||'Policy')+(p.Product?' \u2014 '+p.Product:'')+' ('+p.BeneficiaryType+')', Rfmt(p.BenDeath));
       }
@@ -3303,37 +3307,15 @@ function buildSummary() {
     gapRow.appendChild(gl); gapRow.appendChild(gv); capBox.appendChild(gapRow);
     s.appendChild(capBox);
 
-    // INCOME section
-    var incBox = div();
-    incBox.style.cssText='background:var(--navy);color:#fff;border-radius:9px;padding:18px 20px;margin-bottom:16px';
-    var incTtl=div(); incTtl.style.cssText='font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--gold);margin-bottom:10px';
-    incTtl.textContent='Income'; incBox.appendChild(incTtl);
-
-    function incRow(lbl, val, bold, borderTop) {
-      var row=div(); row.style.cssText='display:flex;justify-content:space-between;padding:4px 0;font-size:13px'+(borderTop?';border-top:1px solid #334;margin-top:8px;padding-top:10px':'')+(bold?';font-weight:700':'');
-      var ls=el('span','',lbl); ls.style.color='#ccd6f6';
-      var vs=el('span','',val); vs.style.color=bold?'var(--gold)':'#ccd6f6';
-      row.appendChild(ls); row.appendChild(vs); incBox.appendChild(row);
+    // Income replacement need — shown as a note if captured in Needs tab
+    if (totIncCap > 0) {
+      var incNote = div('info');
+      incNote.style.cssText = 'font-size:12px;margin-bottom:12px';
+      incNote.innerHTML = '<strong>Income replacement:</strong> A capitalised income need of <strong>' + Rfmt(totIncCap) + '</strong> ' +
+        'has been included in the capital needs above. ' +
+        'This represents the lump sum needed to fund ongoing income for the family.';
+      s.appendChild(incNote);
     }
-    function incSub(lbl,val){var row=div();row.style.cssText='display:flex;justify-content:space-between;padding:2px 0 2px 16px;font-size:11px;color:#8899bb';row.innerHTML='<span>'+lbl+'</span><span>'+val+'</span>';incBox.appendChild(row);}
-
-    incRow('Income needed (capitalised)','');
-    S.deathIncome.forEach(function(r){
-      var cap=calcIncomeNeed(r);
-      if(cap>0) incSub((r.desc||'Income')+' ('+Rfmt(N(r.incPM)||0)+'/pm)','('+Rfmt(cap)+')');
-    });
-    incRow('Total income need (lump sum value)','('+Rfmt(totIncCap)+')',false,true);
-    incRow('Income available','',false,true);
-    incSub('Ongoing income sources after death','R 0');
-    incRow('Total income available', Rfmt(incomeAvail),false,true);
-
-    var incGap = incomeAvail - totIncCap;
-    var igRow=div(); igRow.style.cssText='display:flex;justify-content:space-between;padding:8px 0;margin-top:8px;border-top:2px solid #445;font-size:14px;font-weight:700';
-    var igl=el('span','',incGap>=0?'Overall position \u2014 Surplus':'Overall position \u2014 Shortfall');
-    var igv=el('span','',Rfmt(Math.abs(incGap)));
-    igl.style.color='#ccd6f6'; igv.style.color=incGap>=0?'#86efac':'#f87171';
-    igRow.appendChild(igl); igRow.appendChild(igv); incBox.appendChild(igRow);
-    s.appendChild(incBox);
   }
 
   // ── Disability, Dread, IP — simple gap rows
