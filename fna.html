@@ -1748,18 +1748,30 @@ function buildRetirement() {
   var raPolTypes = ['Retirement Annuity','Pension Fund','Provident Fund','Pension Preservation','Provident Preservation',
                     'Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment',
                     'Unit Trust','Tax Free Savings','Living Annuity'];
-  if (S.retAssets.length === 0 && S.importedPols && S.importedPols.length > 0) {
+  // Rebuild retAssets from policies marked IncludeInRetirement = Yes
+  // Run every time (not just when empty) so tick changes take effect immediately
+  var raOnlyTypes = ['Retirement Annuity','Pension Fund','Provident Fund','Pension Preservation','Provident Preservation'];
+  if (S.importedPols && S.importedPols.length > 0) {
+    // Set defaults for any policy that hasn't been explicitly set yet
     S.importedPols.forEach(function(p) {
-      if (raPolTypes.indexOf(p.Type) > -1) {
-        S.retAssets.push({
-          desc: (p.Insurer ? p.Insurer + ' — ' : '') + (p.Type || 'Policy'),
-          currentVal: p.BenFundValue || '',
-          monthlyContrib: p.Premium && (p.Frequency === 'Monthly' || !p.Frequency) ? p.Premium : '',
-          contribEsc: '',
-          growthRate: ''
-        });
+      if (raPolTypes.indexOf(p.Type) > -1 && (p.IncludeInRetirement === undefined || p.IncludeInRetirement === '')) {
+        p.IncludeInRetirement = raOnlyTypes.indexOf(p.Type) > -1 ? 'Yes' : 'No';
       }
     });
+    // Only rebuild if retAssets is empty OR if it was cleared by a tick change
+    if (S.retAssets.length === 0) {
+      S.importedPols.forEach(function(p) {
+        if (raPolTypes.indexOf(p.Type) > -1 && p.IncludeInRetirement === 'Yes') {
+          S.retAssets.push({
+            desc: (p.Insurer ? p.Insurer + ' — ' : '') + (p.Product || p.Type || 'Policy'),
+            currentVal: p.BenFundValue || '',
+            monthlyContrib: p.Premium && (p.Frequency === 'Monthly' || !p.Frequency) ? p.Premium : '',
+            contribEsc: '',
+            growthRate: ''
+          });
+        }
+      });
+    }
   }
 
   var inf2=div('info'); inf2.innerHTML='These assets project forward to retirement. ' +
@@ -2240,6 +2252,34 @@ function buildPolCard(p, i) {
     premNote.style.cssText = 'font-size:11px;padding:6px 10px;margin-top:-4px';
     premNote.textContent = 'Premium field above = monthly contribution for this fund.';
     card.appendChild(premNote);
+
+    // Include in retirement projection tick
+    // RAs and pension/provident funds default ON — they are core retirement vehicles
+    // Flexible investments, endowments, unit trusts default OFF — may have specific purpose
+    if (p.IncludeInRetirement === undefined || p.IncludeInRetirement === '') {
+      p.IncludeInRetirement = isRA ? 'Yes' : 'No';
+    }
+    var retRow = div(); retRow.style.cssText='display:flex;align-items:center;gap:8px;margin-top:8px;padding:8px 10px;border-radius:6px;background:'+(p.IncludeInRetirement==='Yes'?'#f0fdf4;border:1px solid #86efac':'#f8fafc;border:1px solid var(--mist)');
+    var retCb = document.createElement('input'); retCb.type='checkbox';
+    retCb.checked = (p.IncludeInRetirement === 'Yes');
+    retCb.addEventListener('change', function(e) {
+      S.importedPols[i].IncludeInRetirement = e.target.checked ? 'Yes' : 'No';
+      S.retAssets = []; // force retirement tab to re-seed on next render
+      render();
+    });
+    var retLbl = el('label','','');
+    retLbl.style.cssText='font-size:12px;cursor:pointer;color:var(--navy)';
+    retLbl.innerHTML = p.IncludeInRetirement==='Yes'
+      ? '<strong>&#10003; Included in retirement projection</strong>'
+      : '<span style="color:var(--sub)">Not included in retirement projection</span>';
+    retRow.appendChild(retCb); retRow.appendChild(retLbl);
+    if (p.IncludeInRetirement !== 'Yes') {
+      var retHint = el('span','','');
+      retHint.style.cssText='font-size:11px;color:var(--sub);margin-left:4px';
+      retHint.textContent = '— tick to include in retirement calculation';
+      retRow.appendChild(retHint);
+    }
+    card.appendChild(retRow);
   }
 
   if (isBiz) {
