@@ -2359,54 +2359,146 @@ function buildPolicies() {
         '(' + yrsToRet + ' years from now). This is critical for budgeting retirement income.';
       s.appendChild(afford);
 
+      // Income escalation rate for salary projection
+      var incEsc = pct(N(S.assump.incEsc) > 0 ? S.assump.incEsc : 5);
+      var nettToday = N(S.cli.nettPM);
+      var salaryAtRet = nettToday > 0 ? nettToday * Math.pow(1 + incEsc, yrsToRet) : 0;
+
       var affTbl = document.createElement('table');
-      affTbl.innerHTML = '<thead><tr><th>Policy</th><th>Current premium</th><th>Esc %</th><th>At retirement (est.)</th></tr></thead>';
+      var hdr = '<thead><tr><th>Policy</th><th>Current premium</th>';
+      if (nettToday > 0) hdr += '<th>% of salary today</th>';
+      hdr += '<th>Esc %</th><th>At retirement</th>';
+      if (salaryAtRet > 0) hdr += '<th>% of salary at ret.</th>';
+      hdr += '<th>Include in<br>ret. needs</th></tr></thead>';
+      affTbl.innerHTML = hdr;
       var affTb = document.createElement('tbody');
       var totalAtRet = 0;
+      var totalIncluded = 0; // sum of future premiums ticked for retirement needs
+
       pols.forEach(function(pol, j) {
         if ((pol.Frequency||'Monthly') !== 'Monthly') return;
         var prem = N(pol.Premium);
         if (!prem) return;
+        // Skip RA/investment policies — they are savings, not a retirement cost
+        var allInvTypes = POL_RA_TYPES.concat(POL_INV_TYPES);
+        if (allInvTypes.indexOf(pol.Type||'') > -1) return;
+
         var esc = N(pol.premEsc) || 0;
         var future = esc > 0 ? Math.round(prem * Math.pow(1 + esc/100, yrsToRet)) : prem;
         totalAtRet += future;
+
+        var todayPct = nettToday > 0 ? (prem / nettToday * 100).toFixed(1) + '%' : '';
+        var futurePct = salaryAtRet > 0 ? (future / salaryAtRet * 100).toFixed(1) + '%' : '';
+        // Flag: future % materially higher than today % (premium growing faster than salary)
+        var todayPctN  = nettToday > 0 ? prem / nettToday * 100 : 0;
+        var futurePctN = salaryAtRet > 0 ? future / salaryAtRet * 100 : 0;
+        var isHigh = futurePctN > todayPctN * 1.3; // more than 30% worse than today
+
+        // Default: include in retirement needs if it is a risk/medical policy
+        if (pol.retInclude === undefined || pol.retInclude === null) pol.retInclude = true;
+        if (pol.retInclude) totalIncluded += future;
+
         var tr2 = document.createElement('tr');
-        tr2.innerHTML =
-          '<td>' + (pol.Insurer||'—') + (pol.Type ? ' <span style="font-size:11px;color:var(--sub)">'+pol.Type+'</span>' : '') + '</td>' +
-          '<td>' + Rfmt(prem) + '</td>' +
-          '<td><input type="text" inputmode="numeric" value="' + (pol.premEsc||'') + '" placeholder="0" style="width:52px;padding:4px 6px;border:1.5px solid var(--mist);border-radius:5px;font-size:12px" ' +
-            'data-idx="'+j+'" onblur="S.importedPols[this.dataset.idx].premEsc=this.value;render()" oninput="S.importedPols[this.dataset.idx].premEsc=this.value"> %</td>' +
-          '<td style="font-weight:700;color:' + (future > prem * 2 ? 'var(--red)' : 'var(--navy)') + '">' + Rfmt(future) + '</td>';
+        var td1 = document.createElement('td');
+        td1.innerHTML = (pol.Insurer||'—') + (pol.Type ? ' <span style="font-size:11px;color:var(--sub)">'+pol.Type+'</span>' : '');
+        var td2 = document.createElement('td'); td2.textContent = Rfmt(prem);
+        tr2.appendChild(td1); tr2.appendChild(td2);
+
+        if (nettToday > 0) {
+          var td3 = document.createElement('td'); td3.textContent = todayPct;
+          td3.style.color = 'var(--sub)'; tr2.appendChild(td3);
+        }
+
+        // Escalation input
+        var td4 = document.createElement('td');
+        var escInp = document.createElement('input');
+        escInp.type = 'text'; escInp.inputMode = 'numeric';
+        escInp.value = pol.premEsc || ''; escInp.placeholder = '0';
+        escInp.style.cssText = 'width:52px;padding:4px 6px;border:1.5px solid var(--mist);border-radius:5px;font-size:12px';
+        escInp.dataset.idx = j;
+        escInp.addEventListener('input', function(e){ S.importedPols[this.dataset.idx].premEsc = e.target.value; });
+        escInp.addEventListener('blur', function(){ render(); });
+        td4.appendChild(escInp);
+        var pctSpan = document.createElement('span'); pctSpan.textContent = ' %';
+        pctSpan.style.fontSize = '11px'; td4.appendChild(pctSpan);
+        tr2.appendChild(td4);
+
+        // Future premium
+        var td5 = document.createElement('td');
+        td5.textContent = Rfmt(future);
+        td5.style.fontWeight = '700';
+        td5.style.color = isHigh ? 'var(--red)' : 'var(--navy)';
+        tr2.appendChild(td5);
+
+        if (salaryAtRet > 0) {
+          var td6 = document.createElement('td');
+          td6.textContent = futurePct;
+          td6.style.fontWeight = isHigh ? '700' : '400';
+          td6.style.color = isHigh ? 'var(--red)' : 'var(--sub)';
+          if (isHigh) td6.title = 'Premium growing faster than salary';
+          tr2.appendChild(td6);
+        }
+
+        // Include in retirement needs checkbox
+        var td7 = document.createElement('td');
+        td7.style.textAlign = 'center';
+        var cb = document.createElement('input'); cb.type = 'checkbox';
+        cb.checked = pol.retInclude !== false;
+        cb.dataset.idx = j;
+        cb.addEventListener('change', function(e){
+          S.importedPols[this.dataset.idx].retInclude = e.target.checked;
+          render();
+        });
+        td7.appendChild(cb); tr2.appendChild(td7);
         affTb.appendChild(tr2);
       });
+
+      // Totals row
       var trTot = document.createElement('tr');
       trTot.style.cssText = 'border-top:2px solid var(--navy);font-weight:700';
-      trTot.innerHTML = '<td colspan="3">Total premiums at retirement</td><td style="color:var(--gold)">' + Rfmt(totalAtRet) + ' /pm</td>';
+      var totCols = '<td>Total (risk policies only)</td>';
+      totCols += '<td>' + Rfmt(pols.reduce(function(s,p){ return (p.Frequency||'Monthly')==='Monthly'&&POL_RA_TYPES.concat(POL_INV_TYPES).indexOf(p.Type||'')===-1?s+N(p.Premium):s; },0)) + '</td>';
+      if (nettToday > 0) {
+        var totTodayPct = (pols.reduce(function(s,p){ return (p.Frequency||'Monthly')==='Monthly'&&POL_RA_TYPES.concat(POL_INV_TYPES).indexOf(p.Type||'')===-1?s+N(p.Premium):s; },0) / nettToday * 100).toFixed(1);
+        totCols += '<td>' + totTodayPct + '%</td>';
+      }
+      totCols += '<td></td><td style="color:var(--gold)">' + Rfmt(totalAtRet) + '</td>';
+      if (salaryAtRet > 0) {
+        var totFuturePct = (totalAtRet / salaryAtRet * 100).toFixed(1);
+        totCols += '<td style="color:var(--gold)">' + totFuturePct + '%</td>';
+      }
+      totCols += '<td></td>';
+      trTot.innerHTML = totCols;
       affTb.appendChild(trTot);
       affTbl.appendChild(affTb);
       var affTw = div('twrap'); affTw.appendChild(affTbl); s.appendChild(affTw);
 
-      var nettAtRet = N(S.cli.nettPM);
-      if (nettAtRet > 0 && totalAtRet > 0) {
-        var premPct = Math.round(totalAtRet / nettAtRet * 100);
+      // Summary note
+      if (nettToday > 0 && totalAtRet > 0) {
+        var totPremToday = pols.reduce(function(sm,p){ return (p.Frequency||'Monthly')==='Monthly'&&POL_RA_TYPES.concat(POL_INV_TYPES).indexOf(p.Type||'')===-1?sm+N(p.Premium):sm; },0);
+        var todayPctTotal = (totPremToday / nettToday * 100).toFixed(1);
+        var futurePctTotal = salaryAtRet > 0 ? (totalAtRet / salaryAtRet * 100).toFixed(1) : null;
+        var isHighTotal = futurePctTotal && parseFloat(futurePctTotal) > parseFloat(todayPctTotal) * 1.3;
         var afford2 = div('info'); afford2.style.marginTop = '8px';
-        afford2.style.background = premPct > 20 ? '#fef2f2' : '#f0fdf4';
-        afford2.style.borderColor = premPct > 20 ? '#fca5a5' : '#86efac';
-        afford2.style.color = premPct > 20 ? '#991b1b' : '#166534';
-        afford2.innerHTML = 'Estimated premiums at retirement = <strong>' + Rfmt(totalAtRet) + ' /pm</strong> (' +
-          premPct + '% of current nett income of ' + Rfmt(nettAtRet) + '). ' +
-          (premPct > 20 ? '⚠ Premium burden is high relative to current income.' : '✓ Premium burden appears manageable.');
+        afford2.style.background = isHighTotal ? '#fef2f2' : '#f0fdf4';
+        afford2.style.borderColor = isHighTotal ? '#fca5a5' : '#86efac';
+        afford2.style.color = isHighTotal ? '#991b1b' : '#166534';
+        var msg = 'Premiums today = <strong>' + Rfmt(totPremToday) + ' /pm</strong> (' + todayPctTotal + '% of current nett salary).';
+        if (futurePctTotal) msg += ' At retirement: <strong>' + Rfmt(totalAtRet) + ' /pm</strong> (' + futurePctTotal + '% of projected salary of ' + Rfmt(Math.round(salaryAtRet)) + '/pm).';
+        msg += isHighTotal ? ' ⚠ Premiums are growing faster than salary — affordability is reducing.' : ' ✓ Premiums growing in line with salary.';
+        afford2.innerHTML = msg;
         s.appendChild(afford2);
       }
-      if (totalAtRet > 0) {
+
+      // Update retirement needs automatically based on ticked policies
+      if (totalIncluded > 0) {
         var addPremBtn = document.createElement('button');
         addPremBtn.className = 'btn btn-navy';
         addPremBtn.style.cssText = 'margin-top:10px;font-size:12px';
-        addPremBtn.textContent = '→ Add risk premiums at retirement as a Retirement income need';
+        addPremBtn.textContent = '→ Send ticked premiums to Retirement needs (' + Rfmt(Math.round(totalIncluded)) + '/pm at retirement)';
         addPremBtn.addEventListener('click', function() {
           if (!S.retNeeds) S.retNeeds = [];
-          // totalAtRet is at retirement value — store today's equivalent
-          var todayAmt = yrsToRet > 0 ? Math.round(totalAtRet / Math.pow(1 + pct(S.assump.cpi), yrsToRet)) : Math.round(totalAtRet);
+          var todayAmt = yrsToRet > 0 ? Math.round(totalIncluded / Math.pow(1 + pct(S.assump.cpi), yrsToRet)) : Math.round(totalIncluded);
           var existing = (S.retNeeds||[]).filter(function(r){ return r.desc === 'Risk premiums at retirement'; })[0];
           if (existing) { existing.amtToday = String(todayAmt); }
           else { S.retNeeds.push({ desc: 'Risk premiums at retirement', amtToday: String(todayAmt), esc: '' }); }
