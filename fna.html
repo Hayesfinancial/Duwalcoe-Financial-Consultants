@@ -1742,90 +1742,93 @@ function buildRetirement() {
 
     s.appendChild(calcBox);
 
-    // ── What-if Scenario Calculator (discussion tool)
+    // ── What-if Scenario Calculator (client discussion tool)
     s.appendChild(stitle('Scenario Calculator — Client Discussion'));
     var scInf=div('info');
-    scInf.innerHTML='Use this during the client meeting to explore "what if" scenarios. '
-      +'Adjust retirement age, assumptions and extra saving below — the calculator updates instantly. '
-      +'<strong>This does not change any saved data.</strong>';
+    scInf.innerHTML='Adjust the assumptions below with the client. The <strong>monthly saving required</strong> updates instantly. Does not affect saved data.';
     s.appendChild(scInf);
 
-    // Scenario state — window-level so it survives re-renders within the session but is not persisted
     if(!window._sc){
       window._sc={
-        retAge:   String(retAge),
-        cpi:      String(S.assump.cpi||6),
-        growth:   String(S.assump.growth||9),
-        retReturn:String(S.assump.retReturn||8),
-        extraPM:  '0'
+        retAge:    String(retAge),
+        growth:    String(S.assump.growth||9),
+        contribEsc:String(S.assump.incEsc||6),
+        extraPM:   '0'
       };
     }
     var sc=window._sc;
+    // Keep retirement age in sync if it changed
+    sc.retAge = sc.retAge || String(retAge);
 
     var scCard=div();
     scCard.style.cssText='background:#fff;border:1.5px solid var(--gold);border-radius:9px;padding:16px;margin-bottom:14px';
 
-    var scG=div(); scG.style.cssText='display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:14px';
+    // Four input fields
+    var scG=div(); scG.style.cssText='display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px';
 
-    function scInpFld(lbl, key, isMoney){
+    function scFld(lbl, key, suffix, hint){
       var w=div('f');
-      w.appendChild(el('label','',lbl));
+      var lb=el('label','',lbl); w.appendChild(lb);
+      if(hint){ var hn=el('div','',hint); hn.style.cssText='font-size:9px;color:var(--sub);margin-bottom:2px'; w.appendChild(hn); }
       var wrap=div(); wrap.style.cssText='position:relative';
-      var prefix=el('span',''); prefix.style.cssText='position:absolute;left:10px;top:50%;transform:translateY(-50%);color:var(--sub);font-size:12px;pointer-events:none';
-      var suffix=el('span',''); suffix.style.cssText='position:absolute;right:10px;top:50%;transform:translateY(-50%);color:var(--sub);font-size:12px;pointer-events:none';
       var inp=document.createElement('input');
       inp.type='text'; inp.inputMode='numeric'; inp.value=sc[key]||'';
-      inp.style.cssText='width:100%;border:1.5px solid var(--mist);border-radius:6px;padding:7px 10px;font-size:13px;font-family:inherit;box-sizing:border-box';
-      if(isMoney){ prefix.textContent='R'; inp.style.paddingLeft='22px'; wrap.appendChild(prefix); }
-      else { suffix.textContent='%'; inp.style.paddingRight='24px'; wrap.appendChild(suffix); }
-      wrap.appendChild(inp);
-      w.appendChild(wrap);
+      inp.style.cssText='width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;font-size:13px;font-family:inherit;padding:7px 24px 7px 10px';
+      var suf=el('span','',suffix);
+      suf.style.cssText='position:absolute;right:8px;top:50%;transform:translateY(-50%);font-size:11px;color:var(--sub);pointer-events:none';
+      wrap.appendChild(inp); wrap.appendChild(suf); w.appendChild(wrap);
       inp.addEventListener('input',function(e){ sc[key]=e.target.value; recalcSc(); });
       return w;
     }
 
-    scG.appendChild(scInpFld('Retirement Age','retAge',false));
-    scG.appendChild(scInpFld('CPI / Inflation %','cpi',false));
-    scG.appendChild(scInpFld('Fund Growth Rate %','growth',false));
-    scG.appendChild(scInpFld('Return in Retirement %','retReturn',false));
-    scG.appendChild(scInpFld('Additional Saving R/pm','extraPM',true));
+    scG.appendChild(scFld('Retirement Age','retAge','yrs',''));
+    scG.appendChild(scFld('Growth Rate','growth','%','on funds'));
+    scG.appendChild(scFld('Annual Prem Increase','contribEsc','%','on new saving'));
+    scG.appendChild(scFld('Extra Saving Today','extraPM','R/pm','to test'));
     scCard.appendChild(scG);
 
+    // Result display
     var scResult=div();
-    scResult.style.cssText='background:#1a2a4a;border-radius:7px;padding:12px 16px';
+    scResult.style.cssText='background:#1a2a4a;border-radius:7px;padding:14px 16px';
     scCard.appendChild(scResult);
     s.appendChild(scCard);
 
-    function scRow(parent,lbl,val,bold,colour){
+    function scRow(lbl,val,bold,colour){
       var r=div();
-      r.style.cssText='display:flex;justify-content:space-between;padding:'+(bold?'7':'4')+'px 0'+(bold?';border-top:1px solid #334;margin-top:4px':'');
-      var l=el('span','',lbl); l.style.cssText='color:#ccd6f6;font-size:12px';
-      var v=el('span','',val); v.style.cssText='font-size:12px;font-weight:'+(bold?'700':'400')+';color:'+(colour||'#c8a84b');
-      r.appendChild(l); r.appendChild(v); parent.appendChild(r);
+      r.style.cssText='display:flex;justify-content:space-between;align-items:center;padding:'+(bold?'8':'4')+'px 0'+(bold?';border-top:1px solid #334;margin-top:6px':'');
+      var l=el('span','',lbl); l.style.cssText='color:#ccd6f6;font-size:'+(bold?'13':'12')+'px';
+      var v=el('span','',val); v.style.cssText='font-size:'+(bold?'14':'12')+'px;font-weight:'+(bold?'700':'400')+';color:'+(colour||'#c8a84b');
+      r.appendChild(l); r.appendChild(v); scResult.appendChild(r);
     }
 
     function recalcSc(){
       scResult.innerHTML='';
       var scRetAge  = N(sc.retAge)||65;
-      var scCpi     = N(sc.cpi)||6;
       var scGrowth  = N(sc.growth)||9;
-      var scRet     = N(sc.retReturn)||8;
+      var scEsc     = N(sc.contribEsc)||0;
       var scExtra   = N(sc.extraPM)||0;
       var scYrsToR  = cliAge ? Math.max(0, scRetAge - cliAge) : 0;
       var scYrsInR  = Math.max(1, 85 - scRetAge);
 
-      if(!cliAge){ scRow(scResult,'Enter client date of birth on the Client tab to use this calculator','',false,'#f87171'); return; }
-      if(!scYrsToR){ scRow(scResult,'Client has already reached retirement age '+scRetAge,'',false,'#86efac'); return; }
+      if(!cliAge){
+        scRow('Enter client date of birth on the Client tab','',false,'#f87171');
+        return;
+      }
+      if(scYrsToR<=0){
+        scRow('Client has already reached retirement age '+scRetAge,'',false,'#86efac');
+        return;
+      }
 
-      var scMNeed   = (S.retNeeds||[]).reduce(function(a,r){return a+N(r.amtToday);},0);
-      var scRental  = N(S.retRentalPM)>0?Math.round(N(S.retRentalPM)*Math.pow(1+scCpi/100,scYrsToR)):0;
-      var scMAtRet  = scMNeed>0?Math.round(scMNeed*Math.pow(1+scCpi/100,scYrsToR)):0;
-      var scNetGap  = Math.max(0,scMAtRet-scRental);
-      var scNetToday= scNetGap>0?scNetGap/Math.pow(1+scCpi/100,scYrsToR):0;
-      var scCapNeed = scNetToday>0?retirementCapitalNeeded(scNetToday,scYrsToR,scYrsInR,scCpi,scRet):0;
-      var scLumps   = (S.retLumps||[]).reduce(function(a,r){return a+N(r.amt);},0);
-      var scTotNeed = scCapNeed+scLumps;
+      // Capital target — same as main retirement tab
+      var scMNeed = (S.retNeeds||[]).reduce(function(a,r){return a+N(r.amtToday);},0);
+      var scRental= N(S.retRentalPM)>0?Math.round(N(S.retRentalPM)*Math.pow(1+N(S.assump.cpi)/100,scYrsToR)):0;
+      var scMAtRet= scMNeed>0?Math.round(scMNeed*Math.pow(1+N(S.assump.cpi)/100,scYrsToR)):0;
+      var scNetToday=Math.max(0,scMAtRet-scRental)>0?Math.max(0,scMAtRet-scRental)/Math.pow(1+N(S.assump.cpi)/100,scYrsToR):0;
+      var scCapNeed=scNetToday>0?retirementCapitalNeeded(scNetToday,scYrsToR,scYrsInR,S.assump.cpi,S.assump.retReturn):0;
+      var scLumps=(S.retLumps||[]).reduce(function(a,r){return a+N(r.amt);},0);
+      var scTarget=scCapNeed+scLumps;
 
+      // Projected capital from existing funds at scenario growth rate
       var scProj=S.retAssets.reduce(function(a,r){
         if(!N(r.currentVal)&&!N(r.monthlyContrib)) return a;
         var gr=N(r.growthRate)>0?N(r.growthRate):scGrowth;
@@ -1833,30 +1836,50 @@ function buildRetirement() {
         return a+projectFund(r.currentVal,r.monthlyContrib,esc,gr,scYrsToR);
       },0)+N(S.retOtherCapital);
 
-      if(scExtra>0){
+      // Shortfall before any extra saving
+      var scShortfall=Math.max(0, scTarget-scProj);
+
+      // If extra saving entered — project it and reduce shortfall
+      var scExtraFV=scExtra>0?projectFund(0,scExtra,scEsc,scGrowth,scYrsToR):0;
+      var scRemainingShortfall=Math.max(0,scShortfall-scExtraFV);
+
+      // PMT to close the remaining shortfall
+      // FV = scRemainingShortfall, solve for PMT with annual escalation scEsc% at growth scGrowth%
+      // Use projectFund inverse: binary search since growing annuity PMT inverse is not trivial
+      var scPMT=0;
+      if(scRemainingShortfall>0&&scYrsToR>0){
+        // Simple PMT (no escalation on new contribution) as starting point
         var mr=scGrowth/100/12;
         var nm=scYrsToR*12;
-        scProj+=(mr>0)?(scExtra*12*(Math.pow(1+mr*12,scYrsToR)-1)/(mr*12)):scExtra*nm;
+        if(scEsc>0){
+          // PMT of growing annuity: use projectFund with PMT=1 to find scale factor
+          var unitFV=projectFund(0,1,scEsc,scGrowth,scYrsToR);
+          scPMT=unitFV>0?Math.round(scRemainingShortfall/unitFV):0;
+        } else {
+          scPMT=mr>0?Math.round(scRemainingShortfall*mr/(Math.pow(1+mr,nm)-1)):Math.round(scRemainingShortfall/nm);
+        }
       }
 
-      var scGap=scProj-scTotNeed;
-      var scPMT=0;
-      if(scGap<0){
-        var mr2=scGrowth/100/12;
-        var nm2=scYrsToR*12;
-        scPMT=mr2>0?Math.round(Math.abs(scGap)*mr2/(Math.pow(1+mr2,nm2)-1)):Math.round(Math.abs(scGap)/nm2);
+      // Display
+      scRow('Capital target (from income needs)',Rfmt(scTarget));
+      scRow('Projected capital (existing funds @ '+scGrowth+'%)',Rfmt(scProj));
+      scRow('Shortfall to close',Rfmt(scShortfall),true,(scShortfall>0?'#f87171':'#86efac'));
+
+      if(scExtra>0){
+        scRow('Extra saving of '+Rfmt(scExtra)+'/pm grows to',Rfmt(scExtraFV));
+        scRow('Remaining shortfall after extra saving',Rfmt(scRemainingShortfall),false,(scRemainingShortfall>0?'#f87171':'#86efac'));
       }
 
-      scRow(scResult,'Retirement age',scRetAge+' ('+scYrsToR+' yrs from now, '+scYrsInR+' yrs in retirement)');
-      scRow(scResult,'Monthly need today (from Retirement tab)',Rfmt(scMNeed)+' /pm');
-      scRow(scResult,'Inflated to retirement at '+scCpi+'% CPI',Rfmt(scMAtRet)+' /pm');
-      if(scRental>0) scRow(scResult,'Less: rental at retirement','('+Rfmt(scRental)+'/pm)');
-      scRow(scResult,'Capital needed @ '+scRet+'% return',Rfmt(scTotNeed),true);
-      scRow(scResult,'Projected capital @ '+scGrowth+'% growth',Rfmt(scProj),true);
-      var gCol=scGap>=0?'#86efac':'#f87171';
-      scRow(scResult,(scGap>=0?'▲ Surplus':'▼ Shortfall'),Rfmt(Math.abs(scGap)),true,gCol);
-      if(scPMT>0) scRow(scResult,'Additional saving needed to close gap',Rfmt(scPMT)+' /pm',false,'#fbbf24');
-      if(scExtra>0) scRow(scResult,'(includes extra '+Rfmt(scExtra)+'/pm entered above)','',false,'#8899bb');
+      if(scRemainingShortfall>0){
+        scRow(
+          'Monthly saving needed'+(scEsc>0?' (escalating '+scEsc+'% p.a.)':'(flat, no increase)'),
+          Rfmt(scPMT)+' /pm',
+          true,
+          '#fbbf24'
+        );
+      } else {
+        scRow('✓ Shortfall covered'+(scExtra>0?' with extra saving of '+Rfmt(scExtra)+'/pm':''),'',true,'#86efac');
+      }
     }
 
     recalcSc();
