@@ -164,6 +164,7 @@ table input:focus, table select:focus { outline: none; border-color: var(--gold)
 </div>
 <div class="tabbar" id="tabBar"></div>
 <div class="content" id="content"></div>
+<div class="tabbar" id="tabBarBottom"></div>
 <div class="footer">
   <div class="footer-l" id="statusBar">FSP No: 9978 · Clinton Hayes · <a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="b3d0dfdaddc7dcddf3d7c6c4d2dfd0dcd69dd0dc9dc9d2">[email&#160;protected]</a></div>
   <div class="footer-r">
@@ -912,10 +913,13 @@ function g4() { return div('g4'); }
 function render() {
   document.getElementById('hdrClient').textContent = S.cli.name || 'New Client';
   document.getElementById('tabBar').innerHTML = '';
+  document.getElementById('tabBarBottom').innerHTML = '';
   TABS.forEach(function (t, i) {
-    var tab = el('div', 'tab' + (i === activeTab ? ' on' : ''), t);
-    tab.addEventListener('click', function () { go(i); });
-    document.getElementById('tabBar').appendChild(tab);
+    ['tabBar','tabBarBottom'].forEach(function(barId) {
+      var tab = el('div', 'tab' + (i === activeTab ? ' on' : ''), t);
+      tab.addEventListener('click', function () { go(i); });
+      document.getElementById(barId).appendChild(tab);
+    });
   });
   var c = document.getElementById('content');
   c.innerHTML = '';
@@ -3662,6 +3666,23 @@ function buildSummary() {
       var esc3=N(r.contribEsc)>0?r.contribEsc:S.assump.incEsc;
       return a+projectFund(r.currentVal,r.monthlyContrib,esc3,gr,yrsToR2);
     },0);
+    // Other capital at retirement — sold properties + other assets (same as retirement tab)
+    var otherCapAtRet3 = 0;
+    S.otherAssets.forEach(function(a){
+      var role = a.retirementRole || 'Not included';
+      if (role === 'Not included') return;
+      var gr = N(a.growthRate) > 0 ? a.growthRate : S.assump.growth;
+      var projVal = N(a.val) * Math.pow(1 + pct(gr), yrsToR2);
+      if (role !== 'Generates income (farm/business)') otherCapAtRet3 += Math.round(projVal);
+    });
+    S.props.forEach(function(p){
+      if (!p.soldAtRetirement) return;
+      var gr = N(S.assump.growth);
+      var projVal = N(p.val) * Math.pow(1 + pct(gr), yrsToR2);
+      var retPct = N(p.retirementPct||100) / 100;
+      otherCapAtRet3 += Math.round(projVal * retPct);
+    });
+    var totalCapAvail3 = totalProj3 + otherCapAtRet3;
     // Use retNeeds array (same logic as retirement tab) — NOT old fixed fields
     var monthlyAtRet3 = 0;
     (S.retNeeds||[]).forEach(function(r){
@@ -3689,7 +3710,7 @@ function buildSummary() {
     var monthlyGapToday3 = monthlyGapAtRet3 > 0 ? monthlyGapAtRet3 / Math.pow(1+pct(S.assump.cpi), yrsToR2) : 0;
     var lumpRet3=S.retLumps.reduce(function(a,r){return a+N(r.amt);},0)*Math.pow(1+pct(S.assump.cpi),yrsToR2);
     var capNeed3=retirementCapitalNeeded(monthlyGapToday3,yrsToR2,yrsInRet3,S.assump.cpi,S.assump.retReturn);
-    var retTarget3=capNeed3+lumpRet3, retGap3=totalProj3-retTarget3;
+    var retTarget3=capNeed3+lumpRet3, retGap3=totalCapAvail3-retTarget3;
 
     var retBox3=div(); retBox3.style.cssText='background:var(--navy);color:#fff;border-radius:9px;padding:18px 20px;margin-bottom:12px';
     var retTtl3=div(); retTtl3.style.cssText='font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--gold);margin-bottom:10px';
@@ -3700,8 +3721,10 @@ function buildSummary() {
     r3Sub('Each item inflated to retirement at its own escalation rate','');
     r3Row('Capital needed','('+Rfmt(retTarget3)+')',false,true);
     r3Sub('To fund income for '+yrsInRet3+' years + lump sum objectives','');
-    r3Row('Projected capital at retirement', Rfmt(totalProj3), false, true);
+    r3Row('Projected capital at retirement', Rfmt(totalCapAvail3), false, true);
     S.retAssets.forEach(function(r){ if(N(r.currentVal)||N(r.monthlyContrib)){ var gr=N(r.growthRate)>0?r.growthRate:S.assump.growth;var esc3=N(r.contribEsc)>0?r.contribEsc:S.assump.incEsc;r3Sub((r.desc||'Fund')+(N(r.monthlyContrib)?' ('+Rfmt(r.monthlyContrib)+'/pm)':''),Rfmt(projectFund(r.currentVal,r.monthlyContrib,esc3,gr,yrsToR2)));} });
+    if(otherCapAtRet3>0) r3Sub('Other assets / property proceeds at retirement', Rfmt(otherCapAtRet3));
+    if(rentalAtRet3>0)   r3Sub('Rental income at retirement (reduces capital needed)', Rfmt(rentalAtRet3)+'/pm');
     var rg3=div(); rg3.style.cssText='display:flex;justify-content:space-between;padding:8px 0;margin-top:8px;border-top:2px solid #445;font-size:14px;font-weight:700';
     var rgl3=el('span','',retGap3>=0?'Overall position \u2014 Surplus':'Overall position \u2014 Shortfall');
     var rgv3=el('span','',Rfmt(Math.abs(retGap3)));
