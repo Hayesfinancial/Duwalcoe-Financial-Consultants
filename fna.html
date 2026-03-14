@@ -367,7 +367,7 @@ var DEFAULTS = {
   cli: {
     name: '', id: '', dob: '', gender: '', smoker: '', education: '',
     occ: '', retAge: '65', grossPM: '', nettPM: '',
-    marital: '', domDate: '', spouseName: '', spouseDob: '', spouseOcc: ''
+    marital: '', domDate: '', spouseName: '', spouseDob: '', spouseOcc: '', spouseInheritsResidue: false
   },
   kids: [],
 
@@ -868,6 +868,35 @@ function buildClient() {
   var r5 = g2();
   r5.appendChild(fld('Spouse DOB (DD/MM/YYYY)', S.cli, 'spouseDob', { placeholder: '01/01/1982' }));
   s.appendChild(r5);
+
+  // Spouse inherits residue — fundamental estate planning question
+  var isMarried = S.cli.marital && S.cli.marital.toLowerCase().indexOf('married') > -1;
+  if (isMarried && S.cli.spouseName) {
+    var residueCard = div();
+    residueCard.style.cssText = 'background:#f0fdf4;border:1px solid #86efac;border-radius:8px;padding:14px 16px;margin-top:4px';
+    var residueRow = div(); residueRow.style.cssText = 'display:flex;align-items:center;gap:10px';
+    var residueCb = document.createElement('input'); residueCb.type = 'checkbox';
+    residueCb.checked = !!S.cli.spouseInheritsResidue;
+    residueCb.addEventListener('change', function(e) { S.cli.spouseInheritsResidue = e.target.checked; render(); });
+    var residueLbl = el('label','',''); 
+    residueLbl.innerHTML = '<strong>Spouse inherits the residue of the estate</strong>';
+    residueLbl.style.cssText = 'font-size:13px;cursor:pointer;color:var(--navy)';
+    residueRow.appendChild(residueCb); residueRow.appendChild(residueLbl);
+    residueCard.appendChild(residueRow);
+    var residueExp = el('div','','');
+    residueExp.style.cssText = 'font-size:11px;margin-top:6px;color:#166534';
+    if (S.cli.spouseInheritsResidue) {
+      residueExp.innerHTML = '✓ The net estate (after liabilities and specific bequests) passes to ' +
+        (S.cli.spouseName || 'the spouse') + ' — qualifies for the <strong>Section 4(q) deduction</strong>. ' +
+        'The residue is deducted from the dutiable estate in the Estate tab calculation. ' +
+        'Note: executor fees still apply on the gross estate regardless.';
+    } else {
+      residueExp.innerHTML = 'Tick if the client\u2019s will leaves the residue of the estate to the surviving spouse. ' +
+        'This qualifies for the Section 4(q) deduction and can significantly reduce or eliminate estate duty.';
+    }
+    residueCard.appendChild(residueExp);
+    s.appendChild(residueCard);
+  }
 
   s.appendChild(stitle('Dependants'));
   if (S.kids.length === 0) {
@@ -2506,6 +2535,14 @@ function buildEstate() {
 
   var grossEstate    = totalDutiableAssets + toEstate;
   var netEstate      = Math.max(0, grossEstate - totalLiabs);
+
+  // If spouse inherits residue, the entire net estate (less specific policy bequests
+  // already counted in section4q) passes to spouse and qualifies for s.4(q) deduction.
+  // Executor fees still apply on gross estate regardless.
+  if (S.cli.spouseInheritsResidue) {
+    section4q = netEstate; // entire net estate to spouse
+  }
+
   var sec4qDed       = Math.min(section4q, netEstate);  // can't exceed net estate
   var afterSpouse    = Math.max(0, netEstate - sec4qDed);
   // Accrual deduction (payable before estate duty is calculated)
@@ -2566,7 +2603,10 @@ function buildEstate() {
   calcRow('Net Estate', Rfmt(netEstate), false, false, true);
 
   if (section4q > 0) {
-    calcRow('Less: Section 4(q) — spouse bequest', '− ' + Rfmt(sec4qDed), true);
+    var s4qLabel = S.cli.spouseInheritsResidue
+      ? 'Less: Section 4(q) — spouse inherits residue'
+      : 'Less: Section 4(q) — spouse bequest';
+    calcRow(s4qLabel, '− ' + Rfmt(sec4qDed), true);
   }
   if (afterSpouse !== netEstate) {
     calcRow('After 4(q) deduction', Rfmt(afterSpouse), false, false, true);
