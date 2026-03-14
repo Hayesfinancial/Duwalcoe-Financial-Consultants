@@ -3639,9 +3639,25 @@ function buildSummary() {
       var esc3=N(r.contribEsc)>0?r.contribEsc:S.assump.incEsc;
       return a+projectFund(r.currentVal,r.monthlyContrib,esc3,gr,yrsToR2);
     },0);
-    var mNeed3=N(S.retIncomeToday)+N(S.retMedAidToday)+N(S.retOtherMonthly);
+    // Use retNeeds array (same logic as retirement tab) — NOT old fixed fields
+    var monthlyAtRet3 = 0;
+    (S.retNeeds||[]).forEach(function(r){
+      var amt = N(r.amtToday); if(!amt) return;
+      var esc = N(r.esc) > 0 ? pct(r.esc) : pct(S.assump.cpi);
+      monthlyAtRet3 += amt * Math.pow(1 + esc, yrsToR2);
+    });
+    // Backward compat: fall back to old fields if retNeeds is empty
+    if (!(S.retNeeds && S.retNeeds.length > 0)) {
+      var _old3 = N(S.retIncomeToday)+N(S.retMedAidToday)+N(S.retOtherMonthly);
+      if (_old3 > 0) monthlyAtRet3 = _old3 * Math.pow(1+pct(S.assump.cpi), yrsToR2);
+    }
+    var mNeed3 = (S.retNeeds&&S.retNeeds.length>0)
+      ? (S.retNeeds||[]).reduce(function(a,r){return a+N(r.amtToday);},0)
+      : N(S.retIncomeToday)+N(S.retMedAidToday)+N(S.retOtherMonthly);
+    var monthlyGapAtRet3 = monthlyAtRet3; // no other income sources deducted in summary
+    var monthlyGapToday3 = monthlyGapAtRet3 > 0 ? monthlyGapAtRet3 / Math.pow(1+pct(S.assump.cpi), yrsToR2) : 0;
     var lumpRet3=S.retLumps.reduce(function(a,r){return a+N(r.amt);},0)*Math.pow(1+pct(S.assump.cpi),yrsToR2);
-    var capNeed3=retirementCapitalNeeded(mNeed3,yrsToR2,yrsInRet3,S.assump.cpi,S.assump.retReturn);
+    var capNeed3=retirementCapitalNeeded(monthlyGapToday3,yrsToR2,yrsInRet3,S.assump.cpi,S.assump.retReturn);
     var retTarget3=capNeed3+lumpRet3, retGap3=totalProj3-retTarget3;
 
     var retBox3=div(); retBox3.style.cssText='background:var(--navy);color:#fff;border-radius:9px;padding:18px 20px;margin-bottom:12px';
@@ -3649,8 +3665,8 @@ function buildSummary() {
     retTtl3.textContent='Retirement Capital'; retBox3.appendChild(retTtl3);
     function r3Row(lbl,val,bold,bt){ var row=div(); row.style.cssText='display:flex;justify-content:space-between;padding:4px 0;font-size:13px'+(bt?';border-top:1px solid #334;margin-top:8px;padding-top:10px':'')+(bold?';font-weight:700':''); var ls=el('span','',lbl);ls.style.color='#ccd6f6';var vs=el('span','',val);vs.style.color=bold?'var(--gold)':'#ccd6f6';row.appendChild(ls);row.appendChild(vs);retBox3.appendChild(row); }
     function r3Sub(lbl,val){ var row=div();row.style.cssText='display:flex;justify-content:space-between;padding:2px 0 2px 16px;font-size:11px;color:#8899bb';row.innerHTML='<span>'+lbl+'</span><span>'+val+'</span>';retBox3.appendChild(row); }
-    r3Row('Monthly income needed at retirement', Rfmt(mNeed3)+' /pm');
-    r3Sub('In today\'s rands \u00b7 inflated to retirement date','');
+    r3Row('Monthly income needed (today\'s rands)', Rfmt(mNeed3)+' /pm');
+    r3Sub('Each item inflated to retirement at its own escalation rate','');
     r3Row('Capital needed','('+Rfmt(retTarget3)+')',false,true);
     r3Sub('To fund income for '+yrsInRet3+' years + lump sum objectives','');
     r3Row('Projected capital at retirement', Rfmt(totalProj3), false, true);
