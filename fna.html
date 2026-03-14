@@ -1950,7 +1950,7 @@ function buildRetirement() {
 
   // Retirement needs table
   var rnTbl = document.createElement('table');
-  rnTbl.innerHTML = '<thead><tr><th>Description</th><th>Amount today (R/pm)</th><th>Escalation % (blank=CPI)</th><th></th></tr></thead>';
+  rnTbl.innerHTML = '<thead><tr><th>Description</th><th style="width:110px">Today (R/pm)</th><th style="width:80px">Esc %</th><th style="width:120px">Capital needed</th><th></th></tr></thead>';
   var rnTb = document.createElement('tbody');
   (S.retNeeds||[]).forEach(function(r, ni) {
     var tr = document.createElement('tr');
@@ -1958,21 +1958,35 @@ function buildRetirement() {
     var td1 = document.createElement('td');
     var di = document.createElement('input'); di.type='text'; di.value=r.desc||''; di.placeholder='e.g. Living expenses';
     di.addEventListener('input',function(e){S.retNeeds[ni].desc=e.target.value;}); td1.appendChild(di); tr.appendChild(td1);
-    // Amount
+    // Amount — narrow input
     var td2 = document.createElement('td');
     var rw2 = div('td-r'); rw2.appendChild(el('span','rp','R'));
-    var ai2 = document.createElement('input'); ai2.type='text'; ai2.inputMode='numeric'; ai2.value=r.amtToday||''; ai2.placeholder='0';
+    var ai2 = document.createElement('input'); ai2.type='text'; ai2.inputMode='numeric';
+    ai2.value=r.amtToday||''; ai2.placeholder='0';
+    ai2.style.cssText = 'width:80px;padding:5px 6px;font-size:12px';
     ai2.addEventListener('input',function(e){S.retNeeds[ni].amtToday=e.target.value;});
     ai2.addEventListener('blur',function(){render();});
     rw2.appendChild(ai2); td2.appendChild(rw2); tr.appendChild(td2);
-    // Escalation
+    // Escalation — narrow input
     var td3 = document.createElement('td');
     var pw3 = div('pw'); var pp3 = el('span','pp','%');
     var ei3 = document.createElement('input'); ei3.type='text'; ei3.inputMode='numeric';
     ei3.value=r.esc||''; ei3.placeholder=S.assump.cpi||5;
+    ei3.style.cssText = 'width:46px;padding:5px 6px;font-size:12px';
     ei3.addEventListener('input',function(e){S.retNeeds[ni].esc=e.target.value;});
     ei3.addEventListener('blur',function(){render();});
     pw3.appendChild(ei3); pw3.appendChild(pp3); td3.appendChild(pw3); tr.appendChild(td3);
+    // Capital needed for this item
+    var td5 = document.createElement('td');
+    td5.style.cssText = 'font-weight:700;color:var(--navy);font-size:12px';
+    if (N(r.amtToday) > 0 && yrsToR !== null) {
+      var itemEsc = N(r.esc) > 0 ? pct(r.esc) : pct(S.assump.cpi);
+      var itemAtRet = N(r.amtToday) * Math.pow(1 + itemEsc, yrsToR);
+      var itemTodayAdj = itemAtRet / Math.pow(1 + pct(S.assump.cpi), yrsToR);
+      var itemCap = retirementCapitalNeeded(itemTodayAdj, yrsToR, yrsInRet, S.assump.cpi, S.assump.retReturn);
+      td5.textContent = Rfmt(Math.round(itemCap));
+    } else { td5.textContent = '—'; }
+    tr.appendChild(td5);
     // Delete
     var td4 = document.createElement('td');
     td4.appendChild(delBtn(function(){S.retNeeds.splice(ni,1);render();})); tr.appendChild(td4);
@@ -2172,12 +2186,15 @@ function buildRetirement() {
       // Store calculator state on S so it persists
       if (!S.retCalc) S.retCalc = {};
       var rc = S.retCalc;
-      // Seed defaults from current projection — reset each render so they stay current
-      rc.target   = String(Math.round(totalCapNeeded));  // what you need
+      // Only seed target if user has not manually set it
+      // _targetLocked = true means user has typed their own value
+      if (!rc._targetLocked) rc.target = String(Math.round(totalCapNeeded));
       if (!rc.growth)   rc.growth   = String(S.assump.growth || 9);
       if (!rc.esc)      rc.esc      = String(S.assump.incEsc || 5);
       if (!rc.yrs)      rc.yrs      = String(yrsToR);
       if (!rc.existing) rc.existing = String(Math.round(S.retAssets.reduce(function(sum,r){ return sum+N(r.monthlyContrib); },0)));
+      // Show both target and shortfall so user knows what to enter
+      var _capNeeded = totalCapNeeded, _capAvail = totalCapAvail, _gapAbs = Math.abs(gap);
 
       var scBox = div();
       scBox.style.cssText = 'background:var(--navy);color:#fff;border-radius:9px;padding:18px 20px;margin-bottom:16px';
@@ -2195,6 +2212,7 @@ function buildRetirement() {
         inp.style.cssText = 'width:100%;box-sizing:border-box;background:#1e3a5f;border:1px solid #334;color:#fff;padding:7px 10px;border-radius:5px;font-size:13px';
         inp.addEventListener('input', function(){
           rc[key] = this.value;
+          if (key === 'target') rc._targetLocked = true; // user has manually set target
           S.retCalc = rc;
           // Clear result — user must click Calculate
           var res = document.getElementById('sc-result');
@@ -2211,6 +2229,14 @@ function buildRetirement() {
         return wrap;
       }
 
+      // Show helper note: full target vs shortfall
+      var tgtNote = div();
+      tgtNote.style.cssText = 'grid-column:1/-1;font-size:11px;color:#8899bb;margin-bottom:-4px';
+      tgtNote.innerHTML = 'Full capital needed: <strong style="color:#ccd6f6">' + Rfmt(Math.round(_capNeeded)) + '</strong>' +
+        (_gapAbs > 0 && gap < 0 ? ' · Shortfall to close: <strong style="color:#f87171">' + Rfmt(Math.round(_gapAbs)) + '</strong>' : '') +
+        (gap >= 0 ? ' · <span style="color:#86efac">Currently on track</span>' : '') +
+        ' · <a href="#" style="color:#8899bb;font-size:10px" onclick="S.retCalc._targetLocked=false;S.retCalc.target=String(Math.round(' + Math.round(_capNeeded) + '));render();return false">reset to full target</a>';
+      scGrid.appendChild(tgtNote);
       scGrid.appendChild(scFld('Target capital needed (R)', 'target', ''));
       scGrid.appendChild(scFld('Years to retirement', 'yrs', 'years'));
       scGrid.appendChild(scFld('Growth rate', 'growth', '% /yr'));
@@ -2383,7 +2409,15 @@ function buildPolicies() {
         var allInvTypes = POL_RA_TYPES.concat(POL_INV_TYPES);
         if (allInvTypes.indexOf(pol.Type||'') > -1) return;
 
-        var esc = N(pol.premEsc) || 0;
+        // Use manual premEsc override, or fall back to CRM PremEscalation field
+        var escVal = pol.premEsc !== undefined && pol.premEsc !== ''
+          ? pol.premEsc
+          : (pol.PremEscalation || '');
+        var esc = N(escVal) || 0;
+        // Auto-seed premEsc from CRM value on first load
+        if ((pol.premEsc === undefined || pol.premEsc === '') && pol.PremEscalation) {
+          pol.premEsc = String(N(pol.PremEscalation) || '');
+        }
         var future = esc > 0 ? Math.round(prem * Math.pow(1 + esc/100, yrsToRet)) : prem;
         totalAtRet += future;
 
