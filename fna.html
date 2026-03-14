@@ -2530,8 +2530,9 @@ function buildEstate() {
 
   // Policy routing buckets — kept separate for display and calculation
   var s4qPolicies    = 0;  // Spouse beneficiary — s.4(q) deductible, enters gross estate as deemed property
-  var dutiablePols   = 0;  // Estate + Third Party beneficiary — dutiable, enters gross estate
-  var bizDutiable    = 0;  // Business assurance with EstateDutiable=Yes — enters gross estate
+  var estatePols     = 0;  // Estate beneficiary — paid INTO the estate, executor administers
+  var thirdPartyPols = 0;  // Third Party beneficiary — deemed property, paid DIRECT to beneficiary
+  var bizDutiable    = 0;  // Business assurance with EstateDutiable=Yes — deemed property
   var bizOutside     = 0;  // Business assurance outside personal estate
 
   pols.forEach(function(p) {
@@ -2547,10 +2548,10 @@ function buildEstate() {
     }
     if (!ben) return;
     var bt = p.BeneficiaryType || '';
-    if      (bt === 'Spouse')       s4qPolicies  += ben;
-    else if (bt === 'Estate')       dutiablePols += ben;
-    else if (bt === 'Third Party')  dutiablePols += ben;  // deemed property — dutiable
-    else                            bizOutside   += ben;
+    if      (bt === 'Spouse')       s4qPolicies    += ben;
+    else if (bt === 'Estate')       estatePols     += ben;  // paid into estate
+    else if (bt === 'Third Party')  thirdPartyPols += ben;  // deemed property, paid direct
+    else                            bizOutside     += ben;
   });
 
   // Physical assets with spouse beneficiary also qualify for s.4(q)
@@ -2559,24 +2560,20 @@ function buildEstate() {
   S.vehicles.forEach(function(v){ if(v.deathBenType==='Spouse' && N(v.val)) s4qAssets += N(v.val); });
   S.otherAssets.forEach(function(a){ if(a.deathBenType==='Spouse' && N(a.val)) s4qAssets += N(a.val); });
 
-  // toEstate = ALL policy proceeds that enter the gross estate (both dutiable and s.4q)
-  // This is needed for the grossEstate calculation
+  // dutiablePols = all non-spouse policy proceeds in gross estate (for calculations)
+  var dutiablePols = estatePols + thirdPartyPols;
+
+  // toEstate = ALL policy proceeds entering gross estate as deemed property
   var toEstate = s4qPolicies + dutiablePols + bizDutiable;
 
-  // section4q = total s.4(q) deduction (spouse policies + spouse physical assets)
+  // section4q = total s.4(q) deduction
   var section4q = s4qPolicies + s4qAssets;
 
-  // toBiz = for display card only — business outside personal estate
+  // toBiz = display only
   var toBiz = bizOutside;
 
-  // polsActuallyInEstate = policies where BeneficiaryType='Estate' only
-  // These are the only policies actually administered by the executor
-  // Third Party / trust policies and business assurance are deemed property only
-  var polsActuallyInEstate = (S.importedPols||[]).reduce(function(sum,p){
-    if (p.Type === 'Business Assurance') return sum;
-    if ((p.BeneficiaryType||'') === 'Estate') return sum + N(p.BenDeath);
-    return sum;
-  }, 0);
+  // polsActuallyInEstate = estate-beneficiary policies only (executor administers)
+  var polsActuallyInEstate = estatePols;
 
   if (pols.length === 0) {
     var noPol = div('info'); noPol.textContent = 'No policies captured. Add policies on the Policies tab.';
@@ -2585,10 +2582,11 @@ function buildEstate() {
     var polRouteCards = div('cards');
     polRouteCards.style.gridTemplateColumns = 'repeat(4,1fr)';
     [
-      { l: 'Section 4(q) — Spouse',        v: s4qPolicies,  c: 'ok',   sub: 'In gross estate, deducted via s.4(q)' },
-      { l: 'To Estate / Third Party',       v: dutiablePols, c: 'warn', sub: 'Dutiable — estate duty applies' },
-      { l: 'Biz Assurance — Dutiable',      v: bizDutiable,  c: 'warn', sub: 'In estate — advisor confirmed dutiable' },
-      { l: 'Biz Assurance — Outside Estate',v: bizOutside,   c: '',     sub: 'Keyman / buy-sell — outside personal estate' }
+      { l: 'Section 4(q) — Spouse',         v: s4qPolicies,    c: 'ok',   sub: 'Paid direct to spouse — not dutiable' },
+      { l: 'To Estate (estate beneficiary)', v: estatePols,     c: 'warn', sub: 'Paid into estate — executor administers' },
+      { l: 'Third Party / Trust',            v: thirdPartyPols, c: 'warn', sub: 'Deemed property — paid direct, duty apportioned' },
+      { l: 'Biz Assurance — Dutiable',       v: bizDutiable,    c: 'warn', sub: 'Deemed property — paid to CC/bank, duty apportioned' },
+      { l: 'Biz Assurance — Outside Estate', v: bizOutside,     c: '',     sub: 'Keyman / buy-sell — outside estate, no duty' }
     ].forEach(function(x) {
       var c = div('card');
       c.innerHTML = '<div class="lbl">' + x.l + '</div>' +
@@ -2719,7 +2717,9 @@ function buildEstate() {
   // NOT: s4q policies (paid direct to spouse)
   // NOT: trust/third party policies (paid direct — executor never handles them)
   // NOT: business assurance to CC/bank (paid direct to that entity)
-  var execFeeBasis     = totalDutiableAssets + dutiablePols;
+  // Executor fees basis: physical assets + policies paid INTO estate only
+  // Third party / trust policies paid direct — executor never handles them
+  var execFeeBasis     = totalDutiableAssets + estatePols;
   var execFees         = execFeeBasis * EXEC_RATE;
   var totalEstateCosts = estateDuty + execFees;
 
@@ -2730,18 +2730,29 @@ function buildEstate() {
   function apportionDuty(val) {
     return (afterAbatement > 0 && estateDuty > 0) ? estateDuty * (val / afterAbatement) : 0;
   }
-  var dutyOnPhysical   = apportionDuty(totalDutiableAssets);
-  var dutyOnDutiablePols = apportionDuty(dutiablePols);
-  var dutyOnBizDutiable  = apportionDuty(bizDutiable);
-  var dutyPayableByEstate       = dutyOnPhysical;
-  var dutyPayableByThirdParties = dutyOnDutiablePols + dutyOnBizDutiable;
+  var dutyOnPhysical      = apportionDuty(totalDutiableAssets);
+  var dutyOnEstatePols    = apportionDuty(estatePols);      // estate pays this via estate policy
+  var dutyOnThirdParty    = apportionDuty(thirdPartyPols);  // trust/3rd party pays this
+  var dutyOnBizDutiable   = apportionDuty(bizDutiable);     // CC/bank pays this
+  var dutyPayableByEstate        = dutyOnPhysical + dutyOnEstatePols;
+  var dutyPayableByThirdParties  = dutyOnThirdParty + dutyOnBizDutiable;
 
   // ── LIQUIDITY — what the estate itself needs to fund
   // Estate pays: its own duty share + executor fees
   // Third party policy beneficiaries pay their own duty share (recovered from them)
   // Available to estate: estate-beneficiary policy proceeds + liquid assets
   // s4q and business assurance proceeds do NOT flow through the estate
-  var liquidCash     = S.otherAssets.reduce(function(sum,a){ return sum+N(a.val); },0);
+  // Liquid cash = only Investment-type assets (not business interests, farms, personal property)
+  // Business interests / farms are illiquid — cannot be quickly sold to pay estate costs
+  var LIQUID_TYPES = ['Investment','Unit Trust','Money Market','Tax Free'];
+  var liquidCash = S.otherAssets.reduce(function(sum,a){
+    var t = (a.type||'').toLowerCase();
+    var isLiquid = t === '' || t === 'investment' || t.indexOf('unit') > -1 ||
+                   t.indexOf('money') > -1 || t.indexOf('tax free') > -1;
+    var isIlliquid = t.indexOf('business') > -1 || t.indexOf('farm') > -1 ||
+                     t.indexOf('personal') > -1 || t.indexOf('inheritance') > -1;
+    return sum + (isIlliquid ? 0 : N(a.val));
+  }, 0);
   var liquidPolicies = polsActuallyInEstate;  // only estate-beneficiary policies flow through executor
   var liquidAssets   = liquidCash + liquidPolicies;
   // Accrual claim is a CASH LIABILITY payable from the estate — must be in liquidity
@@ -2816,9 +2827,9 @@ function buildEstate() {
     apTitle.style.cssText = 'font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:#8899bb;margin-bottom:6px';
     apTitle.textContent = 'Duty Apportionment (s7 Estate Duty Act)';
     calcBox.appendChild(apTitle);
-    calcRow('Duty payable by estate (physical assets)', Rfmt(dutyPayableByEstate), true);
-    if (dutyOnDutiablePols > 0) calcRow('Duty payable by estate-routed policies', Rfmt(dutyOnDutiablePols), true);
-    if (dutyOnBizDutiable  > 0) calcRow('Duty payable by business assurance beneficiary', Rfmt(dutyOnBizDutiable), true);
+    calcRow('Duty payable by estate (assets + estate policy)', Rfmt(dutyPayableByEstate), true);
+    if (dutyOnThirdParty > 0) calcRow('Duty payable by third party policy beneficiary', Rfmt(dutyOnThirdParty), true);
+    if (dutyOnBizDutiable > 0) calcRow('Duty payable by business assurance beneficiary', Rfmt(dutyOnBizDutiable), true);
     calcRow('Total duty by third parties', Rfmt(dutyPayableByThirdParties), false, false, true);
     var apNote = div();
     apNote.style.cssText = 'font-size:10px;color:#8899bb;margin-top:6px;line-height:1.4';
@@ -2888,7 +2899,7 @@ function buildEstate() {
     outCards.appendChild(c_estate);
   }
   // Policies that are deemed property but paid DIRECT to beneficiary (not through estate)
-  var deemedDirect = dutiablePols - polsActuallyInEstate + bizDutiable;
+  var deemedDirect = thirdPartyPols + bizDutiable;
   if (deemedDirect > 0) {
     var c_deemed = div('card');
     c_deemed.innerHTML = '<div class="lbl">Deemed property — paid direct</div>' +
