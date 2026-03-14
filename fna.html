@@ -2600,30 +2600,59 @@ function buildEstate() {
     accrGrid.appendChild(rfld('Spouse\'s current gross assets (R)', S.accrual, 'spouseCurrentAssets'));
     s.appendChild(accrGrid);
 
-    // Accrual = current estate - estate at start of marriage
-    var clientGross = totalDutiableAssets + toEstate; // same as grossEstate below
-    var clientAccrual = Math.max(0, clientGross - N(S.accrual.clientStartVal));
+    // ── ACCRUAL LAW (Matrimonial Property Act)
+    // Accrual is calculated on assets owned IMMEDIATELY BEFORE death.
+    // Risk life policies have R0 surrender value before death — excluded.
+    // Policy proceeds only arise AFTER death and do not form part of the accrual calculation.
+    // Only actual owned assets count: physical assets + investment/RA fund values.
+
+    // Physical assets owned before death
+    var accrPhysical = S.props.reduce(function(sum,p){ return sum+N(p.val); },0) +
+                       S.vehicles.reduce(function(sum,v){ return sum+N(v.val); },0) +
+                       S.otherAssets.reduce(function(sum,a){ return sum+N(a.val); },0);
+
+    // RA/investment fund values owned before death (surrender value exists)
+    var accrInvFunds = (S.importedPols||[]).reduce(function(sum,p){
+      if (POL_RA_TYPES.indexOf(p.Type) > -1 || POL_INV_TYPES.indexOf(p.Type) > -1) {
+        return sum + N(p.BenFundValue);
+      }
+      return sum;
+    },0);
+
+    var clientGrossAccrual = accrPhysical + accrInvFunds;
+    var clientAccrual = Math.max(0, clientGrossAccrual - N(S.accrual.clientStartVal));
     var spouseAccrual = Math.max(0, N(S.accrual.spouseCurrentAssets) - N(S.accrual.spouseStartVal));
 
     if (clientAccrual > spouseAccrual) {
       accrualClaim = (clientAccrual - spouseAccrual) / 2;
+    } else if (spouseAccrual > clientAccrual) {
+      // Spouse accrual exceeds client — no claim against estate
+      accrualClaim = 0;
     }
 
     var accrCards = div('cards c3'); accrCards.style.marginTop = '10px';
     var ac1 = div('card');
-    ac1.innerHTML = '<div class="lbl">Client Accrual</div><div class="val">' + Rfmt(clientAccrual) + '</div>' +
-      '<div class="sub">Current estate − start value</div>';
+    ac1.innerHTML = '<div class="lbl">Client Accrual Estate</div><div class="val">' + Rfmt(clientGrossAccrual) + '</div>' +
+      '<div class="sub">Physical assets + RA/investment funds<br><span style="font-size:10px;color:#8899bb">Risk policies excluded (R0 before death)</span></div>';
     accrCards.appendChild(ac1);
     var ac2 = div('card');
-    ac2.innerHTML = '<div class="lbl">Spouse Accrual</div><div class="val">' + Rfmt(spouseAccrual) + '</div>' +
-      '<div class="sub">Current assets − start value</div>';
+    ac2.innerHTML = '<div class="lbl">Spouse Accrual Estate</div><div class="val">' + Rfmt(N(S.accrual.spouseCurrentAssets)) + '</div>' +
+      '<div class="sub">Spouse assets at moment of death<br><span style="font-size:10px;color:#8899bb">Before receiving any policy proceeds</span></div>';
     accrCards.appendChild(ac2);
     var ac3 = div('card');
-    ac3.innerHTML = '<div class="lbl">Accrual Claim Payable</div><div class="val ' + (accrualClaim > 0 ? 'warn' : '') + '">' +
-      (accrualClaim > 0 ? Rfmt(accrualClaim) : '—') + '</div>' +
+    ac3.innerHTML = '<div class="lbl">Accrual Claim Payable</div><div class="val ' + (accrualClaim > 0 ? 'warn' : 'ok') + '">' +
+      (accrualClaim > 0 ? Rfmt(accrualClaim) : 'R 0') + '</div>' +
       '<div class="sub">½ × (Client − Spouse) accrual</div>';
     accrCards.appendChild(ac3);
     s.appendChild(accrCards);
+
+    // Info box explaining the calculation
+    var accrExp = div('info'); accrExp.style.cssText='font-size:11px;margin-top:6px';
+    accrExp.innerHTML = '<strong>How accrual is calculated:</strong> Only assets owned <em>immediately before death</em> count. ' +
+      'Risk life policies have R0 surrender value before death and are excluded. ' +
+      'Policy proceeds (paid after death) do not form part of either party\'s accrual estate. ' +
+      'The accrual claim (' + Rfmt(accrualClaim) + ') is deducted from the estate before estate duty is calculated.';
+    s.appendChild(accrExp);
   }
 
   // ── SECTION 5: Estate duty calculation
