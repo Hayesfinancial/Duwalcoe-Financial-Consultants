@@ -2409,20 +2409,10 @@ function buildPolicies() {
         var allInvTypes = POL_RA_TYPES.concat(POL_INV_TYPES);
         if (allInvTypes.indexOf(pol.Type||'') > -1) return;
 
-        // Parse CRM escalation — handles 'Age rated', '9,56', '7.0' etc
-        function parsePremEsc(v) {
-          if (!v) return 0;
-          var s = String(v).replace(/,/g, '.').replace(/[^0-9.]/g, '');
-          var n = parseFloat(s);
-          return isNaN(n) ? 0 : n;
-        }
-        // Auto-seed premEsc from CRM value on first load if not manually set
-        if ((pol.premEsc === undefined || pol.premEsc === '') && pol.PremEscalation) {
-          var crmEsc = parsePremEsc(pol.PremEscalation);
-          pol.premEsc = crmEsc > 0 ? String(crmEsc) : '';
-        }
-        var escVal = pol.premEsc !== undefined && pol.premEsc !== '' ? pol.premEsc : (pol.PremEscalation || '');
-        var esc = parsePremEsc(escVal);
+        // Use PremEscalation directly — now a proper field on the policy card
+        // Handle 'Age rated', '9,56', '7.0' etc
+        var escRaw = String(pol.PremEscalation || pol.premEsc || '').replace(/,/g, '.').replace(/[^0-9.]/g, '');
+        var esc = parseFloat(escRaw) || 0;
         var future = esc > 0 ? Math.round(prem * Math.pow(1 + esc/100, yrsToRet)) : prem;
         totalAtRet += future;
 
@@ -2452,10 +2442,13 @@ function buildPolicies() {
         var td4 = document.createElement('td');
         var escInp = document.createElement('input');
         escInp.type = 'text'; escInp.inputMode = 'numeric';
-        escInp.value = pol.premEsc || ''; escInp.placeholder = '0';
+        escInp.value = pol.PremEscalation || pol.premEsc || ''; escInp.placeholder = '0';
         escInp.style.cssText = 'width:52px;padding:4px 6px;border:1.5px solid var(--mist);border-radius:5px;font-size:12px';
         escInp.dataset.idx = j;
-        escInp.addEventListener('input', function(e){ S.importedPols[this.dataset.idx].premEsc = e.target.value; });
+        escInp.addEventListener('input', function(e){
+          S.importedPols[this.dataset.idx].PremEscalation = e.target.value;
+          S.importedPols[this.dataset.idx].premEsc = e.target.value; // keep in sync
+        });
         escInp.addEventListener('blur', function(){ render(); });
         td4.appendChild(escInp);
         var pctSpan = document.createElement('span'); pctSpan.textContent = ' %';
@@ -2605,11 +2598,15 @@ function buildPolCard(p, i) {
   r1.appendChild(sfld('Status', p, 'Status', ['Active','Lapsed','Paid Up','Cancelled']));
   card.appendChild(r1);
 
-  // ── Row 2: Premium + Frequency
+  // ── Row 2: Premium + Frequency + Escalations
   var r2 = g3();
   r2.appendChild(rfld('Premium / Contribution', p, 'Premium'));
   r2.appendChild(sfld('Frequency', p, 'Frequency', ['Monthly','Quarterly','Annually','Once Off']));
   card.appendChild(r2);
+  var r2b = g3();
+  r2b.appendChild(pfld('Premium escalation %', p, 'PremEscalation', {onblur:function(){render();}}));
+  r2b.appendChild(pfld('Cover escalation %', p, 'BenEscalation', {onblur:function(){render();}}));
+  card.appendChild(r2b);
 
   // ── Benefits section — varies by type
   if (isRisk || t === 'Life / Income Protector') {
