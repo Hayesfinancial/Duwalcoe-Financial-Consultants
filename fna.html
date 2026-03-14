@@ -393,9 +393,9 @@ var DEFAULTS = {
   incNotes: '',
 
   // Assets & Liabilities
-  props:      [],  // { desc, val, bond, bondPM, rental, rentalEsc, baseCost, soldAtDeath, soldAtRetirement, notes }
-  vehicles:   [],  // { desc, val, finance, soldAtDeath, notes }
-  otherAssets:[], // { desc, val, type, soldAtDeath, retirementRole, retirementIncomePM, growthRate, notes }
+  props:      [],  // { desc, val, bond, bondPM, rental, rentalEsc, baseCost, soldAtRetirement, retirementPct, deathBenType, deathBenNote }
+  vehicles:   [],  // { desc, val, finance, deathBenType, deathBenNote }
+  otherAssets:[], // { desc, val, type, retirementRole, retirementIncomePM, growthRate, deathBenType, deathBenNote, deathDutiable }
   liabilities:[], // { desc, bal, pmt, notes }
   assetNotes: '',
 
@@ -1199,7 +1199,6 @@ function buildAssets() {
       wrap.appendChild(cb); wrap.appendChild(lb);
       return wrap;
     }
-    r3.appendChild(chk('Sold at death', p, 'soldAtDeath'));
     r3.appendChild(chk('Sold at retirement', p, 'soldAtRetirement'));
     // Show retirement split fields when sold at retirement
     if (p.soldAtRetirement) {
@@ -1241,9 +1240,41 @@ function buildAssets() {
       r3.appendChild(renEscWrap);
     }
     card.appendChild(r3);
+    // ── Beneficiary at death
+    var benRow_i = div(); benRow_i.style.cssText='display:flex;flex-wrap:wrap;gap:12px;align-items:end;margin-top:10px;padding-top:10px;border-top:1px solid var(--mist)';
+    var benHdr_i = el('div','',''); benHdr_i.style.cssText='font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--sub);width:100%;margin-bottom:2px';
+    benHdr_i.textContent = 'Beneficiary at death';
+    benRow_i.appendChild(benHdr_i);
+    var benFld_i = div('f'); benFld_i.style.minWidth='180px';
+    benFld_i.appendChild(el('label','','Beneficiary type'));
+    var benSel_i = document.createElement('select');
+    benSel_i.style.cssText='border:1.5px solid var(--mist);border-radius:7px;padding:7px 10px;font-size:13px;font-family:inherit;width:100%';
+    ['','Spouse','Estate','Third Party'].forEach(function(o){
+      var opt=document.createElement('option'); opt.value=o; opt.textContent=o||'— Select —';
+      if((p.deathBenType||'')=== o) opt.selected=true;
+      benSel_i.appendChild(opt);
+    });
+    benSel_i.addEventListener('change',function(e){ S.props[i].deathBenType=e.target.value; render(); });
+    benFld_i.appendChild(benSel_i); benRow_i.appendChild(benFld_i);
+    var bt_i = p.deathBenType||'';
+    if (bt_i) {
+      var benTag_i = el('div','',''); benTag_i.style.cssText='font-size:11px;padding:4px 10px;border-radius:4px;align-self:center';
+      if (bt_i==='Spouse')           { benTag_i.style.cssText+='background:#f0fdf4;color:#166534;border:1px solid #86efac'; benTag_i.textContent='✓ Section 4(q) — not dutiable'; }
+      else if (bt_i==='Estate')       { benTag_i.style.cssText+='background:#fff7ed;color:#92400e;border:1px solid #fed7aa'; benTag_i.textContent='⚖ Dutiable estate'; }
+      else if (bt_i==='Third Party')  { benTag_i.style.cssText+='background:#fff7ed;color:#92400e;border:1px solid #fed7aa'; benTag_i.textContent='⚖ Deemed property — dutiable'; }
+      benRow_i.appendChild(benTag_i);
+    }
+    var benNoteFld_i = div('f'); benNoteFld_i.style.cssText='flex:2;min-width:200px';
+    benNoteFld_i.appendChild(el('label','','Who inherits / arrangement'));
+    var benNoteInp_i = document.createElement('input'); benNoteInp_i.type='text';
+    benNoteInp_i.value = p.deathBenNote||''; benNoteInp_i.placeholder='e.g. SJK Trust, child John, buy-sell agreement';
+    benNoteInp_i.style.cssText='border:1.5px solid var(--mist);border-radius:7px;padding:7px 10px;font-size:13px;font-family:inherit;width:100%';
+    benNoteInp_i.addEventListener('input',function(e){ S.props[i].deathBenNote=e.target.value; });
+    benNoteFld_i.appendChild(benNoteInp_i); benRow_i.appendChild(benNoteFld_i);
+    card.appendChild(benRow_i);
     s.appendChild(card);
   });
-  s.appendChild(addBtn('+ Add Property', function(){S.props.push({desc:'',val:'',bond:'',bondPM:'',rental:'',rentalEsc:'6',baseCost:'',soldAtDeath:false,soldAtRetirement:false,retirementPct:'100'});render();}));
+  s.appendChild(addBtn('+ Add Property', function(){S.props.push({desc:'',val:'',bond:'',bondPM:'',rental:'',rentalEsc:'6',baseCost:'',soldAtRetirement:false,retirementPct:'100',deathBenType:'',deathBenNote:''});render();}));
 
   // ── Vehicles
   s.appendChild(stitle('Vehicles'));
@@ -1257,15 +1288,41 @@ function buildAssets() {
     row.appendChild(rfld('Finance Outstanding',v,'finance'));
     var dd=div(); dd.appendChild(delBtn(function(){S.vehicles.splice(i,1);render();})); row.appendChild(dd);
     card.appendChild(row);
-    var vr2=div(); vr2.style.cssText='display:flex;gap:16px;align-items:center;margin-top:10px;padding-top:10px;border-top:1px solid var(--mist)';
-    var vcb=document.createElement('input'); vcb.type='checkbox'; vcb.checked=!!v.soldAtDeath;
-    vcb.addEventListener('change',function(e){S.vehicles[i].soldAtDeath=e.target.checked;render();});
-    var vlb=el('label','','Sold / realised at death'); vlb.style.cssText='font-size:12px;cursor:pointer;color:var(--navy)';
-    vr2.appendChild(vcb); vr2.appendChild(vlb);
-    card.appendChild(vr2);
+    // ── Beneficiary at death
+    var benRow_i = div(); benRow_i.style.cssText='display:flex;flex-wrap:wrap;gap:12px;align-items:end;margin-top:10px;padding-top:10px;border-top:1px solid var(--mist)';
+    var benHdr_i = el('div','',''); benHdr_i.style.cssText='font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--sub);width:100%;margin-bottom:2px';
+    benHdr_i.textContent = 'Beneficiary at death';
+    benRow_i.appendChild(benHdr_i);
+    var benFld_i = div('f'); benFld_i.style.minWidth='180px';
+    benFld_i.appendChild(el('label','','Beneficiary type'));
+    var benSel_i = document.createElement('select');
+    benSel_i.style.cssText='border:1.5px solid var(--mist);border-radius:7px;padding:7px 10px;font-size:13px;font-family:inherit;width:100%';
+    ['','Spouse','Estate','Third Party'].forEach(function(o){
+      var opt=document.createElement('option'); opt.value=o; opt.textContent=o||'--- Select ---';
+      if((v.deathBenType||'')=== o) opt.selected=true;
+      benSel_i.appendChild(opt);
+    });
+    benSel_i.addEventListener('change',function(e){ S.vehicles[i].deathBenType=e.target.value; render(); });
+    benFld_i.appendChild(benSel_i); benRow_i.appendChild(benFld_i);
+    var bt_i = v.deathBenType||'';
+    if (bt_i) {
+      var benTag_i = el('div','',''); benTag_i.style.cssText='font-size:11px;padding:4px 10px;border-radius:4px;align-self:center';
+      if (bt_i==='Spouse')           { benTag_i.style.cssText+='background:#f0fdf4;color:#166534;border:1px solid #86efac'; benTag_i.innerHTML='&#10003; Section 4(q) &mdash; not dutiable'; }
+      else if (bt_i==='Estate')       { benTag_i.style.cssText+='background:#fff7ed;color:#92400e;border:1px solid #fed7aa'; benTag_i.innerHTML='&#9878; Dutiable estate'; }
+      else if (bt_i==='Third Party')  { benTag_i.style.cssText+='background:#fff7ed;color:#92400e;border:1px solid #fed7aa'; benTag_i.innerHTML='&#9878; Deemed property &mdash; dutiable'; }
+      benRow_i.appendChild(benTag_i);
+    }
+    var benNoteFld_i = div('f'); benNoteFld_i.style.cssText='flex:2;min-width:200px';
+    benNoteFld_i.appendChild(el('label','','Who inherits / arrangement'));
+    var benNoteInp_i = document.createElement('input'); benNoteInp_i.type='text';
+    benNoteInp_i.value = v.deathBenNote||''; benNoteInp_i.placeholder='e.g. SJK Trust, child John, spouse';
+    benNoteInp_i.style.cssText='border:1.5px solid var(--mist);border-radius:7px;padding:7px 10px;font-size:13px;font-family:inherit;width:100%';
+    benNoteInp_i.addEventListener('input',function(e){ S.vehicles[i].deathBenNote=e.target.value; });
+    benNoteFld_i.appendChild(benNoteInp_i); benRow_i.appendChild(benNoteFld_i);
+    card.appendChild(benRow_i);
     s.appendChild(card);
   });
-  s.appendChild(addBtn('+ Add Vehicle', function(){S.vehicles.push({desc:'',val:'',finance:'',soldAtDeath:false});render();}));
+  s.appendChild(addBtn('+ Add Vehicle', function(){S.vehicles.push({desc:'',val:'',finance:'',deathBenType:'',deathBenNote:''});render();}));
 
   // ── Other Assets
   s.appendChild(stitle('Other Assets'));
@@ -1316,41 +1373,40 @@ function buildAssets() {
     grInp.addEventListener('input',function(e){S.otherAssets[i].growthRate=e.target.value;});
     grFld.appendChild(grInp); ar2.appendChild(grFld);
 
-    // Realised at death tick + beneficiary field
-    var deathWrap=div(); deathWrap.style.cssText='display:flex;align-items:center;gap:6px;margin-top:4px';
-    var acb1=document.createElement('input'); acb1.type='checkbox'; acb1.checked=!!a.soldAtDeath;
-    acb1.addEventListener('change',function(e){S.otherAssets[i].soldAtDeath=e.target.checked;render();});
-    var alb1=el('label','','Realised at death'); alb1.style.cssText='font-size:12px;cursor:pointer;color:var(--navy)';
-    deathWrap.appendChild(acb1); deathWrap.appendChild(alb1);
-    ar2.appendChild(deathWrap);
-    // Show estate dutiable tick + notes when soldAtDeath is ticked
-    if (a.soldAtDeath) {
-      var benWrap = div(); benWrap.style.cssText='display:flex;flex-wrap:wrap;gap:16px;align-items:center;margin-top:8px;padding:10px 12px;background:#fff7ed;border-radius:6px;border:1px solid #fed7aa;width:100%';
-
-      // Estate dutiable tick — same pattern as policy EstateDutiable
-      var edWrap = div(); edWrap.style.cssText='display:flex;align-items:center;gap:6px';
-      var edCb = document.createElement('input'); edCb.type='checkbox';
-      edCb.checked = (a.deathDutiable !== false); // default true
-      edCb.addEventListener('change', function(e) { S.otherAssets[i].deathDutiable = e.target.checked; render(); });
-      var edLbl = el('label','','Estate dutiable'); edLbl.style.cssText='font-size:12px;font-weight:600;cursor:pointer;color:var(--navy)';
-      edWrap.appendChild(edCb); edWrap.appendChild(edLbl);
-      var edExp = el('span','',''); edExp.style.cssText='font-size:11px;color:var(--sub)';
-      edExp.textContent = a.deathDutiable !== false ? '— proceeds form part of dutiable estate' : '— proceeds outside dutiable estate';
-      edWrap.appendChild(edExp);
-      benWrap.appendChild(edWrap);
-
-      // Notes field — who receives it, trust name, arrangement etc
-      var benNoteFld = div('f'); benNoteFld.style.cssText='flex:1;min-width:220px';
-      benNoteFld.appendChild(el('label','','Notes (beneficiary / arrangement)'));
-      var benNoteInp = document.createElement('input'); benNoteInp.type='text';
-      benNoteInp.value = a.deathProceedsNote||''; benNoteInp.placeholder='e.g. SJK Trust, spouse, repays keyman loan';
-      benNoteInp.style.cssText='border:1.5px solid var(--mist);border-radius:7px;padding:7px 10px;font-size:13px;font-family:inherit;width:100%';
-      benNoteInp.addEventListener('input',function(e){S.otherAssets[i].deathProceedsNote=e.target.value;});
-      benNoteFld.appendChild(benNoteInp); benWrap.appendChild(benNoteFld);
-      ar2.appendChild(benWrap);
-    }
-
     card.appendChild(ar2);
+
+    // ── Beneficiary at death
+    var benRow_i = div(); benRow_i.style.cssText='display:flex;flex-wrap:wrap;gap:12px;align-items:end;margin-top:10px;padding-top:10px;border-top:1px solid var(--mist)';
+    var benHdr_i = el('div','',''); benHdr_i.style.cssText='font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--sub);width:100%;margin-bottom:2px';
+    benHdr_i.textContent = 'Beneficiary at death';
+    benRow_i.appendChild(benHdr_i);
+    var benFld_i = div('f'); benFld_i.style.minWidth='180px';
+    benFld_i.appendChild(el('label','','Beneficiary type'));
+    var benSel_i = document.createElement('select');
+    benSel_i.style.cssText='border:1.5px solid var(--mist);border-radius:7px;padding:7px 10px;font-size:13px;font-family:inherit;width:100%';
+    ['','Spouse','Estate','Third Party'].forEach(function(o){
+      var opt=document.createElement('option'); opt.value=o; opt.textContent=o||'--- Select ---';
+      if((a.deathBenType||'')=== o) opt.selected=true;
+      benSel_i.appendChild(opt);
+    });
+    benSel_i.addEventListener('change',function(e){ S.otherAssets[i].deathBenType=e.target.value; render(); });
+    benFld_i.appendChild(benSel_i); benRow_i.appendChild(benFld_i);
+    var bt_i = a.deathBenType||'';
+    if (bt_i) {
+      var benTag_i = el('div','',''); benTag_i.style.cssText='font-size:11px;padding:4px 10px;border-radius:4px;align-self:center';
+      if (bt_i==='Spouse')           { benTag_i.style.cssText+='background:#f0fdf4;color:#166534;border:1px solid #86efac'; benTag_i.innerHTML='&#10003; Section 4(q) &mdash; not dutiable'; }
+      else if (bt_i==='Estate')       { benTag_i.style.cssText+='background:#fff7ed;color:#92400e;border:1px solid #fed7aa'; benTag_i.innerHTML='&#9878; Dutiable estate'; }
+      else if (bt_i==='Third Party')  { benTag_i.style.cssText+='background:#fff7ed;color:#92400e;border:1px solid #fed7aa'; benTag_i.innerHTML='&#9878; Deemed property &mdash; dutiable'; }
+      benRow_i.appendChild(benTag_i);
+    }
+    var benNoteFld_i = div('f'); benNoteFld_i.style.cssText='flex:2;min-width:200px';
+    benNoteFld_i.appendChild(el('label','','Who inherits / arrangement'));
+    var benNoteInp_i = document.createElement('input'); benNoteInp_i.type='text';
+    benNoteInp_i.value = a.deathBenNote||''; benNoteInp_i.placeholder='e.g. SJK Trust, child John, spouse';
+    benNoteInp_i.style.cssText='border:1.5px solid var(--mist);border-radius:7px;padding:7px 10px;font-size:13px;font-family:inherit;width:100%';
+    benNoteInp_i.addEventListener('input',function(e){ S.otherAssets[i].deathBenNote=e.target.value; });
+    benNoteFld_i.appendChild(benNoteInp_i); benRow_i.appendChild(benNoteFld_i);
+    card.appendChild(benRow_i);
     s.appendChild(card);
   });
   s.appendChild(addBtn('+ Add Asset', function(){S.otherAssets.push({desc:'',val:'',type:'Investment',retirementRole:'Not included',growthRate:''});render();}));
@@ -2348,22 +2404,23 @@ function buildEstate() {
     if (!p.desc && !N(p.val)) return;
     var desc = p.desc || 'Property';
     var ov = getOverride(desc);
-    allAssets.push({ desc: desc, fullVal: N(p.val), dutiable: ov ? ov.dutiable : String(N(p.val)), bond: N(p.bond) });
+    var propDutiableDefault = (p.deathBenType === 'Spouse') ? '0' : String(N(p.val));
+    allAssets.push({ desc: desc, fullVal: N(p.val), dutiable: ov ? ov.dutiable : propDutiableDefault, bond: N(p.bond), benType: p.deathBenType||'' });
   });
   S.vehicles.forEach(function(v) {
     if (!v.desc && !N(v.val)) return;
     var desc = v.desc || 'Vehicle';
     var ov = getOverride(desc);
-    allAssets.push({ desc: desc, fullVal: N(v.val), dutiable: ov ? ov.dutiable : String(N(v.val)), bond: N(v.finance) });
+    var vehDutiableDefault = (v.deathBenType === 'Spouse') ? '0' : String(N(v.val));
+    allAssets.push({ desc: desc, fullVal: N(v.val), dutiable: ov ? ov.dutiable : vehDutiableDefault, bond: N(v.finance), benType: v.deathBenType||'' });
   });
   S.otherAssets.forEach(function(a) {
     if (!a.desc && !N(a.val)) return;
     var desc = a.desc || 'Asset';
     var ov = getOverride(desc);
-    // If soldAtDeath and marked as NOT dutiable, default dutiable amount to 0
-    // Advisor can still override in the Estate tab
-    var defaultDutiable = (a.soldAtDeath && a.deathDutiable === false) ? '0' : String(N(a.val));
-    allAssets.push({ desc: desc, fullVal: N(a.val), dutiable: ov ? ov.dutiable : defaultDutiable, bond: 0 });
+    // Spouse beneficiary type = s.4(q) = not dutiable by default (advisor can override)
+    var otherDutiableDefault = (a.deathBenType === 'Spouse') ? '0' : String(N(a.val));
+    allAssets.push({ desc: desc, fullVal: N(a.val), dutiable: ov ? ov.dutiable : otherDutiableDefault, bond: 0, benType: a.deathBenType||'' });
   });
 
   if (allAssets.length === 0) {
@@ -2454,9 +2511,14 @@ function buildEstate() {
     else                           toBiz     += ben;  // business assurance — outside personal estate
   });
 
-  // Physical assets sold at death — already handled via allAssets table above
-  // deathDutiable tick controls whether they default to dutiable or 0 in the estate table
-  // No separate routing needed here — advisor overrides dutiable amount in Estate tab
+  // Physical asset beneficiaries feed section4q for the estate duty deduction
+  // Spouse beneficiary = s.4(q) deduction. Estate/Third Party = dutiable.
+  // These are already reflected in the allAssets dutiable defaults above.
+  // We also add spouse-beneficiary asset values to section4q so the calc
+  // shows the correct s.4(q) deduction even before spouseInheritsResidue.
+  S.props.forEach(function(p){ if(p.deathBenType==='Spouse' && N(p.val)) section4q += N(p.val); });
+  S.vehicles.forEach(function(v){ if(v.deathBenType==='Spouse' && N(v.val)) section4q += N(v.val); });
+  S.otherAssets.forEach(function(a){ if(a.deathBenType==='Spouse' && N(a.val)) section4q += N(a.val); });
 
   if (pols.length === 0) {
     var noPol = div('info'); noPol.textContent = 'No policies captured. Add policies on the Policies tab.';
