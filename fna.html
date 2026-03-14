@@ -768,7 +768,7 @@ function status(msg) {
 // ═══════════════════════════════════════════════════════════
 // NAVIGATION
 // ═══════════════════════════════════════════════════════════
-var TABS = ['Client', 'Scope', 'Income', 'Assets', 'Needs', 'Retirement', 'Policies', 'Estate', 'Summary', 'ROA'];
+var TABS = ['Client', 'Scope', 'Income', 'Assets', 'Needs', 'Policies', 'Retirement', 'Estate', 'Summary', 'ROA'];
 var activeTab = 0;
 function go(i)    { persist(); activeTab = i; render(); }
 function nextTab(){ if (activeTab < TABS.length-1) { persist(); activeTab++; render(); window.scrollTo(0,0); } }
@@ -919,7 +919,7 @@ function render() {
   });
   var c = document.getElementById('content');
   c.innerHTML = '';
-  var builders = [buildClient, buildScope, buildIncome, buildAssets, buildNeeds, buildRetirement, buildPolicies, buildEstate, buildSummary, buildROATab];
+  var builders = [buildClient, buildScope, buildIncome, buildAssets, buildNeeds, buildPolicies, buildRetirement, buildEstate, buildSummary, buildROATab];
   c.appendChild(builders[activeTab]());
 }
 
@@ -1994,6 +1994,17 @@ function buildRetirement() {
     td4.appendChild(delBtn(function(){S.retNeeds.splice(ni,1);render();})); tr.appendChild(td4);
     rnTb.appendChild(tr);
   });
+  // Policy premiums subtotal
+  var _premRows = (S.retNeeds||[]).filter(function(r){ return r._isPremRow && N(r.amtToday)>0; });
+  if (_premRows.length > 1) {
+    var _premTot = _premRows.reduce(function(a,r){ return a+N(r.amtToday); },0);
+    var _subTr = document.createElement('tr');
+    _subTr.style.cssText = 'border-top:2px solid var(--mist);font-weight:700;background:#f8fafc';
+    _subTr.innerHTML = '<td style="font-size:12px;color:var(--navy)">Total risk premiums (today\'s equiv.)</td>'
+      + '<td style="font-size:12px;color:var(--navy)">R ' + Math.round(_premTot).toLocaleString() + '</td>'
+      + '<td></td><td></td><td></td>';
+    rnTb.appendChild(_subTr);
+  }
   rnTbl.appendChild(rnTb);
   var rnw = div('twrap'); rnw.appendChild(rnTbl); s.appendChild(rnw);
   s.appendChild(addBtn('+ Add Income Need', function(){
@@ -2558,14 +2569,26 @@ function buildPolicies() {
         var addPremBtn = document.createElement('button');
         addPremBtn.className = 'btn btn-navy';
         addPremBtn.style.cssText = 'margin-top:10px;font-size:12px';
-        addPremBtn.textContent = '→ Send ticked premiums to Retirement needs (' + Rfmt(Math.round(totalIncluded)) + '/pm at retirement)';
+        addPremBtn.textContent = '→ Send ticked premiums to Retirement needs as individual lines (' + Rfmt(Math.round(totalIncluded)) + '/pm at retirement)';
         addPremBtn.addEventListener('click', function() {
           if (!S.retNeeds) S.retNeeds = [];
-          var todayAmt = yrsToRet > 0 ? Math.round(totalIncluded / Math.pow(1 + pct(S.assump.cpi), yrsToRet)) : Math.round(totalIncluded);
-          var existing = (S.retNeeds||[]).filter(function(r){ return r.desc === 'Risk premiums at retirement'; })[0];
-          if (existing) { existing.amtToday = String(todayAmt); }
-          else { S.retNeeds.push({ desc: 'Risk premiums at retirement', amtToday: String(todayAmt), esc: '' }); }
-          persist(); go(5);
+          // Remove any previously added policy rows (marked with _isPremRow)
+          S.retNeeds = S.retNeeds.filter(function(r){ return !r._isPremRow; });
+          // Add each ticked policy as its own row
+          pols.forEach(function(pol) {
+            if (!pol.retInclude) return;
+            if (_allInvBiz.indexOf(pol.Type||'') > -1) return;
+            var prem = N(pol.Premium);
+            if (!prem || (pol.Frequency||'Monthly') !== 'Monthly') return;
+            var escRaw = String(pol.PremEscalation||pol.premEsc||'').replace(/,/g,'.').replace(/[^0-9.]/g,'');
+            var polEsc = parseFloat(escRaw) || 0;
+            var futPrem = polEsc > 0 ? Math.round(prem * Math.pow(1 + polEsc/100, yrsToRet)) : prem;
+            // Store as today-equivalent so the retNeeds escalation logic inflates it correctly
+            var todayEquiv = yrsToRet > 0 ? Math.round(futPrem / Math.pow(1 + pct(S.assump.cpi), yrsToRet)) : futPrem;
+            var desc = (pol.Insurer||'Policy') + (pol.Product ? ' — ' + pol.Product : '') + ' premium';
+            S.retNeeds.push({ desc: desc, amtToday: String(todayEquiv), esc: '', _isPremRow: true });
+          });
+          persist(); go(6);
         });
         s.appendChild(addPremBtn);
       }
@@ -3654,7 +3677,15 @@ function buildSummary() {
     var mNeed3 = (S.retNeeds&&S.retNeeds.length>0)
       ? (S.retNeeds||[]).reduce(function(a,r){return a+N(r.amtToday);},0)
       : N(S.retIncomeToday)+N(S.retMedAidToday)+N(S.retOtherMonthly);
-    var monthlyGapAtRet3 = monthlyAtRet3; // no other income sources deducted in summary
+    // Deduct rental income at retirement (same as retirement tab)
+    var rentalAtRet3 = 0;
+    S.props.forEach(function(p){
+      if (!p.soldAtRetirement && N(p.rental) > 0) {
+        var esc2 = N(p.rentalEsc) > 0 ? p.rentalEsc : S.assump.cpi;
+        rentalAtRet3 += Math.round(N(p.rental) * Math.pow(1 + pct(esc2), yrsToR2));
+      }
+    });
+    var monthlyGapAtRet3 = Math.max(0, monthlyAtRet3 - rentalAtRet3);
     var monthlyGapToday3 = monthlyGapAtRet3 > 0 ? monthlyGapAtRet3 / Math.pow(1+pct(S.assump.cpi), yrsToR2) : 0;
     var lumpRet3=S.retLumps.reduce(function(a,r){return a+N(r.amt);},0)*Math.pow(1+pct(S.assump.cpi),yrsToR2);
     var capNeed3=retirementCapitalNeeded(monthlyGapToday3,yrsToR2,yrsInRet3,S.assump.cpi,S.assump.retReturn);
