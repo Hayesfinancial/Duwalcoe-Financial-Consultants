@@ -2949,7 +2949,23 @@ function buildSummary() {
       ?eDutiable*DUTY_RATE1
       :DUTY_THRESH*DUTY_RATE1+(eDutiable-DUTY_THRESH)*DUTY_RATE2;
     var eExecFees=(ePhysVal+eEstPols)*EXEC_RATE;
-    var eTotalCosts=Math.round(eDuty)+Math.round(eExecFees)+(eAccrualDed>0?Math.round(eAccrualDed):0);
+
+    // Duty apportionment (s.7) — same logic as buildEstate
+    // Estate pays duty on: physical assets + estate-routed policies
+    // Third parties pay duty on: third party policies + dutiable biz assurance
+    function eAportion(val){
+      return (eDutiable>0&&eDuty>0)?eDuty*(val/eDutiable):0;
+    }
+    var eDutyOnPhys    = eAportion(ePhysVal);
+    var eDutyOnEst     = eAportion(eEstPols);
+    var eDutyOnThird   = eAportion(eThirdPty);
+    var eDutyOnBiz     = eAportion(eBizDut);
+    var eDutyByEstate  = Math.round(eDutyOnPhys + eDutyOnEst);
+    var eDutyByThird   = Math.round(eDutyOnThird + eDutyOnBiz);
+    var hasThirdDuty   = eDutyByThird > 0;
+
+    // What the estate itself must fund
+    var eEstateFunds = eDutyByEstate + Math.round(eExecFees) + (eAccrualDed>0?Math.round(eAccrualDed):0);
 
     var estBox=div(); estBox.style.cssText='background:#1a2a4a;border-radius:8px;padding:14px 16px;margin-bottom:14px';
     function e3Row(lbl,val,sub,bold){
@@ -2958,6 +2974,8 @@ function buildSummary() {
       var v=el('span','',val); v.style.cssText='font-size:'+(sub?'11':'12')+'px;color:#c8a84b'+(bold?';font-weight:700':'');
       r.appendChild(l); r.appendChild(v); estBox.appendChild(r);
     }
+    function e3Sub(lbl,val){ e3Row(lbl,val,true,false); }
+
     e3Row('Gross estate',Rfmt(eGross));
     if(ePhysLiab>0) e3Row('Less: liabilities','('+Rfmt(ePhysLiab)+')',false,false);
     e3Row('Net estate',Rfmt(eNet),false,true);
@@ -2965,14 +2983,23 @@ function buildSummary() {
     if(eS4qDed>0) e3Row('Less: s.4(q) spouse deduction','('+Rfmt(eS4qDed)+')',false,false);
     e3Row('Less: abatement','('+Rfmt(Math.min(eAfterS4q,ABATEMENT))+')',false,false);
     e3Row('Dutiable amount',Rfmt(eDutiable),false,true);
-    e3Row('Estate duty',Rfmt(Math.round(eDuty)),false,true);
+    e3Row('Total estate duty',Rfmt(Math.round(eDuty)),false,true);
+    if(hasThirdDuty){
+      e3Sub('Estate\'s share of duty (physical + estate policies)',Rfmt(eDutyByEstate));
+      e3Sub('Third party / biz assurance share of duty',Rfmt(eDutyByThird));
+    }
     e3Row('Executor fees (est.)',Rfmt(Math.round(eExecFees)),false,false);
     if(eAccrualDed>0) e3Row('Accrual payable to spouse',Rfmt(Math.round(eAccrualDed)),false,false);
-    e3Row('Total estate costs + accrual',Rfmt(eTotalCosts),false,true);
+
+    // The critical line: what the estate itself must actually fund
+    e3Row(hasThirdDuty?'Estate must fund (duty + exec + accrual)':'Total estate costs',Rfmt(eEstateFunds),false,true);
+    if(hasThirdDuty){
+      e3Sub('Third parties recover their duty share separately','');
+    }
 
     // Spouse residue — only if tick is set on Estate tab
     if(S.cli.spouseInheritsResidue){
-      var eResidue=Math.max(0,eNet-eS4qDed-Math.round(eDuty)-Math.round(eExecFees)-(eAccrualDed>0?Math.round(eAccrualDed):0));
+      var eResidue=Math.max(0,eNet-eS4qDed-eDutyByEstate-Math.round(eExecFees)-(eAccrualDed>0?Math.round(eAccrualDed):0));
       if(eResidue>0) e3Row('Estimated residue to spouse/estate',Rfmt(eResidue),false,false);
     }
     s.appendChild(estBox);
