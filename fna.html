@@ -457,6 +457,7 @@ var DEFAULTS = {
   retIncomeToday: '',
   retMedAidToday: '',
   retOtherMonthly: '',
+  retNeeds: [], // { desc, amtToday, esc } — flexible retirement income needs list
   retLumps: [
     { desc: 'Holiday / travel fund', amt: '' },
     { desc: 'Other lump sum at retirement', amt: '' }
@@ -1936,13 +1937,52 @@ function buildRetirement() {
 
   // ── Retirement income need
   s.appendChild(stitle('Retirement Income Needs (Today\'s Rands)'));
-  var ri=div('info'); ri.textContent='Enter what the client needs in today\'s money. The system inflates to retirement date using CPI.'; s.appendChild(ri);
+  var ri=div('info'); ri.innerHTML='Enter what the client needs in today\'s money. Each item inflates at its own rate to retirement. '
+    + '<strong>Medical aid</strong> uses medical inflation. Risk premiums can be added from the policy schedule.'; s.appendChild(ri);
 
-  var rg3=g3();
-  rg3.appendChild(rfld('Monthly living expenses (today R)', S, 'retIncomeToday', {onblur:function(){render();}}));
-  rg3.appendChild(rfld('Medical aid (today R)', S, 'retMedAidToday', {onblur:function(){render();}}));
-  rg3.appendChild(rfld('Other monthly (today R)', S, 'retOtherMonthly', {onblur:function(){render();}}));
-  s.appendChild(rg3);
+  // Seed retNeeds from old fixed fields if retNeeds is empty
+  if (!S.retNeeds || S.retNeeds.length === 0) {
+    S.retNeeds = [];
+    if (N(S.retIncomeToday) > 0)  S.retNeeds.push({ desc: 'Monthly living expenses', amtToday: S.retIncomeToday, esc: '' });
+    if (N(S.retMedAidToday) > 0)  S.retNeeds.push({ desc: 'Medical aid', amtToday: S.retMedAidToday, esc: String(S.assump.medInf || 8) });
+    if (N(S.retOtherMonthly) > 0) S.retNeeds.push({ desc: 'Other monthly', amtToday: S.retOtherMonthly, esc: '' });
+  }
+
+  // Retirement needs table
+  var rnTbl = document.createElement('table');
+  rnTbl.innerHTML = '<thead><tr><th>Description</th><th>Amount today (R/pm)</th><th>Escalation % (blank=CPI)</th><th></th></tr></thead>';
+  var rnTb = document.createElement('tbody');
+  (S.retNeeds||[]).forEach(function(r, ni) {
+    var tr = document.createElement('tr');
+    // Description
+    var td1 = document.createElement('td');
+    var di = document.createElement('input'); di.type='text'; di.value=r.desc||''; di.placeholder='e.g. Living expenses';
+    di.addEventListener('input',function(e){S.retNeeds[ni].desc=e.target.value;}); td1.appendChild(di); tr.appendChild(td1);
+    // Amount
+    var td2 = document.createElement('td');
+    var rw2 = div('td-r'); rw2.appendChild(el('span','rp','R'));
+    var ai2 = document.createElement('input'); ai2.type='text'; ai2.inputMode='numeric'; ai2.value=r.amtToday||''; ai2.placeholder='0';
+    ai2.addEventListener('input',function(e){S.retNeeds[ni].amtToday=e.target.value;});
+    ai2.addEventListener('blur',function(){render();});
+    rw2.appendChild(ai2); td2.appendChild(rw2); tr.appendChild(td2);
+    // Escalation
+    var td3 = document.createElement('td');
+    var pw3 = div('pw'); var pp3 = el('span','pp','%');
+    var ei3 = document.createElement('input'); ei3.type='text'; ei3.inputMode='numeric';
+    ei3.value=r.esc||''; ei3.placeholder=S.assump.cpi||5;
+    ei3.addEventListener('input',function(e){S.retNeeds[ni].esc=e.target.value;});
+    ei3.addEventListener('blur',function(){render();});
+    pw3.appendChild(ei3); pw3.appendChild(pp3); td3.appendChild(pw3); tr.appendChild(td3);
+    // Delete
+    var td4 = document.createElement('td');
+    td4.appendChild(delBtn(function(){S.retNeeds.splice(ni,1);render();})); tr.appendChild(td4);
+    rnTb.appendChild(tr);
+  });
+  rnTbl.appendChild(rnTb);
+  var rnw = div('twrap'); rnw.appendChild(rnTbl); s.appendChild(rnw);
+  s.appendChild(addBtn('+ Add Income Need', function(){
+    S.retNeeds.push({desc:'',amtToday:'',esc:''});render();
+  }));
 
   // Lump sums at retirement
   s.appendChild(stitle('Lump Sum Needs at Retirement'));
@@ -2009,11 +2049,23 @@ function buildRetirement() {
       }
     });
 
-    var monthlyNeedToday=N(S.retIncomeToday)+N(S.retMedAidToday)+N(S.retOtherMonthly);
+    // Each retirement need inflates at its own escalation rate
+    var monthlyAtRet = 0;
+    (S.retNeeds||[]).forEach(function(r){
+      var amt = N(r.amtToday);
+      if (!amt) return;
+      var esc = N(r.esc) > 0 ? pct(r.esc) : pct(S.assump.cpi);
+      monthlyAtRet += amt * Math.pow(1 + esc, yrsToR);
+    });
+    // Backward compat: also use old fixed fields if retNeeds is empty
+    if (!(S.retNeeds && S.retNeeds.length > 0)) {
+      var oldTotal = N(S.retIncomeToday)+N(S.retMedAidToday)+N(S.retOtherMonthly);
+      if (oldTotal > 0) monthlyAtRet = oldTotal * Math.pow(1+pct(S.assump.cpi), yrsToR);
+    }
+    var monthlyNeedToday = (S.retNeeds&&S.retNeeds.length>0)
+      ? (S.retNeeds||[]).reduce(function(sum,r){return sum+N(r.amtToday);},0)
+      : N(S.retIncomeToday)+N(S.retMedAidToday)+N(S.retOtherMonthly);
     var lumpSumNeedToday=S.retLumps.reduce(function(sum,r){return sum+N(r.amt);},0);
-
-    // Inflate monthly need to retirement date
-    var monthlyAtRet=monthlyNeedToday>0?monthlyNeedToday*Math.pow(1+pct(S.assump.cpi),yrsToR):0;
     var lumpAtRet=lumpSumNeedToday>0?lumpSumNeedToday*Math.pow(1+pct(S.assump.cpi),yrsToR):0;
 
     // Monthly income from other sources at retirement reduces capital needed
@@ -2021,8 +2073,10 @@ function buildRetirement() {
     var monthlyGapAtRet = Math.max(0, monthlyAtRet - totalMonthlyOtherAtRet);
 
     // Capital needed only for the income gap not covered by ongoing income sources
+    // monthlyGapAtRet is already at retirement-date value — convert back to today's for the function
+    var monthlyGapToday = monthlyGapAtRet > 0 ? monthlyGapAtRet / Math.pow(1+pct(S.assump.cpi), yrsToR) : 0;
     var capForIncome = retirementCapitalNeeded(
-      monthlyGapAtRet > 0 ? monthlyGapAtRet / Math.pow(1+pct(S.assump.cpi), yrsToR) : 0,
+      monthlyGapToday,
       yrsToR, yrsInRet, S.assump.cpi, S.assump.retReturn
     );
     var totalCapAvail  = totalProj + otherCapAtRet;
@@ -2343,6 +2397,22 @@ function buildPolicies() {
           premPct + '% of current nett income of ' + Rfmt(nettAtRet) + '). ' +
           (premPct > 20 ? '⚠ Premium burden is high relative to current income.' : '✓ Premium burden appears manageable.');
         s.appendChild(afford2);
+      }
+      if (totalAtRet > 0) {
+        var addPremBtn = document.createElement('button');
+        addPremBtn.className = 'btn btn-navy';
+        addPremBtn.style.cssText = 'margin-top:10px;font-size:12px';
+        addPremBtn.textContent = '→ Add risk premiums at retirement as a Retirement income need';
+        addPremBtn.addEventListener('click', function() {
+          if (!S.retNeeds) S.retNeeds = [];
+          // totalAtRet is at retirement value — store today's equivalent
+          var todayAmt = yrsToRet > 0 ? Math.round(totalAtRet / Math.pow(1 + pct(S.assump.cpi), yrsToRet)) : Math.round(totalAtRet);
+          var existing = (S.retNeeds||[]).filter(function(r){ return r.desc === 'Risk premiums at retirement'; })[0];
+          if (existing) { existing.amtToday = String(todayAmt); }
+          else { S.retNeeds.push({ desc: 'Risk premiums at retirement', amtToday: String(todayAmt), esc: '' }); }
+          persist(); go(5);
+        });
+        s.appendChild(addPremBtn);
       }
     }
   }
