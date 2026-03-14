@@ -2444,23 +2444,22 @@ function buildEstate() {
     if (!p.desc && !N(p.val)) return;
     var desc = p.desc || 'Property';
     var ov = getOverride(desc);
-    var propDutiableDefault = (p.deathBenType === 'Spouse') ? '0' : String(N(p.val));
-    allAssets.push({ desc: desc, fullVal: N(p.val), dutiable: ov ? ov.dutiable : propDutiableDefault, bond: N(p.bond), benType: p.deathBenType||'' });
+    // All assets included in gross estate at full value — s.4(q) handles the deduction
+    allAssets.push({ desc: desc, fullVal: N(p.val), dutiable: ov ? ov.dutiable : String(N(p.val)), bond: N(p.bond), benType: p.deathBenType||'' });
   });
   S.vehicles.forEach(function(v) {
     if (!v.desc && !N(v.val)) return;
     var desc = v.desc || 'Vehicle';
     var ov = getOverride(desc);
-    var vehDutiableDefault = (v.deathBenType === 'Spouse') ? '0' : String(N(v.val));
-    allAssets.push({ desc: desc, fullVal: N(v.val), dutiable: ov ? ov.dutiable : vehDutiableDefault, bond: N(v.finance), benType: v.deathBenType||'' });
+    // All assets included in gross estate at full value
+    allAssets.push({ desc: desc, fullVal: N(v.val), dutiable: ov ? ov.dutiable : String(N(v.val)), bond: N(v.finance), benType: v.deathBenType||'' });
   });
   S.otherAssets.forEach(function(a) {
     if (!a.desc && !N(a.val)) return;
     var desc = a.desc || 'Asset';
     var ov = getOverride(desc);
-    // Spouse beneficiary type = s.4(q) = not dutiable by default (advisor can override)
-    var otherDutiableDefault = (a.deathBenType === 'Spouse') ? '0' : String(N(a.val));
-    allAssets.push({ desc: desc, fullVal: N(a.val), dutiable: ov ? ov.dutiable : otherDutiableDefault, bond: 0, benType: a.deathBenType||'' });
+    // All assets included in gross estate — s.4(q) handles deduction for spouse assets
+    allAssets.push({ desc: desc, fullVal: N(a.val), dutiable: ov ? ov.dutiable : String(N(a.val)), bond: 0, benType: a.deathBenType||'' });
   });
 
   if (allAssets.length === 0) {
@@ -2552,10 +2551,14 @@ function buildEstate() {
     }
     if (!ben) return;
     var bt = p.BeneficiaryType || '';
-    if (bt === 'Spouse')           section4q += ben;  // s.4(q) — not dutiable
-    else if (bt === 'Estate')      toEstate  += ben;  // dutiable
-    else if (bt === 'Third Party') toEstate  += ben;  // deemed property — dutiable
-    else                           toBiz     += ben;  // outside personal estate
+    // ALL non-business policies are deemed property — added to gross estate first
+    // s.4(q) deduction is applied later as a subtraction from net estate
+    if (bt === 'Spouse') {
+      toEstate  += ben;  // deemed property in gross estate
+      section4q += ben;  // will be deducted via s.4(q)
+    } else if (bt === 'Estate')      toEstate  += ben;  // dutiable
+    else if (bt === 'Third Party')   toEstate  += ben;  // deemed property — dutiable
+    else                             toBiz     += ben;  // outside personal estate
   });
 
   // Physical asset beneficiaries feed section4q for the estate duty deduction
@@ -2741,18 +2744,18 @@ function buildEstate() {
   calcRow('Less: Liabilities', '− ' + Rfmt(totalLiabs), true);
   calcRow('Net Estate', Rfmt(netEstate), false, false, true);
 
+  if (accrualClaim > 0) {
+    calcRow('Less: Accrual claim (OCP/ANC accrual)', '− ' + Rfmt(accrualDed), true);
+    calcRow('After accrual deduction', Rfmt(afterAccrual), false, false, true);
+  }
   if (section4q > 0) {
     var s4qLabel = S.cli.spouseInheritsResidue
       ? 'Less: Section 4(q) — spouse inherits residue'
-      : 'Less: Section 4(q) — spouse bequest';
+      : 'Less: Section 4(q) — spouse bequest (policies + assets)';
     calcRow(s4qLabel, '− ' + Rfmt(sec4qDed), true);
   }
-  if (afterSpouse !== netEstate) {
-    calcRow('After 4(q) deduction', Rfmt(afterSpouse), false, false, true);
-  }
-  if (accrualClaim > 0) {
-    calcRow('Less: Accrual claim (OCP)', '− ' + Rfmt(accrualDed), true);
-    calcRow('After accrual deduction', Rfmt(afterAccrual), false, false, true);
+  if (afterSpouse !== netEstate || accrualClaim > 0) {
+    calcRow('After s.4(q) deduction', Rfmt(afterSpouse), false, false, true);
   }
   calcRow('Less: Primary abatement', '− ' + Rfmt(Math.min(afterAccrual, ABATEMENT)), true);
   calcRow('Dutiable amount', Rfmt(afterAbatement), false, false, true);
