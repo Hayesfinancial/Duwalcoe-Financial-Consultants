@@ -474,7 +474,14 @@ var DEFAULTS = {
   estateNotes: ''
 };
 
+// Apps Script URL — same backend as CRM
+var FNA_SURL = 'https://script.google.com/macros/s/AKfycbw_I8Md3snxG36VJb00gIIgbag_2-k0zUkkmzS15kDzpCO37RJSS16hTdhhpS_v5onr/exec';
+
 var S = JSON.parse(JSON.stringify(DEFAULTS));
+var _fnaLastSaved = null;  // timestamp of last successful sheet save
+var _fnaClientId  = null;  // client ID used for sheet storage
+var _fnaSaveQueue = null;  // debounce timer
+
 
 // URL param injection (called from CRM)
 (function () {
@@ -546,6 +553,32 @@ var S = JSON.parse(JSON.stringify(DEFAULTS));
       var pols = JSON.parse(decodeURIComponent(params.get('pols')));
       applyPolsFromCRM(pols);
     } catch(e) {}
+  }
+
+  // Store client ID for sheet storage
+  _fnaClientId = S.cli.id || null;
+
+  // Load manually-entered FNA data from Google Sheet
+  // This merges over the CRM data already loaded above
+  // CRM fields (policies, bio data) are always re-applied after load
+  if (_fnaClientId) {
+    var bar = document.getElementById('statusBar');
+    if (bar) bar.textContent = 'Loading FNA data…';
+    loadFromSheet(_fnaClientId, function() {
+      // Re-apply CRM fields over the loaded manual data
+      // (sheet may have stale bio fields — CRM is always authoritative for these)
+      if (params.get('name'))    S.cli.name     = decodeURIComponent(params.get('name'));
+      if (params.get('id'))      S.cli.id       = params.get('id');
+      if (params.get('income')) { S.cli.grossPM = params.get('income'); }
+      if (params.get('pols')) {
+        try { applyPolsFromCRM(JSON.parse(decodeURIComponent(params.get('pols')))); } catch(e) {}
+      }
+      // Re-seed policy beneficiary dropdowns
+      if (S.importedPols) S.importedPols.forEach(function(p){ p._bensSeeded = false; });
+      render();
+      var savedMsg = _fnaLastSaved ? 'Last saved: ' + _fnaLastSaved : 'No saved FNA data — fresh start';
+      status('\u2713 Ready · ' + savedMsg);
+    });
   }
 })();
 
@@ -625,6 +658,73 @@ function deepMerge(base, over) {
 }
 
 // ═══════════════════════════════════════════════════════════
+// ══ SHEET STORAGE ══════════════════════════════════════════
+// JSONP helper — same pattern as CRM index.html
+function fnaPost(payload, cb) {
+  var cbName = '__fnaPost_' + Date.now();
+  window[cbName] = function(r) { delete window[cbName]; if (cb) cb(r); };
+  var s = document.createElement('script');
+  s.src = FNA_SURL + '?method=POST&payload=' + encodeURIComponent(JSON.stringify(payload))
+        + '&callback=' + cbName + '&t=' + Date.now();
+  document.head.appendChild(s);
+  setTimeout(function() { try { document.head.removeChild(s); } catch(e) {} }, 10000);
+}
+function fnaGet(params, cb) {
+  var cbName = '__fnaGet_' + Date.now();
+  window[cbName] = function(r) { delete window[cbName]; if (cb) cb(r); };
+  var s = document.createElement('script');
+  var qs = Object.keys(params).map(function(k){ return k+'='+encodeURIComponent(params[k]); }).join('&');
+  s.src = FNA_SURL + '?' + qs + '&callback=' + cbName + '&t=' + Date.now();
+  document.head.appendChild(s);
+  setTimeout(function() { try { document.head.removeChild(s); } catch(e) {} }, 10000);
+}
+
+// Keys that come from the CRM — never saved to sheet, always fresh from URL
+var FNA_CRM_KEYS = ['name','id','dob','gender','smoker','marital','occ','edu',
+                    'spouse','spousedob','domdate','grossPM','importedPols','existingCover'];
+
+function fnaDataToSave() {
+  // Strip CRM-owned fields — only save what the advisor enters manually
+  var copy = JSON.parse(JSON.stringify(S));
+  // cli fields that come from CRM
+  ['name','id','dob','gender','smoker','marital','occ','education',
+   'spouseName','spouseDob','domDate','grossPM'].forEach(function(k){ delete copy.cli[k]; });
+  delete copy.importedPols;
+  delete copy.existingCover;
+  return JSON.stringify(copy);
+}
+
+function saveToSheet(cb) {
+  if (!_fnaClientId) { if (cb) cb(null); return; }
+  fnaPost({ action: 'saveFNA', clientId: _fnaClientId, jsonData: fnaDataToSave() }, function(r) {
+    if (r && r.ok) {
+      _fnaLastSaved = r.saved || new Date().toISOString().slice(0,16).replace('T',' ');
+      var bar = document.getElementById('statusBar');
+      if (bar) bar.textContent = 'FSP No: 9978 · Clinton Hayes · Saved to sheet ' + _fnaLastSaved;
+    }
+    if (cb) cb(r);
+  });
+}
+
+function loadFromSheet(clientId, cb) {
+  fnaGet({ action: 'loadFNA', clientId: clientId }, function(r) {
+    if (r && r.ok && r.data) {
+      try {
+        var saved = JSON.parse(r.data);
+        // Deep merge saved manual data into S, preserving CRM fields already set
+        S = deepMerge(S, saved);
+        _fnaLastSaved = r.saved || null;
+      } catch(e) {}
+    }
+    if (cb) cb(r);
+  });
+}
+
+function debounceSaveToSheet() {
+  if (_fnaSaveQueue) clearTimeout(_fnaSaveQueue);
+  _fnaSaveQueue = setTimeout(function() { saveToSheet(null); }, 2000);
+}
+
 // SAVE / LOAD / NEW
 // ═══════════════════════════════════════════════════════════
 function persist() {
@@ -632,6 +732,8 @@ function persist() {
   document.getElementById('saved-data').textContent = json;
   var key = 'du_fna_' + (S.cli.id || S.cli.name.replace(/\s+/g,'_') || 'draft');
   try { localStorage.setItem(key, json); } catch(e) {}
+  // Also debounce-save manual data to Google Sheet
+  if (_fnaClientId) debounceSaveToSheet();
 }
 
 function autoSave() {
@@ -642,11 +744,14 @@ function autoSave() {
 }
 function saveFile() {
   persist();
-  if (!S.cli.name.trim()) { alert('Enter client name first.'); return; }
-  var fname = S.cli.name.replace(/[^a-zA-Z0-9\s]/g, '').trim().replace(/\s+/g, '_') + '_FNA.html';
-  var blob = new Blob([document.documentElement.outerHTML], { type: 'text/html' });
-  var a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = fname; a.click();
-  status('✓ Saved as ' + fname);
+  if (!_fnaClientId) { alert('No client ID — open this FNA from the CRM client card to enable sheet saving.'); return; }
+  saveToSheet(function(r) {
+    if (r && r.ok) {
+      status('\u2713 FNA data saved to Google Sheet at ' + (_fnaLastSaved||''));
+    } else {
+      status('\u26a0 Sheet save failed — data preserved in localStorage');
+    }
+  });
 }
 function newClient() {
   if (!confirm('Start a new blank FNA? All current data will be cleared.')) return;
