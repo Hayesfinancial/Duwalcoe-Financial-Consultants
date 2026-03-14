@@ -2116,374 +2116,446 @@ function buildPolCard(p, i) {
 // ═══════════════════════════════════════════════════════════
 function buildEstate() {
   var s = div();
-
-  var inf = div('info');
-  inf.innerHTML = 'Estate duty is calculated on the <strong>dutiable estate</strong>. ' +
-    'Adjust beneficiary routing on the Policies tab to model different outcomes. ' +
-    'Asset dutiable amounts can be overridden below.';
-  s.appendChild(inf);
-
-  // ── SECTION 1: Assets
-  s.appendChild(stitle('Dutiable Assets'));
-
-  var assetNote = div('info');
-  assetNote.innerHTML = 'Assets are drawn from the Assets tab. Override the dutiable amount if an asset is held in a trust, CC, or is otherwise excluded. ' +
-    'Set to <strong>0</strong> to exclude entirely.';
-  s.appendChild(assetNote);
-
-  // Build a working list from Assets tab data
-  // Each row: { desc, fullVal, dutiableAmt (editable) }
-  // We reconcile with S.estateAssets (persisted overrides) by desc key
-
-  function getOverride(desc) {
-    if (!S.estateAssets) S.estateAssets = [];
-    var found = S.estateAssets.filter(function(a) { return a.desc === desc; })[0];
-    return found || null;
+  if(!S.scope.estate){
+    var wi=div('info'); wi.textContent='Estate planning not selected in Scope.'; s.appendChild(wi); return s;
   }
-  function setOverride(desc, dutiable) {
-    if (!S.estateAssets) S.estateAssets = [];
-    var idx = -1;
-    S.estateAssets.forEach(function(a, i) { if (a.desc === desc) idx = i; });
-    if (idx > -1) S.estateAssets[idx].dutiable = dutiable;
-    else S.estateAssets.push({ desc: desc, dutiable: dutiable });
-  }
-
-  // Collect all assets from tab 3
-  var allAssets = [];
-  S.props.forEach(function(p) {
-    if (!p.desc && !N(p.val)) return;
-    var desc = p.desc || 'Property';
-    var ov = getOverride(desc);
-    allAssets.push({ desc: desc, fullVal: N(p.val), dutiable: ov ? ov.dutiable : String(N(p.val)), bond: N(p.bond) });
-  });
-  S.vehicles.forEach(function(v) {
-    if (!v.desc && !N(v.val)) return;
-    var desc = v.desc || 'Vehicle';
-    var ov = getOverride(desc);
-    allAssets.push({ desc: desc, fullVal: N(v.val), dutiable: ov ? ov.dutiable : String(N(v.val)), bond: N(v.finance) });
-  });
-  S.otherAssets.forEach(function(a) {
-    if (!a.desc && !N(a.val)) return;
-    var desc = a.desc || 'Asset';
-    var ov = getOverride(desc);
-    allAssets.push({ desc: desc, fullVal: N(a.val), dutiable: ov ? ov.dutiable : String(N(a.val)), bond: 0 });
-  });
-
-  if (allAssets.length === 0) {
-    var noA = div('info');
-    noA.textContent = 'No assets captured. Add properties, vehicles, and other assets on the Assets tab.';
-    s.appendChild(noA);
-  } else {
-    var aTbl = document.createElement('table');
-    var aThead = document.createElement('thead');
-    aThead.innerHTML = '<tr><th>Asset</th><th>Full Value</th><th>Dutiable Amount</th><th>Notes</th></tr>';
-    aTbl.appendChild(aThead);
-    var aTbody = document.createElement('tbody');
-
-    allAssets.forEach(function(a) {
-      var tr = document.createElement('tr');
-
-      var td1 = document.createElement('td'); td1.style.fontWeight = '600'; td1.textContent = a.desc; tr.appendChild(td1);
-
-      var td2 = document.createElement('td'); td2.textContent = Rfmt(a.fullVal); td2.style.color = 'var(--sub)'; tr.appendChild(td2);
-
-      var td3 = document.createElement('td');
-      var rw = div('td-r'); rw.appendChild(el('span','rp','R'));
-      var inp = document.createElement('input'); inp.type = 'text'; inp.inputMode = 'numeric';
-      inp.value = a.dutiable; inp.placeholder = '0';
-      inp.addEventListener('input', function(e) { setOverride(a.desc, e.target.value); });
-      inp.addEventListener('blur', function(e) { setOverride(a.desc, e.target.value); render(); });
-      rw.appendChild(inp); td3.appendChild(rw); tr.appendChild(td3);
-
-      var td4 = document.createElement('td');
-      td4.style.fontSize = '11px'; td4.style.color = 'var(--sub)';
-      if (N(a.dutiable) < a.fullVal && N(a.dutiable) >= 0) {
-        td4.textContent = a.bond > 0 ? 'Bond: ' + Rfmt(a.bond) : 'Partially excluded';
-        if (N(a.dutiable) === 0) td4.textContent = 'Excluded (trust/CC?)';
-      } else if (a.bond > 0) {
-        td4.textContent = 'Bond outstanding: ' + Rfmt(a.bond) + ' (reduce dutiable if applicable)';
-      }
-      tr.appendChild(td4);
-
-      aTbody.appendChild(tr);
-    });
-    aTbl.appendChild(aTbody);
-    var aTw = div('twrap'); aTw.appendChild(aTbl); s.appendChild(aTw);
-  }
-
-  // ── SECTION 2: Retirement assets (outside estate — display only)
-  var retTotal = S.retAssets.reduce(function(sum, r) { return sum + N(r.currentVal); }, 0);
-  if (retTotal > 0) {
-    s.appendChild(stitle('Retirement Assets (Outside Estate)'));
-    var retNote = div('info');
-    retNote.innerHTML = 'RA / pension fund values are <strong>excluded from estate duty</strong> (Pension Funds Act s.37C — paid at trustee discretion). ' +
-      'Shown for liquidity context only.';
-    s.appendChild(retNote);
-    var retCards = div('cards c3');
-    S.retAssets.forEach(function(r) {
-      if (!N(r.currentVal)) return;
-      var c = div('card');
-      c.innerHTML = '<div class="lbl">' + (r.desc || 'Retirement fund') + '</div><div class="val">' + Rfmt(r.currentVal) + '</div>' +
-        '<div class="sub">Outside estate</div>';
-      retCards.appendChild(c);
-    });
-    s.appendChild(retCards);
-  }
-
-  // ── SECTION 3: Policy death benefits — routing summary
-  s.appendChild(stitle('Policy Death Benefits — Routing'));
 
   var pols = S.importedPols || [];
-  var section4q  = 0;  // To spouse — s.4(q) deduction
-  var toEstate   = 0;  // Into estate (dutiable)
-  var toThird    = 0;  // Direct to 3rd party
-  var toBiz      = 0;  // Business assurance
 
+  // ── Helper: navy calculation box
+  function makeCalcBox(title) {
+    var box = div();
+    box.style.cssText = 'background:var(--navy);color:#fff;border-radius:9px;padding:18px 20px;margin-bottom:16px';
+    var ttl = div();
+    ttl.style.cssText = 'font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--gold);margin-bottom:12px';
+    ttl.textContent = title;
+    box.appendChild(ttl);
+    var api = {
+      box: box,
+      row: function(lbl, val, indent, bold, borderTop) {
+        var row = div();
+        row.style.cssText = 'display:flex;justify-content:space-between;align-items:flex-start;padding:5px 0;font-size:13px' +
+          (indent ? ';padding-left:18px' : '') +
+          (borderTop ? ';border-top:1px solid #334;margin-top:8px;padding-top:10px' : '') +
+          (bold ? ';font-weight:700' : '');
+        var l = el('span','',lbl); l.style.color = '#ccd6f6';
+        var v = el('span','',val); v.style.color = bold ? 'var(--gold)' : '#ccd6f6';
+        row.appendChild(l); row.appendChild(v);
+        box.appendChild(row);
+      },
+      sub: function(lbl, val) {
+        var row = div();
+        row.style.cssText = 'display:flex;justify-content:space-between;padding:2px 0 2px 18px;font-size:11px;color:#8899bb';
+        row.innerHTML = '<span>'+lbl+'</span><span>'+val+'</span>';
+        box.appendChild(row);
+      }
+    };
+    return api;
+  }
+
+  // ── PHYSICAL ASSETS
+  s.appendChild(stitle('Assets in Estate'));
+  var inf=div('info');
+  inf.innerHTML='Only assets that <strong>fall into the estate</strong> are shown. Assets in a trust, CC or with named beneficiaries are excluded from estate duty.';
+  s.appendChild(inf);
+
+  var physVal = 0;
+  var physLiab = 0;
+
+  // Properties
+  if((S.props||[]).length>0||(S.vehicles||[]).length>0||(S.otherAssets||[]).length>0){
+    var assetTbl = document.createElement('table');
+    assetTbl.style.cssText='width:100%;border-collapse:collapse;margin-bottom:12px;font-size:12px';
+    assetTbl.innerHTML='<thead><tr><th style="text-align:left;padding:6px 8px;background:var(--navy);color:#fff">Asset</th><th style="text-align:right;padding:6px 8px;background:var(--navy);color:#fff">Value</th><th style="text-align:right;padding:6px 8px;background:var(--navy);color:#fff">Liability</th><th style="text-align:right;padding:6px 8px;background:var(--navy);color:#fff">Net</th><th style="text-align:left;padding:6px 8px;background:var(--navy);color:#fff">Falls to</th></tr></thead>';
+    var tbody = document.createElement('tbody');
+
+    function assetRow(desc, val, liab, benType) {
+      var net = N(val) - N(liab);
+      var tr = document.createElement('tr');
+      tr.innerHTML = '<td style="padding:5px 8px;border-bottom:1px solid var(--mist)">'+esc2(desc)+'</td>'+
+        '<td style="text-align:right;padding:5px 8px;border-bottom:1px solid var(--mist)">'+Rfmt(val)+'</td>'+
+        '<td style="text-align:right;padding:5px 8px;border-bottom:1px solid var(--mist);color:var(--sub)">'+
+          (N(liab)>0?'('+Rfmt(liab)+')':'—')+'</td>'+
+        '<td style="text-align:right;padding:5px 8px;border-bottom:1px solid var(--mist);font-weight:600">'+Rfmt(net)+'</td>'+
+        '<td style="padding:5px 8px;border-bottom:1px solid var(--mist);font-size:11px;color:var(--sub)">'+esc2(benType||'Estate')+'</td>';
+      tbody.appendChild(tr);
+      physVal += N(val);
+      physLiab += N(liab);
+    }
+
+    (S.props||[]).forEach(function(p){
+      if(N(p.val)>0) assetRow(p.desc||'Property', p.val, p.bond, p.deathBenType||'Estate');
+    });
+    (S.vehicles||[]).forEach(function(v){
+      if(N(v.val)>0) assetRow(v.desc||'Vehicle', v.val, v.finance, v.deathBenType||'Estate');
+    });
+    (S.otherAssets||[]).forEach(function(a){
+      if(N(a.val)>0) assetRow(a.desc||'Asset', a.val, 0, a.deathBenType||'Estate');
+    });
+
+    assetTbl.appendChild(tbody);
+    s.appendChild(assetTbl);
+  }
+
+  var totalDutiableAssets = physVal;
+
+  // ── POLICY ROUTING
+  s.appendChild(stitle('Policy Routing'));
+  var polInf=div('info');
+  polInf.innerHTML='Policies are routed based on the beneficiary type set on each policy card. '+
+    '<strong>Spouse</strong> = s.4(q) deduction (not dutiable) · '+
+    '<strong>Estate</strong> = dutiable, executor administers · '+
+    '<strong>Third Party/Trust</strong> = deemed property (dutiable) · '+
+    '<strong>Business Assurance</strong> = outside estate (unless marked dutiable)';
+  s.appendChild(polInf);
+
+  var s4qPolicies = 0, estatePols = 0, thirdPartyPols = 0, bizDutiable = 0;
+  var s4qAssets = 0;
+
+  // Assets with spouse as beneficiary
+  (S.props||[]).forEach(function(p){ if((p.deathBenType||'')==='Spouse') s4qAssets+=N(p.val)-N(p.bond); });
+  (S.vehicles||[]).forEach(function(v){ if((v.deathBenType||'')==='Spouse') s4qAssets+=N(v.val)-N(v.finance); });
+  (S.otherAssets||[]).forEach(function(a){ if((a.deathBenType||'')==='Spouse') s4qAssets+=N(a.val); });
+
+  var polTbl = document.createElement('table');
+  polTbl.style.cssText='width:100%;border-collapse:collapse;margin-bottom:12px;font-size:12px';
+  polTbl.innerHTML='<thead><tr><th style="text-align:left;padding:6px 8px;background:var(--navy);color:#fff">Policy</th><th style="text-align:left;padding:6px 8px;background:var(--navy);color:#fff">Beneficiary</th><th style="text-align:left;padding:6px 8px;background:var(--navy);color:#fff">Type</th><th style="text-align:right;padding:6px 8px;background:var(--navy);color:#fff">Amount</th><th style="text-align:left;padding:6px 8px;background:var(--navy);color:#fff">Treatment</th></tr></thead>';
+  var polTbody = document.createElement('tbody');
+
+  // Seed BeneficiaryType from Beneficiaries array if not set
   pols.forEach(function(p) {
-    var ben = N(p.BenDeath);
-    if (!ben && (POL_RA_TYPES.indexOf(p.Type) > -1 || POL_INV_TYPES.indexOf(p.Type) > -1)) {
-      ben = N(p.BenFundValue);  // Use fund value for RA/investments
+    if(p.Beneficiaries && !p._bensSeeded){
+      try {
+        var bens = JSON.parse(p.Beneficiaries);
+        if(bens&&bens.length>0){
+          if(!p.BeneficiaryType && bens[0].type) p.BeneficiaryType = bens[0].type;
+          if(!p.Beneficiary && bens[0].name)     p.Beneficiary     = bens[0].name;
+          if(!p.EstateDutiable){
+            if(p.BeneficiaryType==='Spouse')       p.EstateDutiable='No';
+            else if(p.BeneficiaryType==='Estate')  p.EstateDutiable='Yes';
+            else if(p.BeneficiaryType==='Third Party') p.EstateDutiable='Yes';
+          }
+          p._bensSeeded=true;
+        }
+      } catch(e){}
     }
-    if (p.Type === 'Business Assurance') {
-      // Business assurance goes to toBiz regardless of beneficiary — outside personal estate
-      toBiz += N(p.LoanAmount) || N(p.BenDeath);
-      return; // skip personal routing
-    }
-    if (!ben) return;
-    var bt = p.BeneficiaryType || '';
-    if (bt === 'Spouse')       section4q += ben;
-    else if (bt === 'Estate')  toEstate  += ben;
-    else if (bt === 'Third Party') toThird += ben;
-    else                       toBiz     += ben;
   });
 
-  if (pols.length === 0) {
-    var noPol = div('info'); noPol.textContent = 'No policies captured. Add policies on the Policies tab.';
-    s.appendChild(noPol);
-  } else {
-    var polRouteCards = div('cards');
-    polRouteCards.style.gridTemplateColumns = 'repeat(4,1fr)';
-    [
-      { l: 'Section 4(q) — Spouse', v: section4q, c: 'ok',  sub: 'Not dutiable' },
-      { l: 'To Estate',              v: toEstate,  c: 'warn', sub: 'Dutiable' },
-      { l: 'Third Party Direct',     v: toThird,   c: '',     sub: 'Not dutiable' },
-      { l: 'Business Assurance',     v: toBiz,     c: '',     sub: 'Outside estate' }
-    ].forEach(function(x) {
-      var c = div('card');
-      c.innerHTML = '<div class="lbl">' + x.l + '</div>' +
-        '<div class="val ' + x.c + '">' + (x.v > 0 ? Rfmt(x.v) : '—') + '</div>' +
-        '<div class="sub">' + x.sub + '</div>';
-      polRouteCards.appendChild(c);
+  function esc2(t){ return (t||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+  function polRow(insurer,product,beneficiary,benType,amount,treatment,colour){
+    var tr=document.createElement('tr');
+    tr.innerHTML='<td style="padding:5px 8px;border-bottom:1px solid var(--mist)"><strong>'+esc2(insurer)+'</strong>'+(product?'<br><span style="font-size:10px;color:var(--sub)">'+esc2(product)+'</span>':'')+'</td>'+
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--mist);font-size:11px">'+esc2(beneficiary||'—')+'</td>'+
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--mist);font-size:11px">'+esc2(benType||'—')+'</td>'+
+      '<td style="text-align:right;padding:5px 8px;border-bottom:1px solid var(--mist);font-weight:600">'+Rfmt(amount)+'</td>'+
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--mist);font-size:11px;color:'+colour+'">'+esc2(treatment)+'</td>';
+    polTbody.appendChild(tr);
+  }
+
+  pols.forEach(function(p){
+    var bt = p.BeneficiaryType||'';
+    if(p.Type==='Business Assurance'){
+      var amt = N(p.LoanAmount)||N(p.BenDeath);
+      var treatment, colour;
+      if(p.EstateDutiable==='Yes'){
+        bizDutiable+=amt;
+        treatment='Deemed property — dutiable'; colour='#dc2626';
+      } else {
+        treatment='Outside estate — '+esc2(p.BizType||'Business assurance'); colour='#6b7280';
+      }
+      if(amt>0) polRow(p.Insurer,p.Product,p.Beneficiary||p.BizType,p.Type,amt,treatment,colour);
+      return;
+    }
+    var ben = N(p.BenDeath);
+    if(!ben) return;
+    if(bt==='Spouse'){
+      s4qPolicies+=ben;
+      polRow(p.Insurer,p.Product,p.Beneficiary||'Spouse','Spouse',ben,'s.4(q) — not dutiable','#16a34a');
+    } else if(bt==='Estate'){
+      estatePols+=ben;
+      polRow(p.Insurer,p.Product,'Estate','Estate',ben,'Dutiable — executor administers','#dc2626');
+    } else if(bt==='Third Party'){
+      thirdPartyPols+=ben;
+      polRow(p.Insurer,p.Product,p.Beneficiary||'Third Party','Third Party',ben,'Deemed property — dutiable','#f59e0b');
+    } else {
+      polRow(p.Insurer,p.Product,p.Beneficiary||'—',bt||'—',ben,'Set beneficiary type on policy card','#9ca3af');
+    }
+  });
+
+  polTbl.appendChild(polTbody);
+  s.appendChild(polTbl);
+
+  // Beneficiary type editors on policies
+  var benEdBox=div(); benEdBox.style.cssText='background:#f8fafc;border:var(--border);border-radius:8px;padding:12px 14px;margin-bottom:16px';
+  var benEdTtl=el('div','stitle','Set Beneficiary Types'); benEdTtl.style.marginBottom='8px'; benEdBox.appendChild(benEdTtl);
+  var benInf2=div(); benInf2.style.cssText='font-size:11px;color:var(--sub);margin-bottom:10px';
+  benInf2.textContent='Set the beneficiary type for each policy to model how proceeds route through your estate.';
+  benEdBox.appendChild(benInf2);
+
+  pols.forEach(function(p,i){
+    if(p.Type==='Business Assurance') return;
+    if(!N(p.BenDeath)) return;
+    var row=div(); row.style.cssText='display:flex;align-items:center;gap:10px;margin-bottom:6px;flex-wrap:wrap';
+    var lbl=el('span','',((p.Insurer||'Policy')+(p.Product?' — '+p.Product:''))+' '+Rfmt(p.BenDeath));
+    lbl.style.cssText='font-size:12px;min-width:220px';
+    row.appendChild(lbl);
+    var sel=document.createElement('select');
+    sel.style.cssText='border:var(--border);border-radius:5px;padding:4px 8px;font-size:12px;font-family:inherit';
+    ['','Spouse','Estate','Third Party'].forEach(function(o){
+      var opt=document.createElement('option'); opt.value=o; opt.textContent=o||'— select —';
+      if(p.BeneficiaryType===o) opt.selected=true;
+      sel.appendChild(opt);
     });
-    s.appendChild(polRouteCards);
-  }
+    sel.addEventListener('change',function(e){
+      S.importedPols[i].BeneficiaryType=e.target.value;
+      if(e.target.value==='Spouse') S.importedPols[i].EstateDutiable='No';
+      else if(e.target.value==='Estate') S.importedPols[i].EstateDutiable='Yes';
+      else if(e.target.value==='Third Party') S.importedPols[i].EstateDutiable='Yes';
+      render();
+    });
+    row.appendChild(sel);
+    var benInp=document.createElement('input'); benInp.type='text'; benInp.placeholder='Beneficiary name';
+    benInp.value=p.Beneficiary||''; benInp.style.cssText='border:var(--border);border-radius:5px;padding:4px 8px;font-size:12px;flex:1;min-width:140px';
+    benInp.addEventListener('input',function(e){ S.importedPols[i].Beneficiary=e.target.value; });
+    row.appendChild(benInp);
+    benEdBox.appendChild(row);
+  });
+  s.appendChild(benEdBox);
 
-  // ── SECTION 4: Accrual Claim (OCP with Accrual marriages)
-  var isOCP = (S.cli.marital || '').toLowerCase().indexOf('accrual') > -1 ||
-              (S.cli.marital || '').toLowerCase().indexOf('community') > -1;
+  // ── ESTATE DUTY CALCULATION
+  var grossEstate    = totalDutiableAssets + estatePols + thirdPartyPols + bizDutiable + s4qPolicies;
+  var netEstate      = Math.max(0, grossEstate - physLiab);
+
+  // Accrual — on physical assets + RA fund values only (NOT risk policies)
   var accrualClaim = 0;
-
-  if (isOCP || N(S.accrual.spouseCurrentAssets) > 0) {
-    s.appendChild(stitle('Accrual Claim (OCP with Accrual)'));
-    var accrNote = div('info');
-    accrNote.innerHTML = 'For OCP with accrual marriages: if the client\'s estate accrual exceeds the spouse\'s accrual, ' +
-      'half the difference is payable to the surviving spouse from the estate before estate duty. ' +
-      '<strong>Accrual claim reduces the dutiable estate.</strong>';
-    s.appendChild(accrNote);
-
-    var accrGrid = g3();
-    accrGrid.appendChild(rfld('Client estate at marriage (R)', S.accrual, 'clientStartVal'));
-    accrGrid.appendChild(rfld('Spouse estate at marriage (R)', S.accrual, 'spouseStartVal'));
-    accrGrid.appendChild(rfld('Spouse\'s current gross assets (R)', S.accrual, 'spouseCurrentAssets'));
-    s.appendChild(accrGrid);
-
-    // Accrual = current estate - estate at start of marriage
-    var clientGross = totalDutiableAssets + toEstate; // same as grossEstate below
-    var clientAccrual = Math.max(0, clientGross - N(S.accrual.clientStartVal));
+  var isANC = (S.cli.marital||'').toLowerCase().indexOf('accrual') > -1;
+  s.appendChild(stitle('Accrual Calculation'));
+  var accrBox=div(); accrBox.style.cssText='background:#fff;border:var(--border);border-radius:8px;padding:14px;margin-bottom:12px';
+  if(isANC){
+    var accrInf=div('info'); accrInf.textContent='ANC with accrual detected. Accrual is calculated on growth of each spouse\'s estate since marriage. Risk policies are excluded — only physical assets and RA fund values count.';
+    s.appendChild(accrInf);
+    if(!S.accrual) S.accrual={};
+    var ag=g3();
+    ag.appendChild(rfld('Client estate at marriage (R)', S.accrual, 'clientStartVal', {onblur:function(){render();}}));
+    ag.appendChild(rfld('Spouse current assets (R)', S.accrual, 'spouseCurrentAssets', {onblur:function(){render();}}));
+    ag.appendChild(rfld('Spouse estate at marriage (R)', S.accrual, 'spouseStartVal', {onblur:function(){render();}}));
+    s.appendChild(ag);
+    var raFundValue = pols.reduce(function(a,p){ return POL_RA_TYPES.indexOf(p.Type)>-1?a+N(p.BenFundValue):a; },0);
+    var clientCurrentAccrual = Math.max(0, totalDutiableAssets + raFundValue - N(S.accrual.clientStartVal));
     var spouseAccrual = Math.max(0, N(S.accrual.spouseCurrentAssets) - N(S.accrual.spouseStartVal));
+    if(clientCurrentAccrual > spouseAccrual) accrualClaim = (clientCurrentAccrual - spouseAccrual) / 2;
+    var accrNote=div(); accrNote.style.cssText='font-size:12px;color:var(--sub);margin-top:8px;padding:8px 12px;background:#f0fdf4;border-radius:6px;border:1px solid #bbf7d0';
+    accrNote.innerHTML='Client accrual: <strong>'+Rfmt(clientCurrentAccrual)+'</strong> · Spouse accrual: <strong>'+Rfmt(spouseAccrual)+'</strong> · '+
+      (accrualClaim>0?'Accrual payable to spouse: <strong>'+Rfmt(accrualClaim)+'</strong>':'No accrual payable (spouse estate grew more)');
+    s.appendChild(accrNote);
+  } else {
+    var noAccrNote=div('info'); noAccrNote.textContent='Not married ANC with accrual — no accrual claim applies.';
+    s.appendChild(noAccrNote);
+  }
 
-    if (clientAccrual > spouseAccrual) {
-      accrualClaim = (clientAccrual - spouseAccrual) / 2;
+  // s.4(q) and abatement
+  var accrualDed  = Math.min(accrualClaim, netEstate);
+  var afterAccrual= Math.max(0, netEstate - accrualDed);
+  var section4q   = s4qPolicies + s4qAssets;
+  var s4qDed      = Math.min(section4q, afterAccrual);
+  var afterS4q    = Math.max(0, afterAccrual - s4qDed);
+  var dutiable    = Math.max(0, afterS4q - ABATEMENT);
+  var estateDuty  = dutiable <= DUTY_THRESH
+    ? dutiable * DUTY_RATE1
+    : DUTY_THRESH * DUTY_RATE1 + (dutiable - DUTY_THRESH) * DUTY_RATE2;
+  var afterAbatement = dutiable; // alias for apportionment
+
+  // Apportionment — each category pays proportional share of duty
+  function apportionDuty(val){
+    return (afterAbatement>0 && estateDuty>0) ? estateDuty * (val / afterAbatement) : 0;
+  }
+  var dutyOnPhysical     = apportionDuty(totalDutiableAssets);
+  var dutyOnEstatePols   = apportionDuty(estatePols);
+  var dutyOnThirdParty   = apportionDuty(thirdPartyPols);
+  var dutyOnBizDutiable  = apportionDuty(bizDutiable);
+  var dutyPayableByEstate       = dutyOnPhysical + dutyOnEstatePols;
+  var dutyPayableByThirdParties = dutyOnThirdParty + dutyOnBizDutiable;
+
+  // ── BOX 1: ESTATE DUTY
+  s.appendChild(stitle('Estate Duty'));
+  var b1 = makeCalcBox('Estate Duty Calculation');
+  b1.row('Gross estate', Rfmt(grossEstate));
+  b1.sub('Physical assets + all deemed property (policies)', '');
+  if(physLiab>0){ b1.row('Less: Liabilities', '('+Rfmt(physLiab)+')', true); }
+  b1.row('Net estate', Rfmt(netEstate), false, false, true);
+  if(accrualDed>0){
+    b1.row('Less: Accrual claim (ANC)', '('+Rfmt(accrualDed)+')', true);
+    b1.sub('Payable to spouse before estate duty is levied', '');
+  }
+  b1.row('Less: s.4(q) — spouse policies & assets', '('+Rfmt(s4qDed)+')', true);
+  b1.sub('Paid direct to spouse — excluded from estate duty', '');
+  b1.row('Less: Primary abatement', '('+Rfmt(Math.min(afterS4q, ABATEMENT))+')', true);
+  b1.row('Dutiable amount', Rfmt(dutiable), false, false, true);
+  b1.row('Estate duty @ 20%'+(dutiable>DUTY_THRESH?' / 25%':''), Rfmt(Math.round(estateDuty)), false, true, true);
+  s.appendChild(b1.box);
+
+  // Duty apportionment breakdown
+  if(dutyPayableByThirdParties>0){
+    var b1b = makeCalcBox('Duty Apportionment (s.7)');
+    b1b.row('Total estate duty', Rfmt(Math.round(estateDuty)));
+    b1b.sub('Apportioned in proportion to each category\'s share of the dutiable estate','');
+    b1b.row('Payable by estate (physical + estate policies)', Rfmt(Math.round(dutyPayableByEstate)), false, false, true);
+    if(dutyOnThirdParty>0){
+      b1b.row('Payable by third party / trust beneficiaries', Rfmt(Math.round(dutyOnThirdParty)), true);
+      pols.forEach(function(p){
+        if((p.BeneficiaryType||'')==='Third Party'&&N(p.BenDeath)>0&&p.Type!=='Business Assurance'){
+          b1b.sub((p.Insurer||'Policy')+(p.Product?' \u2014 '+p.Product:'')+' \u00b7 '+Rfmt(p.BenDeath), 'Duty: '+Rfmt(Math.round(apportionDuty(N(p.BenDeath)))));
+        }
+      });
     }
-
-    var accrCards = div('cards c3'); accrCards.style.marginTop = '10px';
-    var ac1 = div('card');
-    ac1.innerHTML = '<div class="lbl">Client Accrual</div><div class="val">' + Rfmt(clientAccrual) + '</div>' +
-      '<div class="sub">Current estate − start value</div>';
-    accrCards.appendChild(ac1);
-    var ac2 = div('card');
-    ac2.innerHTML = '<div class="lbl">Spouse Accrual</div><div class="val">' + Rfmt(spouseAccrual) + '</div>' +
-      '<div class="sub">Current assets − start value</div>';
-    accrCards.appendChild(ac2);
-    var ac3 = div('card');
-    ac3.innerHTML = '<div class="lbl">Accrual Claim Payable</div><div class="val ' + (accrualClaim > 0 ? 'warn' : '') + '">' +
-      (accrualClaim > 0 ? Rfmt(accrualClaim) : '—') + '</div>' +
-      '<div class="sub">½ × (Client − Spouse) accrual</div>';
-    accrCards.appendChild(ac3);
-    s.appendChild(accrCards);
-  }
-
-  // ── SECTION 5: Estate duty calculation
-  s.appendChild(stitle('Estate Duty Calculation'));
-
-  // Gross dutiable estate = dutiable assets + estate-routed policy benefits - liabilities
-  var totalDutiableAssets = allAssets.reduce(function(sum, a) { return sum + N(a.dutiable); }, 0);
-  var totalLiabs = S.props.reduce(function(sum, p) { return sum + N(p.bond); }, 0) +
-                   S.vehicles.reduce(function(sum, v) { return sum + N(v.finance); }, 0) +
-                   S.liabilities.reduce(function(sum, l) { return sum + N(l.bal); }, 0);
-
-  var grossEstate    = totalDutiableAssets + toEstate;
-  var netEstate      = Math.max(0, grossEstate - totalLiabs);
-  var sec4qDed       = Math.min(section4q, netEstate);  // can't exceed net estate
-  var afterSpouse    = Math.max(0, netEstate - sec4qDed);
-  // Accrual deduction (payable before estate duty is calculated)
-  var accrualDed     = Math.min(accrualClaim, afterSpouse);
-  var afterAccrual   = Math.max(0, afterSpouse - accrualDed);
-  var afterAbatement = Math.max(0, afterAccrual - ABATEMENT);
-
-  // Estate duty
-  var estateDuty = 0;
-  if (afterAbatement > 0) {
-    if (afterAbatement <= DUTY_THRESH) {
-      estateDuty = afterAbatement * DUTY_RATE1;
-    } else {
-      estateDuty = DUTY_THRESH * DUTY_RATE1 + (afterAbatement - DUTY_THRESH) * DUTY_RATE2;
+    if(dutyOnBizDutiable>0){
+      b1b.row('Payable by business assurance beneficiary', Rfmt(Math.round(dutyOnBizDutiable)), true);
+      pols.forEach(function(p){
+        if(p.Type==='Business Assurance'&&p.EstateDutiable==='Yes'){
+          var amt=N(p.LoanAmount)||N(p.BenDeath);
+          b1b.sub((p.Insurer||'Policy')+(p.BizType?' \u2014 '+p.BizType:''), 'Duty: '+Rfmt(Math.round(apportionDuty(amt))));
+        }
+      });
     }
+    b1b.row('Total duty by third parties', Rfmt(Math.round(dutyPayableByThirdParties)), false, false, true);
+    s.appendChild(b1b.box);
   }
 
-  // Executor fees on gross estate (gross assets, not net)
-  var execFees = grossEstate * EXEC_RATE;
-
-  // Total estate costs
-  var totalEstateCosts = estateDuty + execFees;
-
-  // Liquidity: cash-type assets + estate-routed policies vs costs
-  // Cash/liquid = investments and other assets not properties/vehicles (rough proxy)
-  var liquidAssets = S.otherAssets.reduce(function(sum, a) { return sum + N(a.val); }, 0) + toEstate;
-  var liquidityGap = liquidAssets - totalEstateCosts;
-
-  // ── Calculation breakdown display
-  var calcBox = div();
-  calcBox.style.cssText = 'background:var(--navy);color:#fff;border-radius:9px;padding:18px 20px;margin-bottom:16px';
-
-  function calcRow(label, val, indent, highlight, borderTop) {
-    var row = div();
-    row.style.cssText = 'display:flex;justify-content:space-between;padding:4px 0;font-size:13px' +
-      (indent ? ';padding-left:20px' : '') +
-      (borderTop ? ';border-top:1px solid #334;margin-top:8px;padding-top:10px' : '') +
-      (highlight ? ';font-size:15px;font-weight:700' : '');
-    var lSpan = el('span','',label);
-    var vSpan = el('span','', val);
-    vSpan.style.color = highlight ? 'var(--gold)' : '#ccd6f6';
-    row.appendChild(lSpan); row.appendChild(vSpan);
-    calcBox.appendChild(row);
+  // ── BOX 2: EXECUTOR FEES
+  var execFeeBasis = totalDutiableAssets + estatePols;
+  var execFees = execFeeBasis * EXEC_RATE;
+  s.appendChild(stitle('Executor Fees'));
+  var b2 = makeCalcBox('How Executor Fees Are Calculated');
+  b2.row('Physical assets in estate', Rfmt(totalDutiableAssets));
+  b2.sub('Market value of all assets administered by the executor','');
+  if(estatePols>0){
+    b2.row('+ Estate-beneficiary policy proceeds', Rfmt(estatePols), true);
+    b2.sub('Policies paid into the estate \u2014 executor receives and distributes','');
   }
+  b2.row('Executor fee basis', Rfmt(execFeeBasis), false, false, true);
+  b2.sub('s.4(q), trust and business assurance proceeds excluded \u2014 not handled by executor','');
+  b2.row('\u00d7 Executor fee rate (3.5% + 15% VAT = 4.025%)', '', true);
+  b2.row('Executor fees', Rfmt(Math.round(execFees)), false, true, true);
+  s.appendChild(b2.box);
 
-  function calcRowSub(label, val) {
-    var row = div();
-    row.style.cssText = 'display:flex;justify-content:space-between;padding:3px 0 3px 16px;font-size:11px;color:#8899bb';
-    row.innerHTML = '<span>' + label + '</span><span>' + val + '</span>';
-    calcBox.appendChild(row);
-  }
+  // ── BOX 3: LIQUIDITY
+  var liquidCash = (S.otherAssets||[]).reduce(function(sum,a){
+    var tp=(a.type||'').toLowerCase();
+    var illiquid=tp.indexOf('business')>-1||tp.indexOf('farm')>-1||tp.indexOf('personal')>-1||tp.indexOf('inheritance')>-1;
+    return sum + (illiquid?0:N(a.val));
+  },0);
+  var liqTotal = liquidCash + estatePols;
+  var liqNeeds = dutyPayableByEstate + execFees + accrualDed;
+  var liqGap   = liqTotal - liqNeeds;
 
-  calcRow('Gross Estate', Rfmt(grossEstate));
-  calcRowSub('Dutiable assets', Rfmt(totalDutiableAssets));
-  calcRowSub('+ Estate-routed policy benefits', Rfmt(toEstate));
-
-  calcRow('Less: Liabilities', '− ' + Rfmt(totalLiabs), true);
-  calcRow('Net Estate', Rfmt(netEstate), false, false, true);
-
-  if (section4q > 0) {
-    calcRow('Less: Section 4(q) — spouse bequest', '− ' + Rfmt(sec4qDed), true);
-  }
-  if (afterSpouse !== netEstate) {
-    calcRow('After 4(q) deduction', Rfmt(afterSpouse), false, false, true);
-  }
-  if (accrualClaim > 0) {
-    calcRow('Less: Accrual claim (OCP)', '− ' + Rfmt(accrualDed), true);
-    calcRow('After accrual deduction', Rfmt(afterAccrual), false, false, true);
-  }
-  calcRow('Less: Primary abatement', '− ' + Rfmt(Math.min(afterAccrual, ABATEMENT)), true);
-  calcRow('Dutiable amount', Rfmt(afterAbatement), false, false, true);
-
-  if (afterAbatement > 0) {
-    if (afterAbatement <= DUTY_THRESH) {
-      calcRowSub('Rate: 20% on R' + (DUTY_THRESH/1000000) + 'm', '');
-    } else {
-      calcRowSub('20% on first R30m + 25% on balance', '');
-    }
-  }
-
-  calcRow('Estate Duty', Rfmt(estateDuty), false, false, true);
-  calcRow('Executor fees (~4.025% of gross estate)', Rfmt(execFees), true);
-  calcRow('Total Estate Costs', Rfmt(totalEstateCosts), false, true, true);
-  s.appendChild(calcBox);
-
-  // ── Liquidity analysis
   s.appendChild(stitle('Liquidity Analysis'));
-  var liqNote = div('info');
-  liqNote.innerHTML = 'The estate needs <strong>liquid funds</strong> to pay duty and executor fees without forcing asset sales. ' +
-    'Estate-routed policy benefits contribute to estate liquidity.';
-  s.appendChild(liqNote);
+  var b3 = makeCalcBox('Liquid Assets Available to Estate');
+  if(estatePols>0){
+    b3.row('Estate-beneficiary policy proceeds', Rfmt(estatePols));
+    b3.sub('Only policies where executor receives the funds','');
+  }
+  if(liquidCash>0){
+    b3.row('Liquid assets (investments / cash)', Rfmt(liquidCash), true);
+    b3.sub('Investment-type assets only \u2014 illiquid assets excluded','');
+  }
+  b3.row('Total liquid assets available', Rfmt(liqTotal), false, false, true);
+  b3.row('Less: Estate duty (estate\u2019s share)', '\u2212 '+Rfmt(Math.round(dutyPayableByEstate)), true, false, true);
+  b3.row('Less: Executor fees', '\u2212 '+Rfmt(Math.round(execFees)), true);
+  if(accrualDed>0){ b3.row('Less: Accrual claim payable to spouse', '\u2212 '+Rfmt(Math.round(accrualDed)), true); }
+  b3.row('Liquidity '+(liqGap>=0?'Surplus':'Shortfall'), (liqGap<0?'\u2212 ':'')+Rfmt(Math.abs(liqGap)), false, true, true);
+  s.appendChild(b3.box);
 
-  var liqCards = div('cards c3');
-  var lc1 = div('card');
-  lc1.innerHTML = '<div class="lbl">Estate Costs (Duty + Fees)</div><div class="val bad">' + Rfmt(totalEstateCosts) + '</div>';
-  liqCards.appendChild(lc1);
-  var lc2 = div('card');
-  lc2.innerHTML = '<div class="lbl">Liquid / Policy Assets in Estate</div><div class="val">' + Rfmt(Math.max(0, liquidAssets)) + '</div>';
-  liqCards.appendChild(lc2);
-  var lc3 = div('card');
-  lc3.innerHTML = '<div class="lbl">Liquidity ' + (liquidityGap >= 0 ? 'Surplus' : 'Shortfall') + '</div>' +
-    '<div class="val ' + (liquidityGap >= 0 ? 'ok' : 'bad') + '">' + Rfmt(Math.abs(liquidityGap)) + '</div>';
-  liqCards.appendChild(lc3);
-  s.appendChild(liqCards);
-
-  if (liquidityGap < 0) {
-    var liqAlert = div('alert');
-    liqAlert.innerHTML = '⚠ <strong>Liquidity shortfall of ' + Rfmt(Math.abs(liquidityGap)) + '.</strong> ' +
-      'The estate may need to sell assets to fund duty and executor fees. ' +
-      'Consider routing additional life cover to the estate, or an estate liquidity policy.';
+  if(liqGap<0){
+    var liqAlert=div('alert');
+    liqAlert.innerHTML='\u26a0 <strong>Liquidity shortfall of '+Rfmt(Math.abs(liqGap))+'.</strong> The estate cannot fund its own costs without selling assets. Consider additional estate liquidity cover.';
     s.appendChild(liqAlert);
   } else {
-    var liqOk = div('info');
-    liqOk.style.cssText = 'background:#f0fdf4;border-color:#86efac;color:#166534';
-    liqOk.innerHTML = '✓ <strong>Estate is liquid.</strong> Sufficient funds available to cover duty and executor fees without forced asset sales.';
+    var liqOk=div('info'); liqOk.style.cssText='background:#f0fdf4;border-color:#86efac;color:#166534';
+    liqOk.innerHTML='\u2713 <strong>Estate is liquid.</strong> Available assets cover estate duty, executor fees'+(accrualDed>0?' and the accrual claim':'')+'.';
     s.appendChild(liqOk);
   }
 
-  // ── What each beneficiary receives
-  s.appendChild(stitle('Beneficiary Outcome Summary'));
+  // ── BOX 4: BENEFICIARY OUTCOME
+  s.appendChild(stitle('Beneficiary Outcome'));
+  var benBox=div(); benBox.style.cssText='background:var(--navy);color:#fff;border-radius:9px;padding:18px 20px;margin-bottom:16px';
 
-  var outCards = div('cards c2');
-  outCards.style.marginTop = '0';
+  function benRow(lbl,val,note,colour){
+    var row=div();
+    row.style.cssText='display:flex;justify-content:space-between;align-items:flex-start;padding:8px 0;border-bottom:1px solid #223';
+    var left=div(); left.style.cssText='display:flex;flex-direction:column;gap:2px';
+    var ll=el('span','',lbl); ll.style.cssText='font-size:13px;font-weight:600;color:#ccd6f6';
+    left.appendChild(ll);
+    if(note){ var ln2=el('span','',note); ln2.style.cssText='font-size:11px;color:#8899bb'; left.appendChild(ln2); }
+    var vv=el('span','',val); vv.style.cssText='font-size:14px;font-weight:700;color:'+(colour||'var(--gold)');
+    row.appendChild(left); row.appendChild(vv);
+    benBox.appendChild(row);
+  }
 
-  // Spouse receives: 4(q) policies + residual estate after all costs and bequests
-  var estateResidual = Math.max(0, netEstate - sec4qDed - totalEstateCosts);
-  var c_spouse = div('card');
-  c_spouse.innerHTML = '<div class="lbl">Spouse receives</div>' +
-    '<div class="val ok">' + Rfmt(section4q + estateResidual) + '</div>' +
-    '<div class="sub">Section 4(q) policies: ' + Rfmt(section4q) + '<br>Estate residual: ' + Rfmt(estateResidual) + '</div>';
-  outCards.appendChild(c_spouse);
+  // Spouse s.4(q) policies
+  if(s4qPolicies>0||s4qAssets>0){
+    var spouseList=pols.filter(function(p){return(p.BeneficiaryType||'')==='Spouse'&&N(p.BenDeath)>0&&p.Type!=='Business Assurance';});
+    var spouseNote=spouseList.map(function(p){return(p.Insurer||'')+(p.Product?' \u2014 '+p.Product:'')+': '+Rfmt(p.BenDeath);}).join(' \u00b7 ');
+    benRow((S.cli.spouseName||S.cli.spouse||'Spouse')+' \u2014 Section 4(q)',Rfmt(s4qPolicies+s4qAssets),spouseNote||'Paid direct \u2014 not dutiable','#86efac');
+  }
 
-  var c_third = div('card');
-  c_third.innerHTML = '<div class="lbl">Third party beneficiaries</div>' +
-    '<div class="val">' + Rfmt(toThird) + '</div>' +
-    '<div class="sub">Paid direct — no estate duty</div>';
-  outCards.appendChild(c_third);
+  // Spouse inherits residue option
+  var afterSpouse = 0;
+  var showResidueOpt = true;
+  if(showResidueOpt){
+    var residueRow=div(); residueRow.style.cssText='display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid #223';
+    var resCb=document.createElement('input'); resCb.type='checkbox'; resCb.checked=!!S.cli.spouseInheritsResidue;
+    resCb.addEventListener('change',function(e){ S.cli.spouseInheritsResidue=e.target.checked; render(); });
+    var resLbl=el('span','','Spouse inherits residue of estate (tick to include)');
+    resLbl.style.cssText='font-size:12px;color:#8899bb;cursor:pointer';
+    residueRow.appendChild(resCb); residueRow.appendChild(resLbl);
+    benBox.appendChild(residueRow);
 
-  s.appendChild(outCards);
+    if(S.cli.spouseInheritsResidue){
+      afterSpouse = Math.max(0, (totalDutiableAssets+estatePols) - Math.round(dutyPayableByEstate) - Math.round(execFees) - Math.round(accrualDed));
+      if(afterSpouse>0){
+        benRow((S.cli.spouseName||'Spouse')+' \u2014 Residue of estate',Rfmt(afterSpouse),'After duty, executor fees and accrual are settled','#86efac');
+      }
+    }
+  }
 
-  // ── Estate planning notes
+  // Estate-beneficiary policies
+  if(estatePols>0){
+    var estList=pols.filter(function(p){return(p.BeneficiaryType||'')==='Estate'&&N(p.BenDeath)>0;});
+    var estNote=estList.map(function(p){return(p.Insurer||'')+(p.Product?' \u2014 '+p.Product:'')+': '+Rfmt(p.BenDeath);}).join(' \u00b7 ');
+    benRow('Estate (executor administered)',Rfmt(estatePols),(estNote||'')+' \u2014 funds duty, executor fees, bequests','#fcd34d');
+  }
+
+  // Third party policies
+  pols.forEach(function(p){
+    if((p.BeneficiaryType||'')==='Third Party'&&N(p.BenDeath)>0&&p.Type!=='Business Assurance'){
+      var dutyOwed=Math.round(apportionDuty(N(p.BenDeath)));
+      var note=(p.Insurer||'')+(p.Product?' \u2014 '+p.Product:'')+' \u00b7 Deemed property \u00b7 Duty share: '+Rfmt(dutyOwed);
+      benRow((p.Beneficiary||'Third party')+' \u2014 '+Rfmt(p.BenDeath)+' (direct)',Rfmt(N(p.BenDeath)-dutyOwed)+' net',note,'#ccd6f6');
+    }
+  });
+
+  // Business assurance
+  pols.forEach(function(p){
+    if(p.Type==='Business Assurance'){
+      var amt=N(p.LoanAmount)||N(p.BenDeath);
+      if(!amt) return;
+      var dutyOwed2=p.EstateDutiable==='Yes'?Math.round(apportionDuty(amt)):0;
+      var note2=(p.Insurer||'')+(p.BizType?' \u2014 '+p.BizType:'')+(dutyOwed2>0?' \u00b7 Deemed property \u00b7 Duty share: '+Rfmt(dutyOwed2):' \u00b7 Outside estate');
+      benRow((p.Beneficiary||'Business')+' \u2014 Business assurance',Rfmt(amt),note2,'#ccd6f6');
+    }
+  });
+
+  s.appendChild(benBox);
+
+  // ── Notes
   s.appendChild(stitle('Estate Planning Notes'));
   s.appendChild(txfld('Notes / recommendations', S, 'estateNotes'));
 
   return s;
 }
 
-// ═══════════════════════════════════════════════════════════
-// TAB 8 — SUMMARY & GAPS
-// ═══════════════════════════════════════════════════════════
+
+
 function buildSummary() {
   var s = div();
   var inf=div('info'); inf.textContent='This tab summarises all needs versus existing cover. Complete the other tabs first.'; s.appendChild(inf);
