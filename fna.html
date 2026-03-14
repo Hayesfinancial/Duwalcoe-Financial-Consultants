@@ -1919,7 +1919,8 @@ function buildPolCard(p, i) {
   rtickInp.checked = !!p._retInclude;
   rtickInp.addEventListener('change',function(e){ S.importedPols[i]._retInclude=e.target.checked; });
   rtickLbl.appendChild(rtickInp);
-  rtickLbl.appendChild(document.createTextNode('Ret'));
+  rtickLbl.appendChild(document.createTextNode('Include in retirement expenses'));
+  rtickLbl.title = 'Tick to include this premium as an ongoing expense in the retirement projection';
   ch.appendChild(rtickLbl);
   // Delete button
   var db = delBtn(function() { S.importedPols.splice(i, 1); render(); });
@@ -2020,10 +2021,14 @@ function buildPolCard(p, i) {
     card.appendChild(rb2);
     // Age-rated / CPI warning
     var premEscRaw = String(p.PremEscalation || '').trim().toLowerCase();
-    if (premEscRaw === 'age rated' || premEscRaw === 'age-rated' || premEscRaw === 'age_rated') {
+    var raEscIsAgeRated = premEscRaw === 'age rated' || premEscRaw === 'age-rated' || premEscRaw === 'age_rated';
+    var raEscIsCPI      = premEscRaw === 'cpi';
+    if (raEscIsAgeRated || raEscIsCPI) {
       var escWarn = div('alert');
       escWarn.style.marginTop = '4px';
-      escWarn.innerHTML = '⚠ <strong>Age-rated escalation cannot be projected</strong> — please enter a fixed % for FNA purposes.';
+      escWarn.innerHTML = '⚠ <strong>' +
+        (raEscIsAgeRated ? 'Age-rated' : 'CPI') +
+        ' escalation cannot be projected</strong> — please enter a fixed % for FNA purposes.';
       card.appendChild(escWarn);
     }
     var premNote = div('info');
@@ -2045,15 +2050,18 @@ function buildPolCard(p, i) {
     var premEscRaw2 = String(p.PremEscalation || '').trim().toLowerCase();
     var benEscRaw2  = String(p.BenEscalation  || '').trim().toLowerCase();
     var ageRatedPrem = premEscRaw2 === 'age rated' || premEscRaw2 === 'age-rated' || premEscRaw2 === 'age_rated';
+    var ageRatedBen  = benEscRaw2  === 'age rated' || benEscRaw2  === 'age-rated' || benEscRaw2  === 'age_rated';
     var cpiPrem      = premEscRaw2 === 'cpi';
-    var cpiAlreadySet = benEscRaw2 === 'cpi';
-    if (ageRatedPrem || cpiPrem || cpiAlreadySet) {
+    var cpiBen       = benEscRaw2  === 'cpi';
+    if (ageRatedPrem || ageRatedBen || cpiPrem || cpiBen) {
+      var warnParts = [];
+      if (ageRatedPrem) warnParts.push('age-rated premium escalation');
+      if (ageRatedBen)  warnParts.push('age-rated benefit escalation');
+      if (cpiPrem)      warnParts.push('CPI premium escalation');
+      if (cpiBen)       warnParts.push('CPI benefit escalation');
       var escWarn2 = div('alert');
       escWarn2.style.marginTop = '4px';
-      escWarn2.innerHTML = '⚠ <strong>' +
-        (ageRatedPrem ? 'Age-rated premium escalation' : '') +
-        (cpiPrem ? 'CPI premium escalation' : '') +
-        (cpiAlreadySet && !cpiPrem ? 'CPI benefit escalation' : '') +
+      escWarn2.innerHTML = '⚠ <strong>' + warnParts.map(function(w){ return w.charAt(0).toUpperCase()+w.slice(1); }).join(' / ') +
         ' cannot be projected</strong> — please enter a fixed % for FNA purposes.';
       card.appendChild(escWarn2);
     }
@@ -2763,28 +2771,66 @@ function buildSummary() {
   }
 
   // ── ESTATE SUMMARY
+  // Uses IDENTICAL calculation logic to buildEstate — must stay in sync
   if(S.scope.estate){
     sTitle('Estate Planning Summary');
-    var physAssets=(S.props||[]).reduce(function(a,p){return a+N(p.val);},0)
+
+    // Physical assets and liabilities
+    var ePhysVal=(S.props||[]).reduce(function(a,p){return a+N(p.val);},0)
       +(S.vehicles||[]).reduce(function(a,v){return a+N(v.val);},0)
       +(S.otherAssets||[]).reduce(function(a,x){return a+N(x.val);},0);
-    var liabs=(S.props||[]).reduce(function(a,p){return a+N(p.bond);},0)
+    var ePhysLiab=(S.props||[]).reduce(function(a,p){return a+N(p.bond);},0)
       +(S.vehicles||[]).reduce(function(a,v){return a+N(v.finance);},0)
       +(S.liabilities||[]).reduce(function(a,l){return a+N(l.bal);},0);
-    var s4q=0,estPols=0;
+
+    // Policy routing — match buildEstate exactly
+    var eS4qPols=0, eEstPols=0, eThirdPty=0, eBizDut=0;
+    var eS4qAssets=0;
+    (S.props||[]).forEach(function(p){ if((p.deathBenType||'')==='Spouse') eS4qAssets+=N(p.val)-N(p.bond); });
+    (S.vehicles||[]).forEach(function(v){ if((v.deathBenType||'')==='Spouse') eS4qAssets+=N(v.val)-N(v.finance); });
+    (S.otherAssets||[]).forEach(function(a){ if((a.deathBenType||'')==='Spouse') eS4qAssets+=N(a.val); });
+
     pols.forEach(function(p){
-      if(p.Type==='Business Assurance') return;
+      if(p.Type==='Business Assurance'){
+        if(p.EstateDutiable==='Yes') eBizDut+=N(p.LoanAmount)||N(p.BenDeath);
+        return;
+      }
       var b=N(p.BenDeath); if(!b) return;
-      if((p.BeneficiaryType||'')==='Spouse') s4q+=b;
-      else if((p.BeneficiaryType||'')==='Estate') estPols+=b;
+      var bt=p.BeneficiaryType||'';
+      if(bt==='Spouse')       eS4qPols+=b;
+      else if(bt==='Estate')  eEstPols+=b;
+      else if(bt==='Third Party') eThirdPty+=b;
     });
-    var gross=physAssets+s4q+estPols;
-    var net=Math.max(0,gross-liabs);
-    var s4qDed=Math.min(s4q,net);
-    var afterS4q=Math.max(0,net-s4qDed);
-    var dutiable=Math.max(0,afterS4q-ABATEMENT);
-    var duty=dutiable<=DUTY_THRESH?dutiable*DUTY_RATE1:DUTY_THRESH*DUTY_RATE1+(dutiable-DUTY_THRESH)*DUTY_RATE2;
-    var execFees=(physAssets+estPols)*EXEC_RATE;
+
+    // Accrual — ANC with accrual marriages only, physical + RA policies, not risk
+    var eAccrual=0;
+    if((S.cli.marital||'').indexOf('accrual')>-1){
+      var eRaVal=pols.reduce(function(a,p){
+        if(POL_RA_TYPES.indexOf(p.Type)>-1) return a+(N(p.BenFundValue)||N(p.BenDeath));
+        return a;
+      },0);
+      var eClientEstate=ePhysVal+eRaVal;
+      var eSpouseEstate=N(S.accrual&&S.accrual.spouseCurrentAssets);
+      var eClientStart=N(S.accrual&&S.accrual.clientStartVal);
+      var eSpouseStart=N(S.accrual&&S.accrual.spouseStartVal);
+      var eClientAccrual=Math.max(0,eClientEstate-eClientStart);
+      var eSpouseAccrual=Math.max(0,eSpouseEstate-eSpouseStart);
+      eAccrual=Math.max(0,(eClientAccrual-eSpouseAccrual)/2);
+    }
+
+    var eGross=ePhysVal+eS4qPols+eEstPols+eThirdPty+eBizDut;
+    var eNet=Math.max(0,eGross-ePhysLiab);
+    var eAccrualDed=Math.min(eAccrual,eNet);
+    var eAfterAccrual=Math.max(0,eNet-eAccrualDed);
+    var eSection4q=eS4qPols+eS4qAssets;
+    var eS4qDed=Math.min(eSection4q,eAfterAccrual);
+    var eAfterS4q=Math.max(0,eAfterAccrual-eS4qDed);
+    var eDutiable=Math.max(0,eAfterS4q-ABATEMENT);
+    var eDuty=eDutiable<=DUTY_THRESH
+      ?eDutiable*DUTY_RATE1
+      :DUTY_THRESH*DUTY_RATE1+(eDutiable-DUTY_THRESH)*DUTY_RATE2;
+    var eExecFees=(ePhysVal+eEstPols)*EXEC_RATE;
+    var eTotalCosts=Math.round(eDuty)+Math.round(eExecFees)+(eAccrualDed>0?Math.round(eAccrualDed):0);
 
     var estBox=div(); estBox.style.cssText='background:#1a2a4a;border-radius:8px;padding:14px 16px;margin-bottom:14px';
     function e3Row(lbl,val,sub,bold){
@@ -2793,22 +2839,22 @@ function buildSummary() {
       var v=el('span','',val); v.style.cssText='font-size:'+(sub?'11':'12')+'px;color:#c8a84b'+(bold?';font-weight:700':'');
       r.appendChild(l); r.appendChild(v); estBox.appendChild(r);
     }
-    e3Row('Gross estate',Rfmt(gross));
-    if(liabs>0) e3Row('Less: liabilities','('+Rfmt(liabs)+')',false,false);
-    e3Row('Net estate',Rfmt(net),false,true);
-    if(s4qDed>0) e3Row('Less: s.4(q) spouse deduction','('+Rfmt(s4qDed)+')',false,false);
-    e3Row('Less: abatement','('+Rfmt(Math.min(afterS4q,ABATEMENT))+')',false,false);
-    e3Row('Dutiable amount',Rfmt(dutiable),false,true);
-    e3Row('Estate duty',Rfmt(Math.round(duty)),false,true);
-    e3Row('Executor fees (est.)',Rfmt(Math.round(execFees)),false,false);
-    e3Row('Total estate costs',Rfmt(Math.round(duty+execFees)),false,true);
+    e3Row('Gross estate',Rfmt(eGross));
+    if(ePhysLiab>0) e3Row('Less: liabilities','('+Rfmt(ePhysLiab)+')',false,false);
+    e3Row('Net estate',Rfmt(eNet),false,true);
+    if(eAccrualDed>0) e3Row('Less: accrual claim (ANC)','('+Rfmt(Math.round(eAccrualDed))+')',false,false);
+    if(eS4qDed>0) e3Row('Less: s.4(q) spouse deduction','('+Rfmt(eS4qDed)+')',false,false);
+    e3Row('Less: abatement','('+Rfmt(Math.min(eAfterS4q,ABATEMENT))+')',false,false);
+    e3Row('Dutiable amount',Rfmt(eDutiable),false,true);
+    e3Row('Estate duty',Rfmt(Math.round(eDuty)),false,true);
+    e3Row('Executor fees (est.)',Rfmt(Math.round(eExecFees)),false,false);
+    if(eAccrualDed>0) e3Row('Accrual payable to spouse',Rfmt(Math.round(eAccrualDed)),false,false);
+    e3Row('Total estate costs + accrual',Rfmt(eTotalCosts),false,true);
+
     // Spouse residue — only if tick is set on Estate tab
-    var totalEstateCosts = Math.round(duty+execFees);
     if(S.cli.spouseInheritsResidue){
-      var spouseResidue = Math.max(0, net - s4qDed - totalEstateCosts);
-      if(spouseResidue>0){
-        e3Row('Estimated residue to spouse/estate',Rfmt(spouseResidue),false,false);
-      }
+      var eResidue=Math.max(0,eNet-eS4qDed-Math.round(eDuty)-Math.round(eExecFees)-(eAccrualDed>0?Math.round(eAccrualDed):0));
+      if(eResidue>0) e3Row('Estimated residue to spouse/estate',Rfmt(eResidue),false,false);
     }
     s.appendChild(estBox);
   }
