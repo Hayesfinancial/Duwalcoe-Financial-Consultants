@@ -1985,6 +1985,57 @@ function buildRetirement() {
         var otw = div('twrap'); otw.appendChild(otherTbl); s.appendChild(otw);
       }
 
+      // ── RETIREMENT SHORTFALL CALCULATOR
+      if (gap < 0) {
+        var shortfall = Math.abs(gap);
+        // Solve for additional monthly contribution needed to close the shortfall
+        // Using the same growth and escalation assumptions as existing contributions
+        var r  = pct(S.assump.growth) / 12;
+        var esc = pct(S.assump.incEsc||5);
+        var nMths = yrsToR * 12;
+        // growthFactor = sum of (1+r)^(nMths-t) for t=0..nMths-1
+        // For level contribution growing at annual escalation:
+        // Factor = sum of (1+r)^(nMths-t) * (1+annual_esc)^floor(t/12)
+        var gf = 0;
+        var pmtScale = 1;
+        for (var tt = 0; tt < nMths; tt++) {
+          if (tt > 0 && tt % 12 === 0) pmtScale *= (1 + esc);
+          gf += pmtScale * Math.pow(1 + r, nMths - tt);
+        }
+        var addPMT = gf > 0 ? Math.ceil(shortfall / gf) : 0;
+
+        s.appendChild(stitle('Retirement Shortfall Calculator'));
+        var scBox = div();
+        scBox.style.cssText = 'background:var(--navy);color:#fff;border-radius:9px;padding:18px 20px;margin-bottom:16px';
+        var scTtl = div();
+        scTtl.style.cssText = 'font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--gold);margin-bottom:12px';
+        scTtl.textContent = 'Additional Contribution Needed to Close Shortfall';
+        scBox.appendChild(scTtl);
+
+        function scRow(lbl, val, highlight) {
+          var row = div();
+          row.style.cssText = 'display:flex;justify-content:space-between;padding:5px 0;font-size:13px;border-bottom:1px solid #223';
+          var ls = el('span','',lbl); ls.style.color = '#ccd6f6';
+          var vs = el('span','',val); vs.style.cssText = 'font-weight:'+(highlight?'700':'400')+';color:'+(highlight?'var(--gold)':'#ccd6f6');
+          row.appendChild(ls); row.appendChild(vs); scBox.appendChild(row);
+        }
+        scRow('Retirement capital shortfall (today\'s rands)', Rfmt(shortfall));
+        scRow('Years to retirement', yrsToR + ' years');
+        scRow('Assumed growth rate', (S.assump.growth||9) + '% per year');
+        scRow('Contribution escalation', (S.assump.incEsc||5) + '% per year');
+        var hlRow = div();
+        hlRow.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-top:12px;padding:12px 0 0;border-top:2px solid #445';
+        var hlL = div();
+        hlL.style.cssText = 'font-size:13px;color:#ccd6f6;line-height:1.5';
+        hlL.innerHTML = 'Additional monthly contribution needed today<br><span style="font-size:11px;color:#8899bb">Escalating at ' + (S.assump.incEsc||5) + '% per year · Same growth as existing funds</span>';
+        var hlV = div();
+        hlV.style.cssText = 'font-size:22px;font-weight:700;color:var(--gold);white-space:nowrap';
+        hlV.textContent = Rfmt(addPMT) + ' /pm';
+        hlRow.appendChild(hlL); hlRow.appendChild(hlV);
+        scBox.appendChild(hlRow);
+        s.appendChild(scBox);
+      }
+
       var rdet=div('info'); rdet.style.marginTop='8px';
       rdet.innerHTML='Assumptions: CPI '+S.assump.cpi+'% · RA/fund growth default '+S.assump.growth+
         '% · Drawdown rate in retirement '+S.assump.retReturn+'% · Life expectancy 85 · Years in retirement: '+yrsInRet+
@@ -2968,66 +3019,162 @@ function buildEstate() {
 // ═══════════════════════════════════════════════════════════
 function buildSummary() {
   var s = div();
-  var inf=div('info'); inf.textContent='This tab reads policies from the CRM (passed via URL) or captured below. It shows needs vs existing cover and calculates gaps.'; s.appendChild(inf);
 
-  // For now, policies are entered here as a quick summary table
-  // When linked from CRM they will be passed via URL params
-  s.appendChild(stitle('Existing Cover Summary'));
-  var inf2=div('info'); inf2.innerHTML='Enter cover amounts from existing policies. When opened from the client profile in the CRM, this will populate automatically.'; s.appendChild(inf2);
+  // ── Read all data from existing tabs — no manual entry
+  var pols = S.importedPols || [];
 
-  // Summary fields for existing cover
-  if(!S.existingCover) S.existingCover={death:'',disability:'',dread:'',ipPM:'',totalPrem:''};
-  var eg=g3();
-  eg.appendChild(rfld('Death Cover', S.existingCover, 'death'));
-  eg.appendChild(rfld('Disability Cover', S.existingCover, 'disability'));
-  eg.appendChild(rfld('Dread Disease', S.existingCover, 'dread'));
-  s.appendChild(eg);
-  var eg2=g3();
-  eg2.appendChild(rfld('Income Protection /pm', S.existingCover, 'ipPM'));
-  eg2.appendChild(rfld('Total Premiums /pm', S.existingCover, 'totalPrem'));
-  s.appendChild(eg2);
+  // ── DEATH: Capital needs (from Needs tab)
+  var needExec   = 0, needMaster = 0, needFuneral = 0, needEstateDuty = 0, needAccrual = 0, needTax = 0;
+  var needLumps  = S.deathCapital.reduce(function(sum,r){ return sum+N(r.amt); }, 0);
+  var needLiabs  = S.deathLiabs.reduce(function(sum,r){ return sum+N(r.amt); }, 0);
 
-  // ── Gap analysis
-  s.appendChild(stitle('Gap Analysis'));
+  // Try to read estate-calculated figures if estate tab has been visited
+  // These mirror the estate tab calculations
+  var cliAge   = ageFrom(S.cli.dob);
+  var retAge   = N(S.cli.retAge)||65;
+  var yrsToR   = cliAge ? Math.max(0, retAge - cliAge) : 20;
 
-  // Death
-  var totLiabNeed=S.deathLiabs.reduce(function(sum,r){return sum+N(r.amt);},0);
-  var totIncCap=S.deathIncome.reduce(function(sum,r){return sum+calcIncomeNeed(r);},0);
-  var totCapNeed=S.deathCapital.reduce(function(sum,r){return sum+N(r.amt);},0);
-  var totalDeathNeed=totLiabNeed+totIncCap+totCapNeed;
-  var haveDeathCover=N(S.existingCover.death);
+  // Personal policies for 'available' cover — all non-business policies
+  var availPols = pols.filter(function(p){ return p.Type !== 'Business Assurance'; });
+  var totalDeathCover = availPols.reduce(function(sum,p){ return sum + N(p.BenDeath); }, 0);
+  var totalDisCover   = pols.reduce(function(sum,p){ return sum + N(p.BenDisability); }, 0);
+  var totalDDCover    = pols.reduce(function(sum,p){ return sum + N(p.BenDreadDisease); }, 0);
 
-  if(S.scope.death) s.appendChild(buildGapRow('Death Cover', totalDeathNeed, haveDeathCover));
+  // Liquid assets (realised on death)
+  var liquidOnDeath = S.otherAssets.reduce(function(sum,a){
+    var t = (a.type||'').toLowerCase();
+    var illiquid = t.indexOf('business')>-1 || t.indexOf('farm')>-1 || t.indexOf('personal')>-1;
+    return sum + (illiquid ? 0 : N(a.val));
+  }, 0);
 
-  // Disability
-  var disIncCap=S.disIncome.reduce(function(sum,r){return sum+calcIncomeNeed(r);},0);
-  var disCapNeed=S.disCapital.reduce(function(sum,r){return sum+N(r.amt);},0);
-  var totalDisNeed=disIncCap+disCapNeed;
-  if(S.scope.disability) s.appendChild(buildGapRow('Disability Cover', totalDisNeed, N(S.existingCover.disability)));
+  // RA fund value available on death
+  var raOnDeath = pols.reduce(function(sum,p){
+    if (POL_RA_TYPES.indexOf(p.Type) > -1) return sum + N(p.BenFundValue);
+    return sum;
+  }, 0);
 
-  // Dread
-  if(S.scope.dread) s.appendChild(buildGapRow('Dread Disease', N(S.dreadAmt), N(S.existingCover.dread)));
+  var totalCapAvail = totalDeathCover + liquidOnDeath + raOnDeath;
 
-  // IP
-  if(S.scope.ip) s.appendChild(buildGapRow('Income Protection /pm', N(S.ipGrossPM||S.ipNettPM), N(S.existingCover.ipPM)));
+  // Capital needs
+  var totLiabNeed  = S.deathLiabs.reduce(function(sum,r){ return sum+N(r.amt); },0);
+  var totCapNeed   = S.deathCapital.reduce(function(sum,r){ return sum+N(r.amt); },0);
+  var totalCapNeed = totLiabNeed + totCapNeed;
 
-  // Retirement
-  if(S.scope.retirement){
-    var cliAge=ageFrom(S.cli.dob);
-    var retAge=N(S.cli.retAge)||65;
-    var yrsToR=cliAge?Math.max(0,retAge-cliAge):null;
-    var yrsInRet=85-retAge;
-    if(yrsToR!==null){
-      var totalProj=S.retAssets.reduce(function(sum,r){
-        if(!N(r.currentVal)&&!N(r.monthlyContrib)) return sum;
-        var gr=N(r.growthRate)>0?r.growthRate:S.assump.growth;
-        var esc=N(r.contribEsc)>0?r.contribEsc:S.assump.incEsc;
-        return sum+projectFund(r.currentVal,r.monthlyContrib,esc,gr,yrsToR);
+  // Income needs (capitalised)
+  var totIncCap  = S.deathIncome.reduce(function(sum,r){ return sum+calcIncomeNeed(r); },0);
+  var incomeAvail = 0; // TODO: ongoing income sources after death
+
+  // ── SECTION: Death cover summary
+  if (S.scope.death) {
+    s.appendChild(stitle('Death \u2014 Needs vs Cover'));
+
+    // CAPITAL section
+    var capBox = div();
+    capBox.style.cssText = 'background:var(--navy);color:#fff;border-radius:9px;padding:18px 20px;margin-bottom:12px';
+    var capTtl = div(); capTtl.style.cssText='font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--gold);margin-bottom:10px';
+    capTtl.textContent='Capital'; capBox.appendChild(capTtl);
+
+    function sumRow(lbl, val, indent, bold, borderTop) {
+      var row = div();
+      row.style.cssText='display:flex;justify-content:space-between;padding:4px 0;font-size:13px'+
+        (indent?';padding-left:20px':'')+(borderTop?';border-top:1px solid #334;margin-top:8px;padding-top:10px':'')+(bold?';font-weight:700':'');
+      var ls=el('span','',lbl); ls.style.color='#ccd6f6';
+      var vs=el('span','',val); vs.style.color=bold?'var(--gold)':'#ccd6f6';
+      row.appendChild(ls); row.appendChild(vs); capBox.appendChild(row);
+    }
+    function sumSub(lbl, val) {
+      var row=div(); row.style.cssText='display:flex;justify-content:space-between;padding:2px 0 2px 16px;font-size:11px;color:#8899bb';
+      row.innerHTML='<span>'+lbl+'</span><span>'+val+'</span>'; capBox.appendChild(row);
+    }
+
+    // Capital needed
+    sumRow('Capital needed', '');
+    if (totLiabNeed > 0) {
+      S.deathLiabs.forEach(function(r){ if(N(r.amt)>0) sumSub(r.desc||'Liability', '('+Rfmt(r.amt)+')'); });
+    }
+    if (totCapNeed > 0) {
+      S.deathCapital.forEach(function(r){ if(N(r.amt)>0) sumSub(r.desc||'Capital need', '('+Rfmt(r.amt)+')'); });
+    }
+    sumRow('Total capital needed', '('+Rfmt(totalCapNeed)+')', false, false, true);
+
+    // Capital available
+    sumRow('Capital available', '', false, false, true);
+    availPols.forEach(function(p){
+      if (N(p.BenDeath) > 0) {
+        sumSub((p.Insurer||'Policy')+(p.Product?' \u2014 '+p.Product:'')+' ('+p.BeneficiaryType+')', Rfmt(p.BenDeath));
+      }
+    });
+    if (liquidOnDeath > 0) sumSub('Liquid assets (realised on death)', Rfmt(liquidOnDeath));
+    if (raOnDeath > 0) sumSub('Retirement fund value', Rfmt(raOnDeath));
+    sumRow('Total capital available', Rfmt(totalCapAvail), false, false, true);
+
+    var capGap = totalCapAvail - totalCapNeed;
+    var gapRow = div();
+    gapRow.style.cssText='display:flex;justify-content:space-between;padding:8px 0;margin-top:8px;border-top:2px solid #445;font-size:14px;font-weight:700';
+    var gl=el('span','', capGap>=0?'Overall position \u2014 Surplus':'Overall position \u2014 Shortfall');
+    var gv=el('span','', Rfmt(Math.abs(capGap)));
+    gl.style.color='#ccd6f6'; gv.style.color=capGap>=0?'#86efac':'#f87171';
+    gapRow.appendChild(gl); gapRow.appendChild(gv); capBox.appendChild(gapRow);
+    s.appendChild(capBox);
+
+    // INCOME section
+    var incBox = div();
+    incBox.style.cssText='background:var(--navy);color:#fff;border-radius:9px;padding:18px 20px;margin-bottom:16px';
+    var incTtl=div(); incTtl.style.cssText='font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--gold);margin-bottom:10px';
+    incTtl.textContent='Income'; incBox.appendChild(incTtl);
+
+    function incRow(lbl, val, bold, borderTop) {
+      var row=div(); row.style.cssText='display:flex;justify-content:space-between;padding:4px 0;font-size:13px'+(borderTop?';border-top:1px solid #334;margin-top:8px;padding-top:10px':'')+(bold?';font-weight:700':'');
+      var ls=el('span','',lbl); ls.style.color='#ccd6f6';
+      var vs=el('span','',val); vs.style.color=bold?'var(--gold)':'#ccd6f6';
+      row.appendChild(ls); row.appendChild(vs); incBox.appendChild(row);
+    }
+    function incSub(lbl,val){var row=div();row.style.cssText='display:flex;justify-content:space-between;padding:2px 0 2px 16px;font-size:11px;color:#8899bb';row.innerHTML='<span>'+lbl+'</span><span>'+val+'</span>';incBox.appendChild(row);}
+
+    incRow('Income needed (capitalised)','');
+    S.deathIncome.forEach(function(r){
+      var cap=calcIncomeNeed(r);
+      if(cap>0) incSub((r.desc||'Income')+' ('+Rfmt(N(r.incPM)||0)+'/pm)','('+Rfmt(cap)+')');
+    });
+    incRow('Total income need (lump sum value)','('+Rfmt(totIncCap)+')',false,true);
+    incRow('Income available','',false,true);
+    incSub('Ongoing income sources after death','R 0');
+    incRow('Total income available', Rfmt(incomeAvail),false,true);
+
+    var incGap = incomeAvail - totIncCap;
+    var igRow=div(); igRow.style.cssText='display:flex;justify-content:space-between;padding:8px 0;margin-top:8px;border-top:2px solid #445;font-size:14px;font-weight:700';
+    var igl=el('span','',incGap>=0?'Overall position \u2014 Surplus':'Overall position \u2014 Shortfall');
+    var igv=el('span','',Rfmt(Math.abs(incGap)));
+    igl.style.color='#ccd6f6'; igv.style.color=incGap>=0?'#86efac':'#f87171';
+    igRow.appendChild(igl); igRow.appendChild(igv); incBox.appendChild(igRow);
+    s.appendChild(incBox);
+  }
+
+  // ── Disability, Dread, IP gap rows
+  if (S.scope.disability || S.scope.dread || S.scope.ip) {
+    s.appendChild(stitle('Other Cover'));
+    var disIncCap=S.disIncome.reduce(function(sum,r){return sum+calcIncomeNeed(r);},0);
+    var disCapNeed=S.disCapital.reduce(function(sum,r){return sum+N(r.amt);},0);
+    if(S.scope.disability) s.appendChild(buildGapRow('Disability Cover', disIncCap+disCapNeed, totalDisCover));
+    if(S.scope.dread)      s.appendChild(buildGapRow('Dread Disease', N(S.dreadAmt), totalDDCover));
+    if(S.scope.ip)         s.appendChild(buildGapRow('Income Protection /pm', N(S.ipGrossPM||S.ipNettPM), S.importedPols.reduce(function(sum,p){ return sum+N(p.BenIP); },0)));
+  }
+
+  // ── Retirement gap
+  if (S.scope.retirement) {
+    s.appendChild(stitle('Retirement'));
+    if (yrsToR !== null && yrsToR > 0) {
+      var yrsInRet2 = 85 - retAge;
+      var totalProj2 = S.retAssets.reduce(function(sum,r){
+        if (!N(r.currentVal) && !N(r.monthlyContrib)) return sum;
+        var gr = N(r.growthRate)>0?r.growthRate:S.assump.growth;
+        var esc2 = N(r.contribEsc)>0?r.contribEsc:S.assump.incEsc;
+        return sum+projectFund(r.currentVal,r.monthlyContrib,esc2,gr,yrsToR);
       },0);
-      var monthlyNeedToday=N(S.retIncomeToday)+N(S.retMedAidToday)+N(S.retOtherMonthly);
-      var lumpAtRet=S.retLumps.reduce(function(sum,r){return sum+N(r.amt);},0)*Math.pow(1+pct(S.assump.cpi),yrsToR);
-      var capForIncome=retirementCapitalNeeded(monthlyNeedToday,yrsToR,yrsInRet,S.assump.cpi,S.assump.retReturn);
-      s.appendChild(buildGapRow('Retirement Capital', capForIncome+lumpAtRet, totalProj));
+      var mNeed = N(S.retIncomeToday)+N(S.retMedAidToday)+N(S.retOtherMonthly);
+      var lumpRet = S.retLumps.reduce(function(sum,r){return sum+N(r.amt);},0)*Math.pow(1+pct(S.assump.cpi),yrsToR);
+      var capNeed2 = retirementCapitalNeeded(mNeed, yrsToR, yrsInRet2, S.assump.cpi, S.assump.retReturn);
+      s.appendChild(buildGapRow('Retirement Capital', capNeed2+lumpRet, totalProj2));
     }
   }
 
