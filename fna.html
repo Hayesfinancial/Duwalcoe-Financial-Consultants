@@ -2958,7 +2958,55 @@ function buildSummary() {
       var totInc=S.deathIncome.reduce(function(a,r){return a+calcIncomeNeed(r);},0);
       var totCap=S.deathCapital.reduce(function(a,r){return a+N(r.amt);},0);
       var totalDeathNeed=totLiab+totInc+totCap;
-      var totalDeathHave=pols.reduce(function(a,p){return p.Type!=='Business Assurance'?a+N(p.BenDeath):a;},0);
+      var totalDeathHave=pols.reduce(function(a,p){
+        if(p.Type==='Business Assurance') return a;
+        return a+N(p.BenDeath);
+      },0);
+
+      // Estate costs — pull from estate tab calculations if estate is in scope
+      var estCostNeed=0;
+      var estDutyAmt=0, estExecAmt=0, estAccrualAmt=0;
+      if(S.scope.estate){
+        // Recalculate estate costs using same logic as buildEstate
+        var _physVal=(S.props||[]).reduce(function(a,p){return a+N(p.val);},0)
+          +(S.vehicles||[]).reduce(function(a,v){return a+N(v.val);},0)
+          +(S.otherAssets||[]).reduce(function(a,x){return a+N(x.val);},0);
+        var _physLiab=(S.props||[]).reduce(function(a,p){return a+N(p.bond);},0)
+          +(S.vehicles||[]).reduce(function(a,v){return a+N(v.finance);},0)
+          +(S.liabilities||[]).reduce(function(a,l){return a+N(l.bal);},0);
+        var _s4q=0,_estP=0,_thirdP=0,_bizD=0;
+        pols.forEach(function(p){
+          if(p.Type==='Business Assurance'){if(p.EstateDutiable==='Yes')_bizD+=N(p.LoanAmount)||N(p.BenDeath);return;}
+          var b=N(p.BenDeath);if(!b)return;
+          var bt=p.BeneficiaryType||'';
+          if(bt==='Spouse')_s4q+=b;
+          else if(bt==='Estate')_estP+=b;
+          else if(bt==='Third Party')_thirdP+=b;
+        });
+        // Accrual
+        var _accrual=0;
+        if((S.cli.marital||'').indexOf('accrual')>-1){
+          var _raVal=pols.reduce(function(a,p){return POL_RA_TYPES.indexOf(p.Type)>-1?a+(N(p.BenFundValue)||N(p.BenDeath)):a;},0);
+          var _cliEst=_physVal+_raVal;
+          var _spEst=N(S.accrual&&S.accrual.spouseCurrentAssets);
+          var _cliStart=N(S.accrual&&S.accrual.clientStartVal);
+          var _spStart=N(S.accrual&&S.accrual.spouseStartVal);
+          _accrual=Math.max(0,(Math.max(0,_cliEst-_cliStart)-Math.max(0,_spEst-_spStart))/2);
+        }
+        var _gross=_physVal+_s4q+_estP+_thirdP+_bizD;
+        var _net=Math.max(0,_gross-_physLiab);
+        var _accrDed=Math.min(_accrual,_net);
+        var _afterAcc=Math.max(0,_net-_accrDed);
+        var _s4qDed=Math.min(_s4q,_afterAcc);
+        var _afterS4q=Math.max(0,_afterAcc-_s4qDed);
+        var _dutiable=Math.max(0,_afterS4q-ABATEMENT);
+        var _duty=_dutiable<=DUTY_THRESH?_dutiable*DUTY_RATE1:DUTY_THRESH*DUTY_RATE1+(_dutiable-DUTY_THRESH)*DUTY_RATE2;
+        var _exec=(_physVal+_estP)*EXEC_RATE;
+        estDutyAmt=Math.round(_duty);
+        estExecAmt=Math.round(_exec);
+        estAccrualAmt=Math.round(_accrDed);
+        estCostNeed=estDutyAmt+estExecAmt+estAccrualAmt;
+      }
 
       // Show full breakdown before the gap box
       if(totalDeathNeed>0){
@@ -2992,18 +3040,54 @@ function buildSummary() {
           lcRow('Once-off capital needs',totCap);
           S.deathCapital.forEach(function(r){ if(N(r.amt)>0) lcSub(r.desc||'—',N(r.amt)); });
         }
-        lcRow('Total need',totalDeathNeed,true);
+        if(estCostNeed>0){
+          lcRow('Estate costs',estCostNeed);
+          // Apportion duty between estate and third parties
+          var _afterAbate=_dutiable;
+          function _apportion(val){ return (_afterAbate>0&&_duty>0)?Math.round(_duty*(val/_afterAbate)):0; }
+          var _dutyEstate =_apportion(_physVal+_estP);
+          var _dutyThird  =_apportion(_thirdP);
+          var _dutyBiz    =_apportion(_bizD);
+          if(estDutyAmt>0){
+            lcSub('Estate duty (total)',estDutyAmt);
+            if(_dutyEstate>0) lcSub('  Estate\'s share (physical + estate policies)',_dutyEstate);
+            if(_dutyThird>0){
+              lcSub('  Third party share',_dutyThird);
+              // Show per-policy duty
+              pols.forEach(function(p){
+                if((p.BeneficiaryType||'')==='Third Party'&&N(p.BenDeath)>0&&p.Type!=='Business Assurance'){
+                  var pd=_apportion(N(p.BenDeath));
+                  if(pd>0) lcSub('    '+(p.Insurer||'Policy')+(p.Product?' — '+p.Product:'')+' ('+Rfmt(p.BenDeath)+')',pd);
+                }
+              });
+            }
+            if(_dutyBiz>0){
+              lcSub('  Business assurance share',_dutyBiz);
+              pols.forEach(function(p){
+                if(p.Type==='Business Assurance'&&p.EstateDutiable==='Yes'){
+                  var amt=N(p.LoanAmount)||N(p.BenDeath);
+                  var pd=_apportion(amt);
+                  if(pd>0) lcSub('    '+(p.Insurer||'Policy')+(p.BizType?' — '+p.BizType:'')+'  ('+Rfmt(amt)+')',pd);
+                }
+              });
+            }
+          }
+          if(estExecAmt>0)    lcSub('Executor fees (4.025% of physical + estate policies)',estExecAmt);
+          if(estAccrualAmt>0) lcSub('Accrual payable to spouse',estAccrualAmt);
+        }
+        var totalDeathNeedFull=totalDeathNeed+estCostNeed;
+        lcRow('Total need',totalDeathNeedFull,true);
         if(totalDeathHave>0){
           lcRow('Existing cover',totalDeathHave,false);
           S.importedPols.forEach(function(p){
             if(p.Type!=='Business Assurance'&&N(p.BenDeath)>0)
-              lcSub((p.Insurer||'Policy')+(p.Product?' — '+p.Product:''),N(p.BenDeath));
+              lcSub((p.Insurer||'Policy')+(p.Product?' — '+p.Product:'')+(p.BeneficiaryType?' ('+p.BeneficiaryType+')':''),N(p.BenDeath));
           });
         }
         s.appendChild(lcBreak);
       }
 
-      gapBox('Life Cover',totalDeathNeed,totalDeathHave);
+      gapBox('Life Cover',totalDeathNeed+estCostNeed,totalDeathHave);
     }
     if(S.scope.disability){
       var disInc=S.disIncome.reduce(function(a,r){return a+calcIncomeNeed(r);},0);
