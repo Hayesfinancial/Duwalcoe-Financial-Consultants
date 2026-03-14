@@ -467,6 +467,7 @@ var DEFAULTS = {
 
   // ROA
   roaNotes: '',
+  roa: { objectives:'', situation:'', experience:'', recommendation:'', products:'', important:'', declined:'', comments:'' },
 
   // Policies imported from CRM via URL
   importedPols: [],
@@ -3834,12 +3835,35 @@ function buildGapRow(label, need, have) {
 // ═══════════════════════════════════════════════════════════
 function buildROATab() {
   var s = div();
-  var inf=div('info'); inf.textContent='Review before generating. The ROA will be emailed to the client for e-signature.'; s.appendChild(inf);
-  s.appendChild(txfld('Adviser notes / recommendations', S, 'roaNotes'));
+  if (!S.roa) S.roa = {};
+  var r = S.roa;
+
+  var inf=div('info');
+  inf.innerHTML='Complete the advisory narrative below. All FNA data (needs, gaps, policies) pulls through automatically.';
+  s.appendChild(inf);
+
+  function roaSec(title, key, ph, ht) {
+    s.appendChild(stitle(title));
+    var ta=document.createElement('textarea');
+    ta.style.cssText='width:100%;box-sizing:border-box;border:var(--border);border-radius:7px;padding:10px 12px;font-family:inherit;font-size:13px;min-height:'+(ht||90)+'px;resize:vertical';
+    ta.placeholder=ph; ta.value=r[key]||'';
+    ta.addEventListener('input',function(e){r[key]=e.target.value;S.roa=r;});
+    s.appendChild(ta);
+  }
+
+  roaSec('A. Client Objectives','objectives','e.g. Ensure family is financially secure if I die or become disabled. Plan for retirement at 65.',80);
+  roaSec('A. Financial Situation','situation','e.g. Farmer, income from CC. Assets held in family trust. Married ANC with accrual.',80);
+  roaSec('A. Current Product Experience','experience','e.g. Existing life and disability cover with Liberty and Sanlam. Sygnia RA and TFS.',80);
+  roaSec('D. Recommendation & Motivation','recommendation','e.g. Recommended increasing life cover to address shortfall. Retirement contributions to be increased...',120);
+  roaSec('D. Products Considered','products','e.g. Sanlam quoted RX for RY cover. Liberty quoted...',80);
+  roaSec('E. Important Information Highlighted','important','e.g. Advised on age-rated premium escalation. Explained estate duty implications...',80);
+  roaSec('F. Products Client Elected Not to Take','declined','e.g. Client declined offshore investment at this stage.',60);
+  roaSec('Additional Comments','comments','Any additional notes...',60);
+
   var brow=div(); brow.style.cssText='display:flex;gap:12px;margin-top:20px;flex-wrap:wrap';
-  var b1=document.createElement('button'); b1.className='btn btn-gold'; b1.textContent='📄 Generate ROA';
+  var b1=document.createElement('button'); b1.className='btn btn-gold'; b1.textContent='Generate ROA Document';
   b1.addEventListener('click',generateROA); brow.appendChild(b1);
-  var b2=document.createElement('button'); b2.className='btn btn-navy'; b2.textContent='💾 Save Client File';
+  var b2=document.createElement('button'); b2.className='btn btn-navy'; b2.textContent='Save Client File';
   b2.addEventListener('click',saveFile); brow.appendChild(b2);
   s.appendChild(brow);
   return s;
@@ -3851,111 +3875,226 @@ function buildROATab() {
 function generateROA() {
   if(!S.cli.name.trim()){alert('Enter client name first.');go(0);return;}
   persist();
+  var r = S.roa || {};
   var today=new Date().toLocaleDateString('en-ZA',{day:'2-digit',month:'long',year:'numeric'});
+  var pols = S.importedPols || [];
 
-  var scopeList=['death Life Cover','disability Disability','dread Dread Disease','ip Income Protection',
-    'retirement Retirement','investment Investment','offshore Offshore','will Will','estate Estate','review Review']
-    .filter(function(x){return S.scope[x.split(' ')[0]];})
-    .map(function(x){return x.split(' ').slice(1).join(' ');}).join(' · ');
-
-  // Calculate all needs
-  var totLiabNeed=S.deathLiabs.reduce(function(sum,r){return sum+N(r.amt);},0);
-  var totIncCap=S.deathIncome.reduce(function(sum,r){return sum+calcIncomeNeed(r);},0);
-  var totCapNeed=S.deathCapital.reduce(function(sum,r){return sum+N(r.amt);},0);
+  // Calculate needs
+  var totLiabNeed=S.deathLiabs.reduce(function(s,x){return s+N(x.amt);},0);
+  var totIncCap=S.deathIncome.reduce(function(s,x){return s+calcIncomeNeed(x);},0);
+  var totCapNeed=S.deathCapital.reduce(function(s,x){return s+N(x.amt);},0);
   var totalDeathNeed=totLiabNeed+totIncCap+totCapNeed;
-  var haveDeathCover=N(S.existingCover&&S.existingCover.death);
-  var deathGap=haveDeathCover-totalDeathNeed;
+  var totalDeathHave=pols.reduce(function(a,p){return p.Type!=='Business Assurance'?a+N(p.BenDeath):a;},0);
+  var disIncCap=S.disIncome.reduce(function(a,x){return a+calcIncomeNeed(x);},0);
+  var disCapNeed=S.disCapital.reduce(function(a,x){return a+N(x.amt);},0);
+  var totalDisNeed=disIncCap+disCapNeed;
+  var totalDisHave=pols.reduce(function(a,p){return a+N(p.BenDisability);},0);
+  var totalDreadHave=pols.reduce(function(a,p){return a+N(p.BenDreadDisease);},0);
 
-  var html='<!DOCTYPE html><html><head><meta charset="UTF-8"><title>ROA — '+S.cli.name+'</title><style>'+
-    'body{font-family:Arial,sans-serif;color:#1a2a4a;font-size:13px;max-width:820px;margin:0 auto;padding:30px}'+
-    '.hdr{display:flex;justify-content:space-between;border-bottom:3px solid #c8a84b;padding-bottom:16px;margin-bottom:24px}'+
-    '.hdr-left h1{font-size:22px;margin:4px 0 2px}.hdr-left .sub{color:#666;font-size:12px}'+
-    '.hdr-right{text-align:right;font-size:12px;color:#666}'+
-    '.hdr-right strong{color:#1a2a4a;display:block;font-size:14px;margin-bottom:2px}'+
-    'h2{font-size:12px;text-transform:uppercase;letter-spacing:1px;color:#c8a84b;border-bottom:1px solid #eee;padding-bottom:4px;margin:24px 0 10px}'+
-    'table{width:100%;border-collapse:collapse;margin-bottom:16px;font-size:12px}'+
-    'th{background:#1a2a4a;color:#fff;padding:6px 8px;text-align:left;font-size:11px}'+
-    'td{padding:6px 8px;border-bottom:1px solid #eef}'+
-    '.g2{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:8px}'+
-    '.lbl{font-size:10px;color:#888;text-transform:uppercase}'+
-    '.val{font-weight:700}'+
-    '.gap-ok{color:#16a34a;font-weight:700}.gap-bad{color:#dc2626;font-weight:700}'+
-    '.sig{margin-top:48px;display:grid;grid-template-columns:1fr 1fr;gap:48px}'+
-    '.sig-line{border-top:1px solid #333;padding-top:6px;font-size:11px;color:#888}'+
-    '.disc{margin-top:32px;font-size:10px;color:#999;border-top:1px solid #eee;padding-top:12px;line-height:1.6}'+
-    '@media print{.noprint{display:none}}'+
-    '</style></head><body>';
-
-  html+='<div class="hdr"><div class="hdr-left"><div style="font-size:11px;text-transform:uppercase;letter-spacing:1px;color:#888">Record of Advice</div>'+
-    '<h1>'+S.cli.name+'</h1><div class="sub">'+S.cli.id+(S.cli.dob?' · DOB '+S.cli.dob:'')+'</div></div>'+
-    '<div class="hdr-right"><strong>Clinton Hayes</strong>Duwalcoe Financial Consultants CC<br>FSP No: 9978<br>clinton@duwalcoe.co.za<br>083 608 5617<br><br>Date: '+today+'</div></div>';
-
-  html+='<h2>Client Information</h2><div class="g2">'+
-    '<div><div class="lbl">Occupation</div><div class="val">'+(S.cli.occ||'—')+'</div></div>'+
-    '<div><div class="lbl">Marital Status</div><div class="val">'+(S.cli.marital||'—')+'</div></div>'+
-    '<div><div class="lbl">Gross Monthly Income</div><div class="val">'+(S.cli.grossPM?Rfmt(S.cli.grossPM)+' /pm':'—')+'</div></div>'+
-    '<div><div class="lbl">Smoker Status</div><div class="val">'+(S.cli.smoker||'—')+'</div></div>'+
-    '</div>';
-
-  html+='<h2>Scope of Advice</h2><p>'+(scopeList||'Not specified')+'</p>';
-  if(S.whyHere) html+='<p style="margin-top:8px;color:#555;font-style:italic">"'+S.whyHere.replace(/\n/g,'<br>').replace(/"/g,'&quot;')+'"</p>';
-
-  // Needs & gaps table
-  html+='<h2>Needs Analysis</h2><table><thead><tr><th>Area</th><th>Cover Required</th><th>Existing Cover</th><th>Surplus / Shortfall</th></tr></thead><tbody>';
-  function roaGapRow(label,need,have){
-    var gap=have-need; var hasN=need>0;
-    return '<tr><td><strong>'+label+'</strong></td><td>'+(need>0?Rfmt(need):'Not quantified')+'</td><td>'+(have>0?Rfmt(have):'—')+'</td>'+
-      '<td class="'+(hasN?(gap>=0?'gap-ok':'gap-bad'):'')+'">'+
-      (hasN?(gap>=0?'▲ '+Rfmt(gap)+' surplus':'▼ '+Rfmt(Math.abs(gap))+' shortfall'):'—')+'</td></tr>';
+  function esc(t){ return (t||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+  function rfmt(v){ return v>0?'R\u00a0'+Math.round(v).toLocaleString('en-ZA'):'—'; }
+  function freeBox(text,height){
+    if(text&&text.trim()) return '<div style="white-space:pre-wrap">'+esc(text)+'</div>';
+    return '<div style="min-height:'+(height||50)+'px;border:1px dashed #ccc;padding:8px;color:#aaa;font-style:italic">[To be completed]</div>';
   }
-  if(S.scope.death) html+=roaGapRow('Death Cover',totalDeathNeed,haveDeathCover);
-  if(S.scope.disability){
-    var disIncCap=S.disIncome.reduce(function(sum,r){return sum+calcIncomeNeed(r);},0);
-    var disCapNeed=S.disCapital.reduce(function(sum,r){return sum+N(r.amt);},0);
-    html+=roaGapRow('Disability Cover',disIncCap+disCapNeed,N(S.existingCover&&S.existingCover.disability));
-  }
-  if(S.scope.dread) html+=roaGapRow('Dread Disease',N(S.dreadAmt),N(S.existingCover&&S.existingCover.dread));
-  if(S.scope.ip) html+=roaGapRow('Income Protection /pm',N(S.ipGrossPM||S.ipNettPM),N(S.existingCover&&S.existingCover.ipPM));
-  html+='</tbody></table>';
 
-  // Death breakdown if applicable
-  if(S.scope.death&&totalDeathNeed>0){
-    html+='<h2>Death Cover Breakdown</h2><table><thead><tr><th>Component</th><th>Amount</th></tr></thead><tbody>';
-    S.deathLiabs.forEach(function(r){if(N(r.amt)>0) html+='<tr><td>'+r.desc+'</td><td>'+Rfmt(r.amt)+'</td></tr>';});
-    S.deathIncome.forEach(function(r){
-      var cap=calcIncomeNeed(r);
-      if(cap>0) html+='<tr><td>'+r.desc+' (capitalised: '+Rfmt(N(r.grossPM)||grossFromNett(r.nettPM))+'/pm × '+r.years+' yrs @ '+(N(r.esc)>0?r.esc:S.assump.cpi)+'% esc)</td><td>'+Rfmt(cap)+'</td></tr>';
+  var h='<!DOCTYPE html><html><head><meta charset="UTF-8"><title>ROA \u2014 '+esc(S.cli.name)+'</title><style>';
+  h+='*{box-sizing:border-box}body{font-family:Arial,sans-serif;color:#1a2a4a;font-size:11.5px;margin:0 auto;padding:20px 28px;max-width:860px}';
+  h+='@media print{.noprint{display:none}@page{margin:12mm 15mm}}';
+  h+='.hdr{display:flex;justify-content:space-between;align-items:flex-end;border-bottom:3px solid #c8a84b;padding-bottom:10px;margin-bottom:14px}';
+  h+='.title{font-size:17px;font-weight:700;text-transform:uppercase;letter-spacing:1px}';
+  h+='.sub{font-size:9px;color:#888;text-transform:uppercase;letter-spacing:.5px}';
+  h+='.adv{text-align:right;font-size:10px;color:#555;line-height:1.7}';
+  h+='.adv strong{font-size:12px;display:block;color:#1a2a4a}';
+  h+='h2{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:1.5px;color:#c8a84b;border-bottom:1px solid #e0e0e0;padding-bottom:3px;margin:18px 0 8px}';
+  h+='table{width:100%;border-collapse:collapse;font-size:11px;margin-bottom:10px}';
+  h+='th{background:#1a2a4a;color:#fff;padding:5px 8px;text-align:left;font-size:9.5px;font-weight:700}';
+  h+='td{padding:5px 8px;border-bottom:1px solid #eef;vertical-align:top}';
+  h+='tr:nth-child(even) td{background:#f9f9fc}';
+  h+='.cg{display:grid;grid-template-columns:repeat(3,1fr);gap:6px 20px;margin-bottom:10px}';
+  h+='.lbl{font-size:8.5px;color:#999;text-transform:uppercase;letter-spacing:.5px}';
+  h+='.val{font-weight:700;font-size:11px}';
+  h+='.sig-grid{display:grid;grid-template-columns:1fr 1fr;gap:40px;margin-top:32px}';
+  h+='.sig-line{border-top:1px solid #333;padding-top:4px;font-size:9px;color:#888;margin-top:28px}';
+  h+='.decl{font-size:10px;color:#444;line-height:1.8;padding-left:20px}';
+  h+='.decl li{margin-bottom:3px}';
+  h+='.section-content{border:1px solid #e5e5e5;border-radius:4px;padding:8px 10px;min-height:40px;font-size:11px}';
+  h+='</style></head><body>';
+
+  // Header
+  h+='<div class="hdr">';
+  h+='<div><div class="sub">Life and Investment Product</div>';
+  h+='<div class="title">Client Advice Record</div>';
+  h+='<div class="sub" style="margin-top:2px">Financial Advisory &amp; Intermediary Services Act</div></div>';
+  h+='<div class="adv"><strong>Clinton Hayes</strong>Duwalcoe Financial Consultants CC<br>FSP No: 9978 &nbsp;&bull;&nbsp; clinton@duwalcoe.co.za &nbsp;&bull;&nbsp; 083 608 5617</div>';
+  h+='</div>';
+
+  // Client bar
+  h+='<table style="margin-bottom:14px"><tr><th>Client Name</th><th>ID Number</th><th>DOB</th><th>Adviser</th><th>Date</th></tr><tr>';
+  h+='<td><strong>'+esc(S.cli.name)+'</strong></td>';
+  h+='<td>'+esc(S.cli.id||'—')+'</td>';
+  h+='<td>'+esc(S.cli.dob?new Date(S.cli.dob).toLocaleDateString('en-ZA'):'—')+'</td>';
+  h+='<td>Clinton Hayes</td><td>'+today+'</td></tr></table>';
+
+  h+='<p style="font-size:9.5px;color:#555;font-style:italic;margin-bottom:14px;line-height:1.6">In terms of the Financial Advisory and Intermediary Services Act, we are required to provide you with a Record of Advice confirming the advisory process undertaken. You are entitled to <strong>a copy of this document for your own records</strong>.</p>';
+
+  // Section A
+  h+='<h2>Section A: Summary of Information Obtained from the Client</h2>';
+  h+='<div class="cg">';
+  h+='<div><div class="lbl">Occupation</div><div class="val">'+esc(S.cli.occ||'—')+'</div></div>';
+  h+='<div><div class="lbl">Marital Status</div><div class="val">'+esc(S.cli.marital||'—')+'</div></div>';
+  h+='<div><div class="lbl">Gross Monthly Income</div><div class="val">'+(S.cli.grossPM?rfmt(S.cli.grossPM)+' /pm':'—')+'</div></div>';
+  h+='<div><div class="lbl">Smoker</div><div class="val">'+esc(S.cli.smoker||'—')+'</div></div>';
+  h+='<div><div class="lbl">Education</div><div class="val">'+esc(S.cli.edu||'—')+'</div></div>';
+  h+='<div><div class="lbl">Spouse</div><div class="val">'+esc(S.cli.spouse||'—')+'</div></div>';
+  h+='</div>';
+  h+='<table><tr><th style="width:22%">Item</th><th>Detail</th></tr>';
+  h+='<tr><td><strong>Client\'s Objectives</strong></td><td class="section-content">'+freeBox(r.objectives,40)+'</td></tr>';
+  h+='<tr><td><strong>Financial Situation</strong></td><td class="section-content">'+freeBox(r.situation,40)+'</td></tr>';
+  h+='<tr><td><strong>Current Product Experience</strong></td><td class="section-content">'+freeBox(r.experience,40)+'</td></tr>';
+  h+='</table>';
+
+  // Section B
+  h+='<h2>Section B: Needs &amp; Goals Identified</h2>';
+  h+='<table><thead><tr><th>Financial Planning Need</th><th>Needs / Quantified</th><th>Priority</th><th>Addressed</th><th>Shortfall</th><th>Review</th></tr></thead><tbody>';
+  function needRow(label,need,have,show){
+    if(!show) return '';
+    var gap=have-need;
+    var addr=need>0?(gap>=0?'Yes':'Partially'):'—';
+    var sf=need>0&&gap<0?'<span style="color:#dc2626;font-weight:700">'+rfmt(Math.abs(gap))+'</span>':'—';
+    return '<tr><td><strong>'+label+'</strong></td><td>'+(need>0?rfmt(need):'Not quantified')+'</td><td></td><td>'+addr+'</td><td>'+sf+'</td><td></td></tr>';
+  }
+  h+=needRow('Life Cover',totalDeathNeed,totalDeathHave,S.scope.death);
+  h+=needRow('Disability',totalDisNeed,totalDisHave,S.scope.disability);
+  h+=needRow('Dread Disease / Trauma',N(S.dreadAmt),totalDreadHave,S.scope.dread);
+  h+=needRow('Income Protection /pm',N(S.ipGrossPM||S.ipNettPM),pols.reduce(function(a,p){return a+N(p.BenIP);},0),S.scope.ip);
+  if(S.scope.retirement){
+    var cliAgeR=ageFrom(S.cli.dob), retAgeR=N(S.cli.retAge)||65, yrsR=cliAgeR?Math.max(0,retAgeR-cliAgeR):null;
+    if(yrsR){
+      var totalProjR=S.retAssets.reduce(function(a,r2){if(!N(r2.currentVal)&&!N(r2.monthlyContrib))return a;var g=N(r2.growthRate)>0?r2.growthRate:S.assump.growth;var e=N(r2.contribEsc)>0?r2.contribEsc:S.assump.incEsc;return a+projectFund(r2.currentVal,r2.monthlyContrib,e,g,yrsR);},0);
+      var mNeedR=(S.retNeeds&&S.retNeeds.length>0)?S.retNeeds.reduce(function(a,r2){return a+N(r2.amtToday);},0):N(S.retIncomeToday)+N(S.retMedAidToday)+N(S.retOtherMonthly);
+      var capNeedR=retirementCapitalNeeded(mNeedR,yrsR,85-retAgeR,S.assump.cpi,S.assump.retReturn);
+      h+=needRow('Pre-Retirement Planning',capNeedR,totalProjR,true);
+    }
+  }
+  if(S.scope.investment) h+='<tr><td><strong>Local Investment</strong></td><td colspan="5"></td></tr>';
+  if(S.scope.offshore)   h+='<tr><td><strong>Offshore Investment</strong></td><td colspan="5"></td></tr>';
+  if(S.scope.will)       h+='<tr><td><strong>Will &amp; Testament</strong></td><td colspan="5"></td></tr>';
+  if(S.scope.estate)     h+='<tr><td><strong>Estate Planning</strong></td><td colspan="5"></td></tr>';
+  h+='</tbody></table>';
+
+  // Section C — products considered + existing policies
+  h+='<h2>Section C: Products Considered</h2>';
+  h+='<div class="section-content" style="margin-bottom:10px">'+freeBox(r.products,50)+'</div>';
+  if(pols.length>0){
+    h+='<p style="font-size:9.5px;font-weight:700;margin:8px 0 4px;color:#1a2a4a">Existing policies on record:</p>';
+    h+='<table><thead><tr><th>Insurer</th><th>Product</th><th>Policy No</th><th>Type</th><th>Premium</th><th>Key Benefits</th></tr></thead><tbody>';
+    pols.forEach(function(p){
+      var bens=[];
+      if(N(p.BenDeath)>0) bens.push('Life: '+rfmt(p.BenDeath));
+      if(N(p.BenDisability)>0) bens.push('Dis: '+rfmt(p.BenDisability));
+      if(N(p.BenDreadDisease)>0) bens.push('Dread: '+rfmt(p.BenDreadDisease));
+      if(N(p.BenFundValue)>0) bens.push('Fund: '+rfmt(p.BenFundValue));
+      if(N(p.LoanAmount)>0) bens.push('Cover: '+rfmt(p.LoanAmount));
+      var prem=N(p.Premium)>0&&(p.Frequency||'Monthly')==='Monthly'?rfmt(p.Premium)+'/pm':(p.Frequency==='Once Off'?'Once off':rfmt(p.Premium));
+      h+='<tr><td>'+esc(p.Insurer||'—')+'</td><td>'+esc(p.Product||'—')+'</td>';
+      h+='<td style="font-size:9px">'+esc(p.PolicyNo||'—')+'</td>';
+      h+='<td style="font-size:9px">'+esc(p.Type||'—')+'</td>';
+      h+='<td>'+prem+'</td>';
+      h+='<td style="font-size:9px">'+esc(bens.join(' | ')||'—')+'</td></tr>';
     });
-    S.deathCapital.forEach(function(r){if(N(r.amt)>0) html+='<tr><td>'+r.desc+'</td><td>'+Rfmt(r.amt)+'</td></tr>';});
-    html+='<tr style="font-weight:700;background:#f5f5f0"><td>Total Death Cover Required</td><td>'+Rfmt(totalDeathNeed)+'</td></tr></tbody></table>';
+    h+='</tbody></table>';
   }
 
-  html+='<h2>Recommendation</h2>';
-  if(S.roaNotes){
-    html+='<p style="white-space:pre-wrap">'+S.roaNotes.replace(/</g,'&lt;')+'</p>';
-  } else {
-    html+='<p style="min-height:80px;border:1px solid #eee;padding:12px;color:#aaa;font-style:italic">[Adviser to complete recommendation]</p>';
+  // Section D
+  h+='<h2>Section D: Recommendation / Advice &amp; Motivation</h2>';
+  h+='<div class="section-content" style="margin-bottom:6px">'+freeBox(r.recommendation,80)+'</div>';
+
+  // Section E
+  h+='<h2>Section E: Important Information Highlighted to the Client</h2>';
+  h+='<div class="section-content" style="margin-bottom:6px">'+freeBox(r.important,60)+'</div>';
+
+  // Section F
+  h+='<h2>Section F: Financial Adviser\'s Declaration</h2>';
+  h+='<p style="font-size:10px;margin-bottom:4px">Client has elected <strong>not</strong> to accept the following recommendations:</p>';
+  h+='<div class="section-content" style="margin-bottom:6px">'+freeBox(r.declined,40)+'</div>';
+
+  // CSA scope ticks
+  h+='<h2>Scope of Services Discussed (Client Service Agreement)</h2>';
+  var csaItems=[
+    {k:'death',l:'Planning for death / life cover'},
+    {k:'disability',l:'Planning for disability'},
+    {k:'dread',l:'Planning for dread disease / trauma'},
+    {k:'ip',l:'Income protection'},
+    {k:'retirement',l:'Planning for retirement'},
+    {k:'investment',l:'Investment / savings planning'},
+    {k:'offshore',l:'Offshore investment'},
+    {k:'will',l:'Will &amp; Testament'},
+    {k:'estate',l:'Estate planning'},
+    {k:'review',l:'Annual review'}
+  ];
+  h+='<table><tr><th>Service</th><th style="width:60px;text-align:center">Yes</th><th style="width:60px;text-align:center">No</th></tr>';
+  csaItems.forEach(function(item){
+    var tk=!!S.scope[item.k];
+    h+='<tr><td>'+item.l+'</td>';
+    h+='<td style="text-align:center;font-size:14px">'+(tk?'&#9745;':'&#9744;')+'</td>';
+    h+='<td style="text-align:center;font-size:14px">'+(tk?'&#9744;':'&#9745;')+'</td></tr>';
+  });
+  h+='</table>';
+
+  // Additional comments
+  if(r.comments&&r.comments.trim()){
+    h+='<h2>Additional Comments</h2>';
+    h+='<div class="section-content">'+freeBox(r.comments,40)+'</div>';
   }
 
-  html+='<div class="sig">'+
-    '<div><div class="sig-line">Client signature &amp; date</div><div style="margin-top:6px;font-weight:700">'+S.cli.name+'</div></div>'+
-    '<div><div class="sig-line">Financial adviser signature &amp; date</div><div style="margin-top:6px;font-weight:700">Clinton Hayes · FSP No: 9978</div></div>'+
-    '</div>';
+  // Client declarations
+  h+='<h2>Client Declarations</h2>';
+  h+='<p style="font-size:9.5px;font-style:italic;color:#555;margin-bottom:6px"><strong>Please read this section carefully and ensure you understand it fully before signing.</strong></p>';
+  var decls=[
+    'I confirm that a <strong>Contact Stage Disclosure letter</strong> setting out the Financial Advisor\'s full particulars, experience and services offered has been provided to me.',
+    'I confirm that I <strong>required</strong> the Financial Advisor to render the financial services set out in the <strong>Service Level Agreement</strong>, a copy of which has been provided to me.',
+    'Where I elected <strong>not to</strong> take up the recommendation of a <strong>Full Financial Needs Analysis</strong>, I was advised and understand that I should take particular care to consider whether the product(s) purchased are appropriate to my needs and circumstances.',
+    'If I <strong>did not</strong> provide all <strong>information requested</strong>, or there was insufficient time for a full analysis, I confirm that I understand there may be <strong>limitations on the appropriateness</strong> of the advice provided.',
+    'I understand that the <strong>accuracy of a Needs Analysis</strong> is dependent on the information I provided. The advice and recommendations are based largely on information I provided. Material non-disclosures or misrepresentations could result in inappropriate products being recommended.',
+    'I confirm that I was provided with copies of <strong>quotes, Fund Fact-sheets, marketing brochures and rates/benefit sheets</strong> for products selected. All material terms and conditions were explained to me prior to any decision.',
+    'I have been informed of and understand all <strong>costs, charges, penalties, liquidity limitations and tax implications</strong> where applicable, and the risks/guarantees associated with the products selected.',
+    'I confirm that all documents signed by me were <strong>fully completed</strong> prior to my signing them.',
+    'I confirm that the Financial Advisor <strong>warned me orally</strong> of the risks and consequences of <strong>non-disclosure and misrepresentation</strong> when I provided information for any risk benefit application forms.',
+    'I confirm that the Financial Advisor made enquiries to ascertain whether the products selected are intended to <strong>replace any existing financial products</strong> and where applicable, informed me of the financial implications of replacement.',
+    'I acknowledge that I have an <strong>obligation to familiarize myself</strong> with the terms and conditions of products purchased, notwithstanding information provided by the Advisor.'
+  ];
+  h+='<ol class="decl">';
+  decls.forEach(function(d){h+='<li>'+d+'</li>';});
+  h+='</ol>';
 
-  html+='<div class="disc">This Record of Advice has been prepared by Clinton Hayes on behalf of Duwalcoe Financial Consultants CC (FSP No: 9978). '+
-    'The information and recommendations contained herein are based on information provided by the client and are believed to be correct as at '+today+'. '+
-    'All projections and calculations are based on assumptions which are not guaranteed. Past performance is not indicative of future results. '+
-    'This document constitutes a record of the financial advice provided and should be retained by the client.</div>';
+  // Policy numbers
+  h+='<p style="font-size:9.5px;margin:8px 0 4px">The above declarations apply to the purchase/amendment of the following products:</p>';
+  h+='<table><tr><th>Policy / Investment No. 1</th><th>Policy / Investment No. 2</th><th>Policy / Investment No. 3</th></tr>';
+  h+='<tr><td style="height:22px"></td><td></td><td></td></tr></table>';
 
-  html+='<div class="noprint" style="position:fixed;bottom:20px;right:20px;display:flex;gap:8px">'+
-    '<button onclick="window.print()" style="background:#1a2a4a;color:#fff;border:none;padding:10px 20px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:700">🖨 Print / Save PDF</button>'+
-    '<button onclick="window.close()" style="background:#888;color:#fff;border:none;padding:10px 16px;border-radius:6px;cursor:pointer;font-size:13px">Close</button>'+
-    '</div>';
+  // Copy entitlement
+  h+='<table style="margin-top:8px"><tr><th style="width:70%">You are entitled to a copy of this document for your own records, please mail to me.</th><th>YES &nbsp;/&nbsp; NO</th></tr></table>';
 
-  html+='</body></html>';
-  var win=window.open('','_blank','width=920,height=850');
-  win.document.write(html); win.document.close();
+  // Signature block
+  h+='<div class="sig-grid">';
+  h+='<div><div class="sig-line">Client Name</div><p style="font-weight:700;margin:4px 0">'+esc(S.cli.name)+'</p></div>';
+  h+='<div><div class="sig-line">Client Signature &amp; Date</div></div>';
+  h+='</div>';
+  h+='<div class="sig-grid" style="margin-top:20px">';
+  h+='<div><div class="sig-line">Adviser Name</div><p style="font-weight:700;margin:4px 0">Clinton Hayes &mdash; FSP No: 9978</p></div>';
+  h+='<div><div class="sig-line">Adviser Signature &amp; Date</div></div>';
+  h+='</div>';
+
+  h+='<div class="noprint" style="position:fixed;bottom:16px;right:16px;display:flex;gap:8px">';
+  h+='<button onclick="window.print()" style="background:#1a2a4a;color:#fff;border:none;padding:10px 20px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:700">Print / Save PDF</button>';
+  h+='<button onclick="window.close()" style="background:#888;color:#fff;border:none;padding:10px 16px;border-radius:6px;cursor:pointer;font-size:13px">Close</button></div>';
+
+  h+='</body></html>';
+  var win=window.open('','_blank','width=950,height=900');
+  win.document.write(h); win.document.close();
 }
+
 
 // INIT
 render();
