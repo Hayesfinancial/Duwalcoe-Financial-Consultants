@@ -1172,6 +1172,35 @@ function buildAssets() {
     }
     r3.appendChild(chk('Sold at death', p, 'soldAtDeath'));
     r3.appendChild(chk('Sold at retirement', p, 'soldAtRetirement'));
+    // Show retirement split fields when sold at retirement
+    if (p.soldAtRetirement) {
+      var retSplitWrap = div(); retSplitWrap.style.cssText='display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-top:8px;padding:10px 12px;background:#eff6ff;border-radius:6px;border:1px solid #bfdbfe;width:100%';
+      var retSplitLbl = el('div','','<strong>💰 Retirement proceeds split:</strong>'); retSplitLbl.style.cssText='font-size:12px;color:#1e40af;width:100%'; retSplitWrap.appendChild(retSplitLbl);
+      // % to retirement
+      var retPctFld = div('f'); retPctFld.style.minWidth='140px';
+      retPctFld.appendChild(el('label','','% to Retirement Fund'));
+      var retPctInp = document.createElement('input'); retPctInp.type='text'; retPctInp.inputMode='numeric';
+      retPctInp.value = p.retirementPct||'100'; retPctInp.placeholder='100';
+      retPctInp.style.cssText='border:1.5px solid var(--mist);border-radius:7px;padding:7px 10px;font-size:13px;font-family:inherit;width:100%';
+      retPctInp.addEventListener('input',function(e){S.props[i].retirementPct=e.target.value;});
+      retPctInp.addEventListener('blur',function(e){render();});
+      retPctFld.appendChild(retPctInp); retSplitWrap.appendChild(retPctFld);
+      // % to buy-down (auto-calculated)
+      var buyPct = Math.max(0, 100 - N(p.retirementPct||100));
+      var buyFld = div('f'); buyFld.style.minWidth='140px';
+      buyFld.appendChild(el('label','','% to Buy-down / Personal'));
+      var buyInp = document.createElement('input'); buyInp.type='text'; buyInp.readOnly=true;
+      buyInp.value = buyPct+'%'; buyInp.style.cssText='border:1.5px solid var(--mist);border-radius:7px;padding:7px 10px;font-size:13px;font-family:inherit;width:100%;background:#f8fafc;color:var(--sub)';
+      buyFld.appendChild(buyInp); retSplitWrap.appendChild(buyFld);
+      // Estimated retirement proceeds (projected value × retirementPct%)
+      var retNote = el('div','',''); retNote.style.cssText='font-size:11px;color:#1e40af;margin-top:4px;width:100%';
+      var retPctVal = N(p.retirementPct||100);
+      if (N(p.val) > 0) {
+        retNote.textContent = 'Current value: '+Rfmt(N(p.val)*retPctVal/100)+' to retirement fund, '+Rfmt(N(p.val)*(100-retPctVal)/100)+' to buy-down (at current value — will be projected to retirement date)';
+      }
+      retSplitWrap.appendChild(retNote);
+      r3.appendChild(retSplitWrap);
+    }
     if (N(p.rental) > 0) {
       var renEscWrap = div(); renEscWrap.style.cssText='display:flex;align-items:center;gap:6px';
       var renLb = el('label','','Rental esc %'); renLb.style.cssText='font-size:12px;color:var(--navy);white-space:nowrap';
@@ -1185,7 +1214,7 @@ function buildAssets() {
     card.appendChild(r3);
     s.appendChild(card);
   });
-  s.appendChild(addBtn('+ Add Property', function(){S.props.push({desc:'',val:'',bond:'',bondPM:'',rental:'',rentalEsc:'6',baseCost:'',soldAtDeath:false,soldAtRetirement:false});render();}));
+  s.appendChild(addBtn('+ Add Property', function(){S.props.push({desc:'',val:'',bond:'',bondPM:'',rental:'',rentalEsc:'6',baseCost:'',soldAtDeath:false,soldAtRetirement:false,retirementPct:'100'});render();}));
 
   // ── Vehicles
   s.appendChild(stitle('Vehicles'));
@@ -1258,13 +1287,59 @@ function buildAssets() {
     grInp.addEventListener('input',function(e){S.otherAssets[i].growthRate=e.target.value;});
     grFld.appendChild(grInp); ar2.appendChild(grFld);
 
-    // Realised at death tick
+    // Realised at death tick + beneficiary field
     var deathWrap=div(); deathWrap.style.cssText='display:flex;align-items:center;gap:6px;margin-top:4px';
     var acb1=document.createElement('input'); acb1.type='checkbox'; acb1.checked=!!a.soldAtDeath;
     acb1.addEventListener('change',function(e){S.otherAssets[i].soldAtDeath=e.target.checked;render();});
     var alb1=el('label','','Realised at death'); alb1.style.cssText='font-size:12px;cursor:pointer;color:var(--navy)';
     deathWrap.appendChild(acb1); deathWrap.appendChild(alb1);
     ar2.appendChild(deathWrap);
+    // Show estate routing dropdown + notes when soldAtDeath is ticked
+    if (a.soldAtDeath) {
+      var benWrap = div(); benWrap.style.cssText='display:flex;flex-wrap:wrap;gap:12px;align-items:end;margin-top:8px;padding:10px 12px;background:#fff7ed;border-radius:6px;border:1px solid #fed7aa;width:100%';
+      var benHdr = el('div','','<strong>☠ At death — estate routing:</strong>'); benHdr.style.cssText='font-size:12px;color:#92400e;width:100%'; benWrap.appendChild(benHdr);
+
+      // Dropdown — maps directly to estate calculation buckets
+      var routeFld = div('f'); routeFld.style.cssText='flex:1;min-width:220px';
+      routeFld.appendChild(el('label','','Proceeds route to'));
+      var routeSel = document.createElement('select');
+      routeSel.style.cssText='border:1.5px solid var(--mist);border-radius:7px;padding:7px 10px;font-size:13px;font-family:inherit;width:100%';
+      var routeOpts = [
+        { v: '',                        l: '— Select routing —' },
+        { v: 'Dutiable estate',         l: 'Dutiable estate — attracts estate duty' },
+        { v: 'Spouse — s.4(q)',         l: 'Spouse — Section 4(q) deduction (not dutiable)' },
+        { v: 'Third party direct',      l: 'Third party direct — deemed property (still dutiable)' },
+        { v: 'Trust / CC',              l: 'Trust / CC — outside estate (not dutiable)' },
+        { v: 'Business — keyman',       l: 'Business — keyman / buy-sell (outside personal estate)' },
+      ];
+      routeOpts.forEach(function(opt) {
+        var o = document.createElement('option'); o.value = opt.v; o.textContent = opt.l;
+        if ((a.deathRoute||'') === opt.v) o.selected = true;
+        routeSel.appendChild(o);
+      });
+      routeSel.addEventListener('change', function(e) { S.otherAssets[i].deathRoute = e.target.value; render(); });
+      routeFld.appendChild(routeSel); benWrap.appendChild(routeFld);
+
+      // Routing explanation label
+      var routeExp = el('div','',''); routeExp.style.cssText='font-size:11px;width:100%;margin-top:2px';
+      var dr = a.deathRoute||'';
+      if (dr === 'Dutiable estate')    routeExp.innerHTML='⚖ <span style="color:#b45309">Added to dutiable estate — estate duty and executor fees apply.</span>';
+      else if (dr === 'Spouse — s.4(q)') routeExp.innerHTML='✓ <span style="color:#166534">Section 4(q) deduction — not dutiable. Spouse receives proceeds outside estate.</span>';
+      else if (dr === 'Third party direct') routeExp.innerHTML='⚖ <span style="color:#92400e">Deemed property — paid to third party but still dutiable. Estate duty applies on this amount.</span>';
+      else if (dr === 'Trust / CC')    routeExp.innerHTML='🏛 <span style="color:#1e40af">Held in trust or CC — outside personal estate, no estate duty.</span>';
+      else if (dr === 'Business — keyman') routeExp.innerHTML='💼 <span style="color:#6b21a8">Business asset — outside personal estate. Keyman / buy-sell arrangement.</span>';
+      benWrap.appendChild(routeExp);
+
+      // Free text notes for clarity
+      var benNoteFld = div('f'); benNoteFld.style.cssText='flex:2;min-width:220px';
+      benNoteFld.appendChild(el('label','','Notes (beneficiary / arrangement details)'));
+      var benNoteInp = document.createElement('input'); benNoteInp.type='text';
+      benNoteInp.value = a.deathProceedsNote||''; benNoteInp.placeholder='e.g. SJK Trust, repays keyman loan, buy-out partner at R5m';
+      benNoteInp.style.cssText='border:1.5px solid var(--mist);border-radius:7px;padding:7px 10px;font-size:13px;font-family:inherit;width:100%';
+      benNoteInp.addEventListener('input',function(e){S.otherAssets[i].deathProceedsNote=e.target.value;});
+      benNoteFld.appendChild(benNoteInp); benWrap.appendChild(benNoteFld);
+      ar2.appendChild(benWrap);
+    }
 
     card.appendChild(ar2);
     s.appendChild(card);
@@ -1329,13 +1404,13 @@ function buildNeeds() {
     var totalVehicleFinance = S.vehicles.reduce(function(sum,v){return sum+N(v.finance);},0);
     var totalOtherLiabs = S.liabilities.reduce(function(sum,l){return sum+N(l.bal);},0);
 
-    // Find and update the bond row
+    // Find and update the bond row — clear if all properties deleted
     var bondRow = S.deathLiabs.filter(function(r){return r.desc==='Bond / mortgage';})[0];
-    if(bondRow && totalBond > 0) bondRow.amt = String(Math.round(totalBond));
+    if(bondRow) bondRow.amt = totalBond > 0 ? String(Math.round(totalBond)) : '';
 
-    // Find and update vehicle finance row
+    // Find and update vehicle finance row — clear if all vehicles deleted
     var vehRow = S.deathLiabs.filter(function(r){return r.desc==='Vehicle finance';})[0];
-    if(vehRow && totalVehicleFinance > 0) vehRow.amt = String(Math.round(totalVehicleFinance));
+    if(vehRow) vehRow.amt = totalVehicleFinance > 0 ? String(Math.round(totalVehicleFinance)) : '';
 
     var lt=document.createElement('table');
     lt.innerHTML='<thead><tr><th>Description</th><th>Amount</th><th></th></tr></thead>';
@@ -1716,7 +1791,17 @@ function buildRetirement() {
       }
     });
 
-    // Also project rental income from properties at retirement
+    // Project property proceeds at retirement (soldAtRetirement = true)
+    // retirementPct% of projected sale value goes to retirement capital
+    S.props.forEach(function(p){
+      if (!p.soldAtRetirement) return;
+      var gr = N(S.assump.growth);
+      var projVal = N(p.val) * Math.pow(1 + pct(gr), yrsToR);
+      var retPct = N(p.retirementPct||100) / 100;
+      otherCapAtRet += Math.round(projVal * retPct);
+    });
+
+    // Also project rental income from properties NOT sold at retirement
     var rentalAtRet = 0;
     S.props.forEach(function(p){
       if (!p.soldAtRetirement && N(p.rental) > 0) {
@@ -1781,7 +1866,7 @@ function buildRetirement() {
 
       // Other asset projections detail table
       var hasOtherRet = S.otherAssets.some(function(a){ return (a.retirementRole||'Not included') !== 'Not included'; }) ||
-                        S.props.some(function(p){ return N(p.rental) > 0 && !p.soldAtRetirement; });
+                        S.props.some(function(p){ return (N(p.rental) > 0 && !p.soldAtRetirement) || p.soldAtRetirement; });
       if (hasOtherRet) {
         s.appendChild(el('div','',''));
         var otherTbl = document.createElement('table');
@@ -1798,6 +1883,19 @@ function buildRetirement() {
           otherTb.appendChild(tr3);
         });
         S.props.forEach(function(p){
+          // Show properties sold at retirement with split
+          if (p.soldAtRetirement) {
+            var gr = N(S.assump.growth);
+            var projV = Math.round(N(p.val) * Math.pow(1+pct(gr), yrsToR));
+            var retPct = N(p.retirementPct||100);
+            var buyPct = 100 - retPct;
+            var trP = document.createElement('tr');
+            trP.innerHTML = '<td>'+(p.desc||'Property')+' (sold)</td><td>'+Rfmt(p.val)+'</td><td>'+gr+'%</td>' +
+              '<td style="font-weight:700">'+Rfmt(projV)+'<br><span style="font-size:11px;font-weight:400;color:var(--sub)">'+retPct+'% to retirement = '+Rfmt(projV*retPct/100)+(buyPct>0?'<br>'+buyPct+'% to buy-down = '+Rfmt(projV*buyPct/100):'')+'</span></td>' +
+              '<td style="font-size:11px;color:var(--sub)">Sold at retirement</td>';
+            otherTb.appendChild(trP);
+            return;
+          }
           if (!N(p.rental) || p.soldAtRetirement) return;
           var esc3 = N(p.rentalEsc) > 0 ? p.rentalEsc : S.assump.cpi;
           var projRent = Math.round(N(p.rental) * Math.pow(1+pct(esc3), yrsToR));
@@ -2106,7 +2204,7 @@ function buildPolCard(p, i) {
         if (!p.EstateDutiable) {
           if (p.BeneficiaryType === 'Spouse')        p.EstateDutiable = 'No';
           else if (p.BeneficiaryType === 'Estate')   p.EstateDutiable = 'Yes';
-          else if (p.BeneficiaryType === 'Third Party') p.EstateDutiable = 'No';
+          else if (p.BeneficiaryType === 'Third Party') p.EstateDutiable = 'Yes'; // Deemed property — dutiable
         }
         p._bensSeeded = true;
       }
@@ -2141,7 +2239,7 @@ function buildPolCard(p, i) {
     // Auto-set EstateDutiable based on type
     if (e.target.value === 'Spouse')       { S.importedPols[i].EstateDutiable = 'No'; }
     else if (e.target.value === 'Estate')  { S.importedPols[i].EstateDutiable = 'Yes'; }
-    else if (e.target.value === 'Third Party') { S.importedPols[i].EstateDutiable = 'No'; }
+    else if (e.target.value === 'Third Party') { S.importedPols[i].EstateDutiable = 'Yes'; } // Deemed property — dutiable
     render();
   });
   btWrap.appendChild(btSel);
@@ -2182,8 +2280,8 @@ function buildPolCard(p, i) {
       routeInf.style.cssText += ';background:#fff7ed;color:#92400e;border:1px solid #fed7aa';
       routeInf.innerHTML = '⚖ <strong>Routed to Estate:</strong> This benefit forms part of the dutiable estate. Estate duty and executor fees will apply.';
     } else if (bt === 'Third Party') {
-      routeInf.style.cssText += ';background:#eff6ff;color:#1e40af;border:1px solid #bfdbfe';
-      routeInf.innerHTML = '→ <strong>Third Party:</strong> Paid direct to named beneficiary — outside estate. No estate duty on this benefit.';
+      routeInf.style.cssText += ';background:#fff7ed;color:#92400e;border:1px solid #fed7aa';
+      routeInf.innerHTML = '⚖ <strong>Third Party (Deemed Property):</strong> Although paid direct to the beneficiary, this is a <strong>deemed asset</strong> under the Estate Duty Act — it forms part of the dutiable estate. Estate duty applies.';
     }
     card.appendChild(routeInf);
   }
@@ -2253,7 +2351,16 @@ function buildEstate() {
     if (!a.desc && !N(a.val)) return;
     var desc = a.desc || 'Asset';
     var ov = getOverride(desc);
-    allAssets.push({ desc: desc, fullVal: N(a.val), dutiable: ov ? ov.dutiable : String(N(a.val)), bond: 0 });
+    // If soldAtDeath and routed OUTSIDE estate, exclude from dutiable assets table
+    // (these are handled separately in the estate routing section below)
+    var dr = a.soldAtDeath ? (a.deathRoute||'') : '';
+    var outsideEstate = dr === 'Spouse — s.4(q)' || dr === 'Third party direct' || dr === 'Trust / CC' || dr === 'Business — keyman';
+    if (a.soldAtDeath && outsideEstate) {
+      // Show in table but default dutiable to 0 (user can override)
+      allAssets.push({ desc: desc + ' (' + dr + ')', fullVal: N(a.val), dutiable: ov ? ov.dutiable : '0', bond: 0, routeNote: dr });
+    } else {
+      allAssets.push({ desc: desc, fullVal: N(a.val), dutiable: ov ? ov.dutiable : String(N(a.val)), bond: 0 });
+    }
   });
 
   if (allAssets.length === 0) {
@@ -2338,10 +2445,29 @@ function buildEstate() {
     }
     if (!ben) return;
     var bt = p.BeneficiaryType || '';
-    if (bt === 'Spouse')       section4q += ben;
-    else if (bt === 'Estate')  toEstate  += ben;
-    else if (bt === 'Third Party') toThird += ben;
-    else                       toBiz     += ben;
+    if (bt === 'Spouse')           section4q += ben;  // s.4(q) — not dutiable
+    else if (bt === 'Estate')      toEstate  += ben;  // dutiable
+    else if (bt === 'Third Party') toEstate  += ben;  // deemed property — dutiable
+    else                           toBiz     += ben;  // business assurance — outside personal estate
+  });
+
+  // Also route physical assets sold at death into the correct estate buckets
+  // This feeds the same routing summary cards and estate duty calculation
+  S.otherAssets.forEach(function(a) {
+    if (!a.soldAtDeath || !N(a.val)) return;
+    var dr = a.deathRoute || '';
+    if (dr === 'Dutiable estate')     toEstate  += N(a.val);
+    else if (dr === 'Spouse — s.4(q)') section4q += N(a.val);
+    else if (dr === 'Third party direct') toEstate += N(a.val); // deemed property — dutiable
+    else if (dr === 'Trust / CC')     toBiz     += N(a.val); // outside personal estate
+    else if (dr === 'Business — keyman') toBiz   += N(a.val);
+    // If no route selected, asset remains in allAssets table as dutiable (default)
+  });
+  S.props.forEach(function(p) {
+    if (!p.soldAtDeath || !N(p.val)) return;
+    // Properties sold at death — currently always dutiable unless in trust
+    // No routing dropdown for properties yet — they stay in allAssets table
+    // Future: add same routing dropdown to property cards
   });
 
   if (pols.length === 0) {
@@ -2351,10 +2477,10 @@ function buildEstate() {
     var polRouteCards = div('cards');
     polRouteCards.style.gridTemplateColumns = 'repeat(4,1fr)';
     [
-      { l: 'Section 4(q) — Spouse', v: section4q, c: 'ok',  sub: 'Not dutiable' },
-      { l: 'To Estate',              v: toEstate,  c: 'warn', sub: 'Dutiable' },
-      { l: 'Third Party Direct',     v: toThird,   c: '',     sub: 'Not dutiable' },
-      { l: 'Business Assurance',     v: toBiz,     c: '',     sub: 'Outside estate' }
+      { l: 'Section 4(q) — Spouse', v: section4q, c: 'ok',   sub: 'Not dutiable' },
+      { l: 'To Estate (incl. 3rd party)', v: toEstate, c: 'warn', sub: 'Dutiable — estate duty applies' },
+      { l: 'Business Assurance',     v: toBiz,     c: '',     sub: 'Outside personal estate' },
+      { l: 'Trust / CC Assets',      v: 0,         c: 'ok',   sub: 'Outside estate — not dutiable' }
     ].forEach(function(x) {
       var c = div('card');
       c.innerHTML = '<div class="lbl">' + x.l + '</div>' +
@@ -2553,11 +2679,8 @@ function buildEstate() {
     '<div class="sub">Section 4(q) policies: ' + Rfmt(section4q) + '<br>Estate residual: ' + Rfmt(estateResidual) + '</div>';
   outCards.appendChild(c_spouse);
 
-  var c_third = div('card');
-  c_third.innerHTML = '<div class="lbl">Third party beneficiaries</div>' +
-    '<div class="val">' + Rfmt(toThird) + '</div>' +
-    '<div class="sub">Paid direct — no estate duty</div>';
-  outCards.appendChild(c_third);
+  // Third party benefits are deemed property — included in dutiable estate above
+  // No separate card needed as they flow through the estate calculation
 
   s.appendChild(outCards);
 
