@@ -160,6 +160,7 @@ table input:focus, table select:focus { outline: none; border-color: var(--gold)
     <button class="btn btn-ghost btn-sm" onclick="newClient()">New</button>
     <button class="btn btn-ghost btn-sm" onclick="refreshFromCRM()" title="Re-pull policies and personal details from CRM without losing FNA data">↻ CRM</button>
     <button class="btn btn-ghost btn-sm" onclick="saveFile()">💾 Save</button>
+    <button class="btn btn-ghost btn-sm" onclick="printFNA()">🖨 Print FNA</button>
   </div>
 </div>
 <div class="tabbar" id="tabBar"></div>
@@ -511,10 +512,27 @@ var _fnaSaveQueue = null;  // debounce timer
   if (params.get('name')) S.cli.name = decodeURIComponent(params.get('name'));
   if (params.get('id'))   S.cli.id   = params.get('id');
 
-  // If we have a saved state, DON'T overwrite FNA data from URL.
-  // The user may have edited income, policies etc — those are preserved.
-  // A "Refresh from CRM" button lets them deliberately pull fresh data.
-  if (hasSavedState) return;
+  // If we have a saved state, re-apply CRM-owned fields from URL but preserve manual FNA data.
+  // Policies always come fresh from CRM — never from saved state.
+  if (hasSavedState) {
+    if (params.get('pols')) {
+      try { applyPolsFromCRM(JSON.parse(decodeURIComponent(params.get('pols')))); } catch(e) {}
+    }
+    if (params.get('dob')) {
+      var rawDob = params.get('dob');
+      if (rawDob.indexOf('T') > -1) rawDob = rawDob.split('T')[0];
+      var d = rawDob.split('-');
+      if (d.length === 3) S.cli.dob = d[2]+'/'+d[1]+'/'+d[0];
+    }
+    if (params.get('income')) { S.cli.grossPM = params.get('income'); }
+    if (params.get('gender'))  S.cli.gender   = decodeURIComponent(params.get('gender'));
+    if (params.get('marital')) S.cli.marital  = decodeURIComponent(params.get('marital'));
+    if (params.get('smoker'))  S.cli.smoker   = decodeURIComponent(params.get('smoker'));
+    if (params.get('occ'))     S.cli.occ      = decodeURIComponent(params.get('occ'));
+    if (params.get('edu'))     S.cli.education= decodeURIComponent(params.get('edu'));
+    if (params.get('spouse'))  S.cli.spouseName = decodeURIComponent(params.get('spouse'));
+    return;
+  }
 
   // Fresh FNA — seed everything from URL params
   if (params.get('dob')) {
@@ -3838,37 +3856,155 @@ function buildROATab() {
   var s = div();
   if (!S.roa) S.roa = {};
   var r = S.roa;
+  if (!r.needsRows) r.needsRows = [
+    { area:'Life Cover',              quantified:'', priority:'', addressed:'', shortfall:'', review:'' },
+    { area:'Disability',              quantified:'', priority:'', addressed:'', shortfall:'', review:'' },
+    { area:'Dread Disease / Trauma',  quantified:'', priority:'', addressed:'', shortfall:'', review:'' },
+    { area:'Income Protection',       quantified:'', priority:'', addressed:'', shortfall:'', review:'' },
+    { area:'Pre-Retirement',          quantified:'', priority:'', addressed:'', shortfall:'', review:'' },
+    { area:'Post-Retirement',         quantified:'', priority:'', addressed:'', shortfall:'', review:'' },
+    { area:'Savings / Investment',    quantified:'', priority:'', addressed:'', shortfall:'', review:'' },
+    { area:'Will / Estate',           quantified:'', priority:'', addressed:'', shortfall:'', review:'' },
+    { area:'Other',                   quantified:'', priority:'', addressed:'', shortfall:'', review:'' }
+  ];
 
-  var inf=div('info');
-  inf.innerHTML='Complete the advisory narrative below. All FNA data (needs, gaps, policies) pulls through automatically.';
+  var inf = div('info');
+  inf.innerHTML = 'Complete the advisory narrative. <strong>All fields are editable</strong> — the FNA provides the analysis but the ROA records what was actually agreed with the client. '
+    + 'Section B and the products table are pre-populated as a starting point — override anything.';
   s.appendChild(inf);
 
   function roaSec(title, key, ph, ht) {
     s.appendChild(stitle(title));
-    var ta=document.createElement('textarea');
-    ta.style.cssText='width:100%;box-sizing:border-box;border:var(--border);border-radius:7px;padding:10px 12px;font-family:inherit;font-size:13px;min-height:'+(ht||90)+'px;resize:vertical';
-    ta.placeholder=ph; ta.value=r[key]||'';
-    ta.addEventListener('input',function(e){r[key]=e.target.value;S.roa=r;});
+    var ta = document.createElement('textarea');
+    ta.style.cssText = 'width:100%;box-sizing:border-box;border:var(--border);border-radius:7px;padding:10px 12px;font-family:inherit;font-size:13px;min-height:'+(ht||90)+'px;resize:vertical';
+    ta.placeholder = ph; ta.value = r[key] || '';
+    ta.addEventListener('input', function(e){ r[key] = e.target.value; S.roa = r; });
     s.appendChild(ta);
   }
 
-  roaSec('A. Client Objectives','objectives','e.g. Ensure family is financially secure if I die or become disabled. Plan for retirement at 65.',80);
-  roaSec('A. Financial Situation','situation','e.g. Farmer, income from CC. Assets held in family trust. Married ANC with accrual.',80);
-  roaSec('A. Current Product Experience','experience','e.g. Existing life and disability cover with Liberty and Sanlam. Sygnia RA and TFS.',80);
-  roaSec('D. Recommendation & Motivation','recommendation','e.g. Recommended increasing life cover to address shortfall. Retirement contributions to be increased...',120);
-  roaSec('D. Products Considered','products','e.g. Sanlam quoted RX for RY cover. Liberty quoted...',80);
-  roaSec('E. Important Information Highlighted','important','e.g. Advised on age-rated premium escalation. Explained estate duty implications...',80);
-  roaSec('F. Products Client Elected Not to Take','declined','e.g. Client declined offshore investment at this stage.',60);
-  roaSec('Additional Comments','comments','Any additional notes...',60);
+  // Section A
+  roaSec('A. Client Objectives', 'objectives', 'e.g. Ensure family is financially secure. Plan for retirement at 65. Review estate structures.', 70);
+  roaSec('A. Financial Situation', 'situation', 'e.g. Farmer, income from CC. Assets held in family trust. Married ANC with accrual.', 70);
+  roaSec('A. Current Product Experience', 'experience', 'e.g. Existing life and disability cover with Liberty and Sanlam. Sygnia RA and TFS.', 70);
 
-  var brow=div(); brow.style.cssText='display:flex;gap:12px;margin-top:20px;flex-wrap:wrap';
-  var b1=document.createElement('button'); b1.className='btn btn-gold'; b1.textContent='Generate ROA Document';
-  b1.addEventListener('click',generateROA); brow.appendChild(b1);
-  var b2=document.createElement('button'); b2.className='btn btn-navy'; b2.textContent='Save Client File';
-  b2.addEventListener('click',saveFile); brow.appendChild(b2);
+  // Section B — fully editable needs table
+  s.appendChild(stitle('B. Needs & Goals Identified'));
+  var bInf = div('info');
+  bInf.innerHTML = 'Record what was <strong>discussed and agreed</strong> with the client. Fill in the cover amounts taken up, not just what was needed. '
+    + 'Leave rows blank if not discussed. Addressed: Yes / Partially / Later / No.';
+  s.appendChild(bInf);
+
+  var tbl = document.createElement('table');
+  tbl.innerHTML = '<thead><tr>'
+    + '<th style="width:18%">Planning Area</th>'
+    + '<th style="width:22%">Cover / Amount</th>'
+    + '<th style="width:8%">Priority</th>'
+    + '<th style="width:18%">Addressed</th>'
+    + '<th style="width:18%">Shortfall / Notes</th>'
+    + '<th style="width:12%">Review Date</th>'
+    + '</tr></thead>';
+  var tb = document.createElement('tbody');
+
+  // Pre-populate from FNA where possible
+  function fnaHint(rowIdx) {
+    var pols = S.importedPols || [];
+    switch(rowIdx) {
+      case 0: // Life cover
+        var need = S.deathLiabs.reduce(function(a,x){return a+N(x.amt);},0)
+                 + S.deathIncome.reduce(function(a,x){return a+calcIncomeNeed(x);},0)
+                 + S.deathCapital.reduce(function(a,x){return a+N(x.amt);},0);
+        var have = pols.reduce(function(a,p){return p.Type!=='Business Assurance'?a+N(p.BenDeath):a;},0);
+        return need > 0 ? 'FNA need: '+Rfmt(need)+' / Have: '+Rfmt(have) : '';
+      case 1: // Disability
+        var dn = S.disIncome.reduce(function(a,x){return a+calcIncomeNeed(x);},0)+S.disCapital.reduce(function(a,x){return a+N(x.amt);},0);
+        var dh = pols.reduce(function(a,p){return a+N(p.BenDisability);},0);
+        return dn > 0 ? 'FNA need: '+Rfmt(dn)+' / Have: '+Rfmt(dh) : '';
+      case 2: // Dread
+        var drh = pols.reduce(function(a,p){return a+N(p.BenDreadDisease);},0);
+        return N(S.dreadAmt) > 0 ? 'FNA need: '+Rfmt(S.dreadAmt)+' / Have: '+Rfmt(drh) : '';
+      case 3: // IP
+        return N(S.ipGrossPM) > 0 ? 'FNA need: '+Rfmt(S.ipGrossPM)+'/pm gross' : '';
+      case 4: // Pre-retirement
+        var cliAge=ageFrom(S.cli.dob), retAge=N(S.cli.retAge)||65, yrsToR=cliAge?Math.max(0,retAge-cliAge):null;
+        if(!yrsToR) return '';
+        var totalProj=S.retAssets.reduce(function(a,r2){if(!N(r2.currentVal)&&!N(r2.monthlyContrib))return a;var g=N(r2.growthRate)>0?r2.growthRate:S.assump.growth;var e=N(r2.contribEsc)>0?r2.contribEsc:S.assump.incEsc;return a+projectFund(r2.currentVal,r2.monthlyContrib,e,g,yrsToR);},0);
+        var mNeed=(S.retNeeds&&S.retNeeds.length>0)?S.retNeeds.reduce(function(a,r2){return a+N(r2.amtToday);},0):N(S.retIncomeToday)+N(S.retMedAidToday)+N(S.retOtherMonthly);
+        var capNeed=retirementCapitalNeeded(mNeed,yrsToR,85-retAge,S.assump.cpi,S.assump.retReturn);
+        var gap=totalProj-capNeed;
+        return capNeed>0?'FNA: need '+Rfmt(capNeed)+' / have '+Rfmt(totalProj)+(gap<0?' \u25bc '+Rfmt(Math.abs(gap))+' shortfall':' \u25b2 surplus'):'';
+      default: return '';
+    }
+  }
+
+  r.needsRows.forEach(function(row, ni) {
+    var tr = document.createElement('tr');
+    var hint = fnaHint(ni);
+
+    // Area (fixed label)
+    var td0 = document.createElement('td');
+    td0.style.cssText = 'font-weight:700;font-size:11px';
+    td0.textContent = row.area;
+    if (hint) {
+      var hd = document.createElement('div');
+      hd.style.cssText = 'font-size:9px;color:#888;font-weight:400;margin-top:2px';
+      hd.textContent = hint;
+      td0.appendChild(hd);
+    }
+    tr.appendChild(td0);
+
+    // Editable cells
+    ['quantified','priority','addressed','shortfall','review'].forEach(function(key) {
+      var td = document.createElement('td');
+      var inp = document.createElement('input');
+      inp.type = 'text';
+      inp.value = row[key] || '';
+      inp.style.cssText = 'width:100%;border:none;border-bottom:1px solid var(--mist);padding:4px 2px;font-size:11px;font-family:inherit;background:transparent';
+      if (key === 'addressed') {
+        inp.placeholder = 'Yes / Partially / Later / No';
+      }
+      inp.addEventListener('input', function(e){ r.needsRows[ni][key] = e.target.value; S.roa = r; });
+      td.appendChild(inp);
+      tr.appendChild(td);
+    });
+
+    tb.appendChild(tr);
+  });
+  tbl.appendChild(tb);
+  var tw = div('twrap'); tw.appendChild(tbl); s.appendChild(tw);
+
+  // Section C — products (free text + context from FNA)
+  s.appendChild(stitle('C. Products Considered'));
+  var cInf = div('info');
+  cInf.innerHTML = 'Record companies and quotes considered. The existing policy schedule is shown in the generated document as context.';
+  s.appendChild(cInf);
+  roaSec('', 'products', 'e.g. Sanlam quoted R1 800/pm for R5m life cover. Liberty quoted R2 100/pm. Client selected Sanlam.', 80);
+
+  // Section D
+  roaSec('D. Recommendation & Motivation', 'recommendation',
+    'e.g. Recommended increasing life cover by R5m to address shortfall. Retained existing Sanlam policies. '
+    + 'Increased RA contribution to R3 000/pm. Client acknowledged age-rated premium risk on trust policy.', 120);
+
+  // Section E
+  roaSec('E. Important Information Highlighted to Client', 'important',
+    'e.g. Advised on age-rated premium escalation and long-term affordability. Explained estate duty implications of policy beneficiary routing. '
+    + 'Discussed s.4(q) deduction and accrual claim.', 90);
+
+  // Section F
+  roaSec('F. Products / Advice Client Elected Not to Take', 'declined',
+    'e.g. Client declined offshore investment at this stage — to be reviewed at next annual review. '
+    + 'Client declined additional dread disease cover citing affordability.', 70);
+
+  roaSec('Additional Comments', 'comments', 'Any additional notes...', 60);
+
+  var brow = div(); brow.style.cssText = 'display:flex;gap:12px;margin-top:20px;flex-wrap:wrap';
+  var b1 = document.createElement('button'); b1.className = 'btn btn-gold'; b1.textContent = 'Generate ROA Document';
+  b1.addEventListener('click', generateROA); brow.appendChild(b1);
+  var b2 = document.createElement('button'); b2.className = 'btn btn-navy'; b2.textContent = 'Save Client File';
+  b2.addEventListener('click', saveFile); brow.appendChild(b2);
   s.appendChild(brow);
   return s;
 }
+
 
 // ═══════════════════════════════════════════════════════════
 // ROA GENERATOR
@@ -3955,33 +4091,27 @@ function generateROA() {
   h+='<tr><td><strong>Current Product Experience</strong></td><td class="section-content">'+freeBox(r.experience,40)+'</td></tr>';
   h+='</table>';
 
-  // Section B
+  // Section B — use adviser-entered rows from ROA tab
   h+='<h2>Section B: Needs &amp; Goals Identified</h2>';
-  h+='<table><thead><tr><th>Financial Planning Need</th><th>Needs / Quantified</th><th>Priority</th><th>Addressed</th><th>Shortfall</th><th>Review</th></tr></thead><tbody>';
-  function needRow(label,need,have,show){
-    if(!show) return '';
-    var gap=have-need;
-    var addr=need>0?(gap>=0?'Yes':'Partially'):'—';
-    var sf=need>0&&gap<0?'<span style="color:#dc2626;font-weight:700">'+rfmt(Math.abs(gap))+'</span>':'—';
-    return '<tr><td><strong>'+label+'</strong></td><td>'+(need>0?rfmt(need):'Not quantified')+'</td><td></td><td>'+addr+'</td><td>'+sf+'</td><td></td></tr>';
-  }
-  h+=needRow('Life Cover',totalDeathNeed,totalDeathHave,S.scope.death);
-  h+=needRow('Disability',totalDisNeed,totalDisHave,S.scope.disability);
-  h+=needRow('Dread Disease / Trauma',N(S.dreadAmt),totalDreadHave,S.scope.dread);
-  h+=needRow('Income Protection /pm',N(S.ipGrossPM||S.ipNettPM),pols.reduce(function(a,p){return a+N(p.BenIP);},0),S.scope.ip);
-  if(S.scope.retirement){
-    var cliAgeR=ageFrom(S.cli.dob), retAgeR=N(S.cli.retAge)||65, yrsR=cliAgeR?Math.max(0,retAgeR-cliAgeR):null;
-    if(yrsR){
-      var totalProjR=S.retAssets.reduce(function(a,r2){if(!N(r2.currentVal)&&!N(r2.monthlyContrib))return a;var g=N(r2.growthRate)>0?r2.growthRate:S.assump.growth;var e=N(r2.contribEsc)>0?r2.contribEsc:S.assump.incEsc;return a+projectFund(r2.currentVal,r2.monthlyContrib,e,g,yrsR);},0);
-      var mNeedR=(S.retNeeds&&S.retNeeds.length>0)?S.retNeeds.reduce(function(a,r2){return a+N(r2.amtToday);},0):N(S.retIncomeToday)+N(S.retMedAidToday)+N(S.retOtherMonthly);
-      var capNeedR=retirementCapitalNeeded(mNeedR,yrsR,85-retAgeR,S.assump.cpi,S.assump.retReturn);
-      h+=needRow('Pre-Retirement Planning',capNeedR,totalProjR,true);
-    }
-  }
-  if(S.scope.investment) h+='<tr><td><strong>Local Investment</strong></td><td colspan="5"></td></tr>';
-  if(S.scope.offshore)   h+='<tr><td><strong>Offshore Investment</strong></td><td colspan="5"></td></tr>';
-  if(S.scope.will)       h+='<tr><td><strong>Will &amp; Testament</strong></td><td colspan="5"></td></tr>';
-  if(S.scope.estate)     h+='<tr><td><strong>Estate Planning</strong></td><td colspan="5"></td></tr>';
+  h+='<table><thead><tr><th>Financial Planning Need</th><th>Cover / Amount</th><th>Priority</th><th>Addressed</th><th>Shortfall / Notes</th><th>Review Date</th></tr></thead><tbody>';
+  var roaNeedsRows = (r.needsRows || []);
+  roaNeedsRows.forEach(function(row) {
+    var scopeMatch = {
+      'Life Cover':S.scope.death,'Disability':S.scope.disability,
+      'Dread Disease / Trauma':S.scope.dread,'Income Protection':S.scope.ip,
+      'Pre-Retirement':S.scope.retirement,'Post-Retirement':S.scope.retirement,
+      'Savings / Investment':S.scope.investment||S.scope.offshore,
+      'Will / Estate':S.scope.will||S.scope.estate,'Other':false
+    };
+    var hasData = row.quantified||row.priority||row.addressed||row.shortfall||row.review;
+    if (!hasData && !scopeMatch[row.area]) return;
+    h += '<tr><td><strong>'+esc(row.area)+'</strong></td>';
+    h += '<td>'+esc(row.quantified||'')+'</td>';
+    h += '<td style="text-align:center">'+esc(row.priority||'')+'</td>';
+    h += '<td>'+esc(row.addressed||'')+'</td>';
+    h += '<td>'+esc(row.shortfall||'')+'</td>';
+    h += '<td>'+esc(row.review||'')+'</td></tr>';
+  });
   h+='</tbody></table>';
 
   // Section C — products considered + existing policies
@@ -4114,6 +4244,298 @@ function generateROA() {
   }
 }
 
+
+function printFNA() {
+  persist();
+  var pols = S.importedPols || [];
+  var today = new Date().toLocaleDateString('en-ZA',{day:'2-digit',month:'long',year:'numeric'});
+
+  function esc(t){ return (t||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+  function rfmt(v){ var n=parseFloat(String(v||'').replace(/[^0-9.-]/g,'')); return isNaN(n)||n===0?'—':'R\u00a0'+Math.round(n).toLocaleString('en-ZA'); }
+  function pct(v){ var n=parseFloat(String(v||'')); return isNaN(n)?0:n/100; }
+
+  var h = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>FNA \u2014 '+esc(S.cli.name)+'</title><style>';
+  h += '*{box-sizing:border-box}body{font-family:Arial,sans-serif;font-size:11px;color:#1a2a4a;margin:0;padding:0}';
+  h += '@media print{@page{margin:12mm 14mm;size:A4}.pb{page-break-before:always}.noprint{display:none}}';
+  h += '@media screen{body{max-width:860px;margin:0 auto;padding:20px}}';
+  h += '.hdr{display:flex;justify-content:space-between;align-items:flex-end;border-bottom:3px solid #c8a84b;padding-bottom:8px;margin-bottom:12px}';
+  h += '.title{font-size:16px;font-weight:700;text-transform:uppercase;letter-spacing:1px}';
+  h += '.adv{text-align:right;font-size:10px;color:#555;line-height:1.6}';
+  h += '.adv strong{font-size:12px;color:#1a2a4a;display:block}';
+  h += 'h2{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:1.5px;color:#c8a84b;border-bottom:1px solid #e0e0e0;padding-bottom:3px;margin:14px 0 8px}';
+  h += 'table{width:100%;border-collapse:collapse;font-size:10.5px;margin-bottom:10px}';
+  h += 'th{background:#1a2a4a;color:#fff;padding:4px 7px;text-align:left;font-size:9.5px}';
+  h += 'td{padding:4px 7px;border-bottom:1px solid #eef;vertical-align:top}';
+  h += 'tr:nth-child(even) td{background:#f9f9fc}';
+  h += '.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px 20px;margin-bottom:10px}';
+  h += '.lbl{font-size:8.5px;color:#999;text-transform:uppercase}';
+  h += '.val{font-weight:700;font-size:11px}';
+  h += '.box{background:#f0f4fa;border-radius:4px;padding:8px 10px;margin-bottom:8px}';
+  h += '.surp{color:#16a34a;font-weight:700}.short{color:#dc2626;font-weight:700}';
+  h += '.navy-box{background:#1a2a4a;color:#fff;border-radius:6px;padding:12px 14px;margin-bottom:10px}';
+  h += '.navy-box .lbl{color:#8899bb}.navy-box .val{color:#c8a84b}';
+  h += '.row{display:flex;justify-content:space-between;padding:3px 0;font-size:11px}';
+  h += '.sub-row{display:flex;justify-content:space-between;padding:2px 0 2px 14px;font-size:10px;color:#8899bb}';
+  h += '</style></head><body>';
+
+  // ── Page header (repeats on each section)
+  function pageHeader(section) {
+    return '<div class="hdr"><div><div style="font-size:9px;color:#888;text-transform:uppercase;letter-spacing:.5px">Financial Needs Analysis</div>'
+      +'<div class="title">'+esc(S.cli.name)+'</div>'
+      +'<div style="font-size:9px;color:#888">'+section+'</div></div>'
+      +'<div class="adv"><strong>Clinton Hayes</strong>Duwalcoe Financial Consultants CC<br>FSP No: 9978 \u00b7 '+today+'</div></div>';
+  }
+
+  // ══ PAGE 1: CLIENT PROFILE ══════════════════════════════════
+  h += pageHeader('Client Profile');
+  h += '<div class="grid">';
+  h += '<div><div class="lbl">Full Name</div><div class="val">'+esc(S.cli.name)+'</div></div>';
+  h += '<div><div class="lbl">ID Number</div><div class="val">'+esc(S.cli.id||'—')+'</div></div>';
+  h += '<div><div class="lbl">Date of Birth</div><div class="val">'+esc(S.cli.dob||'—')+'</div></div>';
+  h += '<div><div class="lbl">Occupation</div><div class="val">'+esc(S.cli.occ||'—')+'</div></div>';
+  h += '<div><div class="lbl">Marital Status</div><div class="val">'+esc(S.cli.marital||'—')+'</div></div>';
+  h += '<div><div class="lbl">Retirement Age</div><div class="val">'+(S.cli.retAge||65)+'</div></div>';
+  h += '<div><div class="lbl">Gross Income</div><div class="val">'+(S.cli.grossPM?rfmt(S.cli.grossPM)+' /pm':'—')+'</div></div>';
+  h += '<div><div class="lbl">Smoker</div><div class="val">'+esc(S.cli.smoker||'—')+'</div></div>';
+  h += '<div><div class="lbl">Spouse</div><div class="val">'+esc(S.cli.spouseName||S.cli.spouse||'—')+'</div></div>';
+  h += '</div>';
+
+  h += '<h2>Scope of Advice</h2>';
+  var scopeParts = [];
+  if(S.scope.death)      scopeParts.push('Life Cover');
+  if(S.scope.disability) scopeParts.push('Disability');
+  if(S.scope.dread)      scopeParts.push('Dread Disease');
+  if(S.scope.ip)         scopeParts.push('Income Protection');
+  if(S.scope.retirement) scopeParts.push('Retirement Planning');
+  if(S.scope.estate)     scopeParts.push('Estate Planning');
+  if(S.scope.investment) scopeParts.push('Local Investment');
+  if(S.scope.offshore)   scopeParts.push('Offshore Investment');
+  if(S.scope.will)       scopeParts.push('Will & Testament');
+  h += '<p style="font-weight:700">'+scopeParts.join(' \u00b7 ')+'</p>';
+  if(S.whyHere) h += '<p style="color:#555;font-style:italic;margin-top:4px">"'+esc(S.whyHere)+'"</p>';
+
+  h += '<h2>Assumptions</h2>';
+  h += '<div class="grid">';
+  h += '<div><div class="lbl">CPI / Inflation</div><div class="val">'+(S.assump.cpi||6)+'%</div></div>';
+  h += '<div><div class="lbl">Fund Growth</div><div class="val">'+(S.assump.growth||9)+'%</div></div>';
+  h += '<div><div class="lbl">Income Escalation</div><div class="val">'+(S.assump.incEsc||6)+'%</div></div>';
+  h += '<div><div class="lbl">Drawdown Rate</div><div class="val">'+(S.assump.drawdown||4)+'%</div></div>';
+  h += '<div><div class="lbl">Return in Retirement</div><div class="val">'+(S.assump.retReturn||8)+'%</div></div>';
+  h += '<div><div class="lbl">Medical Inflation</div><div class="val">'+(S.assump.medInflation||9)+'%</div></div>';
+  h += '</div>';
+
+  // ══ PAGE 2: POLICY SCHEDULE ═════════════════════════════════
+  if(pols.length > 0) {
+    h += '<div class="pb">'+pageHeader('Policy Schedule')+'</div>';
+    h += '<table><thead><tr><th>Insurer</th><th>Product</th><th>Type</th><th>Policy No</th><th>Premium</th><th>Prem Esc</th><th>Life Cover</th><th>Disability</th><th>Dread</th><th>Fund Value</th><th>Beneficiary</th></tr></thead><tbody>';
+    pols.forEach(function(p){
+      var prem = parseFloat(String(p.Premium||'').replace(/[^0-9.]/g,''))||0;
+      var premStr = prem>0 ? (rfmt(prem)+(p.Frequency==='Annually'?' /yr':p.Frequency==='Once Off'?' once':' /pm')) : '—';
+      var escStr = p.PremEscalation ? String(p.PremEscalation)+'%' : '—';
+      h += '<tr>';
+      h += '<td><strong>'+esc(p.Insurer||'—')+'</strong></td>';
+      h += '<td>'+esc(p.Product||'—')+'</td>';
+      h += '<td style="font-size:9px">'+esc(p.Type||'—')+'</td>';
+      h += '<td style="font-size:9px">'+esc(p.PolicyNo||'—')+'</td>';
+      h += '<td>'+premStr+'</td>';
+      h += '<td>'+escStr+'</td>';
+      h += '<td>'+(p.Type==='Business Assurance'?rfmt(p.LoanAmount):rfmt(p.BenDeath))+'</td>';
+      h += '<td>'+rfmt(p.BenDisability)+'</td>';
+      h += '<td>'+rfmt(p.BenDreadDisease)+'</td>';
+      h += '<td>'+rfmt(p.BenFundValue)+'</td>';
+      h += '<td style="font-size:9px">'+esc((p.BeneficiaryType||p.Beneficiary||'—'))+'</td>';
+      h += '</tr>';
+    });
+    h += '</tbody></table>';
+  }
+
+  // ══ PAGE 3: NEEDS ANALYSIS ══════════════════════════════════
+  var hasNeeds = S.scope.death||S.scope.disability||S.scope.dread||S.scope.ip;
+  if(hasNeeds) {
+    h += '<div class="pb">'+pageHeader('Needs Analysis')+'</div>';
+
+    if(S.scope.death) {
+      h += '<h2>Life Cover</h2>';
+      var totLiab=S.deathLiabs.reduce(function(s,r){return s+parseFloat(String(r.amt||'').replace(/[^0-9.]/g,''))||0;},0);
+      var totInc=S.deathIncome.reduce(function(s,r){return s+calcIncomeNeed(r);},0);
+      var totCap=S.deathCapital.reduce(function(s,r){return s+parseFloat(String(r.amt||'').replace(/[^0-9.]/g,''))||0;},0);
+      var totalNeed=totLiab+totInc+totCap;
+      var totalHave=pols.reduce(function(a,p){return p.Type!=='Business Assurance'?a+parseFloat(String(p.BenDeath||'').replace(/[^0-9.]/g,''))||0:a;},0);
+      if(S.deathLiabs.length>0) {
+        h += '<table><thead><tr><th>Liability</th><th>Amount</th></tr></thead><tbody>';
+        S.deathLiabs.forEach(function(r){if(parseFloat(String(r.amt||'').replace(/[^0-9.]/g,''))>0) h+='<tr><td>'+esc(r.desc||'—')+'</td><td>'+rfmt(r.amt)+'</td></tr>';});
+        h += '</tbody></table>';
+      }
+      if(S.deathIncome.length>0) {
+        h += '<table><thead><tr><th>Income Need</th><th>Nett /pm</th><th>Years</th><th>Capitalised</th></tr></thead><tbody>';
+        S.deathIncome.forEach(function(r){var c=calcIncomeNeed(r);if(c>0)h+='<tr><td>'+esc(r.desc||'Income')+'</td><td>'+rfmt(r.nettPM)+'</td><td>'+esc(r.years||'—')+'</td><td>'+rfmt(c)+'</td></tr>';});
+        h += '</tbody></table>';
+      }
+      var deathGap=totalHave-totalNeed;
+      h += '<div class="box"><div class="row"><span>Total cover needed</span><span>'+rfmt(totalNeed)+'</span></div>';
+      h += '<div class="row"><span>Existing cover</span><span>'+rfmt(totalHave)+'</span></div>';
+      h += '<div class="row" style="font-weight:700;border-top:1px solid #ccc;margin-top:4px;padding-top:4px"><span>'+(deathGap>=0?'Surplus':'Shortfall')+'</span><span class="'+(deathGap>=0?'surp':'short')+'">'+rfmt(Math.abs(deathGap))+'</span></div></div>';
+    }
+
+    if(S.scope.disability||S.scope.ip) {
+      h += '<h2>Disability &amp; Income Protection</h2>';
+      var disInc=S.disIncome.reduce(function(a,r){return a+calcIncomeNeed(r);},0);
+      var disCap=S.disCapital.reduce(function(a,r){return a+parseFloat(String(r.amt||'').replace(/[^0-9.]/g,''))||0;},0);
+      var disHave=pols.reduce(function(a,p){return a+parseFloat(String(p.BenDisability||'').replace(/[^0-9.]/g,''))||0;},0);
+      var disGap=disHave-(disInc+disCap);
+      if(N(S.ipNettPM)>0) h += '<p>Income protection needed: <strong>'+rfmt(S.ipNettPM)+' /pm nett</strong> ('+rfmt(S.ipGrossPM)+' gross) \u00b7 Waiting: '+(S.ipWait||'1 month')+' \u00b7 Benefit period: '+(S.ipBenefit||'To age 65')+'</p>';
+      h += '<div class="box"><div class="row"><span>Capitalised income need</span><span>'+rfmt(disInc)+'</span></div>';
+      h += '<div class="row"><span>Lump sum capital need</span><span>'+rfmt(disCap)+'</span></div>';
+      h += '<div class="row"><span>Existing disability cover</span><span>'+rfmt(disHave)+'</span></div>';
+      h += '<div class="row" style="font-weight:700;border-top:1px solid #ccc;margin-top:4px;padding-top:4px"><span>'+(disGap>=0?'Surplus':'Shortfall')+'</span><span class="'+(disGap>=0?'surp':'short')+'">'+rfmt(Math.abs(disGap))+'</span></div></div>';
+    }
+
+    if(S.scope.dread) {
+      h += '<h2>Dread Disease</h2>';
+      var dreadHave=pols.reduce(function(a,p){return a+parseFloat(String(p.BenDreadDisease||'').replace(/[^0-9.]/g,''))||0;},0);
+      var dreadGap=dreadHave-N(S.dreadAmt);
+      h += '<div class="box"><div class="row"><span>Cover needed</span><span>'+rfmt(S.dreadAmt)+'</span></div>';
+      h += '<div class="row"><span>Existing cover</span><span>'+rfmt(dreadHave)+'</span></div>';
+      h += '<div class="row" style="font-weight:700;border-top:1px solid #ccc;margin-top:4px;padding-top:4px"><span>'+(dreadGap>=0?'Surplus':'Shortfall')+'</span><span class="'+(dreadGap>=0?'surp':'short')+'">'+rfmt(Math.abs(dreadGap))+'</span></div></div>';
+    }
+  }
+
+  // ══ PAGE 4: RETIREMENT ══════════════════════════════════════
+  if(S.scope.retirement && S.retAssets && S.retAssets.length > 0) {
+    h += '<div class="pb">'+pageHeader('Retirement Planning')+'</div>';
+    var cliAge=ageFrom(S.cli.dob), retAge=N(S.cli.retAge)||65;
+    var yrsToR=cliAge?Math.max(0,retAge-cliAge):null;
+    var yrsInRet=85-retAge;
+    if(yrsToR) {
+      var totalProj=S.retAssets.reduce(function(a,r){
+        if(!N(r.currentVal)&&!N(r.monthlyContrib)) return a;
+        var gr=N(r.growthRate)>0?r.growthRate:S.assump.growth;
+        var esc=N(r.contribEsc)>0?r.contribEsc:S.assump.incEsc;
+        return a+projectFund(r.currentVal,r.monthlyContrib,esc,gr,yrsToR);
+      },0);
+      var mNeed=(S.retNeeds&&S.retNeeds.length>0)?S.retNeeds.reduce(function(a,r){return a+N(r.amtToday);},0):N(S.retIncomeToday)+N(S.retMedAidToday)+N(S.retOtherMonthly);
+      var capNeed=retirementCapitalNeeded(mNeed,yrsToR,yrsInRet,S.assump.cpi,S.assump.retReturn);
+      var retGap=totalProj-capNeed;
+
+      h += '<div class="grid">';
+      h += '<div><div class="lbl">Current Age</div><div class="val">'+(cliAge||'—')+'</div></div>';
+      h += '<div><div class="lbl">Retirement Age</div><div class="val">'+retAge+'</div></div>';
+      h += '<div><div class="lbl">Years to Retirement</div><div class="val">'+yrsToR+'</div></div>';
+      h += '<div><div class="lbl">Monthly Need Today</div><div class="val">'+rfmt(mNeed)+' /pm</div></div>';
+      h += '<div><div class="lbl">Capital Needed</div><div class="val">'+rfmt(capNeed)+'</div></div>';
+      h += '<div><div class="lbl">Projected at Retirement</div><div class="val">'+rfmt(totalProj)+'</div></div>';
+      h += '</div>';
+
+      h += '<h2>Retirement Assets</h2>';
+      h += '<table><thead><tr><th>Fund</th><th>Current Value</th><th>Monthly Contribution</th><th>Growth %</th><th>Projected at '+retAge+'</th></tr></thead><tbody>';
+      S.retAssets.forEach(function(r){
+        if(!N(r.currentVal)&&!N(r.monthlyContrib)) return;
+        var gr=N(r.growthRate)>0?r.growthRate:S.assump.growth;
+        var esc=N(r.contribEsc)>0?r.contribEsc:S.assump.incEsc;
+        h += '<tr><td>'+esc(r.desc||'Fund')+'</td><td>'+rfmt(r.currentVal)+'</td>';
+        h += '<td>'+(N(r.monthlyContrib)>0?rfmt(r.monthlyContrib)+' /pm':'—')+'</td>';
+        h += '<td>'+gr+'%</td>';
+        h += '<td><strong>'+rfmt(projectFund(r.currentVal,r.monthlyContrib,esc,gr,yrsToR))+'</strong></td></tr>';
+      });
+      h += '</tbody></table>';
+
+      if(S.retNeeds&&S.retNeeds.length>0) {
+        h += '<h2>Retirement Income Needs</h2>';
+        h += '<table><thead><tr><th>Description</th><th>Today (R/pm)</th><th>Escalation</th><th>Capital Needed</th></tr></thead><tbody>';
+        S.retNeeds.forEach(function(r){
+          if(!N(r.amtToday)) return;
+          var itemEsc=N(r.esc)>0?pct(r.esc):pct(S.assump.cpi);
+          var itemAtRet=N(r.amtToday)*Math.pow(1+itemEsc,yrsToR);
+          var itemCap=retirementCapitalNeeded(itemAtRet/Math.pow(1+pct(S.assump.cpi),yrsToR),yrsToR,yrsInRet,S.assump.cpi,S.assump.retReturn);
+          h += '<tr><td>'+esc(r.desc||'—')+'</td><td>'+rfmt(r.amtToday)+'</td>';
+          h += '<td>'+(r.esc||S.assump.cpi)+'%</td>';
+          h += '<td><strong>'+rfmt(itemCap)+'</strong></td></tr>';
+        });
+        h += '</tbody></table>';
+      }
+
+      h += '<div class="navy-box">';
+      h += '<div class="row"><span class="lbl">Capital needed</span><span class="val">('+rfmt(capNeed)+')</span></div>';
+      h += '<div class="row"><span class="lbl">Projected capital at retirement</span><span class="val">'+rfmt(totalProj)+'</span></div>';
+      h += '<div class="row" style="border-top:1px solid #334;margin-top:6px;padding-top:6px;font-size:13px;font-weight:700">';
+      h += '<span style="color:#ccd6f6">'+(retGap>=0?'Surplus':'Shortfall')+'</span>';
+      h += '<span style="color:'+(retGap>=0?'#86efac':'#f87171')+'">'+rfmt(Math.abs(retGap))+'</span></div>';
+      h += '</div>';
+    }
+  }
+
+  // ══ PAGE 5: ESTATE ══════════════════════════════════════════
+  if(S.scope.estate) {
+    h += '<div class="pb">'+pageHeader('Estate Planning')+'</div>';
+    // Replicate key estate calculations
+    var physAssets = S.props.reduce(function(a,p){return a+N(p.val);},0)+S.vehicles.reduce(function(a,v){return a+N(v.val);},0)+S.otherAssets.reduce(function(a,x){return a+N(x.val);},0);
+    var liabs = S.props.reduce(function(a,p){return a+N(p.bond);},0)+S.vehicles.reduce(function(a,v){return a+N(v.finance);},0)+S.liabilities.reduce(function(a,l){return a+N(l.bal);},0);
+    var s4q=0,estPols=0,thirdPty=0,bizDut=0;
+    pols.forEach(function(p){
+      if(p.Type==='Business Assurance'){if(p.EstateDutiable==='Yes')bizDut+=N(p.LoanAmount)||N(p.BenDeath);return;}
+      var b=N(p.BenDeath);if(!b)return;
+      var bt=p.BeneficiaryType||'';
+      if(bt==='Spouse')s4q+=b;else if(bt==='Estate')estPols+=b;else if(bt==='Third Party')thirdPty+=b;
+    });
+    var gross=physAssets+s4q+estPols+thirdPty+bizDut;
+    var net=Math.max(0,gross-liabs);
+    var s4qDed=Math.min(s4q,net);
+    var afterS4q=Math.max(0,net-s4qDed);
+    var dutiable=Math.max(0,afterS4q-ABATEMENT);
+    var duty=dutiable<=DUTY_THRESH?dutiable*DUTY_RATE1:DUTY_THRESH*DUTY_RATE1+(dutiable-DUTY_THRESH)*DUTY_RATE2;
+    var execFees=(physAssets+estPols)*EXEC_RATE;
+
+    h += '<h2>Estate Duty Calculation</h2>';
+    h += '<table><thead><tr><th>Item</th><th>Amount</th></tr></thead><tbody>';
+    h += '<tr><td>Gross estate (physical assets + deemed policy proceeds)</td><td>'+rfmt(gross)+'</td></tr>';
+    if(liabs>0) h += '<tr><td>Less: Liabilities</td><td>('+rfmt(liabs)+')</td></tr>';
+    h += '<tr><td>Net estate</td><td><strong>'+rfmt(net)+'</strong></td></tr>';
+    if(s4qDed>0) h += '<tr><td>Less: Section 4(q) \u2014 spouse policies</td><td>('+rfmt(s4qDed)+')</td></tr>';
+    h += '<tr><td>Less: Primary abatement</td><td>('+rfmt(Math.min(afterS4q,ABATEMENT))+')</td></tr>';
+    h += '<tr><td>Dutiable amount</td><td><strong>'+rfmt(dutiable)+'</strong></td></tr>';
+    h += '<tr><td>Estate duty (20%)</td><td><strong>'+rfmt(duty)+'</strong></td></tr>';
+    h += '<tr><td>Executor fees (4.025%)</td><td>'+rfmt(execFees)+'</td></tr>';
+    h += '</tbody></table>';
+
+    h += '<h2>Policy Routing</h2>';
+    h += '<table><thead><tr><th>Policy</th><th>Sum Assured</th><th>Beneficiary Type</th><th>Estate Dutiable</th></tr></thead><tbody>';
+    pols.forEach(function(p){
+      var amt = p.Type==='Business Assurance'?(N(p.LoanAmount)||N(p.BenDeath)):N(p.BenDeath);
+      if(!amt&&!N(p.BenFundValue)) return;
+      h += '<tr><td>'+esc(p.Insurer||'')+(p.Product?' \u2014 '+esc(p.Product):'')+'</td>';
+      h += '<td>'+rfmt(amt||p.BenFundValue)+'</td>';
+      h += '<td>'+esc(p.BeneficiaryType||p.BizType||'—')+'</td>';
+      h += '<td>'+esc(p.EstateDutiable||'—')+'</td></tr>';
+    });
+    h += '</tbody></table>';
+  }
+
+  // ══ PRINT BUTTON ════════════════════════════════════════════
+  h += '<div class="noprint" style="position:fixed;bottom:16px;right:16px;display:flex;gap:8px">';
+  h += '<button onclick="window.print()" style="background:#1a2a4a;color:#fff;border:none;padding:10px 20px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:700">Print / Save PDF</button>';
+  h += '<button onclick="window.close()" style="background:#888;color:#fff;border:none;padding:10px 16px;border-radius:6px;cursor:pointer;font-size:13px">Close</button></div>';
+
+  h += '</body></html>';
+
+  var win = window.open('','_blank');
+  if (win) {
+    win.document.write(h); win.document.close();
+  } else {
+    var overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;background:#fff;overflow:auto';
+    var closeBtn = document.createElement('button');
+    closeBtn.textContent = '\u2715 Close';
+    closeBtn.style.cssText = 'position:fixed;top:12px;right:12px;z-index:10000;background:#1a2a4a;color:#fff;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:700';
+    closeBtn.addEventListener('click', function(){ document.body.removeChild(overlay); });
+    var iframe = document.createElement('iframe');
+    iframe.style.cssText = 'width:100%;height:100%;border:none';
+    overlay.appendChild(closeBtn);
+    overlay.appendChild(iframe);
+    document.body.appendChild(overlay);
+    iframe.contentDocument.write(h);
+    iframe.contentDocument.close();
+  }
+}
 
 // INIT
 render();
