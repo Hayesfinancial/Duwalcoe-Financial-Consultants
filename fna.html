@@ -1528,252 +1528,191 @@ function buildRetirement() {
   if(!S.scope.retirement){
     var wi=div('info'); wi.textContent='Retirement planning not selected in Scope. Enable it there to use this tab.'; s.appendChild(wi); return s;
   }
-  var cliAge=ageFrom(S.cli.dob);
-  var retAge=N(S.cli.retAge)||65;
-  var yrsToR=cliAge?Math.max(0,retAge-cliAge):null;
-  var yrsInRet=85-retAge;
 
+  var cliAge = ageFrom(S.cli.dob);
+  var retAge = N(S.cli.retAge) || 65;
+  var yrsToRet = cliAge ? Math.max(0, retAge - cliAge) : null;
+  var yrsInRet = 85 - retAge;
+
+  // ── Assumptions reminder
+  s.appendChild(stitle('Retirement Planning'));
   var inf=div('info');
-  inf.textContent=cliAge?
-    'Age: '+cliAge+' · Retirement: '+retAge+' · Years to retirement: '+(yrsToR||'?')+
-    ' · Life expectancy: 85 · Years in retirement: '+yrsInRet :
-    'Enter date of birth on the Client tab to enable retirement projections.';
+  inf.innerHTML = 'All amounts in <strong>today\'s rands</strong>. The system inflates to retirement using CPI and projects funds using the growth rate.';
   s.appendChild(inf);
 
-  // ── Retirement assets
-  s.appendChild(stitle('Retirement Assets (RAs, Pension Funds, Investments)'));
+  // ── Retirement age
+  var rg0 = g3();
+  rg0.appendChild(rfld('Current Age (auto)', {v:String(cliAge||'')}, 'v', {readonly:true}));
+  var retAgeF = div('f'); retAgeF.appendChild(el('label','','Retirement Age'));
+  var retAgeI = document.createElement('input'); retAgeI.type='text'; retAgeI.inputMode='numeric';
+  retAgeI.value = S.cli.retAge||'65'; retAgeI.placeholder='65';
+  retAgeI.addEventListener('blur',function(e){ S.cli.retAge=e.target.value; render(); });
+  retAgeF.appendChild(retAgeI); rg0.appendChild(retAgeF);
+  rg0.appendChild(rfld('Years to retirement (auto)', {v:String(yrsToRet||'')}, 'v', {readonly:true}));
+  s.appendChild(rg0);
 
-  // Auto-seed retAssets from imported RA/pension/investment policies if retAssets is empty
-  var raPolTypes = ['Retirement Annuity','Pension Fund','Provident Fund','Pension Preservation','Provident Preservation',
-                    'Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment',
-                    'Unit Trust','Tax Free Savings','Living Annuity'];
-  if (S.retAssets.length === 0 && S.importedPols && S.importedPols.length > 0) {
-    S.importedPols.forEach(function(p) {
-      if (raPolTypes.indexOf(p.Type) > -1) {
+  // ── Retirement Income Needs (flexible table)
+  s.appendChild(stitle('Monthly Income Needs at Retirement (Today\'s Rands)'));
+  var ri=div('info'); ri.textContent='Add each income need separately. Enter in today\'s rands — the system inflates to retirement. Leave escalation blank to use CPI.'; s.appendChild(ri);
+
+  if(!S.retNeeds) S.retNeeds=[];
+  // Ensure at least living expenses and medical aid rows
+  if(S.retNeeds.length===0){
+    S.retNeeds.push({desc:'Monthly living expenses', amtToday:'', esc:'', _isPremRow:false});
+    S.retNeeds.push({desc:'Medical aid', amtToday:'', esc:String(S.assump.medInflation||9), _isPremRow:false});
+  }
+
+  S.retNeeds.forEach(function(r,i){
+    var card=div(); card.style.cssText='background:#fff;border:var(--border);border-radius:8px;padding:12px 14px;margin-bottom:8px';
+    var ch=div(); ch.style.cssText='display:flex;justify-content:space-between;align-items:center;margin-bottom:8px';
+    var df=div('f'); df.appendChild(el('label','','Description'));
+    var di=document.createElement('input'); di.type='text'; di.value=r.desc||''; di.placeholder='e.g. Monthly living expenses';
+    di.addEventListener('input',function(e){S.retNeeds[i].desc=e.target.value;});
+    df.appendChild(di); ch.appendChild(df);
+    if(!r._isPremRow){
+      ch.appendChild(delBtn(function(){S.retNeeds.splice(i,1);render();}));
+    } else {
+      var lbl=el('span','','(from policy)'); lbl.style.cssText='font-size:10px;color:var(--sub);margin-right:8px'; ch.appendChild(lbl);
+    }
+    card.appendChild(ch);
+    var rg=g3();
+    var af=div('f'); af.appendChild(el('label','','Amount today (R/pm)'));
+    var arw=div('rw'); arw.appendChild(el('span','rp','R'));
+    var ai=document.createElement('input'); ai.type='text'; ai.inputMode='numeric'; ai.value=r.amtToday||''; ai.placeholder='0';
+    ai.addEventListener('input',function(e){S.retNeeds[i].amtToday=e.target.value;});
+    ai.addEventListener('blur',function(){render();}); arw.appendChild(ai); af.appendChild(arw); rg.appendChild(af);
+    var ef=div('f'); ef.appendChild(el('label','','Escalation % (blank=CPI)'));
+    var epw=div('pw'); epw.appendChild(el('span','pp','%'));
+    var ei=document.createElement('input'); ei.type='text'; ei.value=r.esc||''; ei.placeholder=S.assump.cpi||'6';
+    ei.addEventListener('input',function(e){S.retNeeds[i].esc=e.target.value;});
+    ei.addEventListener('blur',function(){render();}); epw.insertBefore(ei,epw.firstChild); ef.appendChild(epw); rg.appendChild(ef);
+    // Show escalated value at retirement
+    if(N(r.amtToday)>0&&yrsToRet){
+      var escRate=N(r.esc)>0?N(r.esc):N(S.assump.cpi)||6;
+      var atRet=Math.round(N(r.amtToday)*Math.pow(1+escRate/100,yrsToRet));
+      var af2=div('f'); af2.appendChild(el('label','','At retirement (inflated)'));
+      var arw2=div('rw'); arw2.appendChild(el('span','rp','R'));
+      var ai2=document.createElement('input'); ai2.type='text'; ai2.value=Math.round(atRet).toLocaleString('en-ZA'); ai2.readOnly=true; ai2.style.background='#f9f9f6';
+      arw2.appendChild(ai2); af2.appendChild(arw2); rg.appendChild(af2);
+    }
+    card.appendChild(rg);
+    s.appendChild(card);
+  });
+
+  var addRow=addBtn('+ Add income need', function(){
+    S.retNeeds.push({desc:'',amtToday:'',esc:'',_isPremRow:false});render();
+  }); s.appendChild(addRow);
+
+  // ── Lump sum needs at retirement
+  s.appendChild(stitle('Lump Sum Needs at Retirement'));
+  if(!S.retLumps) S.retLumps=[];
+  S.retLumps.forEach(function(r,i){
+    var row=g3();
+    row.appendChild(fld('Description',r,'desc',{placeholder:'e.g. Pay off bond at retirement'}));
+    row.appendChild(rfld('Amount (today\'s rands)',r,'amt',{onblur:function(){render();}}));
+    row.appendChild(div());
+    var dw=div('f'); dw.appendChild(delBtn(function(){S.retLumps.splice(i,1);render();})); row.appendChild(dw);
+    s.appendChild(row);
+  });
+  s.appendChild(addBtn('+ Add lump sum need',function(){S.retLumps.push({desc:'',amt:''});render();}));
+
+  // ── Retirement Assets
+  s.appendChild(stitle('Retirement Assets / Funds'));
+  var rai=div('info'); rai.textContent='Existing RAs, TFS, pension funds. Current values and monthly contributions. Growth rate for projection (blank = assumption).'; s.appendChild(rai);
+
+  // Seed from CRM policies if empty
+  var raPolTypes=['Retirement Annuity','Pension Fund','Provident Fund','Preservation Fund','Living Annuity','Tax Free Savings'];
+  if(S.retAssets.length===0 && S.importedPols && S.importedPols.length>0){
+    S.importedPols.forEach(function(p){
+      if(raPolTypes.indexOf(p.Type)>-1){
         S.retAssets.push({
-          desc: (p.Insurer ? p.Insurer + ' — ' : '') + (p.Type || 'Policy'),
-          currentVal: p.BenFundValue || '',
-          monthlyContrib: p.Premium && (p.Frequency === 'Monthly' || !p.Frequency) ? p.Premium : '',
-          contribEsc: '',
-          growthRate: p.GrowthRate || ''
+          desc:(p.Insurer?p.Insurer+' \u2014 ':'')+p.Product||p.Type||'Fund',
+          currentVal: p.BenFundValue||'',
+          growthRate: p.GrowthRate||'',
+          monthlyContrib: p.Premium&&(p.Frequency==='Monthly'||!p.Frequency)?p.Premium:'',
+          contribEsc:''
         });
       }
     });
   }
 
-  var inf2=div('info'); inf2.innerHTML='These assets project forward to retirement. ' +
-    (S.retAssets.length > 0 ? 'Pre-populated from imported policies — ' : '') +
-    'Enter or update current fund values and monthly contributions.'; s.appendChild(inf2);
-
   S.retAssets.forEach(function(r,i){
-    var card=div(); card.style.cssText='background:#fff;border:var(--border);border-radius:8px;padding:14px;margin-bottom:10px';
-    var ch=div(); ch.style.cssText='display:flex;justify-content:space-between;align-items:center;margin-bottom:10px';
-    var df2=div('f'); df2.appendChild(el('label','','Description'));
-    var di=document.createElement('input'); di.type='text'; di.value=r.desc||''; di.placeholder='e.g. Sanlam RA, Discovery pension';
-    di.addEventListener('input',function(e){S.retAssets[i].desc=e.target.value;}); df2.appendChild(di);
-    ch.appendChild(df2); ch.appendChild(delBtn(function(){S.retAssets.splice(i,1);render();})); card.appendChild(ch);
-
-    var rg1=g4();
-    rg1.appendChild(rfld('Current Fund Value', r, 'currentVal', {onblur:function(){render();}}));
-    rg1.appendChild(rfld('Monthly Contribution', r, 'monthlyContrib', {onblur:function(){render();}}));
-    rg1.appendChild(pfld('Contribution Escalation %', r, 'contribEsc', {onblur:function(){render();}}));
-    rg1.appendChild(pfld('Fund Growth Rate %', r, 'growthRate', {onblur:function(){render();}}));
-    card.appendChild(rg1);
-
-    // Projection
-    if(yrsToR!==null&&(N(r.currentVal)>0||N(r.monthlyContrib)>0)){
-      var gr=N(r.growthRate)>0?r.growthRate:S.assump.growth;
-      var esc=N(r.contribEsc)>0?r.contribEsc:S.assump.incEsc;
-      var fv=projectFund(r.currentVal,r.monthlyContrib,esc,gr,yrsToR);
+    var card=div(); card.style.cssText='background:#fff;border:var(--border);border-radius:8px;padding:12px 14px;margin-bottom:8px';
+    var ch=div(); ch.style.cssText='display:flex;justify-content:space-between;align-items:center;margin-bottom:8px';
+    var df=div('f'); df.appendChild(el('label','','Fund description'));
+    var di=document.createElement('input'); di.type='text'; di.value=r.desc||''; di.placeholder='e.g. Sygnia RA';
+    di.addEventListener('input',function(e){S.retAssets[i].desc=e.target.value;}); df.appendChild(di); ch.appendChild(df);
+    ch.appendChild(delBtn(function(){S.retAssets.splice(i,1);render();})); card.appendChild(ch);
+    var rg=g4();
+    rg.appendChild(rfld('Current fund value',r,'currentVal',{onblur:function(){render();}}));
+    rg.appendChild(rfld('Monthly contribution',r,'monthlyContrib',{onblur:function(){render();}}));
+    rg.appendChild(pfld('Growth rate %',r,'growthRate',{onblur:function(){render();}}));
+    rg.appendChild(pfld('Contrib esc %',r,'contribEsc',{onblur:function(){render();}}));
+    card.appendChild(rg);
+    // Show projected value
+    if(yrsToRet&&(N(r.currentVal)||N(r.monthlyContrib))){
+      var gr=N(r.growthRate)>0?N(r.growthRate):N(S.assump.growth)||9;
+      var esc2=N(r.contribEsc)>0?N(r.contribEsc):N(S.assump.incEsc)||6;
+      var proj=projectFund(r.currentVal,r.monthlyContrib,esc2,gr,yrsToRet);
       var cr=div('calc-result');
-      cr.innerHTML=
-        '<div class="cr-row"><span>Current fund value</span><span class="gold">'+Rfmt(r.currentVal)+'</span></div>'+
-        (N(r.monthlyContrib)>0?'<div class="cr-row"><span>Monthly contribution</span><span class="gold">'+Rfmt(r.monthlyContrib)+' ('+esc+'% p.a. escalation)</span></div>':'')+
-        '<div class="cr-row big"><span>Projected value at retirement (age '+retAge+')</span><span class="gold">'+Rfmt(fv)+'</span></div>'+
-        '<div class="cr-row"><span style="font-size:11px;color:#8899bb">Growth rate: '+gr+'% · '+yrsToR+' years to grow</span></div>';
+      cr.innerHTML='<div class="cr-row"><span>Projected at age '+retAge+'</span><span class="gold">'+Rfmt(proj)+'</span></div>';
       card.appendChild(cr);
     }
     s.appendChild(card);
   });
-  s.appendChild(addBtn('+ Add Retirement Asset', function(){
-    S.retAssets.push({desc:'',currentVal:'',monthlyContrib:'',contribEsc:'',growthRate:''});render();
-  }));
+  s.appendChild(addBtn('+ Add fund / RA',function(){S.retAssets.push({desc:'',currentVal:'',monthlyContrib:'',growthRate:'',contribEsc:''});render();}));
 
-  // ── Retirement income need
-  s.appendChild(stitle('Retirement Income Needs (Today\'s Rands)'));
-  var ri=div('info'); ri.textContent='Enter what the client needs in today\'s money. The system inflates to retirement date using CPI.'; s.appendChild(ri);
+  // ── Other capital at retirement
+  s.appendChild(stitle('Other Capital / Income at Retirement'));
+  var og=g3();
+  og.appendChild(rfld('Property / asset sale proceeds', S, 'retOtherCapital', {onblur:function(){render();}}));
+  og.appendChild(rfld('Rental income today (R/pm)', S, 'retRentalPM', {onblur:function(){render();}}));
+  og.appendChild(div());
+  s.appendChild(og);
 
-  var rg3=g3();
-  rg3.appendChild(rfld('Monthly living expenses (today R)', S, 'retIncomeToday', {onblur:function(){render();}}));
-  rg3.appendChild(rfld('Medical aid (today R)', S, 'retMedAidToday', {onblur:function(){render();}}));
-  rg3.appendChild(rfld('Other monthly (today R)', S, 'retOtherMonthly', {onblur:function(){render();}}));
-  s.appendChild(rg3);
+  // ── Calculator
+  if(yrsToRet && yrsToRet > 0){
+    var totalMonthlyNeed = (S.retNeeds||[]).reduce(function(a,r){return a+N(r.amtToday);},0);
+    var rentalAtRet = N(S.retRentalPM)>0?Math.round(N(S.retRentalPM)*Math.pow(1+N(S.assump.cpi)/100,yrsToRet)):0;
+    var monthlyAtRet = totalMonthlyNeed>0?Math.round(totalMonthlyNeed*Math.pow(1+N(S.assump.cpi)/100,yrsToRet)):0;
+    var netMonthlyGap = Math.max(0, monthlyAtRet - rentalAtRet);
+    var netToday = netMonthlyGap>0?netMonthlyGap/Math.pow(1+N(S.assump.cpi)/100,yrsToRet):0;
+    var capNeed = netToday>0?retirementCapitalNeeded(netToday,yrsToRet,yrsInRet,S.assump.cpi,S.assump.retReturn):0;
+    var lumpNeed = (S.retLumps||[]).reduce(function(a,r){return a+N(r.amt);},0);
+    var totalCapNeed = capNeed + lumpNeed;
+    var totalProj = S.retAssets.reduce(function(a,r){
+      if(!N(r.currentVal)&&!N(r.monthlyContrib)) return a;
+      var gr=N(r.growthRate)>0?N(r.growthRate):N(S.assump.growth)||9;
+      var esc3=N(r.contribEsc)>0?N(r.contribEsc):N(S.assump.incEsc)||6;
+      return a+projectFund(r.currentVal,r.monthlyContrib,esc3,gr,yrsToRet);
+    },0)+N(S.retOtherCapital);
+    var retGap = totalProj - totalCapNeed;
 
-  // Lump sums at retirement
-  s.appendChild(stitle('Lump Sum Needs at Retirement'));
-  var lst=document.createElement('table');
-  lst.innerHTML='<thead><tr><th>Description</th><th>Amount (today R)</th><th></th></tr></thead>';
-  var lsb=document.createElement('tbody');
-  S.retLumps.forEach(function(r,i){
-    var tr=document.createElement('tr');
-    var t1=document.createElement('td'); var di=document.createElement('input'); di.type='text'; di.value=r.desc||'';
-    di.addEventListener('input',function(e){S.retLumps[i].desc=e.target.value;}); t1.appendChild(di); tr.appendChild(t1);
-    var t2=document.createElement('td'); var rw=div('td-r'); rw.appendChild(el('span','rp','R'));
-    var ai=document.createElement('input'); ai.type='text'; ai.inputMode='numeric'; ai.value=r.amt||''; ai.placeholder='0';
-    ai.addEventListener('input',function(e){S.retLumps[i].amt=e.target.value;}); rw.appendChild(ai); t2.appendChild(rw); tr.appendChild(t2);
-    var t3=document.createElement('td'); t3.appendChild(delBtn(function(){S.retLumps.splice(i,1);render();})); tr.appendChild(t3);
-    lsb.appendChild(tr);
-  });
-  lst.appendChild(lsb); var lstw=div('twrap'); lstw.appendChild(lst); s.appendChild(lstw);
-  s.appendChild(addBtn('+ Add Lump Sum', function(){S.retLumps.push({desc:'',amt:''});render();}));
-
-  // ── Retirement projection summary
-  if(yrsToR!==null){
-    var totalProj=S.retAssets.reduce(function(sum,r){
-      if(!N(r.currentVal)&&!N(r.monthlyContrib)) return sum;
-      var gr=N(r.growthRate)>0?r.growthRate:S.assump.growth;
-      var esc=N(r.contribEsc)>0?r.contribEsc:S.assump.incEsc;
-      return sum+projectFund(r.currentVal,r.monthlyContrib,esc,gr,yrsToR);
-    },0);
-
-    // Project other assets that will be sold or are capital-available at retirement
-    var otherCapAtRet = 0;
-    var otherIncAtRet = 0; // monthly income from income-generating assets (today's R — inflated below)
-    S.otherAssets.forEach(function(a){
-      var role = a.retirementRole || 'Not included';
-      if (role === 'Not included') return;
-      var gr = N(a.growthRate) > 0 ? a.growthRate : S.assump.growth;
-      var projVal = N(a.val) * Math.pow(1 + pct(gr), yrsToR);
-      if (role === 'Sold — capital to retirement') {
-        otherCapAtRet += Math.round(projVal);
-      } else if (role === 'Capital available (not sold)') {
-        otherCapAtRet += Math.round(projVal); // not sold but available as backstop
-      } else if (role === 'Generates income (farm/business)') {
-        // Show projected income as monthly amount (inflated at CPI)
-        var incToday = N(a.retirementIncomePM);
-        otherIncAtRet += incToday > 0 ? Math.round(incToday * Math.pow(1 + pct(S.assump.cpi), yrsToR)) : 0;
-      }
-    });
-
-    // Also project rental income from properties at retirement
-    var rentalAtRet = 0;
-    S.props.forEach(function(p){
-      if (!p.soldAtRetirement && N(p.rental) > 0) {
-        var esc2 = N(p.rentalEsc) > 0 ? p.rentalEsc : S.assump.cpi;
-        rentalAtRet += Math.round(N(p.rental) * Math.pow(1 + pct(esc2), yrsToR));
-      }
-    });
-
-    var monthlyNeedToday=N(S.retIncomeToday)+N(S.retMedAidToday)+N(S.retOtherMonthly);
-    var lumpSumNeedToday=S.retLumps.reduce(function(sum,r){return sum+N(r.amt);},0);
-
-    // Inflate monthly need to retirement date
-    var monthlyAtRet=monthlyNeedToday>0?monthlyNeedToday*Math.pow(1+pct(S.assump.cpi),yrsToR):0;
-    var lumpAtRet=lumpSumNeedToday>0?lumpSumNeedToday*Math.pow(1+pct(S.assump.cpi),yrsToR):0;
-
-    // Monthly income from other sources at retirement reduces capital needed
-    var totalMonthlyOtherAtRet = otherIncAtRet + rentalAtRet; // already inflated
-    var monthlyGapAtRet = Math.max(0, monthlyAtRet - totalMonthlyOtherAtRet);
-
-    // Capital needed only for the income gap not covered by ongoing income sources
-    var capForIncome = retirementCapitalNeeded(
-      monthlyGapAtRet > 0 ? monthlyGapAtRet / Math.pow(1+pct(S.assump.cpi), yrsToR) : 0,
-      yrsToR, yrsInRet, S.assump.cpi, S.assump.retReturn
-    );
-    var totalCapAvail  = totalProj + otherCapAtRet;
-    var totalCapNeeded = capForIncome + lumpAtRet;
-    var gap = totalCapAvail - totalCapNeeded;
-
-    if(monthlyNeedToday>0||totalProj>0||otherCapAtRet>0){
-      s.appendChild(stitle('Retirement Projection Summary'));
-
-      // Show non-RA income sources if any
-      if (totalMonthlyOtherAtRet > 0) {
-        var incSrcBox = div('info');
-        incSrcBox.style.cssText = 'background:#f0fdf4;border-color:#86efac;color:#166534;margin-bottom:10px';
-        incSrcBox.innerHTML = '✓ <strong>Other income at retirement:</strong> ';
-        var parts = [];
-        if (rentalAtRet > 0) parts.push('Rental: <strong>' + Rfmt(rentalAtRet) + '/pm</strong> (inflated at esc rate)');
-        if (otherIncAtRet > 0) parts.push('Business/farm income: <strong>' + Rfmt(otherIncAtRet) + '/pm</strong> (inflated at CPI)');
-        incSrcBox.innerHTML += parts.join(' · ');
-        incSrcBox.innerHTML += ' — this reduces the capital needed from your RA/investment funds.';
-        s.appendChild(incSrcBox);
-      }
-
-      var cards2=div('cards'); cards2.style.marginTop='0';
-      var cd=[
-        {l:'RA/Investment fund at ret.',v:totalProj,c:'',sub:null},
-        {l:'Other capital at retirement',v:otherCapAtRet,c:'',sub:otherCapAtRet>0?'Sold/available assets':'—'},
-        {l:'Total capital available',v:totalCapAvail,c:'ok',sub:null},
-        {l:'Monthly need (at retirement)',v:monthlyAtRet,c:'',sub:'Before other income'},
-        {l:'Monthly covered by other sources',v:totalMonthlyOtherAtRet,c:totalMonthlyOtherAtRet>0?'ok':'',sub:'Rental + farm/business'},
-        {l:'Capital needed from funds',v:totalCapNeeded,c:'',sub:'For uncovered income + lumps'},
-        {l:'Surplus / Shortfall',v:gap,c:gap>=0?'ok':'bad',sub:null}
-      ];
-      cd.forEach(function(x){
-        var c=div('card');
-        c.innerHTML='<div class="lbl">'+x.l+'</div><div class="val '+x.c+'">'+Rfmt(Math.abs(x.v))+(x.v<0&&x.l.indexOf('Surplus')>-1?' ▼':'')+( x.v===0&&x.l.indexOf('Other')>-1?'<span style="font-size:12px;color:var(--sub)"> —</span>':'')+
-          '</div>'+(x.sub?'<div class="sub">'+x.sub+'</div>':'');
-        cards2.appendChild(c);
-      });
-      s.appendChild(cards2);
-
-      // Other asset projections detail table
-      var hasOtherRet = S.otherAssets.some(function(a){ return (a.retirementRole||'Not included') !== 'Not included'; }) ||
-                        S.props.some(function(p){ return N(p.rental) > 0 && !p.soldAtRetirement; });
-      if (hasOtherRet) {
-        s.appendChild(el('div','',''));
-        var otherTbl = document.createElement('table');
-        otherTbl.innerHTML = '<thead><tr><th>Asset</th><th>Current value</th><th>Growth %</th><th>Projected at retirement</th><th>Role</th></tr></thead>';
-        var otherTb = document.createElement('tbody');
-        S.otherAssets.forEach(function(a){
-          var role = a.retirementRole || 'Not included';
-          if (role === 'Not included') return;
-          var gr = N(a.growthRate) > 0 ? a.growthRate : S.assump.growth;
-          var projV = Math.round(N(a.val) * Math.pow(1+pct(gr), yrsToR));
-          var tr3 = document.createElement('tr');
-          tr3.innerHTML = '<td>'+( a.desc||'Asset')+'</td><td>'+Rfmt(a.val)+'</td><td>'+gr+'%</td><td style="font-weight:700">'+Rfmt(projV)+'</td>' +
-            '<td style="font-size:11px;color:var(--sub)">'+role+'</td>';
-          otherTb.appendChild(tr3);
-        });
-        S.props.forEach(function(p){
-          if (!N(p.rental) || p.soldAtRetirement) return;
-          var esc3 = N(p.rentalEsc) > 0 ? p.rentalEsc : S.assump.cpi;
-          var projRent = Math.round(N(p.rental) * Math.pow(1+pct(esc3), yrsToR));
-          var trR = document.createElement('tr');
-          trR.innerHTML = '<td>'+(p.desc||'Property')+' (rental)</td><td>'+Rfmt(p.rental)+'/pm</td><td>'+esc3+'%</td><td style="font-weight:700">'+Rfmt(projRent)+'/pm</td>' +
-            '<td style="font-size:11px;color:var(--sub)">Ongoing income</td>';
-          otherTb.appendChild(trR);
-        });
-        otherTbl.appendChild(otherTb);
-        var otw = div('twrap'); otw.appendChild(otherTbl); s.appendChild(otw);
-      }
-
-      var rdet=div('info'); rdet.style.marginTop='8px';
-      rdet.innerHTML='Assumptions: CPI '+S.assump.cpi+'% · RA/fund growth default '+S.assump.growth+
-        '% · Drawdown rate in retirement '+S.assump.retReturn+'% · Life expectancy 85 · Years in retirement: '+yrsInRet+
-        '<br><span style="font-size:11px">Blank growth rates on retirement cards use the default '+S.assump.growth+'%. Blank other-asset growth uses the same default.</span>';
-      s.appendChild(rdet);
+    s.appendChild(stitle('Retirement Capital Summary'));
+    var calcBox=div(); calcBox.style.cssText='background:#1a2a4a;border-radius:8px;padding:14px 16px;margin-bottom:14px';
+    function rRow(lbl,val,sub,bold){
+      var r2=div(); r2.style.cssText='display:flex;justify-content:space-between;padding:'+(bold?'7':'4')+'px 0'+(bold?';border-top:1px solid #334;margin-top:4px':'');
+      var l2=el('span','',lbl); l2.style.cssText='color:#ccd6f6;font-size:'+(sub?'11':'12')+'px'+(sub?';padding-left:14px':'');
+      var v2=el('span','',val); v2.style.cssText='font-size:'+(sub?'11':'12')+'px;color:#c8a84b'+(bold?';font-weight:700':'');
+      r2.appendChild(l2); r2.appendChild(v2); calcBox.appendChild(r2);
     }
+    rRow('Monthly need today', Rfmt(totalMonthlyNeed)+' /pm');
+    rRow('Monthly need at retirement (age '+retAge+')', Rfmt(monthlyAtRet)+' /pm');
+    if(rentalAtRet>0) rRow('Less: rental at retirement', '('+Rfmt(rentalAtRet)+'/pm)', true);
+    rRow('Net monthly gap at retirement', Rfmt(netMonthlyGap)+' /pm', false, true);
+    rRow('Capital needed to fund income', '('+Rfmt(capNeed)+')', false, true);
+    if(lumpNeed>0) rRow('Lump sum needs', '('+Rfmt(lumpNeed)+')', true);
+    rRow('Total capital required', '('+Rfmt(totalCapNeed)+')', false, true);
+    rRow('Projected capital at retirement', Rfmt(totalProj), false, true);
+    var gapRow=div(); gapRow.style.cssText='display:flex;justify-content:space-between;padding:8px 0;margin-top:8px;border-top:2px solid #445;font-size:14px;font-weight:700';
+    var gl2=el('span','',retGap>=0?'Surplus':'Shortfall'); gl2.style.color='#ccd6f6';
+    var gv2=el('span','',Rfmt(Math.abs(retGap))); gv2.style.color=retGap>=0?'#86efac':'#f87171';
+    gapRow.appendChild(gl2); gapRow.appendChild(gv2); calcBox.appendChild(gapRow);
+    s.appendChild(calcBox);
   }
 
-  s.appendChild(txfld('Retirement notes', S, 'retNotes'));
   return s;
 }
-
-// ═══════════════════════════════════════════════════════════
-// ═══════════════════════════════════════════════════════════
-// TAB 6 — POLICY SCHEDULE (fully editable in FNA)
-// ═══════════════════════════════════════════════════════════
-var POL_TYPES = [
-  'Life / Income Protector','Business Assurance',
-  'Retirement Annuity','Pension Fund','Provident Fund','Pension Preservation','Provident Preservation',
-  'Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment',
-  'Unit Trust','Tax Free Savings','Living Annuity',
-  'Medical Aid','Other'
-];
-var POL_RA_TYPES  = ['Retirement Annuity','Pension Fund','Provident Fund','Pension Preservation','Provident Preservation'];
-var POL_INV_TYPES = ['Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment','Unit Trust','Tax Free Savings','Living Annuity'];
 
 function buildPolicies() {
   var s = div();
