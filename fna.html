@@ -2569,6 +2569,15 @@ function buildEstate() {
   // toBiz = for display card only — business outside personal estate
   var toBiz = bizOutside;
 
+  // polsActuallyInEstate = policies where BeneficiaryType='Estate' only
+  // These are the only policies actually administered by the executor
+  // Third Party / trust policies and business assurance are deemed property only
+  var polsActuallyInEstate = (S.importedPols||[]).reduce(function(sum,p){
+    if (p.Type === 'Business Assurance') return sum;
+    if ((p.BeneficiaryType||'') === 'Estate') return sum + N(p.BenDeath);
+    return sum;
+  }, 0);
+
   if (pols.length === 0) {
     var noPol = div('info'); noPol.textContent = 'No policies captured. Add policies on the Policies tab.';
     s.appendChild(noPol);
@@ -2733,7 +2742,7 @@ function buildEstate() {
   // Available to estate: estate-beneficiary policy proceeds + liquid assets
   // s4q and business assurance proceeds do NOT flow through the estate
   var liquidCash     = S.otherAssets.reduce(function(sum,a){ return sum+N(a.val); },0);
-  var liquidPolicies = dutiablePols;  // only estate-beneficiary policies flow to estate
+  var liquidPolicies = polsActuallyInEstate;  // only estate-beneficiary policies flow through executor
   var liquidAssets   = liquidCash + liquidPolicies;
   var estateOwnCosts = dutyPayableByEstate + execFees;
   var liquidityGap   = liquidAssets - estateOwnCosts;
@@ -2794,7 +2803,8 @@ function buildEstate() {
   }
 
   calcRow('Estate Duty', Rfmt(estateDuty), false, false, true);
-  calcRow('Executor fees (~4.025% of gross estate)', Rfmt(execFees), true);
+  calcRow('Executor fees (4.025% on R' + Rfmt(execFeeBasis) + ')', Rfmt(execFees), true);
+  calcRowSub('Physical assets + estate-routed policies only', '');
   calcRow('Total Estate Costs', Rfmt(totalEstateCosts), false, true, true);
 
   // Apportionment section
@@ -2866,19 +2876,28 @@ function buildEstate() {
     (spouseResidual>0?'<br>Estate residual: '+Rfmt(spouseResidual):'') + '</div>';
   outCards.appendChild(c_spouse);
 
-  // Estate-routed and third party policies
-  if (dutiablePols > 0 || bizDutiable > 0) {
+  // Policies actually paid INTO the estate (estate beneficiary only)
+  if (polsActuallyInEstate > 0) {
     var c_estate = div('card');
     c_estate.innerHTML = '<div class="lbl">Paid into estate</div>' +
-      '<div class="val warn">' + Rfmt(dutiablePols + bizDutiable) + '</div>' +
-      '<div class="sub">Used to fund estate duty, executor fees, bequests</div>';
+      '<div class="val warn">' + Rfmt(polsActuallyInEstate) + '</div>' +
+      '<div class="sub">Administered by executor — funds estate costs and bequests</div>';
     outCards.appendChild(c_estate);
+  }
+  // Policies that are deemed property but paid DIRECT to beneficiary (not through estate)
+  var deemedDirect = dutiablePols - polsActuallyInEstate + bizDutiable;
+  if (deemedDirect > 0) {
+    var c_deemed = div('card');
+    c_deemed.innerHTML = '<div class="lbl">Deemed property — paid direct</div>' +
+      '<div class="val">' + Rfmt(deemedDirect) + '</div>' +
+      '<div class="sub">Included in estate duty calc only — paid direct to trust / CC / creditor. Beneficiary pays proportional duty share.</div>';
+    outCards.appendChild(c_deemed);
   }
   if (bizOutside > 0) {
     var c_biz = div('card');
-    c_biz.innerHTML = '<div class="lbl">Business assurance</div>' +
+    c_biz.innerHTML = '<div class="lbl">Business assurance — outside estate</div>' +
       '<div class="val">' + Rfmt(bizOutside) + '</div>' +
-      '<div class="sub">Paid outside personal estate</div>';
+      '<div class="sub">Keyman / buy-sell — paid outside personal estate, no estate duty</div>';
     outCards.appendChild(c_biz);
   }
 
