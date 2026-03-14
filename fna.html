@@ -1294,47 +1294,27 @@ function buildAssets() {
     var alb1=el('label','','Realised at death'); alb1.style.cssText='font-size:12px;cursor:pointer;color:var(--navy)';
     deathWrap.appendChild(acb1); deathWrap.appendChild(alb1);
     ar2.appendChild(deathWrap);
-    // Show estate routing dropdown + notes when soldAtDeath is ticked
+    // Show estate dutiable tick + notes when soldAtDeath is ticked
     if (a.soldAtDeath) {
-      var benWrap = div(); benWrap.style.cssText='display:flex;flex-wrap:wrap;gap:12px;align-items:end;margin-top:8px;padding:10px 12px;background:#fff7ed;border-radius:6px;border:1px solid #fed7aa;width:100%';
-      var benHdr = el('div','','<strong>☠ At death — estate routing:</strong>'); benHdr.style.cssText='font-size:12px;color:#92400e;width:100%'; benWrap.appendChild(benHdr);
+      var benWrap = div(); benWrap.style.cssText='display:flex;flex-wrap:wrap;gap:16px;align-items:center;margin-top:8px;padding:10px 12px;background:#fff7ed;border-radius:6px;border:1px solid #fed7aa;width:100%';
 
-      // Dropdown — maps directly to estate calculation buckets
-      var routeFld = div('f'); routeFld.style.cssText='flex:1;min-width:220px';
-      routeFld.appendChild(el('label','','Proceeds route to'));
-      var routeSel = document.createElement('select');
-      routeSel.style.cssText='border:1.5px solid var(--mist);border-radius:7px;padding:7px 10px;font-size:13px;font-family:inherit;width:100%';
-      var routeOpts = [
-        { v: '',                        l: '— Select routing —' },
-        { v: 'Dutiable estate',         l: 'Dutiable estate — attracts estate duty' },
-        { v: 'Spouse — s.4(q)',         l: 'Spouse — Section 4(q) deduction (not dutiable)' },
-        { v: 'Third party direct',      l: 'Third party direct — deemed property (still dutiable)' },
-        { v: 'Trust / CC',              l: 'Trust / CC — outside estate (not dutiable)' },
-        { v: 'Business — keyman',       l: 'Business — keyman / buy-sell (outside personal estate)' },
-      ];
-      routeOpts.forEach(function(opt) {
-        var o = document.createElement('option'); o.value = opt.v; o.textContent = opt.l;
-        if ((a.deathRoute||'') === opt.v) o.selected = true;
-        routeSel.appendChild(o);
-      });
-      routeSel.addEventListener('change', function(e) { S.otherAssets[i].deathRoute = e.target.value; render(); });
-      routeFld.appendChild(routeSel); benWrap.appendChild(routeFld);
+      // Estate dutiable tick — same pattern as policy EstateDutiable
+      var edWrap = div(); edWrap.style.cssText='display:flex;align-items:center;gap:6px';
+      var edCb = document.createElement('input'); edCb.type='checkbox';
+      edCb.checked = (a.deathDutiable !== false); // default true
+      edCb.addEventListener('change', function(e) { S.otherAssets[i].deathDutiable = e.target.checked; render(); });
+      var edLbl = el('label','','Estate dutiable'); edLbl.style.cssText='font-size:12px;font-weight:600;cursor:pointer;color:var(--navy)';
+      edWrap.appendChild(edCb); edWrap.appendChild(edLbl);
+      var edExp = el('span','',''); edExp.style.cssText='font-size:11px;color:var(--sub)';
+      edExp.textContent = a.deathDutiable !== false ? '— proceeds form part of dutiable estate' : '— proceeds outside dutiable estate';
+      edWrap.appendChild(edExp);
+      benWrap.appendChild(edWrap);
 
-      // Routing explanation label
-      var routeExp = el('div','',''); routeExp.style.cssText='font-size:11px;width:100%;margin-top:2px';
-      var dr = a.deathRoute||'';
-      if (dr === 'Dutiable estate')    routeExp.innerHTML='⚖ <span style="color:#b45309">Added to dutiable estate — estate duty and executor fees apply.</span>';
-      else if (dr === 'Spouse — s.4(q)') routeExp.innerHTML='✓ <span style="color:#166534">Section 4(q) deduction — not dutiable. Spouse receives proceeds outside estate.</span>';
-      else if (dr === 'Third party direct') routeExp.innerHTML='⚖ <span style="color:#92400e">Deemed property — paid to third party but still dutiable. Estate duty applies on this amount.</span>';
-      else if (dr === 'Trust / CC')    routeExp.innerHTML='🏛 <span style="color:#1e40af">Held in trust or CC — outside personal estate, no estate duty.</span>';
-      else if (dr === 'Business — keyman') routeExp.innerHTML='💼 <span style="color:#6b21a8">Business asset — outside personal estate. Keyman / buy-sell arrangement.</span>';
-      benWrap.appendChild(routeExp);
-
-      // Free text notes for clarity
-      var benNoteFld = div('f'); benNoteFld.style.cssText='flex:2;min-width:220px';
-      benNoteFld.appendChild(el('label','','Notes (beneficiary / arrangement details)'));
+      // Notes field — who receives it, trust name, arrangement etc
+      var benNoteFld = div('f'); benNoteFld.style.cssText='flex:1;min-width:220px';
+      benNoteFld.appendChild(el('label','','Notes (beneficiary / arrangement)'));
       var benNoteInp = document.createElement('input'); benNoteInp.type='text';
-      benNoteInp.value = a.deathProceedsNote||''; benNoteInp.placeholder='e.g. SJK Trust, repays keyman loan, buy-out partner at R5m';
+      benNoteInp.value = a.deathProceedsNote||''; benNoteInp.placeholder='e.g. SJK Trust, spouse, repays keyman loan';
       benNoteInp.style.cssText='border:1.5px solid var(--mist);border-radius:7px;padding:7px 10px;font-size:13px;font-family:inherit;width:100%';
       benNoteInp.addEventListener('input',function(e){S.otherAssets[i].deathProceedsNote=e.target.value;});
       benNoteFld.appendChild(benNoteInp); benWrap.appendChild(benNoteFld);
@@ -2351,16 +2331,10 @@ function buildEstate() {
     if (!a.desc && !N(a.val)) return;
     var desc = a.desc || 'Asset';
     var ov = getOverride(desc);
-    // If soldAtDeath and routed OUTSIDE estate, exclude from dutiable assets table
-    // (these are handled separately in the estate routing section below)
-    var dr = a.soldAtDeath ? (a.deathRoute||'') : '';
-    var outsideEstate = dr === 'Spouse — s.4(q)' || dr === 'Third party direct' || dr === 'Trust / CC' || dr === 'Business — keyman';
-    if (a.soldAtDeath && outsideEstate) {
-      // Show in table but default dutiable to 0 (user can override)
-      allAssets.push({ desc: desc + ' (' + dr + ')', fullVal: N(a.val), dutiable: ov ? ov.dutiable : '0', bond: 0, routeNote: dr });
-    } else {
-      allAssets.push({ desc: desc, fullVal: N(a.val), dutiable: ov ? ov.dutiable : String(N(a.val)), bond: 0 });
-    }
+    // If soldAtDeath and marked as NOT dutiable, default dutiable amount to 0
+    // Advisor can still override in the Estate tab
+    var defaultDutiable = (a.soldAtDeath && a.deathDutiable === false) ? '0' : String(N(a.val));
+    allAssets.push({ desc: desc, fullVal: N(a.val), dutiable: ov ? ov.dutiable : defaultDutiable, bond: 0 });
   });
 
   if (allAssets.length === 0) {
@@ -2451,24 +2425,9 @@ function buildEstate() {
     else                           toBiz     += ben;  // business assurance — outside personal estate
   });
 
-  // Also route physical assets sold at death into the correct estate buckets
-  // This feeds the same routing summary cards and estate duty calculation
-  S.otherAssets.forEach(function(a) {
-    if (!a.soldAtDeath || !N(a.val)) return;
-    var dr = a.deathRoute || '';
-    if (dr === 'Dutiable estate')     toEstate  += N(a.val);
-    else if (dr === 'Spouse — s.4(q)') section4q += N(a.val);
-    else if (dr === 'Third party direct') toEstate += N(a.val); // deemed property — dutiable
-    else if (dr === 'Trust / CC')     toBiz     += N(a.val); // outside personal estate
-    else if (dr === 'Business — keyman') toBiz   += N(a.val);
-    // If no route selected, asset remains in allAssets table as dutiable (default)
-  });
-  S.props.forEach(function(p) {
-    if (!p.soldAtDeath || !N(p.val)) return;
-    // Properties sold at death — currently always dutiable unless in trust
-    // No routing dropdown for properties yet — they stay in allAssets table
-    // Future: add same routing dropdown to property cards
-  });
+  // Physical assets sold at death — already handled via allAssets table above
+  // deathDutiable tick controls whether they default to dutiable or 0 in the estate table
+  // No separate routing needed here — advisor overrides dutiable amount in Estate tab
 
   if (pols.length === 0) {
     var noPol = div('info'); noPol.textContent = 'No policies captured. Add policies on the Policies tab.';
