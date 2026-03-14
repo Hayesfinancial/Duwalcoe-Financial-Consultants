@@ -3205,181 +3205,194 @@ function buildEstate() {
 // ═══════════════════════════════════════════════════════════
 function buildSummary() {
   var s = div();
-
-  // ── Read all data from existing tabs — no manual entry
   var pols = S.importedPols || [];
 
-  // ── DEATH: Capital needs (from Needs tab)
-  var needExec   = 0, needMaster = 0, needFuneral = 0, needEstateDuty = 0, needAccrual = 0, needTax = 0;
-  var needLumps  = S.deathCapital.reduce(function(sum,r){ return sum+N(r.amt); }, 0);
-  var needLiabs  = S.deathLiabs.reduce(function(sum,r){ return sum+N(r.amt); }, 0);
+  // ── Replicate estate calculations for summary (same logic as buildEstate)
+  // Physical assets
+  var sumPhysical = S.props.reduce(function(a,p){return a+N(p.val);},0) +
+                    S.vehicles.reduce(function(a,v){return a+N(v.val);},0) +
+                    S.otherAssets.reduce(function(a,x){return a+N(x.val);},0);
+  var sumLiabs    = S.props.reduce(function(a,p){return a+N(p.bond);},0) +
+                    S.vehicles.reduce(function(a,v){return a+N(v.finance);},0) +
+                    S.liabilities.reduce(function(a,l){return a+N(l.bal);},0);
 
-  // Try to read estate-calculated figures if estate tab has been visited
-  // These mirror the estate tab calculations
-  var cliAge   = ageFrom(S.cli.dob);
-  var retAge   = N(S.cli.retAge)||65;
-  var yrsToR   = cliAge ? Math.max(0, retAge - cliAge) : 20;
-
-  // Personal risk policies for death cover — exclude business assurance AND RA/investment types
-  // RA/investment policies are counted separately via raOnDeath to avoid double-counting
-  var allPolTypes = POL_RA_TYPES.concat(POL_INV_TYPES);
-  var riskPols = pols.filter(function(p){
-    return p.Type !== 'Business Assurance' && allPolTypes.indexOf(p.Type) === -1;
+  // Policy routing
+  var sum_s4q=0, sum_estate=0, sum_3p=0, sum_biz_dut=0;
+  pols.forEach(function(p){
+    if(p.Type==='Business Assurance'){
+      if(p.EstateDutiable==='Yes') sum_biz_dut += N(p.LoanAmount)||N(p.BenDeath);
+      return;
+    }
+    var ben=N(p.BenDeath); if(!ben) return;
+    var bt=p.BeneficiaryType||'';
+    if(bt==='Spouse')       sum_s4q    += ben;
+    else if(bt==='Estate')  sum_estate += ben;
+    else if(bt==='Third Party') sum_3p += ben;
   });
-  var totalDeathCover = riskPols.reduce(function(sum,p){ return sum + N(p.BenDeath); }, 0);
-  var totalDisCover   = pols.reduce(function(sum,p){ return sum + N(p.BenDisability); }, 0);
-  var totalDDCover    = pols.reduce(function(sum,p){ return sum + N(p.BenDreadDisease); }, 0);
+  var sum_s4q_assets=0;
+  S.props.forEach(function(p){if(p.deathBenType==='Spouse') sum_s4q_assets+=N(p.val);});
+  S.vehicles.forEach(function(v){if(v.deathBenType==='Spouse') sum_s4q_assets+=N(v.val);});
+  S.otherAssets.forEach(function(a){if(a.deathBenType==='Spouse') sum_s4q_assets+=N(a.val);});
 
-  // Liquid assets (realised on death) — investment-type other assets only
-  var liquidOnDeath = S.otherAssets.reduce(function(sum,a){
-    var t = (a.type||'').toLowerCase();
-    var illiquid = t.indexOf('business')>-1 || t.indexOf('farm')>-1 || t.indexOf('personal')>-1;
-    return sum + (illiquid ? 0 : N(a.val));
-  }, 0);
+  var toEstate_sum = sum_s4q + sum_estate + sum_3p + sum_biz_dut;
+  var grossEstate_sum = sumPhysical + toEstate_sum;
+  var netEstate_sum   = Math.max(0, grossEstate_sum - sumLiabs);
+  var section4q_sum   = sum_s4q + sum_s4q_assets;
 
-  // RA/investment fund values available on death
-  var raOnDeath = pols.reduce(function(sum,p){
-    if (allPolTypes.indexOf(p.Type) > -1) return sum + N(p.BenFundValue);
-    return sum;
-  }, 0);
+  // Accrual
+  var accrualClaim_sum = 0;
+  var isOCP_sum = (S.cli.marital||'').toLowerCase().indexOf('accrual') > -1;
+  if(isOCP_sum){
+    var accrPhys = sumPhysical;
+    var accrRA   = pols.reduce(function(a,p){ return POL_RA_TYPES.indexOf(p.Type)>-1?a+N(p.BenFundValue):a; },0);
+    var clientAccr = Math.max(0, accrPhys + accrRA - N((S.accrual||{}).clientStartVal));
+    var spouseAccr = Math.max(0, N((S.accrual||{}).spouseCurrentAssets) - N((S.accrual||{}).spouseStartVal));
+    if(clientAccr > spouseAccr) accrualClaim_sum = (clientAccr - spouseAccr) / 2;
+  }
 
-  var totalCapAvail = totalDeathCover + liquidOnDeath + raOnDeath;
+  // Deductions
+  var accrDed_sum   = Math.min(accrualClaim_sum, netEstate_sum);
+  var afterAccr_sum = Math.max(0, netEstate_sum - accrDed_sum);
+  var s4qDed_sum    = Math.min(section4q_sum, afterAccr_sum);
+  var afterS4q_sum  = Math.max(0, afterAccr_sum - s4qDed_sum);
+  var dutiable_sum  = Math.max(0, afterS4q_sum - ABATEMENT);
+  var duty_sum      = dutiable_sum <= DUTY_THRESH
+    ? dutiable_sum * DUTY_RATE1
+    : DUTY_THRESH * DUTY_RATE1 + (dutiable_sum - DUTY_THRESH) * DUTY_RATE2;
 
-  // Capital needs
-  var totLiabNeed  = S.deathLiabs.reduce(function(sum,r){ return sum+N(r.amt); },0);
-  var totCapNeed   = S.deathCapital.reduce(function(sum,r){ return sum+N(r.amt); },0);
-  var totalCapNeed = totLiabNeed + totCapNeed;
+  // Apportionment
+  function appSum(v){ return dutiable_sum>0&&duty_sum>0 ? duty_sum*(v/dutiable_sum) : 0; }
+  var dutyEstate_sum = appSum(sumPhysical) + appSum(sum_estate);
 
-  // Income needs (capitalised)
-  var totIncCap  = S.deathIncome.reduce(function(sum,r){ return sum+calcIncomeNeed(r); },0);
-  var incomeAvail = 0; // TODO: ongoing income sources after death
+  // Executor fees
+  var execBasis_sum = sumPhysical + sum_estate;
+  var execFees_sum  = execBasis_sum * EXEC_RATE;
 
-  // ── SECTION: Death cover summary
-  if (S.scope.death) {
-    s.appendChild(stitle('Death \u2014 Needs vs Cover'));
+  // Liquidity needs (estate's own costs)
+  var estateNeeds_sum = dutyEstate_sum + execFees_sum + accrDed_sum;
 
-    // CAPITAL section
-    var capBox = div();
-    capBox.style.cssText = 'background:var(--navy);color:#fff;border-radius:9px;padding:18px 20px;margin-bottom:12px';
-    var capTtl = div(); capTtl.style.cssText='font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--gold);margin-bottom:10px';
+  // ── DEATH SUMMARY
+  if(S.scope.death){
+    s.appendChild(stitle('Death \u2014 Capital Needs vs Available'));
+
+    var capBox=div(); capBox.style.cssText='background:var(--navy);color:#fff;border-radius:9px;padding:18px 20px;margin-bottom:12px';
+    var capTtl=div(); capTtl.style.cssText='font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--gold);margin-bottom:10px';
     capTtl.textContent='Capital'; capBox.appendChild(capTtl);
 
-    function sumRow(lbl, val, indent, bold, borderTop) {
-      var row = div();
-      row.style.cssText='display:flex;justify-content:space-between;padding:4px 0;font-size:13px'+
-        (indent?';padding-left:20px':'')+(borderTop?';border-top:1px solid #334;margin-top:8px;padding-top:10px':'')+(bold?';font-weight:700':'');
+    function sRow(lbl,val,indent,bold,bt){
+      var row=div(); row.style.cssText='display:flex;justify-content:space-between;padding:4px 0;font-size:13px'+(indent?';padding-left:20px':'')+(bt?';border-top:1px solid #334;margin-top:8px;padding-top:10px':'')+(bold?';font-weight:700':'');
       var ls=el('span','',lbl); ls.style.color='#ccd6f6';
       var vs=el('span','',val); vs.style.color=bold?'var(--gold)':'#ccd6f6';
       row.appendChild(ls); row.appendChild(vs); capBox.appendChild(row);
     }
-    function sumSub(lbl, val) {
-      var row=div(); row.style.cssText='display:flex;justify-content:space-between;padding:2px 0 2px 16px;font-size:11px;color:#8899bb';
-      row.innerHTML='<span>'+lbl+'</span><span>'+val+'</span>'; capBox.appendChild(row);
-    }
+    function sSub(lbl,val){ var row=div(); row.style.cssText='display:flex;justify-content:space-between;padding:2px 0 2px 16px;font-size:11px;color:#8899bb'; row.innerHTML='<span>'+lbl+'</span><span>'+val+'</span>'; capBox.appendChild(row); }
 
-    // Capital needed
-    sumRow('Capital needed', '');
-    if (totLiabNeed > 0) {
-      S.deathLiabs.forEach(function(r){ if(N(r.amt)>0) sumSub(r.desc||'Liability', '('+Rfmt(r.amt)+')'); });
-    }
-    if (totCapNeed > 0) {
-      S.deathCapital.forEach(function(r){ if(N(r.amt)>0) sumSub(r.desc||'Capital need', '('+Rfmt(r.amt)+')'); });
-    }
-    sumRow('Total capital needed', '('+Rfmt(totalCapNeed)+')', false, false, true);
+    // ── NEEDS SIDE
+    sRow('Estate costs on death','');
+    if(execFees_sum>0)      sSub('Executor fees (4.025%)',       '('+Rfmt(execFees_sum)+')');
+    if(dutyEstate_sum>0)    sSub('Estate duty (estate\u2019s share)', '('+Rfmt(dutyEstate_sum)+')');
+    if(accrDed_sum>0)       sSub('Accrual claim payable',         '('+Rfmt(accrDed_sum)+')');
 
-    // Capital available
-    sumRow('Capital available', '', false, false, true);
-    riskPols.forEach(function(p){
-      if (N(p.BenDeath) > 0) {
-        sumSub((p.Insurer||'Policy')+(p.Product?' \u2014 '+p.Product:'')+' ('+p.BeneficiaryType+')', Rfmt(p.BenDeath));
-      }
+    // Manually entered needs (bonds, income cap, lump sums)
+    var manualLiabs = S.deathLiabs.reduce(function(a,r){return a+N(r.amt);},0);
+    var manualCap   = S.deathCapital.reduce(function(a,r){return a+N(r.amt);},0);
+    var manualInc   = S.deathIncome.reduce(function(a,r){return a+calcIncomeNeed(r);},0);
+    if(manualLiabs>0){ sRow('Additional liabilities','',false,false,true); S.deathLiabs.forEach(function(r){if(N(r.amt)>0) sSub(r.desc||'Liability','('+Rfmt(r.amt)+')');}); }
+    if(manualInc>0){   sRow('Income replacement (capitalised)','',false,false,true); S.deathIncome.forEach(function(r){var c=calcIncomeNeed(r);if(c>0) sSub((r.desc||'Income')+' '+Rfmt(N(r.incPM)||0)+'/pm','('+Rfmt(c)+')');}); }
+    if(manualCap>0){   sRow('Lump sum objectives','',false,false,true); S.deathCapital.forEach(function(r){if(N(r.amt)>0) sSub(r.desc||'Capital need','('+Rfmt(r.amt)+')');}); }
+
+    var totalNeed = estateNeeds_sum + manualLiabs + manualCap + manualInc;
+    sRow('Total capital needed','('+Rfmt(totalNeed)+')',false,false,true);
+
+    // ── AVAILABLE SIDE
+    sRow('Capital available','',false,false,true);
+
+    // Risk policies (no RA/investment — those show separately)
+    var allPolTypesArr = POL_RA_TYPES.concat(POL_INV_TYPES);
+    var riskPolsSum = pols.filter(function(p){ return p.Type!=='Business Assurance' && allPolTypesArr.indexOf(p.Type)===-1; });
+    riskPolsSum.forEach(function(p){
+      if(N(p.BenDeath)>0) sSub((p.Insurer||'Policy')+(p.Product?' \u2014 '+p.Product:'')+' ('+p.BeneficiaryType+')', Rfmt(p.BenDeath));
     });
-    if (liquidOnDeath > 0) sumSub('Liquid assets (realised on death)', Rfmt(liquidOnDeath));
-    if (raOnDeath > 0) sumSub('Retirement fund value', Rfmt(raOnDeath));
-    sumRow('Total capital available', Rfmt(totalCapAvail), false, false, true);
 
-    var capGap = totalCapAvail - totalCapNeed;
-    var gapRow = div();
-    gapRow.style.cssText='display:flex;justify-content:space-between;padding:8px 0;margin-top:8px;border-top:2px solid #445;font-size:14px;font-weight:700';
-    var gl=el('span','', capGap>=0?'Overall position \u2014 Surplus':'Overall position \u2014 Shortfall');
-    var gv=el('span','', Rfmt(Math.abs(capGap)));
-    gl.style.color='#ccd6f6'; gv.style.color=capGap>=0?'#86efac':'#f87171';
-    gapRow.appendChild(gl); gapRow.appendChild(gv); capBox.appendChild(gapRow);
+    // RA/investment fund values
+    var raSum = pols.reduce(function(a,p){ return allPolTypesArr.indexOf(p.Type)>-1?a+N(p.BenFundValue):a; },0);
+    if(raSum>0) sSub('Retirement fund value', Rfmt(raSum));
+
+    // Liquid assets
+    var liqSum = S.otherAssets.reduce(function(a,x){
+      var t=(x.type||'').toLowerCase();
+      return (t.indexOf('business')>-1||t.indexOf('farm')>-1||t.indexOf('personal')>-1)?a:a+N(x.val);
+    },0);
+    if(liqSum>0) sSub('Liquid assets (realised on death)', Rfmt(liqSum));
+
+    var totalAvail = riskPolsSum.reduce(function(a,p){return a+N(p.BenDeath);},0) + raSum + liqSum;
+    sRow('Total capital available', Rfmt(totalAvail), false, false, true);
+
+    var capGap = totalAvail - totalNeed;
+    var gRow=div(); gRow.style.cssText='display:flex;justify-content:space-between;padding:8px 0;margin-top:8px;border-top:2px solid #445;font-size:14px;font-weight:700';
+    var gl2=el('span','',capGap>=0?'Overall position \u2014 Surplus':'Overall position \u2014 Shortfall');
+    var gv2=el('span','',Rfmt(Math.abs(capGap)));
+    gl2.style.color='#ccd6f6'; gv2.style.color=capGap>=0?'#86efac':'#f87171';
+    gRow.appendChild(gl2); gRow.appendChild(gv2); capBox.appendChild(gRow);
     s.appendChild(capBox);
 
-    // Income replacement need — shown as a note if captured in Needs tab
-    if (totIncCap > 0) {
-      var incNote = div('info');
-      incNote.style.cssText = 'font-size:12px;margin-bottom:12px';
-      incNote.innerHTML = '<strong>Income replacement:</strong> A capitalised income need of <strong>' + Rfmt(totIncCap) + '</strong> ' +
-        'has been included in the capital needs above. ' +
-        'This represents the lump sum needed to fund ongoing income for the family.';
-      s.appendChild(incNote);
+    // Note about s4q and third party — not in capital available (paid direct)
+    if(sum_s4q>0||sum_3p>0){
+      var polNote=div('info'); polNote.style.cssText='font-size:11px;margin-bottom:12px';
+      var noteParts=[];
+      if(sum_s4q>0) noteParts.push('s.4(q) policies '+Rfmt(sum_s4q)+' paid direct to spouse (not in above)');
+      if(sum_3p>0)  noteParts.push('third party/trust policy '+Rfmt(sum_3p)+' paid direct to beneficiary (not in above)');
+      polNote.innerHTML = '\u2139 ' + noteParts.join(' \u00b7 ');
+      s.appendChild(polNote);
     }
   }
 
   // ── Disability, Dread, IP — simple gap rows
-  if (S.scope.disability || S.scope.dread || S.scope.ip) {
+  var totalDisCover = pols.reduce(function(a,p){return a+N(p.BenDisability);},0);
+  var totalDDCover  = pols.reduce(function(a,p){return a+N(p.BenDreadDisease);},0);
+  if(S.scope.disability||S.scope.dread||S.scope.ip){
     s.appendChild(stitle('Other Cover'));
-    var disIncCap=S.disIncome.reduce(function(sum,r){return sum+calcIncomeNeed(r);},0);
-    var disCapNeed=S.disCapital.reduce(function(sum,r){return sum+N(r.amt);},0);
+    var disIncCap=S.disIncome.reduce(function(a,r){return a+calcIncomeNeed(r);},0);
+    var disCapNeed=S.disCapital.reduce(function(a,r){return a+N(r.amt);},0);
     if(S.scope.disability) s.appendChild(buildGapRow('Disability Cover', disIncCap+disCapNeed, totalDisCover));
     if(S.scope.dread)      s.appendChild(buildGapRow('Dread Disease', N(S.dreadAmt), totalDDCover));
-    if(S.scope.ip)         s.appendChild(buildGapRow('Income Protection /pm', N(S.ipGrossPM||S.ipNettPM), S.importedPols.reduce(function(sum,p){ return sum+N(p.BenIP); },0)));
+    if(S.scope.ip)         s.appendChild(buildGapRow('Income Protection /pm', N(S.ipGrossPM||S.ipNettPM), pols.reduce(function(a,p){return a+N(p.BenIP);},0)));
   }
 
   // ── Retirement summary
-  if (S.scope.retirement) {
+  var cliAge2=ageFrom(S.cli.dob), retAge2=N(S.cli.retAge)||65;
+  var yrsToR2=cliAge2?Math.max(0,retAge2-cliAge2):null;
+  if(S.scope.retirement && yrsToR2){
     s.appendChild(stitle('Retirement'));
-    if (yrsToR !== null && yrsToR > 0) {
-      var yrsInRet2 = 85 - retAge;
-      var totalProj2 = S.retAssets.reduce(function(sum,r){
-        if (!N(r.currentVal) && !N(r.monthlyContrib)) return sum;
-        var gr = N(r.growthRate)>0?r.growthRate:S.assump.growth;
-        var esc2 = N(r.contribEsc)>0?r.contribEsc:S.assump.incEsc;
-        return sum+projectFund(r.currentVal,r.monthlyContrib,esc2,gr,yrsToR);
-      },0);
-      var mNeed2 = N(S.retIncomeToday)+N(S.retMedAidToday)+N(S.retOtherMonthly);
-      var lumpRet2 = S.retLumps.reduce(function(sum,r){return sum+N(r.amt);},0)*Math.pow(1+pct(S.assump.cpi),yrsToR);
-      var capNeed2 = retirementCapitalNeeded(mNeed2, yrsToR, yrsInRet2, S.assump.cpi, S.assump.retReturn);
-      var retTarget2 = capNeed2 + lumpRet2;
-      var retGap2 = totalProj2 - retTarget2;
+    var yrsInRet3=85-retAge2;
+    var totalProj3=S.retAssets.reduce(function(a,r){
+      if(!N(r.currentVal)&&!N(r.monthlyContrib)) return a;
+      var gr=N(r.growthRate)>0?r.growthRate:S.assump.growth;
+      var esc3=N(r.contribEsc)>0?r.contribEsc:S.assump.incEsc;
+      return a+projectFund(r.currentVal,r.monthlyContrib,esc3,gr,yrsToR2);
+    },0);
+    var mNeed3=N(S.retIncomeToday)+N(S.retMedAidToday)+N(S.retOtherMonthly);
+    var lumpRet3=S.retLumps.reduce(function(a,r){return a+N(r.amt);},0)*Math.pow(1+pct(S.assump.cpi),yrsToR2);
+    var capNeed3=retirementCapitalNeeded(mNeed3,yrsToR2,yrsInRet3,S.assump.cpi,S.assump.retReturn);
+    var retTarget3=capNeed3+lumpRet3, retGap3=totalProj3-retTarget3;
 
-      var retBox = div();
-      retBox.style.cssText = 'background:var(--navy);color:#fff;border-radius:9px;padding:18px 20px;margin-bottom:12px';
-      var retTtl = div(); retTtl.style.cssText='font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--gold);margin-bottom:10px';
-      retTtl.textContent='Retirement Capital'; retBox.appendChild(retTtl);
-
-      function rRow(lbl, val, bold, borderTop) {
-        var row=div(); row.style.cssText='display:flex;justify-content:space-between;padding:4px 0;font-size:13px'+(borderTop?';border-top:1px solid #334;margin-top:8px;padding-top:10px':'')+(bold?';font-weight:700':'');
-        var ls=el('span','',lbl); ls.style.color='#ccd6f6';
-        var vs=el('span','',val); vs.style.color=bold?'var(--gold)':'#ccd6f6';
-        row.appendChild(ls); row.appendChild(vs); retBox.appendChild(row);
-      }
-      function rSub(lbl,val){var row=div();row.style.cssText='display:flex;justify-content:space-between;padding:2px 0 2px 16px;font-size:11px;color:#8899bb';row.innerHTML='<span>'+lbl+'</span><span>'+val+'</span>';retBox.appendChild(row);}
-
-      rRow('Monthly income needed at retirement', Rfmt(mNeed2) + ' /pm');
-      rSub('In today\'s rands · inflated to retirement date', '');
-      rRow('Capital needed', '('+Rfmt(retTarget2)+')', false, true);
-      rSub('To fund income for ' + yrsInRet2 + ' years + lump sum objectives', '');
-      rRow('Projected capital at retirement', Rfmt(totalProj2), false, true);
-      S.retAssets.forEach(function(r){
-        if (N(r.currentVal)||N(r.monthlyContrib)) {
-          var gr=N(r.growthRate)>0?r.growthRate:S.assump.growth;
-          var esc2=N(r.contribEsc)>0?r.contribEsc:S.assump.incEsc;
-          rSub((r.desc||'Fund')+' (' + (N(r.monthlyContrib)?Rfmt(r.monthlyContrib)+'/pm':'') + ')', Rfmt(projectFund(r.currentVal,r.monthlyContrib,esc2,gr,yrsToR)));
-        }
-      });
-      var retGapRow2 = div();
-      retGapRow2.style.cssText='display:flex;justify-content:space-between;padding:8px 0;margin-top:8px;border-top:2px solid #445;font-size:14px;font-weight:700';
-      var rgl=el('span','',retGap2>=0?'Overall position — Surplus':'Overall position — Shortfall');
-      var rgv=el('span','',Rfmt(Math.abs(retGap2)));
-      rgl.style.color='#ccd6f6'; rgv.style.color=retGap2>=0?'#86efac':'#f87171';
-      retGapRow2.appendChild(rgl); retGapRow2.appendChild(rgv); retBox.appendChild(retGapRow2);
-      s.appendChild(retBox);
-    } else {
-      var noRet=div('info'); noRet.textContent='Enter date of birth and retirement age on the Client tab to calculate retirement projection.'; s.appendChild(noRet);
-    }
+    var retBox3=div(); retBox3.style.cssText='background:var(--navy);color:#fff;border-radius:9px;padding:18px 20px;margin-bottom:12px';
+    var retTtl3=div(); retTtl3.style.cssText='font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--gold);margin-bottom:10px';
+    retTtl3.textContent='Retirement Capital'; retBox3.appendChild(retTtl3);
+    function r3Row(lbl,val,bold,bt){ var row=div(); row.style.cssText='display:flex;justify-content:space-between;padding:4px 0;font-size:13px'+(bt?';border-top:1px solid #334;margin-top:8px;padding-top:10px':'')+(bold?';font-weight:700':''); var ls=el('span','',lbl);ls.style.color='#ccd6f6';var vs=el('span','',val);vs.style.color=bold?'var(--gold)':'#ccd6f6';row.appendChild(ls);row.appendChild(vs);retBox3.appendChild(row); }
+    function r3Sub(lbl,val){ var row=div();row.style.cssText='display:flex;justify-content:space-between;padding:2px 0 2px 16px;font-size:11px;color:#8899bb';row.innerHTML='<span>'+lbl+'</span><span>'+val+'</span>';retBox3.appendChild(row); }
+    r3Row('Monthly income needed at retirement', Rfmt(mNeed3)+' /pm');
+    r3Sub('In today\'s rands \u00b7 inflated to retirement date','');
+    r3Row('Capital needed','('+Rfmt(retTarget3)+')',false,true);
+    r3Sub('To fund income for '+yrsInRet3+' years + lump sum objectives','');
+    r3Row('Projected capital at retirement', Rfmt(totalProj3), false, true);
+    S.retAssets.forEach(function(r){ if(N(r.currentVal)||N(r.monthlyContrib)){ var gr=N(r.growthRate)>0?r.growthRate:S.assump.growth;var esc3=N(r.contribEsc)>0?r.contribEsc:S.assump.incEsc;r3Sub((r.desc||'Fund')+(N(r.monthlyContrib)?' ('+Rfmt(r.monthlyContrib)+'/pm)':''),Rfmt(projectFund(r.currentVal,r.monthlyContrib,esc3,gr,yrsToR2)));} });
+    var rg3=div(); rg3.style.cssText='display:flex;justify-content:space-between;padding:8px 0;margin-top:8px;border-top:2px solid #445;font-size:14px;font-weight:700';
+    var rgl3=el('span','',retGap3>=0?'Overall position \u2014 Surplus':'Overall position \u2014 Shortfall');
+    var rgv3=el('span','',Rfmt(Math.abs(retGap3)));
+    rgl3.style.color='#ccd6f6'; rgv3.style.color=retGap3>=0?'#86efac':'#f87171';
+    rg3.appendChild(rgl3); rg3.appendChild(rgv3); retBox3.appendChild(rg3);
+    s.appendChild(retBox3);
   }
 
   return s;
