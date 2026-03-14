@@ -3002,10 +3002,18 @@ function buildSummary() {
         var _dutiable=Math.max(0,_afterS4q-ABATEMENT);
         var _duty=_dutiable<=DUTY_THRESH?_dutiable*DUTY_RATE1:DUTY_THRESH*DUTY_RATE1+(_dutiable-DUTY_THRESH)*DUTY_RATE2;
         var _exec=(_physVal+_estP)*EXEC_RATE;
-        estDutyAmt=Math.round(_duty);
-        estExecAmt=Math.round(_exec);
-        estAccrualAmt=Math.round(_accrDed);
-        estCostNeed=estDutyAmt+estExecAmt+estAccrualAmt;
+
+        // Apportion duty — estate only pays its share, third parties pay theirs
+        function _apportion(val){ return (_dutiable>0&&_duty>0)?Math.round(_duty*(val/_dutiable)):0; }
+        var _dutyEstate =_apportion(_physVal+_estP);
+        var _dutyThird  =_apportion(_thirdP);
+        var _dutyBiz    =_apportion(_bizD);
+
+        estDutyAmt   = Math.round(_duty);        // full duty (for display)
+        estExecAmt   = Math.round(_exec);
+        estAccrualAmt= Math.round(_accrDed);
+        // Life cover need only includes estate's share of duty — third parties fund their own
+        estCostNeed  = _dutyEstate + estExecAmt + estAccrualAmt;
       }
 
       // Show full breakdown before the gap box
@@ -3014,15 +3022,17 @@ function buildSummary() {
         var lcTtl=el('div','','Life Cover — Need Breakdown'); lcTtl.style.cssText='font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--sub);margin-bottom:8px';
         lcBreak.appendChild(lcTtl);
         function lcRow(lbl,val,bold){
-          var r=div(); r.style.cssText='display:flex;justify-content:space-between;padding:3px 0'+(bold?';border-top:1px solid var(--mist);margin-top:4px;padding-top:6px;font-weight:700':'');
-          r.appendChild(el('span','',lbl));
-          r.appendChild(el('span','',Rfmt(val)));
+          var r=div(); r.style.cssText='display:flex;justify-content:space-between;padding:'+(bold?'7':'5')+'px 0'+(bold?';border-top:2px solid var(--mist);margin-top:6px':'');
+          var l=el('span','',lbl); l.style.cssText='font-weight:'+(bold?'700':'600')+';color:'+(bold?'var(--navy)':'var(--text)');
+          var v=el('span','',Rfmt(val)); v.style.cssText='font-weight:'+(bold?'700':'600')+';color:'+(bold?'var(--navy)':'var(--text)');
+          r.appendChild(l); r.appendChild(v);
           lcBreak.appendChild(r);
         }
         function lcSub(lbl,val){
-          var r=div(); r.style.cssText='display:flex;justify-content:space-between;padding:2px 0 2px 14px;font-size:11px;color:var(--sub)';
-          r.appendChild(el('span','',lbl));
-          r.appendChild(el('span','',Rfmt(val)));
+          var r=div(); r.style.cssText='display:flex;justify-content:space-between;padding:2px 0 2px 16px;font-size:11px;color:var(--sub)';
+          var l=el('span','',lbl);
+          var v=el('span','',val>0?Rfmt(val):'');
+          r.appendChild(l); r.appendChild(v);
           lcBreak.appendChild(r);
         }
         if(totLiab>0){
@@ -3041,28 +3051,21 @@ function buildSummary() {
           S.deathCapital.forEach(function(r){ if(N(r.amt)>0) lcSub(r.desc||'—',N(r.amt)); });
         }
         if(estCostNeed>0){
-          lcRow('Estate costs',estCostNeed);
-          // Apportion duty between estate and third parties
-          var _afterAbate=_dutiable;
-          function _apportion(val){ return (_afterAbate>0&&_duty>0)?Math.round(_duty*(val/_afterAbate)):0; }
-          var _dutyEstate =_apportion(_physVal+_estP);
-          var _dutyThird  =_apportion(_thirdP);
-          var _dutyBiz    =_apportion(_bizD);
+          lcRow('Estate costs (funded by life cover)',estCostNeed);
           if(estDutyAmt>0){
-            lcSub('Estate duty (total)',estDutyAmt);
-            if(_dutyEstate>0) lcSub('  Estate\'s share (physical + estate policies)',_dutyEstate);
+            lcSub('Estate duty — total: '+Rfmt(estDutyAmt),0);
+            lcSub('  Estate\'s share (physical + estate policies)',_dutyEstate);
             if(_dutyThird>0){
-              lcSub('  Third party share',_dutyThird);
-              // Show per-policy duty
+              lcSub('  Third party share — funded by their own policies',_dutyThird);
               pols.forEach(function(p){
                 if((p.BeneficiaryType||'')==='Third Party'&&N(p.BenDeath)>0&&p.Type!=='Business Assurance'){
                   var pd=_apportion(N(p.BenDeath));
-                  if(pd>0) lcSub('    '+(p.Insurer||'Policy')+(p.Product?' — '+p.Product:'')+' ('+Rfmt(p.BenDeath)+')',pd);
+                  if(pd>0) lcSub('    '+(p.Insurer||'Policy')+(p.Product?' — '+p.Product:'')+' (cover '+Rfmt(p.BenDeath)+')',pd);
                 }
               });
             }
             if(_dutyBiz>0){
-              lcSub('  Business assurance share',_dutyBiz);
+              lcSub('  Business assurance share — funded by biz beneficiary',_dutyBiz);
               pols.forEach(function(p){
                 if(p.Type==='Business Assurance'&&p.EstateDutiable==='Yes'){
                   var amt=N(p.LoanAmount)||N(p.BenDeath);
@@ -3072,7 +3075,7 @@ function buildSummary() {
               });
             }
           }
-          if(estExecAmt>0)    lcSub('Executor fees (4.025% of physical + estate policies)',estExecAmt);
+          if(estExecAmt>0) lcSub('Executor fees (4.025% of physical + estate policies)',estExecAmt);
           if(estAccrualAmt>0) lcSub('Accrual payable to spouse',estAccrualAmt);
         }
         var totalDeathNeedFull=totalDeathNeed+estCostNeed;
