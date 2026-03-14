@@ -1085,15 +1085,16 @@ function buildScope() {
 
   s.appendChild(stitle('Assumptions'));
   var ainf = div('info'); ainf.textContent = 'Default assumptions used in all calculations. Review with client.'; s.appendChild(ainf);
+  var _ar = function(){ render(); persist(); };
   var ag = g4();
-  ag.appendChild(pfld('CPI / Inflation',     S.assump, 'cpi'));
-  ag.appendChild(pfld('Fund Growth Rate',    S.assump, 'growth'));
-  ag.appendChild(pfld('Income Escalation',   S.assump, 'incEsc'));
-  ag.appendChild(pfld('Medical Inflation',   S.assump, 'medInflation'));
+  ag.appendChild(pfld('CPI / Inflation',     S.assump, 'cpi',          {onblur:_ar}));
+  ag.appendChild(pfld('Fund Growth Rate',    S.assump, 'growth',       {onblur:_ar}));
+  ag.appendChild(pfld('Income Escalation',   S.assump, 'incEsc',       {onblur:_ar}));
+  ag.appendChild(pfld('Medical Inflation',   S.assump, 'medInflation', {onblur:_ar}));
   s.appendChild(ag);
   var ag2 = g3();
-  ag2.appendChild(pfld('Drawdown Rate (default)', S.assump, 'drawdown'));
-  ag2.appendChild(pfld('Return on Capital (retirement)', S.assump, 'retReturn'));
+  ag2.appendChild(pfld('Drawdown Rate (default)',          S.assump, 'drawdown',  {onblur:_ar}));
+  ag2.appendChild(pfld('Return on Capital (retirement)',   S.assump, 'retReturn', {onblur:_ar}));
   s.appendChild(ag2);
 
   return s;
@@ -2371,7 +2372,13 @@ function buildPolicies() {
   }));
 
   // ── Premium totals + affordability projection
+  // totalPrem = personal risk + medical only (exclude biz assurance and RA/inv contributions)
+  var _allInvBiz = POL_RA_TYPES.concat(POL_INV_TYPES).concat(['Business Assurance']);
   var totalPrem = pols.reduce(function(sum, p) {
+    if (_allInvBiz.indexOf(p.Type||'') > -1) return sum;
+    return sum + ((p.Frequency || 'Monthly') === 'Monthly' ? N(p.Premium) : 0);
+  }, 0);
+  var totalPremAll = pols.reduce(function(sum, p) {
     return sum + ((p.Frequency || 'Monthly') === 'Monthly' ? N(p.Premium) : 0);
   }, 0);
 
@@ -2503,9 +2510,13 @@ function buildPolicies() {
       var trTot = document.createElement('tr');
       trTot.style.cssText = 'border-top:2px solid var(--navy);font-weight:700';
       var totCols = '<td>Total (risk policies only)</td>';
-      totCols += '<td>' + Rfmt(pols.reduce(function(s,p){ return (p.Frequency||'Monthly')==='Monthly'&&POL_RA_TYPES.concat(POL_INV_TYPES).indexOf(p.Type||'')===-1?s+N(p.Premium):s; },0)) + '</td>';
+      var _totToday = pols.reduce(function(sm,p){
+        if (_allInvBiz.indexOf(p.Type||'') > -1) return sm;
+        return (p.Frequency||'Monthly')==='Monthly' ? sm+N(p.Premium) : sm;
+      },0);
+      totCols += '<td>' + Rfmt(_totToday) + '</td>';
       if (nettToday > 0) {
-        var totTodayPct = (pols.reduce(function(s,p){ return (p.Frequency||'Monthly')==='Monthly'&&POL_RA_TYPES.concat(POL_INV_TYPES).indexOf(p.Type||'')===-1?s+N(p.Premium):s; },0) / nettToday * 100).toFixed(1);
+        var totTodayPct = (_totToday / nettToday * 100).toFixed(1);
         totCols += '<td>' + totTodayPct + '%</td>';
       }
       totCols += '<td></td><td style="color:var(--gold)">' + Rfmt(totalAtRet) + '</td>';
@@ -2521,7 +2532,10 @@ function buildPolicies() {
 
       // Summary note
       if (nettToday > 0 && totalAtRet > 0) {
-        var totPremToday = pols.reduce(function(sm,p){ return (p.Frequency||'Monthly')==='Monthly'&&POL_RA_TYPES.concat(POL_INV_TYPES).indexOf(p.Type||'')===-1?sm+N(p.Premium):sm; },0);
+        var totPremToday = pols.reduce(function(sm,p){
+          if (_allInvBiz.indexOf(p.Type||'') > -1) return sm;
+          return (p.Frequency||'Monthly')==='Monthly' ? sm+N(p.Premium) : sm;
+        },0);
         var todayPctTotal = (totPremToday / nettToday * 100).toFixed(1);
         var futurePctTotal = salaryAtRet > 0 ? (totalAtRet / salaryAtRet * 100).toFixed(1) : null;
         var incEscPctTotal = N(S.assump.incEsc) || 5;
