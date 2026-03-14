@@ -372,6 +372,7 @@ var DEFAULTS = {
   kids: [],
 
   // Scope
+  _needsTab: 'death',
   scope: {
     death: false, disability: false, dread: false, ip: false,
     retirement: false, investment: false, offshore: false,
@@ -1563,280 +1564,239 @@ function buildAssets() {
 // ═══════════════════════════════════════════════════════════
 function buildNeeds() {
   var s = div();
-  var inf=div('info'); inf.textContent='Capture what the client needs. The Summary tab compares these against existing cover from the CRM.'; s.appendChild(inf);
 
-  var hasAny = S.scope.death||S.scope.disability||S.scope.dread||S.scope.ip;
-  if(!hasAny){
-    var wi=div('info'); wi.textContent='No needs areas selected. Go to the Scope tab and select the areas to discuss.'; s.appendChild(wi);
+  // Which scope areas are active
+  var hasAny = S.scope.death || S.scope.disability || S.scope.dread || S.scope.ip;
+  if (!hasAny) {
+    var wi = div('info');
+    wi.textContent = 'No needs areas selected. Go to the Scope tab and select the areas to discuss.';
+    s.appendChild(wi);
+    return s;
   }
 
-  // ── DEATH ──────────────────────────────────────────────
-  if(S.scope.death){
-    s.appendChild(stitle('Death — Liabilities to be Settled'));
-    var inf2=div('info'); inf2.innerHTML='These amounts are paid from the estate / life cover before any income needs are funded. ' +
-      'Bond and vehicle finance amounts are <strong>pre-filled from the Assets tab</strong> — edit if needed.'; s.appendChild(inf2);
+  // ── Build sub-tab list from active scope items
+  // Disability + IP are merged into one sub-tab
+  var subTabs = [];
+  if (S.scope.death)                       subTabs.push({ k: 'death',    l: 'Life Cover' });
+  if (S.scope.disability || S.scope.ip)    subTabs.push({ k: 'dis',      l: 'Disability & IP' });
+  if (S.scope.dread)                       subTabs.push({ k: 'dread',    l: 'Dread Disease' });
 
-    // Auto-sync bond and vehicle finance from Assets tab into deathLiabs
-    // We do this by description key — only update if the Assets tab has values
+  if (!S._needsTab || subTabs.findIndex(function(t){return t.k===S._needsTab;})===-1) {
+    S._needsTab = subTabs[0].k;
+  }
+
+  // ── Sub-tab bar
+  var subBar = div();
+  subBar.style.cssText = 'display:flex;gap:4px;margin-bottom:18px;border-bottom:2px solid var(--mist);padding-bottom:0';
+  subTabs.forEach(function(t) {
+    var btn = div();
+    var active = S._needsTab === t.k;
+    btn.style.cssText = 'padding:8px 18px;font-size:13px;font-weight:700;cursor:pointer;border-radius:6px 6px 0 0;margin-bottom:-2px;border:2px solid '+(active?'var(--mist) var(--mist) #fff var(--mist)':'transparent');
+    btn.style.background = active ? '#fff' : 'transparent';
+    btn.style.color = active ? 'var(--navy)' : 'var(--sub)';
+    btn.textContent = t.l;
+    btn.addEventListener('click', function() { S._needsTab = t.k; render(); });
+    subBar.appendChild(btn);
+  });
+  s.appendChild(subBar);
+
+  // ── DEATH ─────────────────────────────────────────────────────────────────
+  if (S._needsTab === 'death') {
+    var inf2 = div('info');
+    inf2.innerHTML = 'Liabilities are pre-filled from the Assets tab. Add income needs (capitalised) and once-off capital needs.';
+    s.appendChild(inf2);
+
+    // Auto-sync from assets
     var totalBond = S.props.reduce(function(sum,p){return sum+N(p.bond);},0);
     var totalVehicleFinance = S.vehicles.reduce(function(sum,v){return sum+N(v.finance);},0);
-    var totalOtherLiabs = S.liabilities.reduce(function(sum,l){return sum+N(l.bal);},0);
-
-    // Find and update the bond row — clear if all properties deleted
     var bondRow = S.deathLiabs.filter(function(r){return r.desc==='Bond / mortgage';})[0];
-    if(bondRow) bondRow.amt = totalBond > 0 ? String(Math.round(totalBond)) : '';
-
-    // Find and update vehicle finance row — clear if all vehicles deleted
+    if (bondRow) bondRow.amt = totalBond > 0 ? String(Math.round(totalBond)) : '';
     var vehRow = S.deathLiabs.filter(function(r){return r.desc==='Vehicle finance';})[0];
-    if(vehRow) vehRow.amt = totalVehicleFinance > 0 ? String(Math.round(totalVehicleFinance)) : '';
+    if (vehRow) vehRow.amt = totalVehicleFinance > 0 ? String(Math.round(totalVehicleFinance)) : '';
 
-    var lt=document.createElement('table');
-    lt.innerHTML='<thead><tr><th>Description</th><th>Amount</th><th></th></tr></thead>';
-    var lb2=document.createElement('tbody');
+    // Liabilities
+    s.appendChild(stitle('Liabilities to Settle on Death'));
+    var lt = document.createElement('table');
+    lt.innerHTML = '<thead><tr><th>Description</th><th>Amount</th><th></th></tr></thead>';
+    var lb2 = document.createElement('tbody');
     S.deathLiabs.forEach(function(r,i){
-      var tr=document.createElement('tr');
-      var t1=document.createElement('td'); var di=document.createElement('input'); di.type='text'; di.value=r.desc||'';
+      var tr = document.createElement('tr');
+      var t1 = document.createElement('td'); var di = document.createElement('input'); di.type='text'; di.value=r.desc||'';
       di.addEventListener('input',function(e){S.deathLiabs[i].desc=e.target.value;}); t1.appendChild(di); tr.appendChild(t1);
-      var t2=document.createElement('td'); var rw=div('td-r'); rw.appendChild(el('span','rp','R'));
-      var ai=document.createElement('input'); ai.type='text'; ai.inputMode='numeric'; ai.value=r.amt||''; ai.placeholder='0';
+      var t2 = document.createElement('td'); var rw = div('td-r'); rw.appendChild(el('span','rp','R'));
+      var ai = document.createElement('input'); ai.type='text'; ai.inputMode='numeric'; ai.value=r.amt||''; ai.placeholder='0';
       ai.addEventListener('input',function(e){S.deathLiabs[i].amt=e.target.value;}); rw.appendChild(ai); t2.appendChild(rw); tr.appendChild(t2);
-      var t3=document.createElement('td'); t3.appendChild(delBtn(function(){S.deathLiabs.splice(i,1);render();})); tr.appendChild(t3);
+      var t3 = document.createElement('td'); t3.appendChild(delBtn(function(){S.deathLiabs.splice(i,1);render();})); tr.appendChild(t3);
       lb2.appendChild(tr);
     });
-    lt.appendChild(lb2); var ltw=div('twrap'); ltw.appendChild(lt); s.appendChild(ltw);
+    lt.appendChild(lb2); var ltw = div('twrap'); ltw.appendChild(lt); s.appendChild(ltw);
     s.appendChild(addBtn('+ Add Liability', function(){S.deathLiabs.push({desc:'',amt:''});render();}));
-
-    var totLiabNeed=S.deathLiabs.reduce(function(sum,r){return sum+N(r.amt);},0);
-    if(totLiabNeed>0){
-      var tli=div('info'); tli.style.marginTop='8px';
-      tli.textContent='Total liabilities to settle: '+Rfmt(totLiabNeed); s.appendChild(tli);
+    var totLiabNeed = S.deathLiabs.reduce(function(sum,r){return sum+N(r.amt);},0);
+    if (totLiabNeed > 0) {
+      var tli = div('info'); tli.style.marginTop='8px';
+      tli.textContent = 'Total liabilities: ' + Rfmt(totLiabNeed);
+      s.appendChild(tli);
     }
 
-    // ── Death income needs ──────────────────────────────
-    s.appendChild(stitle('Death — Income Needs (Capitalised)'));
-    var di2=div('info'); di2.innerHTML='Enter the <strong>nett monthly amount</strong> the beneficiary needs. The system will gross it up using tax tables, then capitalise the capital lump sum needed.'; s.appendChild(di2);
-
-    S.deathIncome.forEach(function(r,i){
-      buildIncomeNeedRow(s, r, i, 'deathIncome');
-    });
+    // Income needs
+    s.appendChild(stitle('Income Needs (Capitalised)'));
+    var di2 = div('info');
+    di2.innerHTML = 'Enter the <strong>nett monthly amount</strong> the beneficiary needs. The system grosses it up and capitalises the lump sum.';
+    s.appendChild(di2);
+    S.deathIncome.forEach(function(r,i){ buildIncomeNeedRow(s,r,i,'deathIncome'); });
     s.appendChild(addBtn('+ Add Income Need', function(){
-      S.deathIncome.push({desc:'',nettPM:'',grossPM:'',years:'',esc:'',drawdown:'',notes:''});render();
+      S.deathIncome.push({desc:'',nettPM:'',grossPM:'',years:'',esc:'',drawdown:'',notes:''}); render();
     }));
 
-    // ── Death capital needs ─────────────────────────────
-    s.appendChild(stitle('Death — Once-off Capital Needs'));
-    var ct2=document.createElement('table');
-    ct2.innerHTML='<thead><tr><th>Description</th><th>Amount</th><th></th></tr></thead>';
-    var cb2=document.createElement('tbody');
+    // Capital needs
+    s.appendChild(stitle('Once-off Capital Needs'));
+    var ct2 = document.createElement('table');
+    ct2.innerHTML = '<thead><tr><th>Description</th><th>Amount</th><th></th></tr></thead>';
+    var cb2 = document.createElement('tbody');
     S.deathCapital.forEach(function(r,i){
-      var tr=document.createElement('tr');
-      var t1=document.createElement('td'); var di=document.createElement('input'); di.type='text'; di.value=r.desc||'';
+      var tr = document.createElement('tr');
+      var t1 = document.createElement('td'); var di = document.createElement('input'); di.type='text'; di.value=r.desc||'';
       di.addEventListener('input',function(e){S.deathCapital[i].desc=e.target.value;}); t1.appendChild(di); tr.appendChild(t1);
-      var t2=document.createElement('td'); var rw=div('td-r'); rw.appendChild(el('span','rp','R'));
-      var ai=document.createElement('input'); ai.type='text'; ai.inputMode='numeric'; ai.value=r.amt||''; ai.placeholder='0';
+      var t2 = document.createElement('td'); var rw = div('td-r'); rw.appendChild(el('span','rp','R'));
+      var ai = document.createElement('input'); ai.type='text'; ai.inputMode='numeric'; ai.value=r.amt||''; ai.placeholder='0';
       ai.addEventListener('input',function(e){S.deathCapital[i].amt=e.target.value;}); rw.appendChild(ai); t2.appendChild(rw); tr.appendChild(t2);
-      var t3=document.createElement('td'); t3.appendChild(delBtn(function(){S.deathCapital.splice(i,1);render();})); tr.appendChild(t3);
+      var t3 = document.createElement('td'); t3.appendChild(delBtn(function(){S.deathCapital.splice(i,1);render();})); tr.appendChild(t3);
       cb2.appendChild(tr);
     });
-    ct2.appendChild(cb2); var ctw2=div('twrap'); ctw2.appendChild(ct2); s.appendChild(ctw2);
+    ct2.appendChild(cb2); var ctw2 = div('twrap'); ctw2.appendChild(ct2); s.appendChild(ctw2);
     s.appendChild(addBtn('+ Add Capital Need', function(){S.deathCapital.push({desc:'',amt:''});render();}));
 
-    // Total death need summary
-    var totCapNeed=S.deathCapital.reduce(function(sum,r){return sum+N(r.amt);},0);
-    var totIncCap=S.deathIncome.reduce(function(sum,r){return sum+calcIncomeNeed(r);},0);
-    if(totLiabNeed>0||totIncCap>0||totCapNeed>0){
-      var ds=div('cards c3'); ds.style.marginTop='16px';
-      [{l:'Liabilities',v:totLiabNeed},{l:'Capitalised Income',v:totIncCap},{l:'Capital Needs',v:totCapNeed}].forEach(function(x){
-        var c=div('card'); c.innerHTML='<div class="lbl">'+x.l+'</div><div class="val">'+Rfmt(x.v)+'</div>'; ds.appendChild(c);
+    // Summary
+    var totCapNeed = S.deathCapital.reduce(function(sum,r){return sum+N(r.amt);},0);
+    var totIncCap  = S.deathIncome.reduce(function(sum,r){return sum+calcIncomeNeed(r);},0);
+    if (totLiabNeed > 0 || totIncCap > 0 || totCapNeed > 0) {
+      var ds = div('cards c3'); ds.style.marginTop='16px';
+      [{l:'Liabilities',v:totLiabNeed},{l:'Capitalised Income',v:totIncCap},{l:'Once-off Capital',v:totCapNeed}].forEach(function(x){
+        var c = div('card'); c.innerHTML='<div class="lbl">'+x.l+'</div><div class="val">'+Rfmt(x.v)+'</div>'; ds.appendChild(c);
       });
       s.appendChild(ds);
-      var totCard=div('card'); totCard.style.cssText='margin-top:0;background:var(--navy);border-color:var(--navy)';
-      totCard.innerHTML='<div class="lbl" style="color:#8899bb">Total Death Cover Required</div><div class="val" style="color:var(--gold)">'+Rfmt(totLiabNeed+totIncCap+totCapNeed)+'</div>';
+      var totCard = div('card'); totCard.style.cssText='margin-top:0;background:var(--navy);border-color:var(--navy)';
+      totCard.innerHTML='<div class="lbl" style="color:#8899bb">Total Life Cover Required</div><div class="val" style="color:var(--gold)">'+Rfmt(totLiabNeed+totIncCap+totCapNeed)+'</div>';
       s.appendChild(totCard);
     }
-    s.appendChild(txfld('Death needs notes', S, 'deathNotes'));
+    s.appendChild(txfld('Notes', S, 'deathNotes'));
   }
 
-  // ── DISABILITY ─────────────────────────────────────────
-  if(S.scope.disability){
-    s.appendChild(stitle('Disability — Income Needs'));
-    var dii=div('info'); dii.textContent='Income protection is the primary recommendation. Capitalise for lump sum disability cover.'; s.appendChild(dii);
-    S.disIncome.forEach(function(r,i){
-      buildIncomeNeedRow(s,r,i,'disIncome');
-    });
-    s.appendChild(addBtn('+ Add Disability Income Need', function(){
-      S.disIncome.push({desc:'Monthly income replacement',nettPM:'',grossPM:'',years:'',esc:'',drawdown:'',notes:''});render();
+  // ── DISABILITY & IP ───────────────────────────────────────────────────────
+  if (S._needsTab === 'dis') {
+    var dii = div('info');
+    dii.innerHTML = 'Disability and income protection are analysed together. '
+      + 'Income replacement covers ongoing monthly needs. Lump sum covers once-off costs (medical, debt, home adaptation).';
+    s.appendChild(dii);
+
+    // Income replacement (shared between disability and IP)
+    s.appendChild(stitle('Monthly Income Replacement Needed'));
+    if (S.disIncome.length === 0) {
+      S.disIncome.push({desc:'Monthly income replacement',nettPM:'',grossPM:'',years:'',esc:'',drawdown:'',notes:''});
+    }
+    S.disIncome.forEach(function(r,i){ buildIncomeNeedRow(s,r,i,'disIncome'); });
+    s.appendChild(addBtn('+ Add Income Need', function(){
+      S.disIncome.push({desc:'',nettPM:'',grossPM:'',years:'',esc:'',drawdown:'',notes:''}); render();
     }));
 
-    s.appendChild(stitle('Disability — Lump Sum Capital Needs'));
-    var dct=document.createElement('table');
-    dct.innerHTML='<thead><tr><th>Description</th><th>Amount</th><th></th></tr></thead>';
-    var dcb=document.createElement('tbody');
+    // IP specifics
+    if (S.scope.ip) {
+      s.appendChild(stitle('Income Protection Policy Details'));
+      var ipinf = div('info');
+      ipinf.innerHTML = 'Enter the nett monthly benefit needed. The system will gross it up for the recommendation.';
+      s.appendChild(ipinf);
+      var ipr = div();
+      ipr.style.cssText = 'background:#fff;border:var(--border);border-radius:8px;padding:16px;margin-bottom:14px';
+      var ipg = g3();
+      var ipf = div('f'); var iplb = el('label','','Nett Monthly Benefit Needed');
+      var iprw = div('rw'); iprw.appendChild(el('span','rp','R'));
+      var ipinp = document.createElement('input'); ipinp.type='text'; ipinp.inputMode='numeric';
+      ipinp.value = S.ipNettPM||''; ipinp.placeholder='0';
+      ipinp.addEventListener('input',function(e){S.ipNettPM=e.target.value;});
+      ipinp.addEventListener('blur',function(e){
+        S.ipNettPM=e.target.value;
+        if(N(S.ipNettPM)>0){S.ipGrossPM=String(grossFromNett(S.ipNettPM));render();}
+      });
+      iprw.appendChild(ipinp); ipf.appendChild(iplb); ipf.appendChild(iprw); ipg.appendChild(ipf);
+      var ipgf = div('f'); var ipglb = el('label','','Gross Equivalent (system calc)');
+      var ipgrw = div('rw'); ipgrw.appendChild(el('span','rp','R'));
+      var ipginp = document.createElement('input'); ipginp.type='text'; ipginp.readOnly=true;
+      ipginp.value=S.ipGrossPM||''; ipginp.style.background='#f5f5f0';
+      ipgrw.appendChild(ipginp); ipgf.appendChild(ipglb); ipgf.appendChild(ipgrw); ipg.appendChild(ipgf);
+      ipg.appendChild(sfld('Waiting Period', S, 'ipWait', ['7 days','2 weeks','1 month','3 months','6 months','1 year']));
+      ipr.appendChild(ipg);
+      var ipg2 = g2();
+      ipg2.appendChild(sfld('Benefit Period', S, 'ipBenefit', ['1 year','2 years','5 years','To age 60','To age 65','To age 70','Whole of Life']));
+      ipr.appendChild(ipg2);
+      if (N(S.ipNettPM)>0 && N(S.ipGrossPM)>0) {
+        var ipcr = div('calc-result');
+        ipcr.innerHTML='<div class="cr-row"><span>Nett monthly benefit</span><span class="gold">'+Rfmt(S.ipNettPM)+'</span></div>'+
+          '<div class="cr-row"><span>Gross equivalent (pre-tax)</span><span class="gold">'+Rfmt(S.ipGrossPM)+'</span></div>';
+        ipr.appendChild(ipcr);
+      }
+      s.appendChild(ipr);
+    }
+
+    // Lump sum capital needs
+    s.appendChild(stitle('Once-off Capital Needs on Disability'));
+    var dct = document.createElement('table');
+    dct.innerHTML = '<thead><tr><th>Description</th><th>Amount</th><th></th></tr></thead>';
+    var dcb = document.createElement('tbody');
     S.disCapital.forEach(function(r,i){
-      var tr=document.createElement('tr');
-      var t1=document.createElement('td'); var di=document.createElement('input'); di.type='text'; di.value=r.desc||'';
+      var tr = document.createElement('tr');
+      var t1 = document.createElement('td'); var di = document.createElement('input'); di.type='text'; di.value=r.desc||'';
       di.addEventListener('input',function(e){S.disCapital[i].desc=e.target.value;}); t1.appendChild(di); tr.appendChild(t1);
-      var t2=document.createElement('td'); var rw=div('td-r'); rw.appendChild(el('span','rp','R'));
-      var ai=document.createElement('input'); ai.type='text'; ai.inputMode='numeric'; ai.value=r.amt||''; ai.placeholder='0';
+      var t2 = document.createElement('td'); var rw = div('td-r'); rw.appendChild(el('span','rp','R'));
+      var ai = document.createElement('input'); ai.type='text'; ai.inputMode='numeric'; ai.value=r.amt||''; ai.placeholder='0';
       ai.addEventListener('input',function(e){S.disCapital[i].amt=e.target.value;}); rw.appendChild(ai); t2.appendChild(rw); tr.appendChild(t2);
-      var t3=document.createElement('td'); t3.appendChild(delBtn(function(){S.disCapital.splice(i,1);render();})); tr.appendChild(t3);
+      var t3 = document.createElement('td'); t3.appendChild(delBtn(function(){S.disCapital.splice(i,1);render();})); tr.appendChild(t3);
       dcb.appendChild(tr);
     });
-    dct.appendChild(dcb); var dctw=div('twrap'); dctw.appendChild(dct); s.appendChild(dctw);
+    dct.appendChild(dcb); var dctw = div('twrap'); dctw.appendChild(dct); s.appendChild(dctw);
     s.appendChild(addBtn('+ Add Capital Need', function(){S.disCapital.push({desc:'',amt:''});render();}));
-    s.appendChild(txfld('Disability notes', S, 'disNotes'));
+
+    // Summary
+    var disIncCap = S.disIncome.reduce(function(a,r){return a+calcIncomeNeed(r);},0);
+    var disCapNeed = S.disCapital.reduce(function(a,r){return a+N(r.amt);},0);
+    if (disIncCap > 0 || disCapNeed > 0) {
+      var disSumCards = div('cards c3'); disSumCards.style.marginTop='16px';
+      [{l:'Capitalised Income Need',v:disIncCap},{l:'Lump Sum Capital',v:disCapNeed},{l:'Total Disability Need',v:disIncCap+disCapNeed}].forEach(function(x){
+        var c = div('card');
+        c.style.cssText = x.l==='Total Disability Need' ? 'background:var(--navy);border-color:var(--navy)' : '';
+        c.innerHTML='<div class="lbl" style="'+(x.l==='Total Disability Need'?'color:#8899bb':'')+'">'+x.l+'</div>'
+          +'<div class="val" style="'+(x.l==='Total Disability Need'?'color:var(--gold)':'')+'">'+Rfmt(x.v)+'</div>';
+        disSumCards.appendChild(c);
+      });
+      s.appendChild(disSumCards);
+    }
+    s.appendChild(txfld('Notes', S, 'disNotes'));
   }
 
-  // ── DREAD DISEASE ──────────────────────────────────────
-  if(S.scope.dread){
-    s.appendChild(stitle('Dread Disease / Severe Illness'));
-    var drg=g2();
+  // ── DREAD DISEASE ─────────────────────────────────────────────────────────
+  if (S._needsTab === 'dread') {
+    var drinf = div('info');
+    drinf.innerHTML = 'Dread disease cover pays a lump sum on diagnosis of a listed condition (cancer, heart attack, stroke etc). '
+      + 'Typically 2\u20133 years of income to cover treatment costs and income loss during recovery.';
+    s.appendChild(drinf);
+    s.appendChild(stitle('Dread Disease / Severe Illness Cover'));
+    var drg = g2();
     drg.appendChild(rfld('Cover Amount Required', S, 'dreadAmt'));
     s.appendChild(drg);
-    s.appendChild(txfld('Dread disease notes', S, 'dreadNotes'));
-  }
-
-  // ── INCOME PROTECTION ──────────────────────────────────
-  if(S.scope.ip){
-    s.appendChild(stitle('Income Protection'));
-    var ipinf=div('info');
-    ipinf.innerHTML='Enter the nett monthly benefit needed. Gross-up will be calculated.'; s.appendChild(ipinf);
-
-    var ipr=div();
-    ipr.style.cssText='background:#fff;border:var(--border);border-radius:8px;padding:16px;margin-bottom:14px';
-
-    // Nett PM field with gross-up on blur
-    var ipg=g3();
-    var ipf=div('f'); var iplb=el('label','','Nett Monthly Benefit Needed');
-    var iprw=div('rw'); iprw.appendChild(el('span','rp','R'));
-    var ipinp=document.createElement('input'); ipinp.type='text'; ipinp.inputMode='numeric';
-    ipinp.value=S.ipNettPM||''; ipinp.placeholder='0';
-    ipinp.addEventListener('input',function(e){S.ipNettPM=e.target.value;});
-    ipinp.addEventListener('blur',function(e){
-      S.ipNettPM=e.target.value;
-      if(N(S.ipNettPM)>0){S.ipGrossPM=String(grossFromNett(S.ipNettPM));render();}
-    });
-    iprw.appendChild(ipinp); ipf.appendChild(iplb); ipf.appendChild(iprw); ipg.appendChild(ipf);
-
-    var ipgf=div('f'); var ipglb=el('label','','Gross Equivalent (system calc)');
-    var ipgrw=div('rw'); ipgrw.appendChild(el('span','rp','R'));
-    var ipginp=document.createElement('input'); ipginp.type='text'; ipginp.readOnly=true;
-    ipginp.value=S.ipGrossPM||''; ipginp.style.background='#f5f5f0';
-    ipgrw.appendChild(ipginp); ipgf.appendChild(ipglb); ipgf.appendChild(ipgrw); ipg.appendChild(ipgf);
-
-    ipg.appendChild(sfld('Waiting Period', S, 'ipWait', ['7 days','2 weeks','1 month','3 months','6 months','1 year']));
-    ipr.appendChild(ipg);
-
-    var ipg2=g2();
-    ipg2.appendChild(sfld('Benefit Period', S, 'ipBenefit', ['1 year','2 years','5 years','To age 60','To age 65','To age 70','Whole of Life']));
-    ipr.appendChild(ipg2);
-
-    if(N(S.ipNettPM)>0&&N(S.ipGrossPM)>0){
-      var ipcr=div('calc-result');
-      ipcr.innerHTML='<div class="cr-row"><span>Nett monthly benefit</span><span class="gold">'+Rfmt(S.ipNettPM)+'</span></div>'+
-        '<div class="cr-row"><span>Gross equivalent (pre-tax)</span><span class="gold">'+Rfmt(S.ipGrossPM)+'</span></div>';
-      ipr.appendChild(ipcr);
+    // Suggested amount based on income
+    var incToday = N(S.cli.grossPM);
+    if (incToday > 0) {
+      var suggested = Math.round(incToday * 24);
+      var sug = div('info'); sug.style.marginTop='8px';
+      sug.innerHTML = 'Suggested minimum: <strong>' + Rfmt(suggested) + '</strong> (24 months gross income of ' + Rfmt(incToday) + '/pm)';
+      s.appendChild(sug);
     }
-    s.appendChild(ipr);
-    s.appendChild(txfld('IP notes', S, 'ipNotes'));
+    s.appendChild(txfld('Notes', S, 'dreadNotes'));
   }
 
   return s;
 }
 
-// ── Income Need Row builder (shared for death and disability) ──
-function calcIncomeNeed(r){
-  if(!N(r.nettPM)&&!N(r.grossPM)) return 0;
-  var gross = N(r.grossPM) || grossFromNett(r.nettPM);
-  var esc = N(r.esc)>0 ? r.esc : S.assump.cpi;
-  var dr  = N(r.drawdown)>0 ? r.drawdown : S.assump.drawdown;
-  return capitalise(gross, r.years, esc, dr);
-}
 
-function buildIncomeNeedRow(parent, r, i, arrayKey){
-  var card=div(); card.style.cssText='background:#fff;border:var(--border);border-radius:8px;padding:14px;margin-bottom:10px';
-  var ch=div(); ch.style.cssText='display:flex;justify-content:space-between;align-items:center;margin-bottom:10px';
-
-  // Description
-  var df=div('f'); df.appendChild(el('label','','Description'));
-  var di=document.createElement('input'); di.type='text'; di.value=r.desc||''; di.placeholder='e.g. Spouse living expenses';
-  di.addEventListener('input',function(e){S[arrayKey][i].desc=e.target.value;}); df.appendChild(di);
-  ch.appendChild(df);
-  ch.appendChild(delBtn(function(){S[arrayKey].splice(i,1);render();}));
-  card.appendChild(ch);
-
-  var rg1=g4();
-
-  // Nett PM with gross-up on blur
-  var nf=div('f'); nf.appendChild(el('label','','Nett /pm (client states)'));
-  var nrw=div('rw'); nrw.appendChild(el('span','rp','R'));
-  var ninp=document.createElement('input'); ninp.type='text'; ninp.inputMode='numeric';
-  ninp.value=r.nettPM||''; ninp.placeholder='0';
-  ninp.addEventListener('input',function(e){S[arrayKey][i].nettPM=e.target.value;});
-  ninp.addEventListener('blur',function(e){
-    S[arrayKey][i].nettPM=e.target.value;
-    if(N(e.target.value)>0){S[arrayKey][i].grossPM=String(grossFromNett(e.target.value));render();}
-  });
-  nrw.appendChild(ninp); nf.appendChild(nrw); rg1.appendChild(nf);
-
-  // Gross PM (calc, overrideable)
-  var gf2=div('f'); gf2.appendChild(el('label','','Gross /pm (tax grossed-up)'));
-  var grw2=div('rw'); grw2.appendChild(el('span','rp','R'));
-  var ginp2=document.createElement('input'); ginp2.type='text'; ginp2.inputMode='numeric';
-  ginp2.value=r.grossPM||''; ginp2.placeholder='0'; ginp2.style.background='#f9f9f6';
-  ginp2.addEventListener('input',function(e){S[arrayKey][i].grossPM=e.target.value;});
-  ginp2.addEventListener('blur',function(e){S[arrayKey][i].grossPM=e.target.value;render();});
-  grw2.appendChild(ginp2); gf2.appendChild(grw2); rg1.appendChild(gf2);
-
-  // Years
-  var yf=div('f'); yf.appendChild(el('label','','Term (years)'));
-  var yi=document.createElement('input'); yi.type='text'; yi.inputMode='numeric';
-  yi.value=r.years||''; yi.placeholder='e.g. 20';
-  yi.addEventListener('input',function(e){S[arrayKey][i].years=e.target.value;});
-  yi.addEventListener('blur',function(e){S[arrayKey][i].years=e.target.value;render();});
-  yf.appendChild(yi); rg1.appendChild(yf);
-
-  // Escalation
-  var ef=div('f'); ef.appendChild(el('label','','Escalation % (blank=CPI)'));
-  var epw=div('pw'); var epp=el('span','pp','%');
-  var ei=document.createElement('input'); ei.type='text'; ei.inputMode='numeric';
-  ei.value=r.esc||''; ei.placeholder=S.assump.cpi;
-  ei.addEventListener('input',function(e){S[arrayKey][i].esc=e.target.value;});
-  ei.addEventListener('blur',function(e){S[arrayKey][i].esc=e.target.value;render();});
-  epw.appendChild(ei); epw.appendChild(epp); ef.appendChild(epw); rg1.appendChild(ef);
-  card.appendChild(rg1);
-
-  var rg2=g3();
-  // Drawdown rate
-  var drf=div('f'); drf.appendChild(el('label','','Drawdown % (blank='+S.assump.drawdown+'%)'));
-  var drpw=div('pw'); var drpp=el('span','pp','%');
-  var dri=document.createElement('input'); dri.type='text'; dri.inputMode='numeric';
-  dri.value=r.drawdown||''; dri.placeholder=S.assump.drawdown;
-  dri.addEventListener('input',function(e){S[arrayKey][i].drawdown=e.target.value;});
-  dri.addEventListener('blur',function(e){S[arrayKey][i].drawdown=e.target.value;render();});
-  drpw.appendChild(dri); drpw.appendChild(drpp); drf.appendChild(drpw); rg2.appendChild(drf);
-  card.appendChild(rg2);
-
-  // Calculated result
-  var gross=N(r.grossPM)||grossFromNett(r.nettPM);
-  if(gross>0&&N(r.years)>0){
-    var cap=calcIncomeNeed(r);
-    var monthly=monthlyFromCapital(cap,r.years,N(r.esc)>0?r.esc:S.assump.cpi,N(r.drawdown)>0?r.drawdown:S.assump.drawdown);
-    var cr=div('calc-result');
-    cr.innerHTML=
-      '<div class="cr-row"><span>Nett monthly amount</span><span class="gold">'+Rfmt(r.nettPM||gross)+'</span></div>'+
-      '<div class="cr-row"><span>Gross (pre-tax)</span><span class="gold">'+Rfmt(gross)+'</span></div>'+
-      '<div class="cr-row big"><span>Capital lump sum required</span><span class="gold">'+Rfmt(cap)+'</span></div>'+
-      '<div class="cr-row"><span style="font-size:11px;color:#8899bb">This capital at '+(N(r.drawdown)>0?r.drawdown:S.assump.drawdown)+'% drawdown produces '+Rfmt(monthly)+'/pm for '+r.years+' years at '+(N(r.esc)>0?r.esc:S.assump.cpi)+'% escalation</span></div>';
-    card.appendChild(cr);
-  }
-
-  parent.appendChild(card);
-}
-
-// ═══════════════════════════════════════════════════════════
-// TAB 5 — RETIREMENT
-// ═══════════════════════════════════════════════════════════
 function buildRetirement() {
   var s = div();
   if(!S.scope.retirement){
