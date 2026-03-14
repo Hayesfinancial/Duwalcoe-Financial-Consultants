@@ -3222,31 +3222,15 @@ function buildEstate() {
   var afterAccrual2 = Math.max(0, netEstate - accrualDed);
 
   // 2. Section 4(q) — spouse policies + spouse physical assets
-  // If spouse inherits the residue of the estate, we must calculate the actual residue:
-  //   Step 1: Calculate duty WITHOUT residue s.4(q) to get estate costs
-  //   Step 2: Residue = (physical assets + estate policies) - executor fees - duty - accrual
-  //   Step 3: Add residue to s.4(q) and recalculate (one iteration sufficient)
+  // The s.4(q) deduction covers:
+  //   a) Policies paid direct to spouse (never enter estate)
+  //   b) Physical assets specifically bequeathed to spouse
+  // The residue of the estate is NOT added to s.4(q) here.
+  // Reason: the residue only exists AFTER paying executor fees, estate duty and accrual.
+  // Adding it to s.4(q) before those costs are calculated creates a circular dependency
+  // and double-counts the deduction. The residue is instead shown as an informational note.
   var sec4qTotal = section4q;
-  var spouseResidue = 0;
-  if (S.cli.spouseInheritsResidue) {
-    // Step 1: preliminary duty without residue
-    var _sec4qPrelim = Math.min(section4q, afterAccrual2);
-    var _afterS4qPrelim = Math.max(0, afterAccrual2 - _sec4qPrelim);
-    var _dutiablePrelim = Math.max(0, _afterS4qPrelim - ABATEMENT);
-    var _dutyPrelim = _dutiablePrelim <= DUTY_THRESH
-      ? _dutiablePrelim * DUTY_RATE1
-      : DUTY_THRESH * DUTY_RATE1 + (_dutiablePrelim - DUTY_THRESH) * DUTY_RATE2;
-    // Step 2: executor fees on preliminary basis
-    var _execPrelim = (totalDutiableAssets + estatePols) * EXEC_RATE;
-    // Apportion duty on estate's share (physical + estate policies)
-    var _dutyEstatePrelim = _dutiablePrelim > 0
-      ? _dutyPrelim * (totalDutiableAssets + estatePols) / _dutiablePrelim : 0;
-    // Residue = what physically flows to the spouse through the will
-    // = estate liquid assets (physical + estate policies) minus estate's own costs
-    var _estateAssets = totalDutiableAssets + estatePols;
-    spouseResidue = Math.max(0, _estateAssets - _execPrelim - _dutyEstatePrelim - accrualDed);
-    sec4qTotal = section4q + spouseResidue;
-  }
+  var spouseResidue = 0; // calculated below for display only — not used in duty calculation
   var sec4qDed    = Math.min(sec4qTotal, afterAccrual2);
   var afterSpouse = Math.max(0, afterAccrual2 - sec4qDed);
 
@@ -3264,14 +3248,16 @@ function buildEstate() {
   }
 
   // Executor fees: only on assets that pass through the executor's hands
-  // = physical assets + policies paid INTO the estate
-  // NOT: s4q policies (paid direct to spouse)
-  // NOT: trust/third party policies (paid direct — executor never handles them)
-  // NOT: business assurance to CC/bank (paid direct to that entity)
-  // Executor fees basis: physical assets + policies paid INTO estate only
-  // Third party / trust policies paid direct — executor never handles them
   var execFeeBasis     = totalDutiableAssets + estatePols;
   var execFees         = execFeeBasis * EXEC_RATE;
+  // Residue = what physically flows to spouse through will AFTER all estate costs
+  // This is informational only — it qualifies for s.4(q) in the will but we do not
+  // retroactively reduce the duty calculation (would create circular dependency)
+  if (S.cli.spouseInheritsResidue) {
+    var _estateIn = totalDutiableAssets + estatePols;
+    var _dutyEstate = afterAbatement > 0 ? estateDuty * (_estateIn / (afterAbatement > 0 ? grossEstate : 1)) : 0;
+    spouseResidue = Math.max(0, _estateIn - execFees - _dutyEstate - accrualDed);
+  }
   var totalEstateCosts = estateDuty + execFees;
 
   // ── DUTY APPORTIONMENT (s7 Estate Duty Act)
@@ -3355,8 +3341,9 @@ function buildEstate() {
   }
   if (sec4qTotal > 0) {
     b1.row(S.cli.spouseInheritsResidue ? 'Less: Section 4(q) \u2014 spouse policies + residue' : 'Less: Section 4(q) \u2014 spouse bequest', '\u2212 ' + Rfmt(sec4qDed), true);
-    if (S.cli.spouseInheritsResidue && section4q > 0)    b1.sub('Spouse policies (paid direct): ' + Rfmt(section4q), '');
-    if (S.cli.spouseInheritsResidue && spouseResidue > 0) b1.sub('Residue of estate (net of costs): ' + Rfmt(Math.round(spouseResidue)), '');
+    if (S.cli.spouseInheritsResidue && spouseResidue > 0) {
+      b1.sub('Note: residue of estate to spouse ≈ ' + Rfmt(Math.round(spouseResidue)) + ' (after executor fees, duty & accrual) — s.4(q) eligible in will but not deducted here to avoid circular calculation', '');
+    }
     b1.row('After Section 4(q) deduction', Rfmt(afterSpouse), false, false, true);
   }
   b1.row('Less: Primary abatement', '\u2212 ' + Rfmt(Math.min(afterSpouse, ABATEMENT)), true);
