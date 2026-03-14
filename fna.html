@@ -382,7 +382,8 @@ var DEFAULTS = {
   cli: {
     name: '', id: '', dob: '', gender: '', smoker: '', education: '',
     occ: '', retAge: '65', grossPM: '', nettPM: '',
-    marital: '', domDate: '', spouseName: '', spouseDob: '', spouseOcc: ''
+    marital: '', domDate: '', spouseName: '', spouseDob: '', spouseOcc: '',
+    spouseInheritsResidue: false
   },
   kids: [],
 
@@ -1714,6 +1715,31 @@ function buildRetirement() {
     var gl2=el('span','',retGap>=0?'Surplus':'Shortfall'); gl2.style.color='#ccd6f6';
     var gv2=el('span','',Rfmt(Math.abs(retGap))); gv2.style.color=retGap>=0?'#86efac':'#f87171';
     gapRow.appendChild(gl2); gapRow.appendChild(gv2); calcBox.appendChild(gapRow);
+
+    // PMT: additional monthly contribution needed to close the shortfall
+    if (retGap < 0 && yrsToRet > 0) {
+      var shortfall = Math.abs(retGap);
+      var monthlyRate = N(S.assump.growth) / 100 / 12;
+      var nMonths = yrsToRet * 12;
+      var pmtNeeded = 0;
+      if (monthlyRate > 0) {
+        // PMT to accumulate shortfall: PMT = FV * r / ((1+r)^n - 1)
+        pmtNeeded = Math.round(shortfall * monthlyRate / (Math.pow(1 + monthlyRate, nMonths) - 1));
+      } else {
+        pmtNeeded = Math.round(shortfall / nMonths);
+      }
+      var pmtRow = div();
+      pmtRow.style.cssText = 'display:flex;justify-content:space-between;padding:6px 0;margin-top:4px;font-size:12px';
+      var pmtL = el('span','','To close this gap, save an additional'); pmtL.style.color='#8899bb';
+      var pmtV = el('span','',Rfmt(pmtNeeded)+' /pm'); pmtV.style.cssText='font-weight:700;color:#fbbf24';
+      pmtRow.appendChild(pmtL); pmtRow.appendChild(pmtV);
+      calcBox.appendChild(pmtRow);
+      var pmtNote = div();
+      pmtNote.style.cssText = 'font-size:10px;color:#667;padding-bottom:4px';
+      pmtNote.textContent = 'Assumes '+S.assump.growth+'% p.a. growth, no escalation on new contribution, over '+yrsToRet+' years.';
+      calcBox.appendChild(pmtNote);
+    }
+
     s.appendChild(calcBox);
   }
 
@@ -1984,33 +2010,66 @@ function buildPolCard(p, i) {
   }
 
   if (isRA || isInv) {
-    var bst2 = el('div','stitle','Fund / Death Benefit');
+    var bst2 = el('div','stitle','Fund Value & Escalations');
     bst2.style.marginTop = '10px';
     card.appendChild(bst2);
     var rb2 = g3();
     rb2.appendChild(rfld('Current Fund Value', p, 'BenFundValue'));
-    rb2.appendChild(rfld('Death Benefit',      p, 'BenDeath'));
+    rb2.appendChild(pfld('Premium esc % p.a.', p, 'PremEscalation', {onblur:function(){render();}}));
     rb2.appendChild(pfld('Growth rate % (projection)', p, 'GrowthRate', {onblur:function(){render();}}));
     card.appendChild(rb2);
-    // Seed GrowthRate into retAssets on blur
+    // Age-rated / CPI warning
+    var premEscRaw = String(p.PremEscalation || '').trim().toLowerCase();
+    if (premEscRaw === 'age rated' || premEscRaw === 'age-rated' || premEscRaw === 'age_rated') {
+      var escWarn = div('alert');
+      escWarn.style.marginTop = '4px';
+      escWarn.innerHTML = '⚠ <strong>Age-rated escalation cannot be projected</strong> — please enter a fixed % for FNA purposes.';
+      card.appendChild(escWarn);
+    }
     var premNote = div('info');
     premNote.style.cssText = 'font-size:11px;padding:6px 10px;margin-top:-4px';
-    premNote.textContent = 'Premium = monthly contribution. Growth rate used for retirement projection.';
+    premNote.textContent = 'Premium = monthly contribution. Fund Value = current balance. Growth rate used for retirement projection.';
     card.appendChild(premNote);
+  }
+
+  if (isRisk || t === 'Life / Income Protector') {
+    // Escalation fields for risk policies
+    var bstEsc = el('div','stitle','Premium & Benefit Escalation');
+    bstEsc.style.marginTop = '10px';
+    card.appendChild(bstEsc);
+    var rbEsc = g2();
+    rbEsc.appendChild(pfld('Premium esc % p.a.', p, 'PremEscalation', {onblur:function(){render();}}));
+    rbEsc.appendChild(pfld('Benefit esc % p.a.', p, 'BenEscalation', {onblur:function(){render();}}));
+    card.appendChild(rbEsc);
+    // Age-rated / CPI warnings
+    var premEscRaw2 = String(p.PremEscalation || '').trim().toLowerCase();
+    var benEscRaw2  = String(p.BenEscalation  || '').trim().toLowerCase();
+    var ageRatedPrem = premEscRaw2 === 'age rated' || premEscRaw2 === 'age-rated' || premEscRaw2 === 'age_rated';
+    var cpiPrem      = premEscRaw2 === 'cpi';
+    var cpiAlreadySet = benEscRaw2 === 'cpi';
+    if (ageRatedPrem || cpiPrem || cpiAlreadySet) {
+      var escWarn2 = div('alert');
+      escWarn2.style.marginTop = '4px';
+      escWarn2.innerHTML = '⚠ <strong>' +
+        (ageRatedPrem ? 'Age-rated premium escalation' : '') +
+        (cpiPrem ? 'CPI premium escalation' : '') +
+        (cpiAlreadySet && !cpiPrem ? 'CPI benefit escalation' : '') +
+        ' cannot be projected</strong> — please enter a fixed % for FNA purposes.';
+      card.appendChild(escWarn2);
+    }
   }
 
   if (isBiz) {
     var bstBiz = el('div','stitle','Business Assurance Details');
     bstBiz.style.marginTop = '10px';
     card.appendChild(bstBiz);
-    var rbBiz = g3();
+    var rbBiz = g2();
     rbBiz.appendChild(sfld('Business Type', p, 'BizType', ['','Buy & Sell','Keyman','Contingent Liability']));
     rbBiz.appendChild(rfld('Cover / Loan Amount', p, 'LoanAmount'));
-    rbBiz.appendChild(rfld('Death Benefit', p, 'BenDeath'));
     card.appendChild(rbBiz);
     var bizNote = div('info');
     bizNote.style.cssText = 'font-size:11px;padding:6px 10px;margin-top:-4px;background:#eff6ff;border-color:#bfdbfe;color:#1e40af';
-    bizNote.innerHTML = '<strong>Buy &amp; Sell</strong> pays to co-shareholder · <strong>Keyman</strong> pays to business · <strong>Contingent Liability</strong> settles business debt. None form part of personal estate.';
+    bizNote.innerHTML = '<strong>Buy &amp; Sell</strong> pays to co-shareholder · <strong>Keyman</strong> pays to business · <strong>Contingent Liability</strong> settles business debt. None form part of personal estate. The Loan Amount IS the death benefit for estate purposes.';
     card.appendChild(bizNote);
   }
   // Parse Beneficiaries array (CRM format) on first render to seed BeneficiaryType/Beneficiary
@@ -2743,11 +2802,13 @@ function buildSummary() {
     e3Row('Estate duty',Rfmt(Math.round(duty)),false,true);
     e3Row('Executor fees (est.)',Rfmt(Math.round(execFees)),false,false);
     e3Row('Total estate costs',Rfmt(Math.round(duty+execFees)),false,true);
-    // Spouse residue — informational only
+    // Spouse residue — only if tick is set on Estate tab
     var totalEstateCosts = Math.round(duty+execFees);
-    var spouseResidue = Math.max(0, net - s4qDed - totalEstateCosts);
-    if(spouseResidue>0){
-      e3Row('Estimated residue to spouse/estate',Rfmt(spouseResidue),false,false);
+    if(S.cli.spouseInheritsResidue){
+      var spouseResidue = Math.max(0, net - s4qDed - totalEstateCosts);
+      if(spouseResidue>0){
+        e3Row('Estimated residue to spouse/estate',Rfmt(spouseResidue),false,false);
+      }
     }
     s.appendChild(estBox);
   }
