@@ -2332,6 +2332,46 @@ function buildRetirement() {
   og.appendChild(div());
   s.appendChild(og);
 
+  // ── Living Annuity income drawings — informational
+  var laIncPols=(S.importedPols||[]).filter(function(p){ return p.Type==='Living Annuity'&&N(p.BenLAIncome)>0; });
+  if(laIncPols.length>0){
+    s.appendChild(stitle('Living Annuity Income in Retirement'));
+    var laInf=div('info');
+    laInf.innerHTML='The Living Annuity fund values are included in <strong>Retirement Assets</strong> above. '
+      +'The income drawings shown here are <strong>for information only</strong> — they confirm what the fund is currently producing. '
+      +'They do not reduce the capital calculation (to avoid double-counting).';
+    s.appendChild(laInf);
+
+    var laTbl=document.createElement('table');
+    laTbl.innerHTML='<thead><tr>'
+      +'<th>Policy</th>'
+      +'<th style="text-align:right">Drawing today /pm</th>'
+      +'<th style="text-align:right">Inc esc %</th>'
+      +(yrsToRet?'<th style="text-align:right">At retirement /pm</th>':'')
+      +'<th>Tax treatment</th>'
+      +'</tr></thead>';
+    var laTb=document.createElement('tbody');
+    laIncPols.forEach(function(p){
+      var incToday=N(p.BenLAIncome);
+      var escRate=N(p.LAIncEsc)>0?N(p.LAIncEsc):N(S.assump.cpi)||6;
+      var incAtRet=yrsToRet?Math.round(incToday*Math.pow(1+escRate/100,yrsToRet)):incToday;
+      var isTax=p.LAIncomeTaxable!==false;
+      var tr=document.createElement('tr');
+      var taxCell=isTax
+        ?'<span style="color:var(--orange);font-weight:700">Taxable — marginal rate</span>'
+        :'<span style="color:var(--green);font-weight:700">Partially/non-taxable — disallowed contributions</span>';
+      tr.innerHTML='<td><strong>'+(p.Insurer||'—')+'</strong>'
+        +(p.Product?'<br><span style="font-size:10px;color:var(--sub)">'+p.Product+'</span>':'')+'</td>'
+        +'<td style="text-align:right">'+Rfmt(incToday)+'</td>'
+        +'<td style="text-align:right">'+escRate+'%</td>'
+        +(yrsToRet?'<td style="text-align:right;font-weight:700">'+Rfmt(incAtRet)+'</td>':'')
+        +'<td style="font-size:11px">'+taxCell+'</td>';
+      laTb.appendChild(tr);
+    });
+    laTbl.appendChild(laTb);
+    var laTw=div('twrap'); laTw.appendChild(laTbl); s.appendChild(laTw);
+  }
+
   // ── Calculator
   if(yrsToRet && yrsToRet > 0){
     var totalMonthlyNeed = (S.retNeeds||[]).reduce(function(a,r){return a+N(r.amtToday);},0);
@@ -3040,6 +3080,61 @@ function buildPolCard(p, i) {
         'Beneficiaries may take a cash lump sum (retirement tax tables apply in their hands) or continue the annuity. '+
         'This is the beneficiary\'s tax — not an estate cost.';
       card.appendChild(laNote);
+
+      // ── Living Annuity income drawing inputs
+      var laIncSt=el('div','stitle','Income Drawing');
+      laIncSt.style.marginTop='10px';
+      card.appendChild(laIncSt);
+
+      var laIncRow=g3();
+      laIncRow.appendChild(rfld('Monthly Income Drawn', p, 'BenLAIncome', {onblur:function(){render();}}));
+      laIncRow.appendChild(pfld('Annual Drawdown Rate %', p, 'DrawdownRate', {onblur:function(){render();}}));
+      laIncRow.appendChild(pfld('Income Escalation % p.a.', p, 'LAIncEsc', {onblur:function(){render();}}));
+      card.appendChild(laIncRow);
+
+      // Taxable / non-taxable tick
+      var taxRow=div(); taxRow.style.cssText='margin-top:8px;margin-bottom:4px';
+      var taxLbl=document.createElement('label');
+      taxLbl.style.cssText='display:flex;align-items:flex-start;gap:8px;cursor:pointer;font-size:12px;color:var(--text)';
+      var taxInp=document.createElement('input'); taxInp.type='checkbox';
+      taxInp.checked=p.LAIncomeTaxable!==false; // default true (most common — deductible contributions)
+      taxInp.style.cssText='accent-color:var(--gold);width:14px;height:14px;flex-shrink:0;margin-top:1px';
+      taxInp.addEventListener('change',function(e){ S.importedPols[i].LAIncomeTaxable=e.target.checked; render(); });
+      var taxText=document.createElement('span');
+      taxText.innerHTML='<strong>Income drawing is fully taxable</strong> — contributions were deductible (standard). '
+        +'Untick if client made disallowed (non-deductible) contributions and a tax-free portion applies per SARS formula.';
+      taxLbl.appendChild(taxInp); taxLbl.appendChild(taxText); taxRow.appendChild(taxLbl);
+      card.appendChild(taxRow);
+
+      // Tax treatment note — changes based on tick
+      var taxNote=div(); taxNote.style.cssText='font-size:11px;padding:6px 10px;border-radius:6px;margin-top:4px';
+      if(p.LAIncomeTaxable!==false){
+        taxNote.style.cssText+='background:#fff7ed;border:1px solid #fed7aa;color:#92400e';
+        taxNote.innerHTML='⚖ <strong>Taxable:</strong> Full drawing added to gross income — taxed at marginal rate. Note in ROA.';
+      } else {
+        taxNote.style.cssText+='background:#f0fdf4;border:1px solid #86efac;color:#166534';
+        taxNote.innerHTML='✓ <strong>Partially/fully non-taxable:</strong> Disallowed contributions — tax-free portion per SARS "cost" formula. Document basis in ROA.';
+      }
+      card.appendChild(taxNote);
+
+      // Drawdown rate regulatory warning
+      var drRate=N(p.DrawdownRate);
+      if(drRate>0 && (drRate<2.5 || drRate>17.5)){
+        var drWarn=div('alert');
+        drWarn.style.marginTop='6px';
+        drWarn.textContent='⚠ FSCA regulation: the annual drawdown rate must be between 2.5% and 17.5%.';
+        card.appendChild(drWarn);
+      } else if(drRate>=2.5 && drRate<=17.5){
+        // Show sustainability indicator
+        var fv=N(p.BenFundValue);
+        if(fv>0){
+          var annualDraw=fv*(drRate/100);
+          var monthlyCheck=Math.round(annualDraw/12);
+          var drInfo=div(); drInfo.style.cssText='font-size:11px;padding:6px 10px;margin-top:6px;border-radius:6px;background:#f0fdf4;border:1px solid #86efac;color:#166534';
+          drInfo.textContent='✓ At '+drRate+'% drawdown on R'+Rfmt(fv)+' fund: ≈ '+Rfmt(monthlyCheck)+' /pm income. Rate within FSCA limits (2.5% – 17.5%).';
+          card.appendChild(drInfo);
+        }
+      }
     } else if(isPreRet){
       var raNote2=div(); raNote2.style.cssText='font-size:11px;padding:6px 10px;margin-top:4px;border-radius:6px;background:#eff6ff;border:1px solid #bfdbfe;color:#1e40af';
       raNote2.innerHTML='<strong>Retirement fund:</strong> No CGT on death. Outside estate (trustees governed by s.37C). '+
@@ -3049,7 +3144,9 @@ function buildPolCard(p, i) {
 
     var premNote = div('info');
     premNote.style.cssText = 'font-size:11px;padding:6px 10px;margin-top:4px';
-    premNote.textContent = 'Premium = monthly contribution. Growth rate used for retirement projection.';
+    premNote.textContent = isLA
+      ? 'If still contributing to this Living Annuity, enter the monthly contribution as the Premium above. Leave blank if fully in drawdown phase. Growth rate is used for fund projection.'
+      : 'Premium = monthly contribution. Growth rate used for retirement projection.';
     card.appendChild(premNote);
   }
 
@@ -3827,6 +3924,14 @@ function buildSummary() {
       });
       if(rentalAtRet3>0) r3Row('Less: rental at retirement','('+Rfmt(rentalAtRet3)+'/pm)',true);
       if(otherIncAtRet3>0) r3Row('Less: farm/business at retirement','('+Rfmt(otherIncAtRet3)+'/pm)',true);
+      // LA income drawings — informational, mirrors buildRetirement
+      var laPolsS=(S.importedPols||[]).filter(function(p){return p.Type==='Living Annuity'&&N(p.BenLAIncome)>0;});
+      laPolsS.forEach(function(p){
+        var escS=N(p.LAIncEsc)>0?N(p.LAIncEsc):N(S.assump.cpi)||6;
+        var laIncS=yrsToR2?Math.round(N(p.BenLAIncome)*Math.pow(1+escS/100,yrsToR2)):N(p.BenLAIncome);
+        var taxLbl=(p.LAIncomeTaxable!==false)?'taxable':'partially non-taxable';
+        r3Sub('LA drawing: '+(p.Insurer||'LA')+' ('+taxLbl+', from LA fund in assets)',Rfmt(laIncS)+'/pm');
+      });
       r3Row('Net monthly gap at retirement',Rfmt(netMonthlyGap3)+' /pm',false,true);
       r3Row('Capital needed to fund income','('+Rfmt(capNeed3)+')',false,true);
       if(lumpAtRet3>0) r3Row('Lump sum needs','('+Rfmt(lumpAtRet3)+')',true);
@@ -4419,6 +4524,12 @@ function printFNA() {
     propSoldP+=Math.round(projV*pct/100);
   });
   totalProjP+=propSoldP;
+  var laIncAtRetP=0;
+  var laIncPolsP=(pols||[]).filter(function(p){return p.Type==='Living Annuity'&&N(p.BenLAIncome)>0;});
+  laIncPolsP.forEach(function(p){
+    var esc=N(p.LAIncEsc)>0?N(p.LAIncEsc):N(S.assump.cpi)||6;
+    laIncAtRetP+=yrsToRet?Math.round(N(p.BenLAIncome)*Math.pow(1+esc/100,yrsToRet)):N(p.BenLAIncome);
+  });
   var retGapP=totalProjP-totalCapNeedP;
 
   // CSS
@@ -4708,6 +4819,21 @@ function printFNA() {
       h+='</tbody></table>';
     }
 
+    if(laIncPolsP.length>0){
+      h+=sec('Living Annuity Income Drawings');
+      h+=tblHead(['Policy','Drawing today /pm','Inc esc %','At retirement /pm','Tax treatment']);
+      laIncPolsP.forEach(function(p){
+        var incToday=N(p.BenLAIncome);
+        var esc=N(p.LAIncEsc)>0?N(p.LAIncEsc):N(S.assump.cpi)||6;
+        var incAtRet=yrsToRet?Math.round(incToday*Math.pow(1+esc/100,yrsToRet)):incToday;
+        var taxTreat=(p.LAIncomeTaxable!==false)?'Taxable \u2014 marginal rate':'Partially/non-taxable \u2014 disallowed contributions';
+        h+='<tr>'+td(e((p.Insurer||'\u2014')+(p.Product?' \u2014 '+p.Product:'')))+td(r(incToday),true)
+          +td(esc+'%',true)+td(r(incAtRet),true)+td(taxTreat)+'</tr>';
+      });
+      h+='</tbody></table>';
+      h+='<p style="font-size:9px;color:#888;margin-bottom:8px">LA fund values are included in Retirement Assets above. Income drawings shown for information \u2014 not deducted from capital gap to avoid double-counting.</p>';
+    }
+
     h+=sec('Retirement Capital Summary');
     h+=navyBox(
       nrow('Capital needed to fund income needs',r(capNeedP))
@@ -4717,6 +4843,7 @@ function printFNA() {
       +(propSoldP>0?nrow('Incl. property proceeds',r(propSoldP),false,true):'')
       +(rentalAtRetP>0?nrow('Rental income at retirement',r(rentalAtRetP)+' /pm',false,true):'')
       +(otherIncAtRetP>0?nrow('Farm/business income at retirement',r(otherIncAtRetP)+' /pm',false,true):'')
+      +(laIncAtRetP>0?nrow('Living Annuity income (from LA funds above)',r(laIncAtRetP)+' /pm \u2014 informational',false,true):'')
       +'<div style="display:flex;justify-content:space-between;padding:7px 0;border-top:2px solid #334;margin-top:5px;font-size:12px;font-weight:700">'
       +'<span style="color:#ccd6f6">'+(retGapP>=0?'SURPLUS':'SHORTFALL')+'</span>'
       +'<span style="color:'+(retGapP>=0?'#86efac':'#f87171')+'">'+r(Math.abs(retGapP))+'</span></div>'
