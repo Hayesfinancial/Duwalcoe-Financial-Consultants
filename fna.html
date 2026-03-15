@@ -437,9 +437,10 @@ function calcTotalCGT(marginalRate) {
     }
   });
 
-  // Other assets
+  // Other assets — only if cgtApplicable is not explicitly false
   (S.otherAssets||[]).forEach(function(a) {
     if (!N(a.val) || !N(a.baseCost)) return;
+    if (a.cgtApplicable === false || a.cgtApplicable === 'false') return; // explicitly exempt
     if ((a.deathBenType||'Estate') === 'Spouse') return;
     var r = calcCGTAsset(a.val, a.baseCost, false);
     if (r.gainAfterExcl > 0) {
@@ -1623,7 +1624,25 @@ function buildAssets() {
     var di=document.createElement('input'); di.type='text'; di.value=a.desc||''; di.placeholder='e.g. Listed shares, farm, business';
     di.addEventListener('input',function(e){S.otherAssets[i].desc=e.target.value;}); df.appendChild(di); row.appendChild(df);
     row.appendChild(rfld('Current Value', a, 'val', {onblur:function(){render();}}));
-    row.appendChild(sfld('Type', a, 'type', ['Investment','Business Interest','Farm / Agricultural','Inheritance','Personal','Other']));
+    var typeOpts=['Bank / Cash Savings','Investment','Business Interest','Farm / Agricultural','Inheritance','Personal','Other'];
+    var cgtByType={'Bank / Cash Savings':false,'Investment':true,'Business Interest':true,'Farm / Agricultural':true,'Inheritance':false,'Personal':false,'Other':false};
+    var typeFld=div('f'); typeFld.appendChild(el('label','','Type'));
+    var typeSel=document.createElement('select');
+    typeSel.style.cssText='border:var(--border);border-radius:5px;padding:6px 8px;font-size:12px;font-family:inherit;background:var(--white)';
+    typeOpts.forEach(function(o){
+      var opt=document.createElement('option'); opt.value=o; opt.textContent=o;
+      if((a.type||'Bank / Cash Savings')===o) opt.selected=true;
+      typeSel.appendChild(opt);
+    });
+    (function(idx){ typeSel.addEventListener('change',function(e){
+      S.otherAssets[idx].type=e.target.value;
+      // Auto-set CGT default when type changes, unless user has explicitly toggled it
+      if(!S.otherAssets[idx]._cgtManuallySet){
+        S.otherAssets[idx].cgtApplicable = cgtByType[e.target.value]||false;
+      }
+      render();
+    }); })(i);
+    typeFld.appendChild(typeSel); row.appendChild(typeFld);
     var dd=div(); dd.appendChild(delBtn(function(){S.otherAssets.splice(i,1);render();})); row.appendChild(dd);
     card.appendChild(row);
 
@@ -1659,6 +1678,31 @@ function buildAssets() {
     });
     adbtSel.addEventListener('change',function(e){S.otherAssets[i].deathBenType=e.target.value;render();});
     adbtFld.appendChild(adbtSel); ar1.appendChild(adbtFld);
+
+    // CGT applicable tick — default based on type
+    var cgtTypes = ['Investment','Business Interest','Farm / Agricultural'];
+    var cgtDefault = cgtTypes.indexOf(a.type||'Bank / Cash Savings') > -1;
+    // If cgtApplicable has never been set, apply the type-driven default
+    if (a.cgtApplicable === undefined || a.cgtApplicable === null) {
+      S.otherAssets[i].cgtApplicable = cgtDefault;
+      a.cgtApplicable = cgtDefault;
+    }
+    var isCGT = a.cgtApplicable !== false && a.cgtApplicable !== 'false';
+
+    var cgtFld=div('f'); cgtFld.style.minWidth='120px';
+    cgtFld.appendChild(el('label','','CGT on death'));
+    var cgtWrap=div(); cgtWrap.style.cssText='display:flex;align-items:center;gap:7px;margin-top:6px';
+    var cgtCb=document.createElement('input'); cgtCb.type='checkbox'; cgtCb.checked=isCGT;
+    cgtCb.style.cssText='accent-color:var(--gold);width:15px;height:15px;cursor:pointer;flex-shrink:0';
+    (function(idx){ cgtCb.addEventListener('change',function(e){
+      S.otherAssets[idx].cgtApplicable=e.target.checked;
+      S.otherAssets[idx]._cgtManuallySet=true;
+      render();
+    }); })(i);
+    var cgtLblTxt=el('span','',isCGT?'Applicable':'Exempt');
+    cgtLblTxt.style.cssText='font-size:12px;color:'+(isCGT?'var(--orange)':'var(--green)');
+    cgtWrap.appendChild(cgtCb); cgtWrap.appendChild(cgtLblTxt); cgtFld.appendChild(cgtWrap);
+    ar1.appendChild(cgtFld);
     card.appendChild(ar1);
 
     // Row 3: Retirement role + dependent fields + growth rate + sold at death
@@ -1750,7 +1794,8 @@ function buildAssets() {
     card.appendChild(ar2);
 
     // CGT preview
-    if(N(a.baseCost)>0&&N(a.val)>0&&(a.deathBenType||'Estate')!=='Spouse'){
+    var isCGTPreview = a.cgtApplicable !== false && a.cgtApplicable !== 'false';
+    if(isCGTPreview && N(a.baseCost)>0&&N(a.val)>0&&(a.deathBenType||'Estate')!=='Spouse'){
       var acgtR=calcCGTAsset(a.val,a.baseCost,false);
       if(acgtR.gainAfterExcl>0){
         var amr=N(S.cli.grossPM)>0?calcMarginalRate(N(S.cli.grossPM)*12):0.45;
@@ -1764,12 +1809,15 @@ function buildAssets() {
     } else if((a.deathBenType||'Estate')==='Spouse'){
       var arb=div(); arb.style.cssText='margin-top:8px;padding:6px 10px;border-radius:6px;background:#f0fdf4;border:1px solid #86efac;font-size:11px;color:#166534';
       arb.textContent='✓ Spouse rollover — no CGT on death.'; card.appendChild(arb);
+    } else if(!isCGTPreview){
+      var arbE=div(); arbE.style.cssText='margin-top:8px;padding:6px 10px;border-radius:6px;background:#f0fdf4;border:1px solid #86efac;font-size:11px;color:#166534';
+      arbE.textContent='✓ CGT exempt — excluded from estate CGT calculation.'; card.appendChild(arbE);
     }
 
     s.appendChild(card);
   });
   s.appendChild(addBtn('+ Add Asset', function(){
-    S.otherAssets.push({desc:'',val:'',type:'Investment',baseCost:'',dateBought:'',deathBenType:'Estate',retirementRole:'Not included',growthRate:'',soldAtDeath:false});
+    S.otherAssets.push({desc:'',val:'',type:'Bank / Cash Savings',baseCost:'',dateBought:'',deathBenType:'Estate',retirementRole:'Not included',growthRate:'',soldAtDeath:false,cgtApplicable:false});
     render();
   }));
 
