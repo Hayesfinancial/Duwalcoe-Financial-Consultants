@@ -2499,7 +2499,7 @@ function buildPolicies() {
         s.appendChild(polCapInf);
 
         var polCapTbl=document.createElement('table');
-        polCapTbl.innerHTML='<thead><tr><th>Policy</th><th>Premium at ret.</th><th>Esc %</th><th>Capital required</th></tr></thead>';
+        polCapTbl.innerHTML='<thead><tr><th>Policy</th><th>Premium today</th><th>Esc %</th><th>Premium at ret.</th><th>Return in ret %</th><th>Capital required</th></tr></thead>';
         var polCapTb=document.createElement('tbody');
         var totalPolCap=0;
 
@@ -2507,31 +2507,65 @@ function buildPolicies() {
           var escRaw2=String(pol.PremEscalation||pol.premEsc||'').replace(/,/g,'.').replace(/[^0-9.]/g,'');
           var esc2=parseFloat(escRaw2)||0;
           var premAtRet=esc2>0?Math.round(N(pol.Premium)*Math.pow(1+esc2/100,yrsToRet2)):N(pol.Premium);
-          // Capitalise the premium stream in retirement
-          var dr=N(S.assump.drawdown)||4;
-          var polCap=capitalise(premAtRet, yrsInRet, esc2||N(S.assump.cpi)||6, dr);
+          // Return rate in retirement — use assumption, editable per policy
+          var retRet=N(pol._retReturn)>0?N(pol._retReturn):N(S.assump.retReturn)||8;
+          // Capital = PV of premium stream in retirement at return rate
+          var polCap=capitalise(premAtRet, yrsInRet, esc2||N(S.assump.cpi)||6, retRet);
           totalPolCap+=polCap;
+          var idx3=pols.indexOf(pol);
           var tr3=document.createElement('tr');
+
+          // Editable return rate cell
+          var retRetInp=document.createElement('input'); retRetInp.type='text'; retRetInp.inputMode='numeric';
+          retRetInp.value=pol._retReturn||''; retRetInp.placeholder=String(N(S.assump.retReturn)||8);
+          retRetInp.style.cssText='width:46px;padding:3px 5px;border:1.5px solid var(--mist);border-radius:4px;font-size:11px;text-align:right';
+          retRetInp.addEventListener('blur',function(e){S.importedPols[idx3]._retReturn=e.target.value;render();});
+          retRetInp.addEventListener('input',function(e){S.importedPols[idx3]._retReturn=e.target.value;});
+
           tr3.innerHTML='<td><strong>'+(pol.Insurer||'—')+'</strong>'+(pol.Product?' — '+pol.Product:'')+'</td>'+
-            '<td>'+Rfmt(premAtRet)+'/pm</td>'+
-            '<td>'+esc2+'%</td>'+
-            '<td><strong>'+Rfmt(polCap)+'</strong></td>';
+            '<td>'+Rfmt(pol.Premium)+'/pm</td>'+
+            '<td>'+(esc2||'—')+'%</td>'+
+            '<td>'+Rfmt(premAtRet)+'/pm</td>';
+          var tdRet=document.createElement('td');
+          tdRet.appendChild(retRetInp);
+          var pctSpan=document.createElement('span'); pctSpan.textContent=' %'; pctSpan.style.fontSize='11px';
+          tdRet.appendChild(pctSpan);
+          tr3.appendChild(tdRet);
+          var tdCap=document.createElement('td'); tdCap.innerHTML='<strong>'+Rfmt(polCap)+'</strong>';
+          tr3.appendChild(tdCap);
           polCapTb.appendChild(tr3);
         });
 
         var polCapTot=document.createElement('tr');
         polCapTot.style.cssText='border-top:2px solid var(--navy);font-weight:700';
-        polCapTot.innerHTML='<td colspan="3">Total capital to fund selected policies in retirement</td>'+
-          '<td style="color:var(--gold)"><strong>'+Rfmt(totalPolCap)+'</strong></td>';
+        polCapTot.innerHTML='<td colspan="5">Total capital to fund selected policies in retirement</td>'+
+          '<td><strong>'+Rfmt(totalPolCap)+'</strong></td>';
         polCapTb.appendChild(polCapTot);
         polCapTbl.appendChild(polCapTb);
         var polCapTw=div('twrap'); polCapTw.appendChild(polCapTbl); s.appendChild(polCapTw);
 
-        // Savings needed box — editable, pre-filled from total
+        // Savings needed box
+        if(!S._polSav) S._polSav={growth:String(N(S.assump.growth)||9),esc:'0'};
         var savBox=div(); savBox.style.cssText='background:#1a2a4a;border-radius:8px;padding:14px 16px;margin-top:8px';
         var savHdr=div(); savHdr.style.cssText='font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--gold);margin-bottom:10px';
-        savHdr.textContent='Savings Required for Policy Premiums in Retirement';
+        savHdr.textContent='Monthly Saving Required to Fund Policy Premiums';
         savBox.appendChild(savHdr);
+
+        // Editable inputs inside the navy box
+        var savInputRow=div(); savInputRow.style.cssText='display:flex;gap:14px;margin-bottom:12px;flex-wrap:wrap';
+        function savInpFld(lbl,key,dflt){
+          var w=div(); w.style.cssText='display:flex;flex-direction:column;gap:3px';
+          var lb=el('span','',lbl); lb.style.cssText='font-size:10px;color:#8899bb;text-transform:uppercase;letter-spacing:.5px';
+          var inp=document.createElement('input'); inp.type='text'; inp.inputMode='numeric';
+          inp.value=S._polSav[key]||dflt||''; inp.placeholder=dflt||'0';
+          inp.style.cssText='width:72px;border:1.5px solid #334;border-radius:5px;padding:5px 8px;font-size:13px;font-family:inherit;background:#0f1e38;color:#c8a84b;text-align:right';
+          inp.addEventListener('blur',function(e){S._polSav[key]=e.target.value;render();});
+          inp.addEventListener('input',function(e){S._polSav[key]=e.target.value;});
+          w.appendChild(lb); w.appendChild(inp); return w;
+        }
+        savInputRow.appendChild(savInpFld('Growth rate %','growth',String(N(S.assump.growth)||9)));
+        savInputRow.appendChild(savInpFld('Annual increase %','esc','0'));
+        savBox.appendChild(savInputRow);
 
         function savRow(lbl,val,bold,colour){
           var r=div(); r.style.cssText='display:flex;justify-content:space-between;padding:'+(bold?'7':'4')+'px 0'+(bold?';border-top:1px solid #334;margin-top:4px':'');
@@ -2543,12 +2577,13 @@ function buildPolicies() {
         savRow('Capital target to fund policy premiums',Rfmt(totalPolCap),true);
 
         if(yrsToRet2>0){
-          // PMT to accumulate this capital — editable growth rate
-          var savGrowth=N(S.assump.growth)||9;
-          var unitFV2=projectFund(0,1,0,savGrowth,yrsToRet2);
+          var savGrowth=N(S._polSav.growth)>0?N(S._polSav.growth):N(S.assump.growth)||9;
+          var savEsc=N(S._polSav.esc)||0;
+          var unitFV2=projectFund(0,1,savEsc,savGrowth,yrsToRet2);
           var savPMT=unitFV2>0?Math.round(totalPolCap/unitFV2):0;
-          savRow('Monthly saving needed (@ '+savGrowth+'% growth, flat)',Rfmt(savPMT)+' /pm',true,'#fbbf24');
-          savRow(yrsToRet2+' years to retirement · '+yrsInRet+' years in retirement','',false,'#556');
+          savRow('Capital target',Rfmt(totalPolCap));
+          savRow('Monthly saving needed',Rfmt(savPMT)+' /pm',true,'#fbbf24');
+          savRow(yrsToRet2+' yrs to retirement · '+savGrowth+'% growth · '+(savEsc>0?savEsc+'% annual increase':'flat'),'',false,'#556');
         }
 
         s.appendChild(savBox);
