@@ -3510,49 +3510,79 @@ function buildSummary() {
   if(S.scope.retirement){
     var cliAge=ageFrom(S.cli.dob), retAge=N(S.cli.retAge)||65;
     var yrsToR2=cliAge?Math.max(0,retAge-cliAge):null;
-    var yrsInRet3=85-retAge;
+    var yrsInRet3=Math.max(1,85-retAge);
     if(yrsToR2&&yrsInRet3>0){
       sTitle('Retirement Summary');
-      var mNeed3=0;
-      if(S.retNeeds&&S.retNeeds.length>0){
-        mNeed3=S.retNeeds.reduce(function(a,r){return a+N(r.amtToday);},0);
-      } else {
-        mNeed3=N(S.retIncomeToday)+N(S.retMedAidToday)+N(S.retOtherMonthly);
-      }
-      // Capitalise other income sources at retirement
+
+      // ── Same logic as buildRetirement calculator ──
+
+      // Rental from properties not sold
       var rentalAtRet3=0;
-      if(S.retRentalPM) rentalAtRet3=Math.round(N(S.retRentalPM)*Math.pow(1+pct(S.assump.cpi),yrsToR2));
+      (S.props||[]).forEach(function(p){
+        if(p.soldAtRetirement||!N(p.rental)) return;
+        var escTo=N(p.rentalEsc)>0?N(p.rentalEsc):6;
+        rentalAtRet3+=Math.round(N(p.rental)*Math.pow(1+escTo/100,yrsToR2));
+      });
+
+      // Other income from farm/business
       var otherIncAtRet3=0;
       (S.otherAssets||[]).forEach(function(a){
-        if((a.retirementRole||'')!=='Generates income (farm/business)') return;
-        if(N(a.retirementIncomePM)>0) otherIncAtRet3+=Math.round(N(a.retirementIncomePM)*Math.pow(1+pct(S.assump.cpi),yrsToR2));
+        if((a.retirementRole||'')!=='Generates income (farm/business)'||!N(a.retirementIncomePM)) return;
+        var escTo=N(a.retirementIncEsc)>0?N(a.retirementIncEsc):N(S.assump.cpi)||6;
+        otherIncAtRet3+=Math.round(N(a.retirementIncomePM)*Math.pow(1+escTo/100,yrsToR2));
       });
-      var totalOtherInc3=rentalAtRet3+otherIncAtRet3;
-      var monthlyAtRet3=mNeed3>0?Math.round(mNeed3*Math.pow(1+pct(S.assump.cpi),yrsToR2)):0;
-      var monthlyGapAtRet3=Math.max(0,monthlyAtRet3-totalOtherInc3);
-      var monthlyGapToday3=monthlyGapAtRet3>0?monthlyGapAtRet3/Math.pow(1+pct(S.assump.cpi),yrsToR2):0;
-      var retTarget3=monthlyGapToday3>0?retirementCapitalNeeded(monthlyGapToday3,yrsToR2,yrsInRet3,S.assump.cpi,S.assump.retReturn):0;
-      var lumpAtRet3=(S.retLumps||[]).reduce(function(a,r){return a+N(r.amt);},0);
-      var totalCapNeeded3=retTarget3+lumpAtRet3;
 
-      // Project retirement assets
+      // Monthly needs at retirement — per need at own escalation
+      var monthlyAtRet3=0;
+      (S.retNeeds||[]).forEach(function(r){
+        if(!N(r.amtToday)) return;
+        var escTo=N(r.esc)>0?N(r.esc):N(S.assump.cpi)||6;
+        monthlyAtRet3+=Math.round(N(r.amtToday)*Math.pow(1+escTo/100,yrsToR2));
+      });
+
+      var netMonthlyGap3=Math.max(0,monthlyAtRet3-rentalAtRet3-otherIncAtRet3);
+
+      // Capital needed — each need at its own escInRet
+      var capNeed3=0;
+      (S.retNeeds||[]).forEach(function(r){
+        if(!N(r.amtToday)) return;
+        var escTo=N(r.esc)>0?N(r.esc):N(S.assump.cpi)||6;
+        var escIn=(r.escInRet!==''&&r.escInRet!==undefined&&r.escInRet!==null)?N(r.escInRet):escTo;
+        capNeed3+=retirementCapitalNeeded(N(r.amtToday),yrsToR2,yrsInRet3,escTo,S.assump.retReturn,escIn);
+      });
+
+      var lumpAtRet3=(S.retLumps||[]).reduce(function(a,r){return a+N(r.amt);},0);
+      var totalCapNeeded3=capNeed3+lumpAtRet3;
+
+      // Projected capital: RA funds
       var totalCapAvail3=S.retAssets.reduce(function(a,r){
         if(!N(r.currentVal)&&!N(r.monthlyContrib)) return a;
-        var gr=N(r.growthRate)>0?r.growthRate:S.assump.growth;
-        var esc2=N(r.contribEsc)>0?r.contribEsc:S.assump.incEsc;
+        var gr=N(r.growthRate)>0?N(r.growthRate):N(S.assump.growth)||9;
+        var esc2=N(r.contribEsc)>0?N(r.contribEsc):N(S.assump.incEsc)||6;
         return a+projectFund(r.currentVal,r.monthlyContrib,esc2,gr,yrsToR2);
-      },0);
-      var otherCapAtRet3=N(S.retOtherCapital);
-      totalCapAvail3+=otherCapAtRet3;
+      },0)+N(S.retOtherCapital);
+
+      // Sold property proceeds
+      var propSold3=0;
+      (S.props||[]).forEach(function(p){
+        if(!p.soldAtRetirement||!N(p.val)) return;
+        var gr=N(p.propGrowth)>0?N(p.propGrowth):N(S.assump.growth)||9;
+        var projV=Math.round(N(p.val)*Math.pow(1+gr/100,yrsToR2));
+        var pct3=N(p.retirementPct)>0?N(p.retirementPct):100;
+        propSold3+=Math.round(projV*pct3/100);
+      });
+      totalCapAvail3+=propSold3;
+
+      // Sold other asset proceeds
+      (S.otherAssets||[]).forEach(function(a){
+        if((a.retirementRole||'')!=='Sold at retirement — proceeds to retirement'||!N(a.retirementSaleProceeds)) return;
+        var gr=N(a.growthRate)>0?N(a.growthRate):N(S.assump.growth)||9;
+        totalCapAvail3+=Math.round(N(a.retirementSaleProceeds)*Math.pow(1+gr/100,yrsToR2));
+      });
+
       var retGap3=totalCapAvail3-totalCapNeeded3;
 
-      // Other income capitalised
-      var _rentalCap3=rentalAtRet3>0?retirementCapitalNeeded(rentalAtRet3/Math.pow(1+pct(S.assump.cpi),yrsToR2),yrsToR2,yrsInRet3,S.assump.cpi,S.assump.retReturn):0;
-      var _farmCap3=otherIncAtRet3>0?retirementCapitalNeeded(otherIncAtRet3/Math.pow(1+pct(S.assump.cpi),yrsToR2),yrsToR2,yrsInRet3,S.assump.cpi,S.assump.retReturn):0;
-      var _totalOtherCap3=Math.round(_rentalCap3+_farmCap3);
-      var grossCapNeed3=Math.round(totalCapNeeded3+_totalOtherCap3);
-
-      var retBox3=div(); retBox3.style.cssText='background:#1a2a4a;border-radius:8px;padding:14px 16px;margin-bottom:14px';
+      var retBox3=sBox();
       function r3Row(lbl,val,sub,bold){
         var r=div(); r.style.cssText='display:flex;justify-content:space-between;padding:'+(bold?'7':'4')+'px 0'+(bold?';border-top:1px solid #334;margin-top:4px':'');
         var l=el('span','',lbl); l.style.cssText='color:#ccd6f6;font-size:'+(sub?'11':'12')+'px'+(sub?';padding-left:14px':'');
@@ -3560,38 +3590,37 @@ function buildSummary() {
         r.appendChild(l); r.appendChild(v); retBox3.appendChild(r);
       }
       function r3Sub(l,v){ r3Row(l,v,true,false); }
-      r3Row('Monthly income needed today', Rfmt(mNeed3)+' /pm');
-      r3Row('At retirement (age '+retAge+')', Rfmt(monthlyAtRet3)+' /pm');
-      if(totalOtherInc3>0){
-        r3Row('Less: ongoing income at retirement','',false,false);
-        if(rentalAtRet3>0) r3Sub('Rental — at retirement: '+Rfmt(rentalAtRet3)+'/pm','');
-        if(otherIncAtRet3>0) r3Sub('Farm/business — at retirement: '+Rfmt(otherIncAtRet3)+'/pm','');
-        r3Row('Net monthly gap', Rfmt(monthlyGapAtRet3)+' /pm');
-      }
-      r3Row('Gross capital needed','('+Rfmt(grossCapNeed3)+')',false,true);
-      r3Sub('Full capital to fund all income for '+yrsInRet3+' years','');
-      if(_totalOtherCap3>0){
-        r3Row('Less: ongoing income (capitalised)','',false,false);
-        if(_rentalCap3>0) r3Sub('Rental capitalised: '+Rfmt(Math.round(_rentalCap3)),'');
-        if(_farmCap3>0) r3Sub('Farm/business capitalised: '+Rfmt(Math.round(_farmCap3)),'');
-      }
-      r3Row('Net capital needed from funds','('+Rfmt(retTarget3)+')',false,true);
-      r3Sub('After deducting ongoing income sources','');
+
+      // Per-need breakdown
+      (S.retNeeds||[]).forEach(function(r){
+        if(!N(r.amtToday)) return;
+        var escTo=N(r.esc)>0?N(r.esc):N(S.assump.cpi)||6;
+        var escIn=(r.escInRet!==''&&r.escInRet!==undefined&&r.escInRet!==null)?N(r.escInRet):escTo;
+        var atRet=Math.round(N(r.amtToday)*Math.pow(1+escTo/100,yrsToR2));
+        var capThis=retirementCapitalNeeded(N(r.amtToday),yrsToR2,yrsInRet3,escTo,S.assump.retReturn,escIn);
+        r3Row(r.desc||'Need', Rfmt(atRet)+' /pm at retirement');
+        r3Sub('Capital ('+escIn+'% esc in ret, '+yrsInRet3+' yrs @ '+(N(S.assump.retReturn)||8)+'%)', Rfmt(capThis));
+      });
+      if(rentalAtRet3>0) r3Row('Less: rental at retirement','('+Rfmt(rentalAtRet3)+'/pm)',true);
+      if(otherIncAtRet3>0) r3Row('Less: farm/business at retirement','('+Rfmt(otherIncAtRet3)+'/pm)',true);
+      r3Row('Net monthly gap at retirement',Rfmt(netMonthlyGap3)+' /pm',false,true);
+      r3Row('Capital needed to fund income','('+Rfmt(capNeed3)+')',false,true);
+      if(lumpAtRet3>0) r3Row('Lump sum needs','('+Rfmt(lumpAtRet3)+')',true);
+      r3Row('Total capital required','('+Rfmt(totalCapNeeded3)+')',false,true);
       r3Row('Projected capital at retirement',Rfmt(totalCapAvail3),false,true);
       S.retAssets.forEach(function(r){
         if(N(r.currentVal)||N(r.monthlyContrib)){
-          var gr=N(r.growthRate)>0?r.growthRate:S.assump.growth;
-          var esc2=N(r.contribEsc)>0?r.contribEsc:S.assump.incEsc;
+          var gr=N(r.growthRate)>0?N(r.growthRate):N(S.assump.growth)||9;
+          var esc2=N(r.contribEsc)>0?N(r.contribEsc):N(S.assump.incEsc)||6;
           r3Sub((r.desc||'Fund')+(N(r.monthlyContrib)?' ('+Rfmt(r.monthlyContrib)+'/pm)':''),Rfmt(projectFund(r.currentVal,r.monthlyContrib,esc2,gr,yrsToR2)));
         }
       });
-      if(otherCapAtRet3>0) r3Sub('Other assets / property proceeds',Rfmt(otherCapAtRet3));
+      if(propSold3>0) r3Sub('Property proceeds',Rfmt(propSold3));
+      if(N(S.retOtherCapital)>0) r3Sub('Other capital',Rfmt(N(S.retOtherCapital)));
       var rg3=div(); rg3.style.cssText='display:flex;justify-content:space-between;padding:8px 0;margin-top:8px;border-top:2px solid #445;font-size:14px;font-weight:700';
-      var rgl3=el('span','',retGap3>=0?'Overall position \u2014 Surplus':'Overall position \u2014 Shortfall');
-      var rgv3=el('span','',Rfmt(Math.abs(retGap3)));
-      rgl3.style.color='#ccd6f6'; rgv3.style.color=retGap3>=0?'#86efac':'#f87171';
+      var rgl3=el('span','',retGap3>=0?'Surplus':'Shortfall'); rgl3.style.color='#ccd6f6';
+      var rgv3=el('span','',Rfmt(Math.abs(retGap3))); rgv3.style.color=retGap3>=0?'#86efac':'#f87171';
       rg3.appendChild(rgl3); rg3.appendChild(rgv3); retBox3.appendChild(rg3);
-      s.appendChild(retBox3);
     }
   }
 
