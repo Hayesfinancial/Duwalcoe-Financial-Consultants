@@ -693,9 +693,21 @@ var S = JSON.parse(JSON.stringify(DEFAULTS));
     }
     // Merge server state into S — but never overwrite importedPols (always from CRM)
     var currentPols = S.importedPols;
+    // Keep the current incRows so URL-seeded income isn't wiped by server
+    var currentIncRows = S.incRows ? JSON.parse(JSON.stringify(S.incRows)) : null;
     Object.keys(serverState).forEach(function(k) {
       if (k !== 'importedPols' && k !== 'cli') S[k] = serverState[k];
     });
+    // Restore incRows[0].pm from URL if server wiped it
+    if (currentIncRows && currentIncRows[0] && currentIncRows[0].pm &&
+        S.incRows && S.incRows[0] && !S.incRows[0].pm) {
+      S.incRows[0].pm = currentIncRows[0].pm;
+    }
+    // Always apply URL income — CRM is the live source for income
+    if (currentIncRows && currentIncRows[0] && currentIncRows[0].pm) {
+      if (S.incRows && S.incRows[0]) S.incRows[0].pm = currentIncRows[0].pm;
+      if (currentIncRows[0].pm) S.cli.grossPM = currentIncRows[0].pm;
+    }
     // Merge cli carefully — keep CRM-sourced fields, use server for adviser-entered fields
     if (serverState.cli) {
       var crmFields = ['name','id','dob','gender','smoker','marital','occ','education','spouseName','spouseDob','domDate','grossPM','nettPM'];
@@ -704,6 +716,17 @@ var S = JSON.parse(JSON.stringify(DEFAULTS));
       });
     }
     S.importedPols = currentPols; // always use fresh CRM policies
+    // If server retAssets is missing RA policies that are now in importedPols, reset so
+    // buildRetirement can re-seed them. This handles the case where a policy was added
+    // in the CRM after the FNA was last saved.
+    var raTypes=['Retirement Annuity','Pension Fund','Provident Fund','Preservation Fund','Living Annuity','Tax Free Savings'];
+    var retDescriptions=(S.retAssets||[]).map(function(r){return (r.desc||'').toLowerCase();});
+    var missingRA=(currentPols||[]).some(function(p){
+      if(raTypes.indexOf(p.Type)<0) return false;
+      var label=((p.Insurer?p.Insurer+' \u2014 ':'')+p.Product||p.Type||'').toLowerCase();
+      return !retDescriptions.some(function(d){return d.indexOf((p.Insurer||'').toLowerCase())>-1||(p.Product&&d.indexOf(p.Product.toLowerCase())>-1);});
+    });
+    if(missingRA) S.retAssets=[];
     persist(); // update localStorage with merged state
     render();
     if (indicator) {
