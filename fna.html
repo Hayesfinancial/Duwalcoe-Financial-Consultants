@@ -1855,8 +1855,9 @@ function buildNeeds() {
         var _cs=N(S.accrual&&S.accrual.clientStartVal), _ss=N(S.accrual&&S.accrual.spouseStartVal);
         _acc=Math.max(0,(Math.max(0,_ce-_cs)-Math.max(0,_se-_ss))/2);
       }
+      var _cgtNeed=calcTotalCGT((N(S.cli.grossPM)>0?calcMarginalRate(N(S.cli.grossPM)*12):0.45)*100).totalCGT;
       var _gr=_pv+_s4q+_ep+_tp+_bd;
-      var _ne=Math.max(0,_gr-_pl);
+      var _ne=Math.max(0,_gr-_pl-_cgtNeed);
       var _ad=Math.min(_acc,_ne);
       var _aa=Math.max(0,_ne-_ad);
       var _s4d=Math.min(_s4q,_aa);
@@ -3204,8 +3205,13 @@ function buildEstate() {
   s.appendChild(benEdBox);
 
   // ── ESTATE DUTY CALCULATION
+  // CGT on death is a deemed income tax liability — deductible from estate (s.4(a))
+  var _estMR = N(S.cli.grossPM)>0 ? calcMarginalRate(N(S.cli.grossPM)*12) : 0.45;
+  var _cgtResult = calcTotalCGT(_estMR*100);
+  var cgtLiability = _cgtResult.totalCGT;
+
   var grossEstate    = totalDutiableAssets + estatePols + thirdPartyPols + bizDutiable + s4qPolicies;
-  var netEstate      = Math.max(0, grossEstate - physLiab);
+  var netEstate      = Math.max(0, grossEstate - physLiab - cgtLiability);
 
   // Accrual — on physical assets + RA fund values only (NOT risk policies)
   var accrualClaim = 0;
@@ -3262,7 +3268,11 @@ function buildEstate() {
   var b1 = makeCalcBox('Estate Duty Calculation');
   b1.row('Gross estate', Rfmt(grossEstate));
   b1.sub('Physical assets + all deemed property (policies)', '');
-  if(physLiab>0){ b1.row('Less: Liabilities', '('+Rfmt(physLiab)+')', true); }
+  if(physLiab>0){ b1.row('Less: Liabilities (bonds, finance, loans)', '('+Rfmt(physLiab)+')', true); }
+  if(cgtLiability>0){
+    b1.row('Less: CGT on death (s.4(a) — deemed income tax)', '('+Rfmt(cgtLiability)+')', true);
+    b1.sub('Inclusion rate 40% · Marginal rate '+Math.round(_estMR*100)+'% · Annual exclusion R300,000 applied', '');
+  }
   b1.row('Net estate', Rfmt(netEstate), false, false, true);
   if(accrualDed>0){
     b1.row('Less: Accrual claim (ANC)', '('+Rfmt(accrualDed)+')', true);
@@ -3601,7 +3611,9 @@ function buildSummary() {
       else if((p.BeneficiaryType||'')==='Estate') estPols+=b;
     });
     var gross=physAssets+s4q+estPols;
-    var net=Math.max(0,gross-liabs);
+    var _sumMR=N(S.cli.grossPM)>0?calcMarginalRate(N(S.cli.grossPM)*12):0.45;
+    var _sumCGT=calcTotalCGT(_sumMR*100).totalCGT;
+    var net=Math.max(0,gross-liabs-_sumCGT);
     var s4qDed=Math.min(s4q,net);
     var afterS4q=Math.max(0,net-s4qDed);
     var dutiable=Math.max(0,afterS4q-ABATEMENT);
@@ -3617,6 +3629,7 @@ function buildSummary() {
     }
     e3Row('Gross estate',Rfmt(gross));
     if(liabs>0) e3Row('Less: liabilities','('+Rfmt(liabs)+')',false,false);
+    if(_sumCGT>0) e3Row('Less: CGT on death (s.4(a))','('+Rfmt(_sumCGT)+')',false,false);
     e3Row('Net estate',Rfmt(net),false,true);
     if(s4qDed>0) e3Row('Less: s.4(q) spouse deduction','('+Rfmt(s4qDed)+')',false,false);
     e3Row('Less: abatement','('+Rfmt(Math.min(afterS4q,ABATEMENT))+')',false,false);
