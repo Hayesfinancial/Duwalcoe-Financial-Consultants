@@ -5139,6 +5139,24 @@ function printFNA() {
   });
   var retGapP=totalProjP-totalCapNeedP;
 
+  // Liquidity variables — used on Page 6 and Page 7
+  var liqCashP=(S.otherAssets||[]).reduce(function(sum,a){
+    var tp=(a.type||'').toLowerCase();
+    var illiq=tp.indexOf('business')>-1||tp.indexOf('farm')>-1||tp.indexOf('personal')>-1||tp.indexOf('inheritance')>-1;
+    return sum+(illiq?0:N(a.val));
+  },0);
+  var liqProvsP=estPols+liqCashP;
+  var liqNeedP=physLiab+manLiabTotal+Math.round(dutyEstate)+Math.round(execFees)+Math.round(accrualDed);
+  var liqGapP=liqProvsP-liqNeedP;
+
+  // Disability / dread / IP have values — used on Page 7
+  var disHaveP=pols.reduce(function(a,p){return a+N(p.BenDisability);},0);
+  var dreadHaveP=pols.reduce(function(a,p){return a+N(p.BenDreadDisease);},0);
+  var ipHaveP=pols.reduce(function(a,p){
+    var ib=[];try{ib=JSON.parse(p.IncomeBenefits||'[]');}catch(e){}
+    return a+ib.reduce(function(s2,b){return s2+N(b.amount);},0);
+  },0);
+
   // CSS
   var h='<!DOCTYPE html><html><head><meta charset="UTF-8"><title>FNA \u2014 '+e(S.cli.name)+'</title><style>';
   h+='*{box-sizing:border-box;margin:0;padding:0}';
@@ -5514,39 +5532,105 @@ function printFNA() {
       h+=sec('Estate Planning Notes');
       h+='<p style="font-size:10px;color:#444;margin-bottom:8px">'+e(S.estateNotes)+'</p>';
     }
-  }
+
+    h+=sec('Liquidity Analysis — Estate Cash Flow on Day of Death');
+    // Provisions
+    h+=navyBox(
+      nrow('PROVISIONS','',true)
+      +(estPols>0?nrow('Policies paid to estate',r(estPols),false,true):'')
+      +(liqCashP>0?nrow('Liquid assets (cash / bank / investments)',r(liqCashP),false,true):'')
+      +nrow('Total liquid provisions',r(liqProvsP),true)
+      +nrow('LESS: CASH REQUIRED','',true)
+      +((S.props||[]).reduce(function(a,p){return a+N(p.bond);},0)>0?nrow('Bond balances',r((S.props||[]).reduce(function(a,p){return a+N(p.bond);},0)),false,true):'')
+      +((S.vehicles||[]).reduce(function(a,v){return a+N(v.finance);},0)>0?nrow('Vehicle finance',r((S.vehicles||[]).reduce(function(a,v){return a+N(v.finance);},0)),false,true):'')
+      +((S.liabilities||[]).reduce(function(a,l){return a+N(l.bal);},0)>0?nrow('Other liabilities',r((S.liabilities||[]).reduce(function(a,l){return a+N(l.bal);},0)),false,true):'')
+      +(manLiabTotal>0?nrow('Personal loans / income tax / funeral',r(manLiabTotal),false,true):'')
+      +(Math.round(dutyEstate)>0?nrow('Estate duty (estate\'s share)',r(Math.round(dutyEstate)),false,true):'')
+      +(Math.round(execFees)>0?nrow('Executor fees',r(Math.round(execFees)),false,true):'')
+      +(Math.round(accrualDed)>0?nrow('Accrual payable to spouse',r(Math.round(accrualDed)),false,true):'')
+      +nrow('Total cash required',r(liqNeedP),true)
+      +nrow(liqGapP>=0?'Liquidity Surplus':'Liquidity Shortfall',r(Math.abs(Math.round(liqGapP))),true)
+    );
+    if(liqGapP<0){
+      h+='<p style="font-size:10px;color:#dc2626;background:#fef2f2;border:1px solid #fecaca;border-radius:5px;padding:8px 10px;margin-bottom:8px">'
+        +'&#9888; <strong>Liquidity shortfall of '+r(Math.abs(Math.round(liqGapP)))+'.</strong> '
+        +'The estate cannot fund its obligations without selling assets. Consider estate liquidity cover of at least '+r(Math.abs(Math.round(liqGapP)))+'.</p>';
+    } else {
+      h+='<p style="font-size:10px;color:#166534;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:5px;padding:8px 10px;margin-bottom:8px">'
+        +'&#10003; <strong>Estate is liquid.</strong> Liquid provisions cover all obligations. Surplus: '+r(liqGapP)+'.</p>';
+    }
+  } // end if(S.scope.estate)
 
   // PAGE 7 — SUMMARY & RECOMMENDATIONS
   h+='<div class="pb">'+pageHdr('Summary &amp; Recommendations')+'</div>';
 
-  h+=sec('Risk Cover Summary');
-  h+=tblHead(['Area','Need','Have','Surplus / (Shortfall)']);
-  if(S.scope.death){
-    var dG=totalDeathHave-totalDeathNeed;
-    h+='<tr>'+td('Life Cover')+td(r(totalDeathNeed),true)+td(r(totalDeathHave),true)
-      +'<td style="text-align:right;font-weight:700;color:'+(dG>=0?'#16a34a':'#dc2626')+'">'+r(dG)+'</td></tr>';
+  // Helper for % funded column
+  function pctFundedP(need,have){
+    if(!need||need===0) return '&mdash;';
+    var p=Math.round(have/need*100);
+    var col=p>=100?'#16a34a':p>=75?'#d97706':'#dc2626';
+    return '<span style="font-weight:700;color:'+col+'">'+p+'%</span>';
   }
-  if(S.scope.disability){
-    var dI2=(S.disIncome||[]).reduce(function(a,rn){return a+calcIncomeNeed(rn);},0);
-    var dC2=(S.disCapital||[]).reduce(function(a,rn){return a+N(rn.amt);},0);
-    var dH2=pols.reduce(function(a,p){return a+N(p.BenDisability);},0);
-    var dG2=dH2-(dI2+dC2);
-    h+='<tr>'+td('Disability')+td(r(dI2+dC2),true)+td(r(dH2),true)
-      +'<td style="text-align:right;font-weight:700;color:'+(dG2>=0?'#16a34a':'#dc2626')+'">'+r(dG2)+'</td></tr>';
+
+  h+=sec('Complete Needs Overview');
+  h+='<table style="width:100%;border-collapse:collapse;font-size:10px;margin-bottom:10px"><thead><tr>'
+    +'<th style="background:#0e413a;color:#fff;padding:5px 7px;text-align:left;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.4px">Need</th>'
+    +'<th style="background:#0e413a;color:#fff;padding:5px 7px;text-align:right;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.4px">Required</th>'
+    +'<th style="background:#0e413a;color:#fff;padding:5px 7px;text-align:right;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.4px">Existing Cover</th>'
+    +'<th style="background:#0e413a;color:#fff;padding:5px 7px;text-align:right;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.4px">Surplus / (Shortfall)</th>'
+    +'<th style="background:#0e413a;color:#fff;padding:5px 7px;text-align:right;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.4px">% Funded</th>'
+    +'</tr></thead><tbody>';
+
+  function sumRowP(label, need, have, sub, isMonthly){
+    var gap=have-need;
+    var gapCol=need>0?(gap>=0?'#16a34a':'#dc2626'):'#999';
+    var gapTxt=need>0?r(Math.abs(gap))+(isMonthly?' /pm':''):'&mdash;';
+    var prefix=need>0?(gap>=0?'&#9650; ':'&#9660; '):'';
+    var rowStyle=sub?'background:#fafafa;':'';
+    var lblStyle=sub?'padding-left:18px;font-size:9px;color:#666;':'font-weight:600;';
+    return '<tr style="'+rowStyle+'">'
+      +'<td style="padding:4px 7px;border-bottom:1px solid #eef;'+lblStyle+'">'+label+'</td>'
+      +'<td style="text-align:right;padding:4px 7px;border-bottom:1px solid #eef;">'+(need>0?r(need)+(isMonthly?' /pm':''):'&mdash;')+'</td>'
+      +'<td style="text-align:right;padding:4px 7px;border-bottom:1px solid #eef;">'+(have>0?r(have)+(isMonthly?' /pm':''):'&mdash;')+'</td>'
+      +'<td style="text-align:right;padding:4px 7px;border-bottom:1px solid #eef;font-weight:700;color:'+gapCol+'">'+(need>0?prefix+gapTxt:'&mdash;')+'</td>'
+      +'<td style="text-align:right;padding:4px 7px;border-bottom:1px solid #eef;">'+pctFundedP(need,have)+'</td>'
+      +'</tr>';
   }
-  if(S.scope.dread&&N(S.dreadAmt)){
-    var ddH2=pols.reduce(function(a,p){return a+N(p.BenDreadDisease);},0);
-    var ddG2=ddH2-N(S.dreadAmt);
-    h+='<tr>'+td('Dread Disease')+td(r(S.dreadAmt),true)+td(r(ddH2),true)
-      +'<td style="text-align:right;font-weight:700;color:'+(ddG2>=0?'#16a34a':'#dc2626')+'">'+r(ddG2)+'</td></tr>';
+  function sumCatP(label){
+    return '<tr><td colspan="5" style="padding:6px 7px 2px;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:#a8b938;background:#f8f8f4;border-top:2px solid #dde0e8">'+label+'</td></tr>';
   }
-  if(S.scope.retirement&&yrsToRet){
-    h+='<tr>'+td('Retirement Capital')+td(r(totalCapNeedP),true)+td(r(totalProjP),true)
-      +'<td style="text-align:right;font-weight:700;color:'+(retGapP>=0?'#16a34a':'#dc2626')+'">'+r(retGapP)+'</td></tr>';
+
+  // Protection
+  if(S.scope.death||S.scope.disability||S.scope.dread||S.scope.ip){
+    h+=sumCatP('Protection');
+    if(S.scope.death){
+      h+=sumRowP('Life cover (total)',totalDeathNeed,totalDeathHave);
+      if(totLiab>0) h+=sumRowP('\u2514 Liabilities & estate costs: '+r(totLiab)+(S.scope.estate?' (incl. duty & executor)':''),0,0,true);
+      if(totInc>0)  h+=sumRowP('\u2514 Income replacement (capitalised): '+r(totInc),0,0,true);
+      if(totCap>0)  h+=sumRowP('\u2514 Capital needs: '+r(totCap),0,0,true);
+    }
+    if(S.scope.disability){
+      var dI2=(S.disIncome||[]).reduce(function(a,rn){return a+calcIncomeNeed(rn);},0);
+      var dC2=(S.disCapital||[]).reduce(function(a,rn){return a+N(rn.amt);},0);
+      h+=sumRowP('Disability (lump sum)',dI2+dC2,disHaveP);
+    }
+    if(S.scope.dread&&N(S.dreadAmt)) h+=sumRowP('Dread disease / trauma',N(S.dreadAmt),dreadHaveP);
+    if(S.scope.ip&&N(S.ipGrossPM||S.ipNettPM)) h+=sumRowP('Income protection',N(S.ipGrossPM||S.ipNettPM),ipHaveP,false,true);
   }
-  if(S.scope.estate){
-    h+='<tr>'+td('Estate duty + executor fees')+td(r(Math.round(estateDuty+execFees)),true)+td('&mdash;',true)+td('&mdash;',true)+'</tr>';
+
+  // Estate liquidity
+  if(S.scope.estate&&liqNeedP>0){
+    h+=sumCatP('Estate');
+    h+=sumRowP('Liquidity (liquid provisions vs all obligations)',liqNeedP,liqProvsP);
+    h+=sumRowP('\u2514 Estate duty: '+r(Math.round(estateDuty))+(Math.round(execFees)>0?' + Executor: '+r(Math.round(execFees)):''),0,0,true);
   }
+
+  // Retirement
+  if(S.scope.retirement&&yrsToRet&&totalCapNeedP>0){
+    h+=sumCatP('Retirement (age '+retAge+', in '+yrsToRet+' yrs)');
+    h+=sumRowP('Capital at retirement',totalCapNeedP,totalProjP);
+  }
+
   h+='</tbody></table>';
 
   if(S.roa){
