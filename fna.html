@@ -716,6 +716,15 @@ var S = JSON.parse(JSON.stringify(DEFAULTS));
       });
     }
     S.importedPols = currentPols; // always use fresh CRM policies
+    // Restore _retInclude flags from saved retIncludes map
+    var retIncludes = serverState.retIncludes || {};
+    if(Object.keys(retIncludes).length && S.importedPols && S.importedPols.length){
+      S.importedPols.forEach(function(p){
+        var k1 = p.PolicyNo;
+        var k2 = p.Insurer+'|'+p.Product+'|'+p.Type;
+        if((k1 && retIncludes[k1]) || retIncludes[k2]) p._retInclude = true;
+      });
+    }
     // If server retAssets is missing RA policies that are now in importedPols, reset so
     // buildRetirement can re-seed them. This handles the case where a policy was added
     // in the CRM after the FNA was last saved.
@@ -834,6 +843,16 @@ function saveToServer(silent) {
   var saveData = {};
   var skip = {importedPols: true};
   Object.keys(S).forEach(function(k){ if(!skip[k]) saveData[k] = S[k]; });
+  // Save _retInclude flags separately keyed by PolicyNo (or Insurer+Product)
+  // so they survive the CRM policy refresh on next load
+  var retIncludes = {};
+  (S.importedPols||[]).forEach(function(p){
+    if(p._retInclude){
+      var key2 = p.PolicyNo || (p.Insurer+'|'+p.Product+'|'+p.Type);
+      if(key2) retIncludes[key2] = true;
+    }
+  });
+  saveData.retIncludes = retIncludes;
 
   var payload = JSON.stringify({ action: 'saveFNA', clientId: clientId, jsonData: JSON.stringify(saveData) });
   var indicator = document.getElementById('syncIndicator');
@@ -2908,7 +2927,7 @@ function buildPolicies() {
         var escRaw3=String(p.PremEscalation!=null&&p.PremEscalation!==''?p.PremEscalation:(p.premEsc!=null&&p.premEsc!==''?p.premEsc:'')).replace(/,/g,'.').replace(/[^0-9.]/g,'');
         S.retNeeds.push({ desc:(p.Insurer||'')+(p.Product?' — '+p.Product:'')+' premium', amtToday:String(Math.round(N(p.Premium))), esc:escRaw3, _isPremRow:true });
       });
-      persist(); go(6); // go to Retirement tab (index 6 after tab reorder)
+      persist(); saveToServer(true); go(6); // go to Retirement tab (index 6 after tab reorder)
     });
     brow2.appendChild(bSend);
     s.appendChild(brow2);
