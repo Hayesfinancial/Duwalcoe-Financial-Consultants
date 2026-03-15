@@ -493,7 +493,7 @@ var DEFAULTS = {
   incNotes: '',
 
   // Assets & Liabilities
-  props:      [],  // { desc, val, bond, bondPM, rental, rentalEsc, baseCost, dateBought, primaryResidence, deathBenType, soldAtDeath, soldAtRetirement, notes }
+  props:      [],  // { desc, val, bond, bondPM, rental, rentalEsc, rentalRetEsc, propGrowth, retirementPct, baseCost, dateBought, primaryResidence, deathBenType, soldAtDeath, soldAtRetirement, notes }
   vehicles:   [],  // { desc, val, finance, baseCost, dateBought, deathBenType, soldAtDeath, notes }
   otherAssets:[], // { desc, val, type, baseCost, dateBought, deathBenType, soldAtDeath, retirementRole, retirementIncomePM, retirementIncEsc, retirementInRetEsc, retirementSaleProceeds, growthRate, notes }
   liabilities:[], // { desc, bal, pmt, notes }
@@ -777,7 +777,7 @@ function status(msg) {
 // ═══════════════════════════════════════════════════════════
 // NAVIGATION
 // ═══════════════════════════════════════════════════════════
-var TABS = ['Client', 'Scope', 'Income', 'Assets', 'Needs', 'Retirement', 'Policies', 'Estate', 'Summary', 'ROA'];
+var TABS = ['Client', 'Scope', 'Income', 'Assets', 'Needs', 'Policies', 'Retirement', 'Estate', 'Summary', 'ROA'];
 var activeTab = 0;
 function go(i)    { persist(); activeTab = i; render(); }
 function nextTab(){ if (activeTab < TABS.length-1) { persist(); activeTab++; render(); window.scrollTo(0,0); } }
@@ -932,7 +932,7 @@ function render() {
   });
   var c = document.getElementById('content');
   c.innerHTML = '';
-  var builders = [buildClient, buildScope, buildIncome, buildAssets, buildNeeds, buildRetirement, buildPolicies, buildEstate, buildSummary, buildROATab];
+  var builders = [buildClient, buildScope, buildIncome, buildAssets, buildNeeds, buildPolicies, buildRetirement, buildEstate, buildSummary, buildROATab];
   c.appendChild(builders[activeTab]());
 }
 
@@ -1285,7 +1285,7 @@ function buildAssets() {
     r2.appendChild(fld('Date Acquired', p, 'dateBought', {placeholder:'DD/MM/YYYY or year'}));
     card.appendChild(r2);
 
-    // Row 3: Ticks + rental esc + deathBenType
+    // Row 3: Ticks + growth rate + deathBenType
     var r3=div(); r3.style.cssText='display:flex;flex-wrap:wrap;gap:16px;align-items:center;margin-top:10px;padding-top:10px;border-top:1px solid var(--mist)';
 
     function propChk(lbl, field){
@@ -1298,15 +1298,6 @@ function buildAssets() {
     r3.appendChild(propChk('Primary residence', 'primaryResidence'));
     r3.appendChild(propChk('Sold at death', 'soldAtDeath'));
     r3.appendChild(propChk('Sold at retirement', 'soldAtRetirement'));
-
-    if(N(p.rental)>0){
-      var renWrap=div(); renWrap.style.cssText='display:flex;align-items:center;gap:6px';
-      renWrap.appendChild(el('label','','Rental esc %')).style='font-size:12px;color:var(--navy);white-space:nowrap';
-      var renInp=document.createElement('input'); renInp.type='text'; renInp.inputMode='numeric';
-      renInp.value=p.rentalEsc||'6'; renInp.style.cssText='width:52px;padding:4px 6px;border:1.5px solid var(--mist);border-radius:5px;font-size:12px';
-      renInp.addEventListener('input',function(e){S.props[i].rentalEsc=e.target.value;});
-      renWrap.appendChild(renInp); r3.appendChild(renWrap);
-    }
 
     // On death, falls to
     var dbtFld=div('f'); dbtFld.style.cssText='display:flex;flex-direction:column;gap:4px;min-width:160px';
@@ -1321,6 +1312,89 @@ function buildAssets() {
     dbtSel.addEventListener('change',function(e){S.props[i].deathBenType=e.target.value;render();});
     dbtFld.appendChild(dbtSel); r3.appendChild(dbtFld);
     card.appendChild(r3);
+
+    // Row 4: Retirement-specific fields — depends on soldAtRetirement tick and rental
+    var r4=div(); r4.style.cssText='display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;margin-top:10px;padding-top:10px;border-top:1px solid var(--mist)';
+    var hasR4=false;
+
+    // Growth rate — always shown (used for projected value at retirement and CGT)
+    var propGrFld=div('f'); propGrFld.style.minWidth='130px';
+    propGrFld.appendChild(el('label','','Property growth % p.a.'));
+    var propGrPw=div('pw'); propGrPw.style.position='relative';
+    var propGrPp=el('span','pp','%'); propGrPp.style.cssText='position:absolute;right:8px;top:50%;transform:translateY(-50%);color:var(--sub);font-size:12px;pointer-events:none';
+    var propGrInp=document.createElement('input'); propGrInp.type='text'; propGrInp.inputMode='numeric';
+    propGrInp.value=p.propGrowth||''; propGrInp.placeholder=S.assump.growth||'9';
+    propGrInp.style.cssText='width:100%;border:1.5px solid var(--mist);border-radius:6px;padding:7px 24px 7px 10px;font-size:13px;font-family:inherit;box-sizing:border-box';
+    propGrInp.addEventListener('blur',function(e){S.props[i].propGrowth=e.target.value;render();});
+    propGrInp.addEventListener('input',function(e){S.props[i].propGrowth=e.target.value;});
+    propGrPw.appendChild(propGrInp); propGrPw.appendChild(propGrPp); propGrFld.appendChild(propGrPw);
+    r4.appendChild(propGrFld); hasR4=true;
+
+    if(p.soldAtRetirement && yrsToRet){
+      // % of net proceeds to retirement
+      var pctFld=div('f'); pctFld.style.minWidth='160px';
+      pctFld.appendChild(el('label','','% of net proceeds to retirement'));
+      var pctPw=div('pw'); pctPw.style.position='relative';
+      var pctPp=el('span','pp','%'); pctPp.style.cssText='position:absolute;right:8px;top:50%;transform:translateY(-50%);color:var(--sub);font-size:12px;pointer-events:none';
+      var pctInp=document.createElement('input'); pctInp.type='text'; pctInp.inputMode='numeric';
+      pctInp.value=p.retirementPct||'100'; pctInp.placeholder='100';
+      pctInp.style.cssText='width:100%;border:1.5px solid var(--mist);border-radius:6px;padding:7px 24px 7px 10px;font-size:13px;font-family:inherit;box-sizing:border-box';
+      pctInp.addEventListener('blur',function(e){S.props[i].retirementPct=e.target.value;render();});
+      pctInp.addEventListener('input',function(e){S.props[i].retirementPct=e.target.value;});
+      pctPw.appendChild(pctInp); pctPw.appendChild(pctPp); pctFld.appendChild(pctPw);
+      r4.appendChild(pctFld);
+
+      // Show projected retirement proceeds
+      var propGr=N(p.propGrowth)>0?N(p.propGrowth):N(S.assump.growth)||9;
+      var projVal=Math.round(N(p.val)*Math.pow(1+propGr/100,yrsToRet));
+      var projNet=Math.max(0,projVal-N(p.bond));
+      var pct2=N(p.retirementPct)>0?N(p.retirementPct):100;
+      var toRet=Math.round(projNet*pct2/100);
+      var projBox=div('info'); projBox.style.cssText='font-size:11px;padding:6px 10px;align-self:flex-end;margin-bottom:0';
+      projBox.innerHTML='Projected value at '+retAge+': <strong>'+Rfmt(projVal)+'</strong>'+
+        ' · Less bond: <strong>'+Rfmt(projNet)+'</strong>'+
+        ' · '+pct2+'% to retirement: <strong>'+Rfmt(toRet)+'</strong>';
+      r4.appendChild(projBox);
+    }
+
+    if(!p.soldAtRetirement && N(p.rental)>0){
+      // Rental escalation to retirement
+      var renEscFld=div('f'); renEscFld.style.minWidth='140px';
+      renEscFld.appendChild(el('label','','Rental esc to retirement %'));
+      var renEscPw=div('pw'); renEscPw.style.position='relative';
+      var renEscPp=el('span','pp','%'); renEscPp.style.cssText='position:absolute;right:8px;top:50%;transform:translateY(-50%);color:var(--sub);font-size:12px;pointer-events:none';
+      var renEscInp=document.createElement('input'); renEscInp.type='text'; renEscInp.inputMode='numeric';
+      renEscInp.value=p.rentalEsc||'6'; renEscInp.placeholder='6';
+      renEscInp.style.cssText='width:100%;border:1.5px solid var(--mist);border-radius:6px;padding:7px 24px 7px 10px;font-size:13px;font-family:inherit;box-sizing:border-box';
+      renEscInp.addEventListener('blur',function(e){S.props[i].rentalEsc=e.target.value;render();});
+      renEscInp.addEventListener('input',function(e){S.props[i].rentalEsc=e.target.value;});
+      renEscPw.appendChild(renEscInp); renEscPw.appendChild(renEscPp); renEscFld.appendChild(renEscPw);
+      r4.appendChild(renEscFld);
+
+      // Rental escalation in retirement
+      var renRetFld=div('f'); renRetFld.style.minWidth='140px';
+      renRetFld.appendChild(el('label','','Rental esc in retirement %'));
+      var renRetPw=div('pw'); renRetPw.style.position='relative';
+      var renRetPp=el('span','pp','%'); renRetPp.style.cssText='position:absolute;right:8px;top:50%;transform:translateY(-50%);color:var(--sub);font-size:12px;pointer-events:none';
+      var renRetInp=document.createElement('input'); renRetInp.type='text'; renRetInp.inputMode='numeric';
+      renRetInp.value=p.rentalRetEsc||''; renRetInp.placeholder=S.assump.cpi||'6';
+      renRetInp.style.cssText='width:100%;border:1.5px solid var(--mist);border-radius:6px;padding:7px 24px 7px 10px;font-size:13px;font-family:inherit;box-sizing:border-box';
+      renRetInp.addEventListener('blur',function(e){S.props[i].rentalRetEsc=e.target.value;render();});
+      renRetInp.addEventListener('input',function(e){S.props[i].rentalRetEsc=e.target.value;});
+      renRetPw.appendChild(renRetInp); renRetPw.appendChild(renRetPp); renRetFld.appendChild(renRetPw);
+      r4.appendChild(renRetFld);
+
+      // Show projected rental at retirement
+      if(yrsToRet){
+        var renEscRate=N(p.rentalEsc)>0?N(p.rentalEsc):6;
+        var renAtRet=Math.round(N(p.rental)*Math.pow(1+renEscRate/100,yrsToRet));
+        var renBox=div('info'); renBox.style.cssText='font-size:11px;padding:6px 10px;align-self:flex-end;margin-bottom:0';
+        renBox.innerHTML='Rental at retirement (age '+retAge+'): <strong>'+Rfmt(renAtRet)+'/pm</strong> (@ '+renEscRate+'% p.a.)';
+        r4.appendChild(renBox);
+      }
+    }
+
+    if(hasR4){ card.appendChild(r4); }
 
     // CGT preview — only if base cost entered and not going to spouse
     if(N(p.baseCost)>0 && N(p.val)>0 && (p.deathBenType||'Estate')!=='Spouse'){
@@ -1343,7 +1417,7 @@ function buildAssets() {
     s.appendChild(card);
   });
   s.appendChild(addBtn('+ Add Property', function(){
-    S.props.push({desc:'',val:'',bond:'',bondPM:'',rental:'',rentalEsc:'6',baseCost:'',dateBought:'',primaryResidence:false,deathBenType:'Estate',soldAtDeath:false,soldAtRetirement:false});
+    S.props.push({desc:'',val:'',bond:'',bondPM:'',rental:'',rentalEsc:'6',rentalRetEsc:'',propGrowth:'',retirementPct:'100',baseCost:'',dateBought:'',primaryResidence:false,deathBenType:'Estate',soldAtDeath:false,soldAtRetirement:false});
     render();
   }));
 
@@ -2067,30 +2141,119 @@ function buildRetirement() {
   });
   s.appendChild(addBtn('+ Add fund / RA',function(){S.retAssets.push({desc:'',currentVal:'',monthlyContrib:'',growthRate:'',contribEsc:''});render();}));
 
-  // ── Other capital at retirement
+  // ── Other capital at retirement — auto-pulled from Properties
   s.appendChild(stitle('Other Capital / Income at Retirement'));
-  var og=g3();
-  og.appendChild(rfld('Property / asset sale proceeds', S, 'retOtherCapital', {onblur:function(){render();}}));
-  og.appendChild(rfld('Rental income today (R/pm)', S, 'retRentalPM', {onblur:function(){render();}}));
+
+  var propsSold=(S.props||[]).filter(function(p){return p.soldAtRetirement&&N(p.val)>0;});
+  var propsRental=(S.props||[]).filter(function(p){return !p.soldAtRetirement&&N(p.rental)>0;});
+
+  if(propsSold.length>0||propsRental.length>0){
+    var propRetInf=div('info');
+    propRetInf.innerHTML='Pulled automatically from the Assets tab. Edit growth rates and percentages on each property card.';
+    s.appendChild(propRetInf);
+
+    if(propsSold.length>0){
+      var psTbl=document.createElement('table');
+      psTbl.innerHTML='<thead><tr><th>Property</th><th>Today</th><th>Growth %</th><th>Projected at '+retAge+'</th><th>Less bond</th><th>% to ret</th><th>To retirement</th></tr></thead>';
+      var psTb=document.createElement('tbody');
+      propsSold.forEach(function(p){
+        var gr=N(p.propGrowth)>0?N(p.propGrowth):N(S.assump.growth)||9;
+        var projV=yrsToRet?Math.round(N(p.val)*Math.pow(1+gr/100,yrsToRet)):N(p.val);
+        var netEq=Math.max(0,projV-N(p.bond));
+        var pct=N(p.retirementPct)>0?N(p.retirementPct):100;
+        var toRet=Math.round(netEq*pct/100);
+        var tr=document.createElement('tr');
+        tr.innerHTML='<td>'+(p.desc||'Property')+'</td><td>'+Rfmt(p.val)+'</td><td>'+gr+'%</td>'+
+          '<td><strong>'+Rfmt(projV)+'</strong></td><td>('+Rfmt(p.bond)+')</td>'+
+          '<td>'+pct+'%</td><td><strong>'+Rfmt(toRet)+'</strong></td>';
+        psTb.appendChild(tr);
+      });
+      psTbl.appendChild(psTb);
+      var psTw=div('twrap'); psTw.appendChild(psTbl); s.appendChild(psTw);
+    }
+
+    if(propsRental.length>0){
+      var prTbl=document.createElement('table');
+      prTbl.innerHTML='<thead><tr><th>Property</th><th>Rental today</th><th>Esc to ret %</th><th>Rental at '+retAge+'</th><th>Esc in ret %</th></tr></thead>';
+      var prTb=document.createElement('tbody');
+      propsRental.forEach(function(p){
+        var escTo=N(p.rentalEsc)>0?N(p.rentalEsc):6;
+        var escIn=N(p.rentalRetEsc)>0?N(p.rentalRetEsc):N(S.assump.cpi)||6;
+        var renAtRet=yrsToRet?Math.round(N(p.rental)*Math.pow(1+escTo/100,yrsToRet)):N(p.rental);
+        var tr=document.createElement('tr');
+        tr.innerHTML='<td>'+(p.desc||'Property')+'</td><td>'+Rfmt(p.rental)+'/pm</td><td>'+escTo+'%</td>'+
+          '<td><strong>'+Rfmt(renAtRet)+'/pm</strong></td><td>'+escIn+'%</td>';
+        prTb.appendChild(tr);
+      });
+      prTbl.appendChild(prTb);
+      var prTw=div('twrap'); prTw.appendChild(prTbl); s.appendChild(prTw);
+    }
+  }
+
+  // Additional manual proceeds not from properties
+  var og=g2();
+  og.appendChild(rfld('Additional proceeds (other assets / manual)', S, 'retOtherCapital', {onblur:function(){render();}}));
   og.appendChild(div());
   s.appendChild(og);
 
   // ── Calculator
   if(yrsToRet && yrsToRet > 0){
     var totalMonthlyNeed = (S.retNeeds||[]).reduce(function(a,r){return a+N(r.amtToday);},0);
-    var rentalAtRet = N(S.retRentalPM)>0?Math.round(N(S.retRentalPM)*Math.pow(1+N(S.assump.cpi)/100,yrsToRet)):0;
+
+    // Rental at retirement — auto from properties not sold, per-property escalation
+    var rentalAtRet = 0;
+    (S.props||[]).forEach(function(p){
+      if(p.soldAtRetirement||!N(p.rental)) return;
+      var escTo=N(p.rentalEsc)>0?N(p.rentalEsc):6;
+      rentalAtRet+=Math.round(N(p.rental)*Math.pow(1+escTo/100,yrsToRet));
+    });
+
+    // Other income at retirement from other assets (farm/business)
+    var otherIncAtRet=0;
+    (S.otherAssets||[]).forEach(function(a){
+      if((a.retirementRole||'')!=='Generates income (farm/business)') return;
+      if(!N(a.retirementIncomePM)) return;
+      var escTo=N(a.retirementIncEsc)>0?N(a.retirementIncEsc):N(S.assump.cpi)||6;
+      otherIncAtRet+=Math.round(N(a.retirementIncomePM)*Math.pow(1+escTo/100,yrsToRet));
+    });
+
     var monthlyAtRet = totalMonthlyNeed>0?Math.round(totalMonthlyNeed*Math.pow(1+N(S.assump.cpi)/100,yrsToRet)):0;
-    var netMonthlyGap = Math.max(0, monthlyAtRet - rentalAtRet);
+    var netMonthlyGap = Math.max(0, monthlyAtRet - rentalAtRet - otherIncAtRet);
     var netToday = netMonthlyGap>0?netMonthlyGap/Math.pow(1+N(S.assump.cpi)/100,yrsToRet):0;
     var capNeed = netToday>0?retirementCapitalNeeded(netToday,yrsToRet,yrsInRet,S.assump.cpi,S.assump.retReturn):0;
     var lumpNeed = (S.retLumps||[]).reduce(function(a,r){return a+N(r.amt);},0);
     var totalCapNeed = capNeed + lumpNeed;
+
+    // Projected capital: RA/investment funds
     var totalProj = S.retAssets.reduce(function(a,r){
       if(!N(r.currentVal)&&!N(r.monthlyContrib)) return a;
       var gr=N(r.growthRate)>0?N(r.growthRate):N(S.assump.growth)||9;
       var esc3=N(r.contribEsc)>0?N(r.contribEsc):N(S.assump.incEsc)||6;
       return a+projectFund(r.currentVal,r.monthlyContrib,esc3,gr,yrsToRet);
     },0)+N(S.retOtherCapital);
+
+    // Add sold property net proceeds
+    var propSoldTotal=0;
+    (S.props||[]).forEach(function(p){
+      if(!p.soldAtRetirement||!N(p.val)) return;
+      var gr=N(p.propGrowth)>0?N(p.propGrowth):N(S.assump.growth)||9;
+      var projV=Math.round(N(p.val)*Math.pow(1+gr/100,yrsToRet));
+      var netEq=Math.max(0,projV-N(p.bond));
+      var pct=N(p.retirementPct)>0?N(p.retirementPct):100;
+      propSoldTotal+=Math.round(netEq*pct/100);
+    });
+    totalProj+=propSoldTotal;
+
+    // Add sold other asset proceeds
+    var soldProceedsAtRet=0;
+    (S.otherAssets||[]).forEach(function(a){
+      if((a.retirementRole||'')!=='Sold at retirement — proceeds to retirement') return;
+      if(!N(a.retirementSaleProceeds)) return;
+      var gr=N(a.growthRate)>0?N(a.growthRate):N(S.assump.growth)||9;
+      soldProceedsAtRet+=Math.round(N(a.retirementSaleProceeds)*Math.pow(1+gr/100,yrsToRet));
+    });
+    totalProj+=soldProceedsAtRet;
+
     var retGap = totalProj - totalCapNeed;
 
     s.appendChild(stitle('Retirement Capital Summary'));
@@ -2103,12 +2266,15 @@ function buildRetirement() {
     }
     rRow('Monthly need today', Rfmt(totalMonthlyNeed)+' /pm');
     rRow('Monthly need at retirement (age '+retAge+')', Rfmt(monthlyAtRet)+' /pm');
-    if(rentalAtRet>0) rRow('Less: rental at retirement', '('+Rfmt(rentalAtRet)+'/pm)', true);
+    if(rentalAtRet>0) rRow('Less: rental income at retirement', '('+Rfmt(rentalAtRet)+'/pm)', true);
+    if(otherIncAtRet>0) rRow('Less: farm/business income at retirement', '('+Rfmt(otherIncAtRet)+'/pm)', true);
     rRow('Net monthly gap at retirement', Rfmt(netMonthlyGap)+' /pm', false, true);
     rRow('Capital needed to fund income', '('+Rfmt(capNeed)+')', false, true);
     if(lumpNeed>0) rRow('Lump sum needs', '('+Rfmt(lumpNeed)+')', true);
     rRow('Total capital required', '('+Rfmt(totalCapNeed)+')', false, true);
     rRow('Projected capital at retirement', Rfmt(totalProj), false, true);
+    if(propSoldTotal>0) rRow('Incl. property proceeds ('+propsSold.length+' propert'+(propsSold.length===1?'y':'ies')+')', Rfmt(propSoldTotal), true);
+    if(soldProceedsAtRet>0) rRow('Incl. other asset proceeds', Rfmt(soldProceedsAtRet), true);
     var gapRow=div(); gapRow.style.cssText='display:flex;justify-content:space-between;padding:8px 0;margin-top:8px;border-top:2px solid #445;font-size:14px;font-weight:700';
     var gl2=el('span','',retGap>=0?'Surplus':'Shortfall'); gl2.style.color='#ccd6f6';
     var gv2=el('span','',Rfmt(Math.abs(retGap))); gv2.style.color=retGap>=0?'#86efac':'#f87171';
