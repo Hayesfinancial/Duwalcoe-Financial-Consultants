@@ -3675,19 +3675,30 @@ function buildSummary() {
     var liabs=(S.props||[]).reduce(function(a,p){return a+N(p.bond);},0)
       +(S.vehicles||[]).reduce(function(a,v){return a+N(v.finance);},0)
       +(S.liabilities||[]).reduce(function(a,l){return a+N(l.bal);},0);
-    var s4q=0,estPols=0;
+    var s4q=0,estPols=0,tpPols=0,bizDut=0;
     pols.forEach(function(p){
-      if(p.Type==='Business Assurance') return;
+      if(p.Type==='Business Assurance'){if(p.EstateDutiable==='Yes')bizDut+=N(p.LoanAmount)||N(p.BenDeath);return;}
       var b=N(p.BenDeath); if(!b) return;
-      if((p.BeneficiaryType||'')==='Spouse') s4q+=b;
-      else if((p.BeneficiaryType||'')==='Estate') estPols+=b;
+      var bt=p.BeneficiaryType||'';
+      if(bt==='Spouse') s4q+=b;
+      else if(bt==='Estate') estPols+=b;
+      else if(bt==='Third Party') tpPols+=b;
     });
-    var gross=physAssets+s4q+estPols;
+    var gross=physAssets+s4q+estPols+tpPols+bizDut;
     var _sumMR=N(S.cli.grossPM)>0?calcMarginalRate(N(S.cli.grossPM)*12):0.45;
     var _sumCGT=calcTotalCGT(_sumMR*100).totalCGT;
     var net=Math.max(0,gross-liabs-_sumCGT);
-    var s4qDed=Math.min(s4q,net);
-    var afterS4q=Math.max(0,net-s4qDed);
+    // Accrual
+    var _sumAccrual=0;
+    if((S.cli.marital||'').indexOf('accrual')>-1){
+      var _sumRaFV=pols.reduce(function(a,p){return POL_RA_TYPES.indexOf(p.Type)>-1?a+N(p.BenFundValue):a;},0);
+      var _sumCE=physAssets+_sumRaFV,_sumSE=N(S.accrual&&S.accrual.spouseCurrentAssets);
+      var _sumCS=N(S.accrual&&S.accrual.clientStartVal),_sumSS=N(S.accrual&&S.accrual.spouseStartVal);
+      _sumAccrual=Math.max(0,(Math.max(0,_sumCE-_sumCS)-Math.max(0,_sumSE-_sumSS))/2);
+    }
+    var netAfterAccrual=Math.max(0,net-_sumAccrual);
+    var s4qDed=Math.min(s4q,netAfterAccrual);
+    var afterS4q=Math.max(0,netAfterAccrual-s4qDed);
     var dutiable=Math.max(0,afterS4q-ABATEMENT);
     var duty=dutiable<=DUTY_THRESH?dutiable*DUTY_RATE1:DUTY_THRESH*DUTY_RATE1+(dutiable-DUTY_THRESH)*DUTY_RATE2;
     var execFees=(physAssets+estPols)*EXEC_RATE;
@@ -3712,18 +3723,8 @@ function buildSummary() {
     // Spouse residue — only if adviser has ticked "spouse inherits residue" on Estate tab
     var totalEstateCosts = Math.round(duty+execFees);
     if(S.cli.spouseInheritsResidue){
-      // Residue = net estate − accrual − s.4(q) − duty − executor fees
-      var _sAccrual=0;
-      if((S.cli.marital||'').indexOf('accrual')>-1){
-        var _sRaFV=pols.reduce(function(a,p){return POL_RA_TYPES.indexOf(p.Type)>-1?a+N(p.BenFundValue):a;},0);
-        var _sCE=physAssets+_sRaFV, _sSE=N(S.accrual&&S.accrual.spouseCurrentAssets);
-        var _sCS=N(S.accrual&&S.accrual.clientStartVal), _sSS=N(S.accrual&&S.accrual.spouseStartVal);
-        _sAccrual=Math.max(0,(Math.max(0,_sCE-_sCS)-Math.max(0,_sSE-_sSS))/2);
-      }
-      var spouseResidue = Math.max(0, net - Math.round(_sAccrual) - Math.round(s4qDed) - Math.round(duty) - Math.round(execFees));
-      if(spouseResidue>0){
-        e3Row('Residue to spouse (inherits residue)',Rfmt(spouseResidue),false,false);
-      }
+      var spouseResidue=Math.max(0,netAfterAccrual-Math.round(s4qDed)-Math.round(duty)-Math.round(execFees));
+      if(spouseResidue>0) e3Row('Residue to spouse (inherits residue)',Rfmt(spouseResidue),false,false);
     }
     s.appendChild(estBox);
   }
