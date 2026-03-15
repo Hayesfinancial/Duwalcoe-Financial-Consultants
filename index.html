@@ -1857,7 +1857,12 @@ function buildFnaUrl(c){
       EstateDutiable:   p.EstateDutiable||'',
       PremEscalation:   p.PremEscalation||'',
       BenEscalation:    p.BenEscalation||'',
-      Product:          p.Product||''
+      Product:          p.Product||'',
+      GrowthRate:       p.PremGrowthRate||'',
+      BenLAIncome:      p.BenLAIncome||'',
+      DrawdownRate:     p.DrawdownRate||'',
+      LAIncEsc:         p.LAIncEsc||'',
+      LAIncomeTaxable:  p.LAIncomeTaxable||''
     };
   });
   var url = base +
@@ -2074,7 +2079,9 @@ function buildPolicyForm(p){
   // PREMIUM
   html+=sec('Premium');
   html+='<div class="g2">'+fld('ppm','Premium / Contribution',p.Premium)+fs('pfreq','Frequency',['Monthly','Quarterly','Annually','Once Off'],p.Frequency||'Monthly')+'</div>';
-  html+='<div class="g2">'+fld('pprem_pct','Premium Escalation %',p.PremEscalation)+fld('pben_pct','Benefit Escalation %',p.BenEscalation)+'</div>';
+  if(!isLA){
+    html+='<div class="g2">'+fld('pprem_pct','Premium Escalation %',p.PremEscalation)+fld('pben_pct','Benefit Escalation %',p.BenEscalation)+'</div>';
+  }
 
   // RISK COVER
   if(isRisk){
@@ -2121,30 +2128,49 @@ function buildPolicyForm(p){
 
   // LIVING ANNUITY
   if(isLA){
+    var fvNum=parseFloat(p.BenFundValue||'0')||0;
     html+=sec('Living Annuity — Fund & Income Drawing');
     html+='<div class="g2">'+fld('pb_fv','Current Fund Value',p.BenFundValue)+fld('pb_growrate','Growth Rate % (projection)',p.PremGrowthRate||'')+'</div>';
-    html+='<div class="g2">'+fld('pb_la_income','Monthly Income Drawn',p.BenLAIncome)+fld('pb_la_drawdown','Annual Drawdown Rate %',p.DrawdownRate)+'</div>';
+
+    // Two-way calculation — income ↔ drawdown rate, driven by fund value
+    html+='<div style="background:var(--smoke);border-radius:8px;padding:12px 14px;margin-bottom:8px">';
+    html+='<div style="font-size:11px;color:#889;margin-bottom:8px">Enter either the monthly income drawn <strong>or</strong> the annual drawdown rate — the other will calculate automatically based on the fund value.</div>';
+    html+='<div class="g2">';
+    // Monthly income field
+    html+='<div class="fld"><label>Monthly Income Drawn</label>';
+    html+='<div style="position:relative"><span style="position:absolute;left:10px;top:50%;transform:translateY(-50%);color:#889;font-size:11px;pointer-events:none">R</span>';
+    html+='<input id="pb_la_income" type="text" value="'+(p.BenLAIncome||'')+'" placeholder="0" '
+      +'style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px 8px 22px;font-family:inherit;font-size:13px" '
+      +'oninput="laCalcFromIncome()">'
+      +'</div></div>';
+    // Drawdown rate field
+    html+='<div class="fld"><label>Annual Drawdown Rate %</label>';
+    html+='<div style="position:relative">';
+    html+='<input id="pb_la_drawdown" type="text" value="'+(p.DrawdownRate||'')+'" placeholder="e.g. 5" '
+      +'style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 28px 8px 10px;font-family:inherit;font-size:13px" '
+      +'oninput="laCalcFromRate()">';
+    html+='<span style="position:absolute;right:10px;top:50%;transform:translateY(-50%);color:#889;font-size:11px;pointer-events:none">%</span>';
+    html+='</div></div>';
+    html+='</div>'; // end g2
+
+    // Validation / confirmation box
+    html+='<div id="la_rate_msg" style="margin-top:6px;font-size:12px"></div>';
+    html+='</div>'; // end smoke box
+
     html+='<div class="g2">'+fld('pb_la_esc','Income Escalation % p.a.',p.LAIncEsc)+'<div></div></div>';
-    // FSCA drawdown rate validation
-    var drNum=parseFloat(p.DrawdownRate||'0');
-    if(drNum>0){
-      if(drNum<2.5||drNum>17.5){
-        html+='<div style="background:#fef2f2;border:1px solid #fca5a5;border-radius:7px;padding:8px 12px;font-size:12px;color:#991b1b;margin-bottom:8px">⚠ FSCA regulation: annual drawdown rate must be between <strong>2.5% and 17.5%</strong>.</div>';
-      } else if(parseFloat(p.BenFundValue||'0')>0){
-        var annDraw=parseFloat(p.BenFundValue)*drNum/100;
-        var mthDraw=Math.round(annDraw/12);
-        html+='<div style="background:#f0fdf4;border:1px solid #86efac;border-radius:7px;padding:8px 12px;font-size:12px;color:#166534;margin-bottom:8px">✓ At '+drNum+'% drawdown: ≈ R\u202f'+mthDraw.toLocaleString('en-ZA')+' /pm — within FSCA limits (2.5%–17.5%).</div>';
-      }
-    }
+
     // Taxable / non-taxable
     html+='<div class="fld" style="margin-top:4px"><label>Income Drawing — Tax Treatment</label>';
-    html+='<div style="display:flex;gap:16px;margin-top:8px">';
+    html+='<div style="display:flex;gap:16px;margin-top:8px;flex-wrap:wrap">';
     html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="platax" value="Yes"'+(p.LAIncomeTaxable!=='No'?' checked':'')+'>Fully taxable (deductible contributions — standard)</label>';
     html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="platax" value="No"'+(p.LAIncomeTaxable==='No'?' checked':'')+'>Partially/non-taxable (disallowed contributions)</label>';
     html+='</div>';
     html+='<div style="font-size:11px;color:#889;margin-top:6px">Taxable: full drawing added to gross income at marginal rate. Non-taxable: SARS &quot;cost&quot; formula applies — document basis in ROA.</div>';
     html+='</div>';
-    html+='<div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:7px;padding:8px 12px;font-size:12px;color:#1e40af;margin-top:8px">ℹ <strong>Living Annuity:</strong> No CGT on death. No estate duty if a beneficiary is nominated. Beneficiary may take cash (retirement tax tables in their hands) or continue the annuity.</div>';
+    html+='<div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:7px;padding:8px 12px;font-size:12px;color:#1e40af;margin-top:10px">ℹ <strong>Living Annuity:</strong> No CGT on death. No estate duty if a beneficiary is nominated. Beneficiary may take cash (retirement tax tables in their hands) or continue the annuity.</div>';
+
+    // Embed fund value for JS calculations
+    html+='<script>window._LA_FV='+fvNum+';<\/script>';
   }
 
   // MEDICAL
@@ -2279,6 +2305,49 @@ function renderIncomeRows(){
 function addIncomeRow(){
   POL_INCOME_ROWS.push({type:'Temporary IP',label:'',amount:'',waiting:'1 month',term:'To age 65',esc:'',taxable:'No',convert:'No'});
   document.getElementById('incomeRowsWrap').innerHTML=renderIncomeRows();
+}
+
+// ── Living Annuity two-way calculation ───────────────────────
+// When income is entered → calculate drawdown rate from fund value
+function laCalcFromIncome(){
+  var fv=window._LA_FV||0;
+  var incEl=document.getElementById('pb_la_income');
+  var rateEl=document.getElementById('pb_la_drawdown');
+  var msgEl=document.getElementById('la_rate_msg');
+  if(!incEl||!rateEl||!msgEl) return;
+  var inc=parseFloat(incEl.value)||0;
+  if(inc>0&&fv>0){
+    var rate=Math.round((inc*12/fv)*1000)/10; // 1 decimal place
+    rateEl.value=rate;
+    laShowMsg(msgEl,fv,rate,inc);
+  } else {
+    rateEl.value='';
+    msgEl.innerHTML='';
+  }
+}
+// When drawdown rate is entered → calculate monthly income from fund value
+function laCalcFromRate(){
+  var fv=window._LA_FV||0;
+  var incEl=document.getElementById('pb_la_income');
+  var rateEl=document.getElementById('pb_la_drawdown');
+  var msgEl=document.getElementById('la_rate_msg');
+  if(!incEl||!rateEl||!msgEl) return;
+  var rate=parseFloat(rateEl.value)||0;
+  if(rate>0&&fv>0){
+    var inc=Math.round(fv*rate/100/12);
+    incEl.value=inc;
+    laShowMsg(msgEl,fv,rate,inc);
+  } else {
+    incEl.value='';
+    msgEl.innerHTML='';
+  }
+}
+function laShowMsg(el,fv,rate,inc){
+  if(rate<2.5||rate>17.5){
+    el.innerHTML='<div style="background:#fef2f2;border:1px solid #fca5a5;border-radius:6px;padding:7px 10px;color:#991b1b">⚠ FSCA regulation: drawdown rate must be between <strong>2.5% and 17.5%</strong>.</div>';
+  } else {
+    el.innerHTML='<div style="background:#f0fdf4;border:1px solid #86efac;border-radius:6px;padding:7px 10px;color:#166534">✓ '+rate+'% of R\u202f'+Math.round(fv).toLocaleString('en-ZA')+' fund = R\u202f'+inc.toLocaleString('en-ZA')+' /pm — within FSCA limits (2.5%–17.5%).</div>';
+  }
 }
 
 function collectPolicyForm(){
