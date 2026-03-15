@@ -2157,22 +2157,24 @@ function buildRetirement() {
 
     if(propsSold.length>0){
       var psTbl=document.createElement('table');
-      psTbl.innerHTML='<thead><tr><th>Property</th><th>Today</th><th>Growth %</th><th>Projected at '+retAge+'</th><th>Less bond</th><th>% to ret</th><th>To retirement</th></tr></thead>';
+      psTbl.innerHTML='<thead><tr><th>Property</th><th>Today</th><th>Growth %</th><th>Projected at '+retAge+'</th><th>% to ret</th><th>To retirement</th></tr></thead>';
       var psTb=document.createElement('tbody');
       propsSold.forEach(function(p){
         var gr=N(p.propGrowth)>0?N(p.propGrowth):N(S.assump.growth)||9;
         var projV=yrsToRet?Math.round(N(p.val)*Math.pow(1+gr/100,yrsToRet)):N(p.val);
-        var netEq=Math.max(0,projV-N(p.bond));
         var pct=N(p.retirementPct)>0?N(p.retirementPct):100;
-        var toRet=Math.round(netEq*pct/100);
+        var toRet=Math.round(projV*pct/100);
         var tr=document.createElement('tr');
         tr.innerHTML='<td>'+(p.desc||'Property')+'</td><td>'+Rfmt(p.val)+'</td><td>'+gr+'%</td>'+
-          '<td><strong>'+Rfmt(projV)+'</strong></td><td>('+Rfmt(p.bond)+')</td>'+
+          '<td><strong>'+Rfmt(projV)+'</strong></td>'+
           '<td>'+pct+'%</td><td><strong>'+Rfmt(toRet)+'</strong></td>';
         psTb.appendChild(tr);
       });
       psTbl.appendChild(psTb);
       var psTw=div('twrap'); psTw.appendChild(psTbl); s.appendChild(psTw);
+      var bondNote=div('info'); bondNote.style.cssText='font-size:11px;padding:5px 10px';
+      bondNote.textContent='Bond assumed paid off by retirement — full projected value used.';
+      s.appendChild(bondNote);
     }
 
     if(propsRental.length>0){
@@ -2235,15 +2237,15 @@ function buildRetirement() {
       return a+projectFund(r.currentVal,r.monthlyContrib,esc3,gr,yrsToRet);
     },0)+N(S.retOtherCapital);
 
-    // Add sold property net proceeds
+    // Add sold property net proceeds — net equity today projected forward (bond paid off assumed)
     var propSoldTotal=0;
     (S.props||[]).forEach(function(p){
       if(!p.soldAtRetirement||!N(p.val)) return;
       var gr=N(p.propGrowth)>0?N(p.propGrowth):N(S.assump.growth)||9;
       var projV=Math.round(N(p.val)*Math.pow(1+gr/100,yrsToRet));
-      var netEq=Math.max(0,projV-N(p.bond));
+      // Bond assumed paid off by retirement — use projected value only
       var pct=N(p.retirementPct)>0?N(p.retirementPct):100;
-      propSoldTotal+=Math.round(netEq*pct/100);
+      propSoldTotal+=Math.round(projV*pct/100);
     });
     totalProj+=propSoldTotal;
 
@@ -2282,6 +2284,22 @@ function buildRetirement() {
     var gl2=el('span','',retGap>=0?'Surplus':'Shortfall'); gl2.style.color='#ccd6f6';
     var gv2=el('span','',Rfmt(Math.abs(retGap))); gv2.style.color=retGap>=0?'#86efac':'#f87171';
     gapRow.appendChild(gl2); gapRow.appendChild(gv2); calcBox.appendChild(gapRow);
+
+    // PMT — always show regardless of surplus or shortfall
+    // Use shortfall as FV (zero if surplus — shows what's needed to stay on track)
+    if(retGap < 0) {
+      var shortfall2 = Math.abs(retGap);
+      var mr3=N(S.assump.growth)/100/12;
+      var nm3=yrsToRet*12;
+      var pmtNeeded2=mr3>0?Math.round(shortfall2*mr3/(Math.pow(1+mr3,nm3)-1)):Math.round(shortfall2/nm3);
+      var pmtRow2=div();
+      pmtRow2.style.cssText='display:flex;justify-content:space-between;padding:6px 0;margin-top:4px;font-size:12px';
+      var pmtL2=el('span','','To close this gap, save an additional'); pmtL2.style.color='#8899bb';
+      var pmtV2=el('span','',Rfmt(pmtNeeded2)+' /pm'); pmtV2.style.cssText='font-weight:700;color:#fbbf24';
+      pmtRow2.appendChild(pmtL2); pmtRow2.appendChild(pmtV2);
+      calcBox.appendChild(pmtRow2);
+    }
+
     s.appendChild(calcBox);
   }
 
@@ -2318,70 +2336,222 @@ function buildPolicies() {
   }));
 
   // ── Premium totals + affordability projection
-  var _allInvBiz = POL_RA_TYPES.concat(POL_INV_TYPES).concat(['Business Assurance']);
-  var totalPrem = pols.reduce(function(sum, p) {
-    if (_allInvBiz.indexOf(p.Type||'') > -1) return sum;
-    return sum + ((p.Frequency || 'Monthly') === 'Monthly' ? N(p.Premium) : 0);
+  var _riskTypes = pols.filter(function(p){
+    return p.Type !== 'Business Assurance' &&
+           POL_RA_TYPES.indexOf(p.Type||'') < 0 &&
+           POL_INV_TYPES.indexOf(p.Type||'') < 0 &&
+           p.Type !== 'Medical Aid' &&
+           (p.Frequency||'Monthly') === 'Monthly' &&
+           N(p.Premium) > 0;
+  });
+
+  var totalPrem = _riskTypes.reduce(function(s,p){ return s+N(p.Premium); }, 0);
+  var totalAllPrem = pols.reduce(function(s,p){
+    return s + ((p.Frequency||'Monthly')==='Monthly' ? N(p.Premium) : 0);
   }, 0);
 
-  if (totalPrem > 0 || pols.length > 0) {
+  if (pols.length > 0) {
     var totCards = div('cards c3');
     totCards.style.marginTop = '20px';
-    var c1 = div('card'); c1.innerHTML = '<div class="lbl">Total Monthly Premiums</div><div class="val">' + Rfmt(totalPrem) + '</div>'; totCards.appendChild(c1);
-    var c2 = div('card'); c2.innerHTML = '<div class="lbl">Annual Premium Cost</div><div class="val">' + Rfmt(totalPrem * 12) + '</div>'; totCards.appendChild(c2);
+    var c1 = div('card'); c1.innerHTML = '<div class="lbl">Risk Premiums /pm</div><div class="val">' + Rfmt(totalPrem) + '</div><div class="sub">Life, disability, dread, IP</div>'; totCards.appendChild(c1);
+    var c2 = div('card'); c2.innerHTML = '<div class="lbl">All Premiums /pm</div><div class="val">' + Rfmt(totalAllPrem) + '</div><div class="sub">Including RA, investments</div>'; totCards.appendChild(c2);
     var c3 = div('card'); c3.innerHTML = '<div class="lbl">Policies on Record</div><div class="val">' + pols.length + '</div>'; totCards.appendChild(c3);
     s.appendChild(totCards);
 
-    // Premium affordability at retirement
-    var cliAge  = ageFrom(S.cli.dob);
-    var retAge  = N(S.cli.retAge) || 65;
-    var yrsToRet = cliAge ? Math.max(0, retAge - cliAge) : null;
-    if (yrsToRet !== null && yrsToRet > 0 && totalPrem > 0) {
+    // Affordability at retirement
+    var cliAge2  = ageFrom(S.cli.dob);
+    var retAge2  = N(S.cli.retAge) || 65;
+    var yrsToRet2 = cliAge2 ? Math.max(0, retAge2 - cliAge2) : null;
+    var yrsInRet  = Math.max(1, 85 - retAge2);
+    var grossPM   = N(S.cli.grossPM) || N(S.incRows&&S.incRows[0]&&S.incRows[0].pm);
+    var incEscRate = N(S.assump.incEsc) || 6;
+
+    if (yrsToRet2 !== null && yrsToRet2 > 0 && _riskTypes.length > 0) {
       s.appendChild(stitle('Premium Affordability at Retirement'));
       var afford = div('info');
-      afford.innerHTML = 'Each policy escalates at its own rate. Projection shows estimated premium at retirement age <strong>' + retAge + '</strong> ' +
-        '(' + yrsToRet + ' years from now). This is critical for budgeting retirement income.';
+      afford.innerHTML = 'Shows each premium escalated to retirement at its own rate. '
+        + 'Income escalation assumption: <strong>' + incEscRate + '% p.a.</strong> '
+        + 'Premiums escalating <em>faster</em> than income are shown in <span style="color:var(--red)">red</span> — '
+        + 'these policies become increasingly unaffordable. '
+        + 'Tick policies to include in retirement budget, then send to the Retirement tab.';
       s.appendChild(afford);
 
+      // Projected gross income at retirement
+      var incAtRet = grossPM > 0 ? Math.round(grossPM * Math.pow(1 + incEscRate/100, yrsToRet2)) : 0;
+
       var affTbl = document.createElement('table');
-      affTbl.innerHTML = '<thead><tr><th>Policy</th><th>Current premium</th><th>Esc %</th><th>At retirement (est.)</th></tr></thead>';
+      affTbl.innerHTML = '<thead><tr>' +
+        '<th style="width:28px"></th>' +
+        '<th>Policy</th>' +
+        '<th style="text-align:right">Premium today</th>' +
+        '<th style="text-align:right">% of income</th>' +
+        '<th style="text-align:right">Esc %</th>' +
+        '<th style="text-align:right">At retirement</th>' +
+        '<th style="text-align:right">% of income then</th>' +
+        '</tr></thead>';
       var affTb = document.createElement('tbody');
-      var totalAtRet = 0;
-      pols.forEach(function(pol, j) {
-        if ((pol.Frequency||'Monthly') !== 'Monthly') return;
+      var totalAtRet2 = 0;
+      var totalRetSelected = 0;
+
+      _riskTypes.forEach(function(pol, j) {
         var prem = N(pol.Premium);
-        if (!prem) return;
-        var escRaw = String(pol.PremEscalation || pol.premEsc || '').replace(/,/g, '.').replace(/[^0-9.]/g, '');
+        var idx  = pols.indexOf(pol);
+        var escRaw = String(pol.PremEscalation || pol.premEsc || '').replace(/,/g,'.').replace(/[^0-9.]/g,'');
         var esc = parseFloat(escRaw) || 0;
-        var future = esc > 0 ? Math.round(prem * Math.pow(1 + esc/100, yrsToRet)) : prem;
-        totalAtRet += future;
+        var future = esc > 0 ? Math.round(prem * Math.pow(1 + esc/100, yrsToRet2)) : prem;
+        totalAtRet2 += future;
+        if(pol._retInclude) totalRetSelected += future;
+
+        var pctToday  = grossPM > 0 ? (prem / grossPM * 100).toFixed(1) : '—';
+        var pctAtRet  = incAtRet > 0 ? (future / incAtRet * 100).toFixed(1) : '—';
+        var isHigh    = esc > 0 && esc > incEscRate;
+        var colour    = isHigh ? 'var(--red)' : 'var(--navy)';
+
         var tr2 = document.createElement('tr');
-        tr2.innerHTML =
-          '<td>' + (pol.Insurer||'—') + (pol.Type ? ' <span style="font-size:11px;color:var(--sub)">'+pol.Type+'</span>' : '') + '</td>' +
-          '<td>' + Rfmt(prem) + '</td>' +
-          '<td><input type="text" inputmode="numeric" value="' + (pol.premEsc||'') + '" placeholder="0" style="width:52px;padding:4px 6px;border:1.5px solid var(--mist);border-radius:5px;font-size:12px" ' +
-            'data-idx="'+j+'" onblur="S.importedPols[this.dataset.idx].premEsc=this.value;render()" oninput="S.importedPols[this.dataset.idx].premEsc=this.value"> %</td>' +
-          '<td style="font-weight:700;color:' + ((esc > 0 && esc > (N(S.assump.incEsc)||5)) ? 'var(--red)' : 'var(--navy)') + '">' + Rfmt(future) + '</td>';
+
+        // Tick cell
+        var tdChk = document.createElement('td');
+        var chkInp = document.createElement('input'); chkInp.type = 'checkbox';
+        chkInp.checked = !!pol._retInclude;
+        chkInp.style.cssText = 'accent-color:var(--gold);width:14px;height:14px;cursor:pointer';
+        chkInp.addEventListener('change', function(e){
+          S.importedPols[idx]._retInclude = e.target.checked;
+          render();
+        });
+        tdChk.appendChild(chkInp); tr2.appendChild(tdChk);
+
+        // Policy name
+        var tdName = document.createElement('td');
+        tdName.innerHTML = '<strong>' + (pol.Insurer||'—') + '</strong>' +
+          (pol.Product ? '<br><span style="font-size:10px;color:var(--sub)">'+pol.Product+'</span>' : '');
+        tr2.appendChild(tdName);
+
+        // Current premium
+        var tdPrem = document.createElement('td'); tdPrem.style.textAlign='right'; tdPrem.textContent = Rfmt(prem); tr2.appendChild(tdPrem);
+
+        // % of income today
+        var tdPct = document.createElement('td'); tdPct.style.textAlign='right';
+        tdPct.innerHTML = '<span style="font-size:11px;color:var(--sub)">' + pctToday + '%</span>';
+        tr2.appendChild(tdPct);
+
+        // Esc % — editable inline
+        var tdEsc = document.createElement('td'); tdEsc.style.textAlign='right';
+        var escInp = document.createElement('input'); escInp.type='text'; escInp.inputMode='numeric';
+        escInp.value = pol.premEsc||''; escInp.placeholder='0';
+        escInp.style.cssText='width:48px;padding:3px 5px;border:1.5px solid var(--mist);border-radius:4px;font-size:11px;text-align:right';
+        escInp.addEventListener('input',  function(e){ S.importedPols[idx].premEsc=e.target.value; });
+        escInp.addEventListener('blur',   function(e){ S.importedPols[idx].premEsc=e.target.value; render(); });
+        tdEsc.appendChild(escInp);
+        var escLabel = document.createElement('span'); escLabel.textContent=' %'; escLabel.style.fontSize='11px';
+        tdEsc.appendChild(escLabel); tr2.appendChild(tdEsc);
+
+        // At retirement
+        var tdFut = document.createElement('td'); tdFut.style.cssText='text-align:right;font-weight:700;color:'+colour;
+        tdFut.textContent = Rfmt(future); tr2.appendChild(tdFut);
+
+        // % of income at retirement
+        var tdPctRet = document.createElement('td'); tdPctRet.style.textAlign='right';
+        tdPctRet.innerHTML = '<span style="font-size:11px;font-weight:700;color:'+colour+'">' + pctAtRet + '%</span>' +
+          (isHigh ? ' <span style="font-size:9px;color:var(--red)">⚠ faster than income</span>' : '');
+        tr2.appendChild(tdPctRet);
+
         affTb.appendChild(tr2);
       });
+
+      // Totals row
       var trTot = document.createElement('tr');
-      trTot.style.cssText = 'border-top:2px solid var(--navy);font-weight:700';
-      trTot.innerHTML = '<td colspan="3">Total premiums at retirement</td><td style="color:var(--gold)">' + Rfmt(totalAtRet) + ' /pm</td>';
+      trTot.style.cssText = 'border-top:2px solid var(--navy);font-weight:700;background:#f8f9fc';
+      var incPctToday  = grossPM > 0 ? (totalPrem / grossPM * 100).toFixed(1) : '—';
+      var incPctAtRet  = incAtRet > 0 ? (totalAtRet2 / incAtRet * 100).toFixed(1) : '—';
+      trTot.innerHTML = '<td></td><td>Total</td>' +
+        '<td style="text-align:right">' + Rfmt(totalPrem) + '</td>' +
+        '<td style="text-align:right"><strong>' + incPctToday + '%</strong><br><span style="font-size:9px;color:var(--sub)">of income today</span></td>' +
+        '<td></td>' +
+        '<td style="text-align:right;color:var(--gold)">' + Rfmt(totalAtRet2) + '</td>' +
+        '<td style="text-align:right"><strong>' + incPctAtRet + '%</strong><br><span style="font-size:9px;color:var(--sub)">of income at ret.</span></td>';
       affTb.appendChild(trTot);
       affTbl.appendChild(affTb);
       var affTw = div('twrap'); affTw.appendChild(affTbl); s.appendChild(affTw);
 
-      var nettAtRet = N(S.cli.nettPM);
-      if (nettAtRet > 0 && totalAtRet > 0) {
-        var premPct = Math.round(totalAtRet / nettAtRet * 100);
+      // Affordability alert
+      if (grossPM > 0) {
+        var premPctNow = Math.round(totalPrem / grossPM * 100);
+        var premPctRet = incAtRet > 0 ? Math.round(totalAtRet2 / incAtRet * 100) : 0;
         var afford2 = div('info'); afford2.style.marginTop = '8px';
-        afford2.style.background = premPct > 20 ? '#fef2f2' : '#f0fdf4';
-        afford2.style.borderColor = premPct > 20 ? '#fca5a5' : '#86efac';
-        afford2.style.color = premPct > 20 ? '#991b1b' : '#166534';
-        afford2.innerHTML = 'Estimated premiums at retirement = <strong>' + Rfmt(totalAtRet) + ' /pm</strong> (' +
-          premPct + '% of current nett income of ' + Rfmt(nettAtRet) + '). ' +
-          (premPct > 20 ? '⚠ Premium burden is high relative to current income.' : '✓ Premium burden appears manageable.');
+        var isAfford = premPctNow <= 10 && premPctRet <= 15;
+        afford2.style.cssText = 'margin-top:8px;background:' + (isAfford?'#f0fdf4':'#fef2f2') +
+          ';border-color:' + (isAfford?'#86efac':'#fca5a5') +
+          ';color:' + (isAfford?'#166534':'#991b1b');
+        afford2.innerHTML =
+          'Today: <strong>' + Rfmt(totalPrem) + '/pm = ' + premPctNow + '% of gross income</strong>. ' +
+          'At retirement: <strong>' + Rfmt(totalAtRet2) + '/pm = ' + premPctRet + '% of projected income (' + Rfmt(incAtRet) + '/pm)</strong>. ' +
+          (isAfford ? '✓ Premiums appear manageable.' : '⚠ Premium burden is significant — review with client.');
         s.appendChild(afford2);
+      }
+
+      // ── Capital needed to fund ticked policies in retirement
+      var tickedPols = _riskTypes.filter(function(p){ return p._retInclude; });
+      if(tickedPols.length > 0){
+        s.appendChild(stitle('Capital Needed to Fund Selected Policies in Retirement'));
+        var polCapInf=div('info');
+        polCapInf.innerHTML='Capital required to fund each selected policy premium for retirement. '
+          +'Uses the premium at retirement, escalated in retirement at the policy rate, capitalised over '+yrsInRet+' years.';
+        s.appendChild(polCapInf);
+
+        var polCapTbl=document.createElement('table');
+        polCapTbl.innerHTML='<thead><tr><th>Policy</th><th>Premium at ret.</th><th>Esc %</th><th>Capital required</th></tr></thead>';
+        var polCapTb=document.createElement('tbody');
+        var totalPolCap=0;
+
+        tickedPols.forEach(function(pol){
+          var escRaw2=String(pol.PremEscalation||pol.premEsc||'').replace(/,/g,'.').replace(/[^0-9.]/g,'');
+          var esc2=parseFloat(escRaw2)||0;
+          var premAtRet=esc2>0?Math.round(N(pol.Premium)*Math.pow(1+esc2/100,yrsToRet2)):N(pol.Premium);
+          // Capitalise the premium stream in retirement
+          var dr=N(S.assump.drawdown)||4;
+          var polCap=capitalise(premAtRet, yrsInRet, esc2||N(S.assump.cpi)||6, dr);
+          totalPolCap+=polCap;
+          var tr3=document.createElement('tr');
+          tr3.innerHTML='<td><strong>'+(pol.Insurer||'—')+'</strong>'+(pol.Product?' — '+pol.Product:'')+'</td>'+
+            '<td>'+Rfmt(premAtRet)+'/pm</td>'+
+            '<td>'+esc2+'%</td>'+
+            '<td><strong>'+Rfmt(polCap)+'</strong></td>';
+          polCapTb.appendChild(tr3);
+        });
+
+        var polCapTot=document.createElement('tr');
+        polCapTot.style.cssText='border-top:2px solid var(--navy);font-weight:700';
+        polCapTot.innerHTML='<td colspan="3">Total capital to fund selected policies in retirement</td>'+
+          '<td style="color:var(--gold)"><strong>'+Rfmt(totalPolCap)+'</strong></td>';
+        polCapTb.appendChild(polCapTot);
+        polCapTbl.appendChild(polCapTb);
+        var polCapTw=div('twrap'); polCapTw.appendChild(polCapTbl); s.appendChild(polCapTw);
+
+        // Savings needed box — editable, pre-filled from total
+        var savBox=div(); savBox.style.cssText='background:#1a2a4a;border-radius:8px;padding:14px 16px;margin-top:8px';
+        var savHdr=div(); savHdr.style.cssText='font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--gold);margin-bottom:10px';
+        savHdr.textContent='Savings Required for Policy Premiums in Retirement';
+        savBox.appendChild(savHdr);
+
+        function savRow(lbl,val,bold,colour){
+          var r=div(); r.style.cssText='display:flex;justify-content:space-between;padding:'+(bold?'7':'4')+'px 0'+(bold?';border-top:1px solid #334;margin-top:4px':'');
+          var l=el('span','',lbl); l.style.cssText='color:#ccd6f6;font-size:12px';
+          var v=el('span','',val); v.style.cssText='font-size:'+(bold?'14':'12')+'px;font-weight:'+(bold?'700':'400')+';color:'+(colour||'#c8a84b');
+          r.appendChild(l); r.appendChild(v); savBox.appendChild(r);
+        }
+
+        savRow('Capital target to fund policy premiums',Rfmt(totalPolCap),true);
+
+        if(yrsToRet2>0){
+          // PMT to accumulate this capital — editable growth rate
+          var savGrowth=N(S.assump.growth)||9;
+          var unitFV2=projectFund(0,1,0,savGrowth,yrsToRet2);
+          var savPMT=unitFV2>0?Math.round(totalPolCap/unitFV2):0;
+          savRow('Monthly saving needed (@ '+savGrowth+'% growth, flat)',Rfmt(savPMT)+' /pm',true,'#fbbf24');
+          savRow(yrsToRet2+' years to retirement · '+yrsInRet+' years in retirement','',false,'#556');
+        }
+
+        s.appendChild(savBox);
       }
     }
   }
@@ -2395,15 +2565,16 @@ function buildPolicies() {
     bSend.addEventListener('click', function() {
       var toSend = (S.importedPols||[]).filter(function(p){
         return p._retInclude && (p.Frequency||'Monthly')==='Monthly' && N(p.Premium)>0
-          && ['Business Assurance'].indexOf(p.Type||'') < 0;
+          && p.Type !== 'Business Assurance';
       });
-      if (!toSend.length) { alert('Tick the Ret checkbox on policies to include first.'); return; }
+      if (!toSend.length) { alert('Tick the checkbox on the policies in the affordability table above.'); return; }
       if (!S.retNeeds) S.retNeeds = [];
       S.retNeeds = S.retNeeds.filter(function(r){ return !r._isPremRow; });
       toSend.forEach(function(p){
-        S.retNeeds.push({ desc:(p.Insurer||'')+(p.Product?' — '+p.Product:'')+' premium', amtToday:String(Math.round(N(p.Premium))), esc:String(N(p.PremEscalation)||''), _isPremRow:true });
+        var escRaw3=String(p.PremEscalation||p.premEsc||'').replace(/,/g,'.').replace(/[^0-9.]/g,'');
+        S.retNeeds.push({ desc:(p.Insurer||'')+(p.Product?' — '+p.Product:'')+' premium', amtToday:String(Math.round(N(p.Premium))), esc:escRaw3, _isPremRow:true });
       });
-      persist(); go(5);
+      persist(); go(6); // go to Retirement tab (index 6 after tab reorder)
     });
     brow2.appendChild(bSend);
     s.appendChild(brow2);
