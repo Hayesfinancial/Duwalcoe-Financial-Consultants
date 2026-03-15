@@ -157,9 +157,10 @@ table input:focus, table select:focus { outline: none; border-color: var(--gold)
   <div class="hdr-brand">Duwalcoe · FNA</div>
   <div class="hdr-client" id="hdrClient">New Client</div>
   <div class="hdr-actions">
+    <span id="syncIndicator" style="font-size:10px;color:#8899bb;margin-right:4px"></span>
     <button class="btn btn-ghost btn-sm" onclick="newClient()">New</button>
     <button class="btn btn-ghost btn-sm" onclick="refreshFromCRM()" title="Re-pull policies and personal details from CRM without losing FNA data">↻ CRM</button>
-    <button class="btn btn-ghost btn-sm" onclick="saveFile()">💾 Save</button>
+    <button class="btn btn-ghost btn-sm" onclick="persist();saveToServer()" title="Save to server — accessible from any computer">☁ Sync</button>
     <button class="btn btn-ghost btn-sm" onclick="printFNA()">🖨 Print FNA</button>
   </div>
 </div>
@@ -667,6 +668,41 @@ var S = JSON.parse(JSON.stringify(DEFAULTS));
   }
 })();
 
+// After initial load — try to pull FNA state from server
+// Runs after render() so the page is visible while waiting
+(function tryServerLoad() {
+  var clientId = (new URLSearchParams(window.location.search)).get('id');
+  if (!clientId) return;
+  var indicator = document.getElementById('syncIndicator');
+  if (indicator) { indicator.textContent = '↓ Loading...'; indicator.style.color = '#c8a84b'; }
+
+  loadFromServer(clientId, function(serverState, savedTime) {
+    if (!serverState) {
+      if (indicator) { indicator.textContent = ''; }
+      return;
+    }
+    // Merge server state into S — but never overwrite importedPols (always from CRM)
+    var currentPols = S.importedPols;
+    Object.keys(serverState).forEach(function(k) {
+      if (k !== 'importedPols' && k !== 'cli') S[k] = serverState[k];
+    });
+    // Merge cli carefully — keep CRM-sourced fields, use server for adviser-entered fields
+    if (serverState.cli) {
+      var crmFields = ['name','id','dob','gender','smoker','marital','occ','education','spouseName','spouseDob','domDate','grossPM','nettPM'];
+      Object.keys(serverState.cli).forEach(function(k) {
+        if (crmFields.indexOf(k) < 0) S.cli[k] = serverState.cli[k];
+      });
+    }
+    S.importedPols = currentPols; // always use fresh CRM policies
+    persist(); // update localStorage with merged state
+    render();
+    if (indicator) {
+      indicator.textContent = '✓ Synced ' + (savedTime ? savedTime.slice(0,16) : '');
+      indicator.style.color = '#86efac';
+    }
+  });
+})();
+
 // Applies CRM policy data to state — used on fresh load and on "Refresh from CRM"
 function applyPolsFromCRM(pols) {
   S.importedPols = pols;
@@ -745,6 +781,8 @@ function deepMerge(base, over) {
 // ═══════════════════════════════════════════════════════════
 // SAVE / LOAD / NEW
 // ═══════════════════════════════════════════════════════════
+var APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbw_I8Md3snxG36VJb00gIIgbag_2-k0zUkkmzS15kDzpCO37RJSS16hTdhhpS_v5onr/exec';
+
 function persist() {
   var json = JSON.stringify(S);
   document.getElementById('saved-data').textContent = json;
@@ -752,8 +790,67 @@ function persist() {
   try { localStorage.setItem(key, json); } catch(e) {}
 }
 
+// Save FNA state to Google Sheets (excludes importedPols — they come fresh from CRM)
+function saveToServer(silent) {
+  var clientId = S.cli.id;
+  if (!clientId) {
+    if(!silent) status('⚠ No client ID — cannot sync to server');
+    return;
+  }
+  // Build save payload — everything except importedPols (CRM-sourced)
+  var saveData = {};
+  var skip = {importedPols: true};
+  Object.keys(S).forEach(function(k){ if(!skip[k]) saveData[k] = S[k]; });
+
+  var payload = JSON.stringify({ action: 'saveFNA', clientId: clientId, jsonData: JSON.stringify(saveData) });
+  var indicator = document.getElementById('syncIndicator');
+  if(indicator) { indicator.textContent = '↑ Saving...'; indicator.style.color = '#c8a84b'; }
+
+  fetch(APPS_SCRIPT_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain' },
+    body: payload
+  })
+  .then(function(r){ return r.json(); })
+  .then(function(res){
+    if(res.ok){
+      var t = new Date().toLocaleTimeString('en-ZA',{hour:'2-digit',minute:'2-digit'});
+      if(indicator){ indicator.textContent = '✓ Synced ' + t; indicator.style.color = '#86efac'; }
+      if(!silent) status('✓ Saved to server at ' + t);
+    } else {
+      if(indicator){ indicator.textContent = '⚠ Sync failed'; indicator.style.color = '#f87171'; }
+      if(!silent) status('⚠ Server save failed: ' + (res.error||'unknown'));
+    }
+  })
+  .catch(function(err){
+    if(indicator){ indicator.textContent = '⚠ Offline'; indicator.style.color = '#f87171'; }
+    if(!silent) status('⚠ Could not reach server — data saved locally only');
+  });
+}
+
+// Load FNA state from Google Sheets
+function loadFromServer(clientId, onDone) {
+  if(!clientId){ if(onDone) onDone(null); return; }
+  var url = APPS_SCRIPT_URL + '?action=loadFNA&clientId=' + encodeURIComponent(clientId) + '&callback=_fnaServerCb';
+  window._fnaServerCb = function(res){
+    delete window._fnaServerCb;
+    if(res && res.ok && res.data){
+      try {
+        var serverState = JSON.parse(res.data);
+        if(onDone) onDone(serverState, res.saved||'');
+      } catch(e){ if(onDone) onDone(null); }
+    } else {
+      if(onDone) onDone(null);
+    }
+  };
+  var s = document.createElement('script'); s.src = url;
+  s.onerror = function(){ if(onDone) onDone(null); };
+  document.head.appendChild(s);
+}
+
 function autoSave() {
   persist();
+  saveToServer(true); // silent background save
   var t = new Date().toLocaleTimeString('en-ZA',{hour:'2-digit',minute:'2-digit'});
   var bar = document.getElementById('statusBar');
   if(bar) bar.textContent = 'FSP No: 9978 · Clinton Hayes · Auto-saved ' + t;
