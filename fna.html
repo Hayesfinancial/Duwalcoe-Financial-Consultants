@@ -366,12 +366,14 @@ function projectFund(currentVal, monthlyContrib, escalation, growth, years) {
 // yearsInRet: how many years capital must last
 // cpi: inflation rate
 // returnRate: return on capital in retirement
-function retirementCapitalNeeded(monthlyIncomeToday, yearsToRet, yearsInRet, cpi, returnRate) {
+function retirementCapitalNeeded(monthlyIncomeToday, yearsToRet, yearsInRet, cpiToRet, returnRate, escInRet) {
   if (N(monthlyIncomeToday) <= 0 || N(yearsInRet) <= 0) return 0;
-  // Inflate to retirement date
-  var incomeAtRet = N(monthlyIncomeToday) * Math.pow(1 + pct(cpi), N(yearsToRet));
-  // Capitalise: PV of growing annuity at retirement date
-  return capitalise(incomeAtRet, N(yearsInRet), N(cpi), N(returnRate));
+  // Inflate to retirement date using escalation-to-retirement rate
+  var incomeAtRet = N(monthlyIncomeToday) * Math.pow(1 + pct(cpiToRet), N(yearsToRet));
+  // Capitalise in retirement using escInRet (separate from cpiToRet)
+  // If escInRet not provided, default to cpiToRet (backward compatible)
+  var inRetEsc = (escInRet !== undefined && escInRet !== null && escInRet !== '') ? N(escInRet) : N(cpiToRet);
+  return capitalise(incomeAtRet, N(yearsInRet), inRetEsc, N(returnRate));
 }
 
 // ── CGT ON DEATH (SA Eighth Schedule) ────────────────────
@@ -2057,25 +2059,40 @@ function buildRetirement() {
       var lbl=el('span','','(from policy)'); lbl.style.cssText='font-size:10px;color:var(--sub);margin-right:8px'; ch.appendChild(lbl);
     }
     card.appendChild(ch);
-    var rg=g3();
+    var rg=g4();
+
+    // Amount today
     var af=div('f'); af.appendChild(el('label','','Amount today (R/pm)'));
     var arw=div('rw'); arw.appendChild(el('span','rp','R'));
     var ai=document.createElement('input'); ai.type='text'; ai.inputMode='numeric'; ai.value=r.amtToday||''; ai.placeholder='0';
     ai.addEventListener('input',function(e){S.retNeeds[i].amtToday=e.target.value;});
     ai.addEventListener('blur',function(){render();}); arw.appendChild(ai); af.appendChild(arw); rg.appendChild(af);
-    var ef=div('f'); ef.appendChild(el('label','','Escalation % (blank=CPI)'));
+
+    // Escalation to retirement
+    var ef=div('f'); ef.appendChild(el('label','','Esc to retirement % (blank=CPI)'));
     var epw=div('pw'); epw.appendChild(el('span','pp','%'));
     var ei=document.createElement('input'); ei.type='text'; ei.value=r.esc||''; ei.placeholder=S.assump.cpi||'6';
     ei.addEventListener('input',function(e){S.retNeeds[i].esc=e.target.value;});
     ei.addEventListener('blur',function(){render();}); epw.insertBefore(ei,epw.firstChild); ef.appendChild(epw); rg.appendChild(ef);
-    // Show escalated value at retirement
+
+    // Escalation IN retirement
+    var erf=div('f'); erf.appendChild(el('label','','Esc in retirement % (blank=CPI)'));
+    var erpw=div('pw'); erpw.appendChild(el('span','pp','%'));
+    var eri=document.createElement('input'); eri.type='text'; eri.value=r.escInRet||''; eri.placeholder=S.assump.cpi||'6';
+    eri.addEventListener('input',function(e){S.retNeeds[i].escInRet=e.target.value;});
+    eri.addEventListener('blur',function(){render();}); erpw.insertBefore(eri,erpw.firstChild); erf.appendChild(erpw); rg.appendChild(erf);
+
+    // Show escalated value at retirement + capital needed
     if(N(r.amtToday)>0&&yrsToRet){
       var escRate=N(r.esc)>0?N(r.esc):N(S.assump.cpi)||6;
+      var escInRetRate=r.escInRet!==''&&r.escInRet!==undefined?N(r.escInRet):escRate;
       var atRet=Math.round(N(r.amtToday)*Math.pow(1+escRate/100,yrsToRet));
-      var af2=div('f'); af2.appendChild(el('label','','At retirement (inflated)'));
-      var arw2=div('rw'); arw2.appendChild(el('span','rp','R'));
-      var ai2=document.createElement('input'); ai2.type='text'; ai2.value=Math.round(atRet).toLocaleString('en-ZA'); ai2.readOnly=true; ai2.style.background='#f9f9f6';
-      arw2.appendChild(ai2); af2.appendChild(arw2); rg.appendChild(af2);
+      var capThis=retirementCapitalNeeded(N(r.amtToday),yrsToRet,yrsInRet,escRate,S.assump.retReturn,escInRetRate);
+      var af2=div('f');
+      af2.appendChild(el('label','','At retirement → capital needed'));
+      var retDisp=div(); retDisp.style.cssText='font-size:12px;padding:7px 10px;border:1.5px solid var(--mist);border-radius:6px;background:#f9f9f6;color:var(--navy)';
+      retDisp.innerHTML=Rfmt(atRet)+'/pm → <strong>'+Rfmt(capThis)+'</strong>';
+      af2.appendChild(retDisp); rg.appendChild(af2);
     }
     card.appendChild(rg);
     s.appendChild(card);
@@ -2222,10 +2239,23 @@ function buildRetirement() {
       otherIncAtRet+=Math.round(N(a.retirementIncomePM)*Math.pow(1+escTo/100,yrsToRet));
     });
 
-    var monthlyAtRet = totalMonthlyNeed>0?Math.round(totalMonthlyNeed*Math.pow(1+N(S.assump.cpi)/100,yrsToRet)):0;
+    // Display: monthly needs at retirement — each at its own escalation rate
+    var monthlyAtRet = 0;
+    (S.retNeeds||[]).forEach(function(r){
+      if(!N(r.amtToday)) return;
+      var escTo=N(r.esc)>0?N(r.esc):N(S.assump.cpi)||6;
+      monthlyAtRet+=Math.round(N(r.amtToday)*Math.pow(1+escTo/100,yrsToRet));
+    });
     var netMonthlyGap = Math.max(0, monthlyAtRet - rentalAtRet - otherIncAtRet);
-    var netToday = netMonthlyGap>0?netMonthlyGap/Math.pow(1+N(S.assump.cpi)/100,yrsToRet):0;
-    var capNeed = netToday>0?retirementCapitalNeeded(netToday,yrsToRet,yrsInRet,S.assump.cpi,S.assump.retReturn):0;
+
+    // Capital needed — each need capitalised individually at its own escInRet
+    var capNeed = 0;
+    (S.retNeeds||[]).forEach(function(r){
+      if(!N(r.amtToday)) return;
+      var escTo=N(r.esc)>0?N(r.esc):N(S.assump.cpi)||6;
+      var escIn=(r.escInRet!==''&&r.escInRet!==undefined&&r.escInRet!==null)?N(r.escInRet):escTo;
+      capNeed+=retirementCapitalNeeded(N(r.amtToday),yrsToRet,yrsInRet,escTo,S.assump.retReturn,escIn);
+    });
     var lumpNeed = (S.retLumps||[]).reduce(function(a,r){return a+N(r.amt);},0);
     var totalCapNeed = capNeed + lumpNeed;
 
@@ -2269,8 +2299,16 @@ function buildRetirement() {
       var v2=el('span','',val); v2.style.cssText='font-size:'+(sub?'11':'12')+'px;color:#c8a84b'+(bold?';font-weight:700':'');
       r2.appendChild(l2); r2.appendChild(v2); calcBox.appendChild(r2);
     }
-    rRow('Monthly need today', Rfmt(totalMonthlyNeed)+' /pm');
-    rRow('Monthly need at retirement (age '+retAge+')', Rfmt(monthlyAtRet)+' /pm');
+    rRow('Monthly needs at retirement (age '+retAge+')', Rfmt(monthlyAtRet)+' /pm');
+    // Per-need breakdown
+    (S.retNeeds||[]).forEach(function(r){
+      if(!N(r.amtToday)) return;
+      var escTo=N(r.esc)>0?N(r.esc):N(S.assump.cpi)||6;
+      var escIn=(r.escInRet!==''&&r.escInRet!==undefined&&r.escInRet!==null)?N(r.escInRet):escTo;
+      var atRet=Math.round(N(r.amtToday)*Math.pow(1+escTo/100,yrsToRet));
+      var capThis=retirementCapitalNeeded(N(r.amtToday),yrsToRet,yrsInRet,escTo,S.assump.retReturn,escIn);
+      rRow((r.desc||'Need')+' (esc '+escTo+'% to ret, '+escIn+'% in ret)', Rfmt(atRet)+'/pm → '+Rfmt(capThis), true);
+    });
     if(rentalAtRet>0) rRow('Less: rental income at retirement', '('+Rfmt(rentalAtRet)+'/pm)', true);
     if(otherIncAtRet>0) rRow('Less: farm/business income at retirement', '('+Rfmt(otherIncAtRet)+'/pm)', true);
     rRow('Net monthly gap at retirement', Rfmt(netMonthlyGap)+' /pm', false, true);
