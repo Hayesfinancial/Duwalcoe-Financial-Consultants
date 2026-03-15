@@ -353,7 +353,7 @@ function projectFund(currentVal, monthlyContrib, escalation, growth, years) {
   var annualPmt = pmt * 12;
   var fvContribs;
   if (Math.abs(r - g) < 0.0001) {
-    fvContribs = annualPmt * n * Math.pow(1 + r, n - 1);
+    fvContribs = annualPmt * n * Math.pow(1 + r, n / 2);
   } else {
     fvContribs = annualPmt * (Math.pow(1 + r, n) - Math.pow(1 + g, n)) / (r - g);
   }
@@ -374,16 +374,83 @@ function retirementCapitalNeeded(monthlyIncomeToday, yearsToRet, yearsInRet, cpi
   return capitalise(incomeAtRet, N(yearsInRet), N(cpi), N(returnRate));
 }
 
-// ═══════════════════════════════════════════════════════════
-// DATA MODEL
-// ═══════════════════════════════════════════════════════════
+// ── CGT ON DEATH (SA Eighth Schedule) ────────────────────
+// SA rules: deemed disposal at market value on death
+// Inclusion rate: 40% for individuals
+// Year-of-death annual exclusion: R300,000
+// Primary residence exclusion: first R2,000,000 of gain
+// Spouse beneficiary: rollover — no CGT on death
+// Returns { gain, includedGain, cgt } for a single asset
+// marginalRate: client's marginal income tax rate (decimal)
+// primaryResidence: boolean — apply R2m exclusion
+// Applied against shared R300k annual exclusion externally
+var CGT_INCLUSION   = 0.40;
+var CGT_ANNUAL_EXCL = 300000;  // year of death
+var CGT_PRIMARY_RES = 2000000; // primary residence gain exclusion
+
+function calcCGTAsset(marketVal, baseCost, primaryResidence) {
+  var mv   = N(marketVal);
+  var bc   = N(baseCost);
+  if (mv <= 0 || bc <= 0) return { gain: 0, gainAfterExcl: 0 };
+  var gain = Math.max(0, mv - bc);
+  if (primaryResidence) gain = Math.max(0, gain - CGT_PRIMARY_RES);
+  return { gain: Math.max(0, mv - bc), gainAfterExcl: gain };
+}
+
+// Total CGT liability across all assets on death
+// Returns array of { desc, gain, gainAfterPR, includedGain, cgt }
+// and totalCGT after applying shared annual exclusion
+function calcTotalCGT(marginalRate) {
+  var items = [];
+  var totalGainAfterPR = 0;
+
+  // Properties — only if NOT going to spouse (spouse = rollover)
+  (S.props||[]).forEach(function(p) {
+    if (!N(p.val) || !N(p.baseCost)) return;
+    if ((p.deathBenType||'Estate') === 'Spouse') return; // rollover
+    var r = calcCGTAsset(p.val, p.baseCost, !!p.primaryResidence);
+    if (r.gainAfterExcl > 0) {
+      items.push({ desc: p.desc||'Property', gain: r.gain, gainAfterPR: r.gainAfterExcl });
+      totalGainAfterPR += r.gainAfterExcl;
+    }
+  });
+
+  // Vehicles
+  (S.vehicles||[]).forEach(function(v) {
+    if (!N(v.val) || !N(v.baseCost)) return;
+    if ((v.deathBenType||'Estate') === 'Spouse') return;
+    var r = calcCGTAsset(v.val, v.baseCost, false);
+    if (r.gainAfterExcl > 0) {
+      items.push({ desc: v.desc||'Vehicle', gain: r.gain, gainAfterPR: r.gainAfterExcl });
+      totalGainAfterPR += r.gainAfterExcl;
+    }
+  });
+
+  // Other assets
+  (S.otherAssets||[]).forEach(function(a) {
+    if (!N(a.val) || !N(a.baseCost)) return;
+    if ((a.deathBenType||'Estate') === 'Spouse') return;
+    var r = calcCGTAsset(a.val, a.baseCost, false);
+    if (r.gainAfterExcl > 0) {
+      items.push({ desc: a.desc||'Asset', gain: r.gain, gainAfterPR: r.gainAfterExcl });
+      totalGainAfterPR += r.gainAfterExcl;
+    }
+  });
+
+  // Apply shared annual exclusion (R300k in year of death)
+  var netGain     = Math.max(0, totalGainAfterPR - CGT_ANNUAL_EXCL);
+  var includedGain= Math.round(netGain * CGT_INCLUSION);
+  var mr          = N(marginalRate) > 0 ? N(marginalRate) / 100 : 0.45; // default max if unknown
+  var totalCGT    = Math.round(includedGain * mr);
+
+  return { items: items, totalGainAfterPR: totalGainAfterPR, netGain: netGain, includedGain: includedGain, totalCGT: totalCGT };
+}
 var DEFAULTS = {
   // Personal
   cli: {
     name: '', id: '', dob: '', gender: '', smoker: '', education: '',
     occ: '', retAge: '65', grossPM: '', nettPM: '',
-    marital: '', domDate: '', spouseName: '', spouseDob: '', spouseOcc: '',
-    spouseInheritsResidue: false
+    marital: '', domDate: '', spouseName: '', spouseDob: '', spouseOcc: ''
   },
   kids: [],
 
@@ -410,28 +477,25 @@ var DEFAULTS = {
   incNotes: '',
 
   // Assets & Liabilities
-  props:      [],  // { desc, val, bond, bondPM, rental, rentalEsc, baseCost, soldAtDeath, soldAtRetirement, notes }
-  vehicles:   [],  // { desc, val, finance, soldAtDeath, notes }
-  otherAssets:[], // { desc, val, type, soldAtDeath, retirementRole, retirementIncomePM, growthRate, notes }
+  props:      [],  // { desc, val, bond, bondPM, rental, rentalEsc, baseCost, dateBought, primaryResidence, deathBenType, soldAtDeath, soldAtRetirement, notes }
+  vehicles:   [],  // { desc, val, finance, baseCost, dateBought, deathBenType, soldAtDeath, notes }
+  otherAssets:[], // { desc, val, type, baseCost, dateBought, deathBenType, soldAtDeath, retirementRole, retirementIncomePM, retirementIncEsc, retirementInRetEsc, retirementSaleProceeds, growthRate, notes }
   liabilities:[], // { desc, bal, pmt, notes }
   assetNotes: '',
 
   // Accrual (OCP with accrual marriages)
   accrual: {
-    clientStartVal: '0',   // Client's estate at start of marriage
-    spouseStartVal: '0',   // Spouse's estate at start of marriage
-    spouseCurrentAssets: '0' // Spouse's current gross assets for accrual calc
+    clientStartVal: '0',
+    spouseStartVal: '0',
+    spouseCurrentAssets: '0'
   },
 
   // NEEDS
-  // Death — liabilities (paid from estate/cover before income needs)
+  // Death — liabilities (MANUAL only — bonds/finance/CGT/estate costs pull automatically)
   deathLiabs: [
-    { desc: 'Bond / mortgage', amt: '' },
-    { desc: 'Vehicle finance', amt: '' },
     { desc: 'Personal loans / credit cards', amt: '' },
-    { desc: 'Income tax outstanding', amt: '' },
-    { desc: 'Executor fees (~4% of estate)', amt: '' },
-    { desc: 'Funeral costs', amt: '' }
+    { desc: 'Income tax outstanding',        amt: '' },
+    { desc: 'Funeral costs',                 amt: '' }
   ],
   // Death — income needs (each capitalised separately)
   // desc, nettPM, grossPM(calc), years, esc, drawdown, capitalised(calc), notes
@@ -1179,9 +1243,6 @@ function buildIncome() {
 // ═══════════════════════════════════════════════════════════
 function buildAssets() {
   var s = div();
-  var cliAge = ageFrom(S.cli.dob);
-  var retAge = N(S.cli.retAge)||65;
-  var yrsToRet = cliAge ? Math.max(0, retAge - cliAge) : null;
 
   // ── Properties
   s.appendChild(stitle('Properties'));
@@ -1190,31 +1251,48 @@ function buildAssets() {
     var ch=div(); ch.style.cssText='display:flex;justify-content:space-between;align-items:center;margin-bottom:10px';
     var ct=el('div','','Property '+(i+1)); ct.style.fontWeight='700'; ch.appendChild(ct);
     ch.appendChild(delBtn(function(){S.props.splice(i,1);render();})); card.appendChild(ch);
+
+    // Row 1: Description, Market Value, Bond Outstanding
     var r1=g3();
     var df=div('f'); df.appendChild(el('label','','Description'));
     var di=document.createElement('input'); di.type='text'; di.value=p.desc||''; di.placeholder='e.g. Primary residence';
     di.addEventListener('input',function(e){S.props[i].desc=e.target.value;}); df.appendChild(di); r1.appendChild(df);
-    r1.appendChild(rfld('Market Value',     p, 'val'));
+    r1.appendChild(rfld('Market Value', p, 'val', {onblur:function(){render();}}));
     r1.appendChild(rfld('Bond Outstanding', p, 'bond'));
     card.appendChild(r1);
-    var r2=g3();
+
+    // Row 2: Bond /pm, Rental, Base Cost (CGT), Date Bought
+    var r2=g4();
     r2.appendChild(rfld('Bond Payment /pm', p, 'bondPM'));
-    r2.appendChild(rfld('Rental Income /pm',p, 'rental'));
-    r2.appendChild(rfld('Base Cost (CGT)',  p, 'baseCost'));
+    r2.appendChild(rfld('Rental Income /pm', p, 'rental'));
+    r2.appendChild(rfld('Base Cost (CGT)', p, 'baseCost', {onblur:function(){render();}}));
+    r2.appendChild(fld('Date Acquired', p, 'dateBought', {placeholder:'DD/MM/YYYY or year'}));
     card.appendChild(r2);
-    // Purpose tick boxes + rental escalation
-    var r3 = div(); r3.style.cssText = 'display:flex;flex-wrap:wrap;gap:16px;align-items:center;margin-top:10px;padding-top:10px;border-top:1px solid var(--mist)';
-    function chk(lbl, obj, field) {
-      var wrap = div(); wrap.style.cssText='display:flex;align-items:center;gap:6px;cursor:pointer';
-      var cb = document.createElement('input'); cb.type='checkbox'; cb.checked=!!obj[field];
+
+    // Row 3: Ticks + rental esc + deathBenType
+    var r3=div(); r3.style.cssText='display:flex;flex-wrap:wrap;gap:16px;align-items:center;margin-top:10px;padding-top:10px;border-top:1px solid var(--mist)';
+
+    function propChk(lbl, field){
+      var wrap=div(); wrap.style.cssText='display:flex;align-items:center;gap:6px;cursor:pointer';
+      var cb=document.createElement('input'); cb.type='checkbox'; cb.checked=!!p[field];
       cb.addEventListener('change',function(e){S.props[i][field]=e.target.checked;render();});
-      var lb = el('label','',lbl); lb.style.cssText='font-size:12px;cursor:pointer;color:var(--navy)';
-      wrap.appendChild(cb); wrap.appendChild(lb);
-      return wrap;
+      var lb=el('label','',lbl); lb.style.cssText='font-size:12px;cursor:pointer;color:var(--navy)';
+      wrap.appendChild(cb); wrap.appendChild(lb); return wrap;
     }
-    r3.appendChild(chk('Sold at death', p, 'soldAtDeath'));
-    r3.appendChild(chk('Sold at retirement', p, 'soldAtRetirement'));
-    // Death beneficiary type
+    r3.appendChild(propChk('Primary residence', 'primaryResidence'));
+    r3.appendChild(propChk('Sold at death', 'soldAtDeath'));
+    r3.appendChild(propChk('Sold at retirement', 'soldAtRetirement'));
+
+    if(N(p.rental)>0){
+      var renWrap=div(); renWrap.style.cssText='display:flex;align-items:center;gap:6px';
+      renWrap.appendChild(el('label','','Rental esc %')).style='font-size:12px;color:var(--navy);white-space:nowrap';
+      var renInp=document.createElement('input'); renInp.type='text'; renInp.inputMode='numeric';
+      renInp.value=p.rentalEsc||'6'; renInp.style.cssText='width:52px;padding:4px 6px;border:1.5px solid var(--mist);border-radius:5px;font-size:12px';
+      renInp.addEventListener('input',function(e){S.props[i].rentalEsc=e.target.value;});
+      renWrap.appendChild(renInp); r3.appendChild(renWrap);
+    }
+
+    // On death, falls to
     var dbtFld=div('f'); dbtFld.style.cssText='display:flex;flex-direction:column;gap:4px;min-width:160px';
     dbtFld.appendChild(el('label','','On death, falls to'));
     var dbtSel=document.createElement('select');
@@ -1224,91 +1302,183 @@ function buildAssets() {
       if((p.deathBenType||'Estate')===o) opt.selected=true;
       dbtSel.appendChild(opt);
     });
-    dbtSel.addEventListener('change',function(e){ S.props[i].deathBenType=e.target.value; render(); });
+    dbtSel.addEventListener('change',function(e){S.props[i].deathBenType=e.target.value;render();});
     dbtFld.appendChild(dbtSel); r3.appendChild(dbtFld);
-    if (N(p.rental) > 0) {
-      var renEscWrap = div(); renEscWrap.style.cssText='display:flex;align-items:center;gap:6px';
-      var renLb = el('label','','Rental esc %'); renLb.style.cssText='font-size:12px;color:var(--navy);white-space:nowrap';
-      var renInp = document.createElement('input'); renInp.type='text'; renInp.inputMode='numeric';
-      renInp.value = p.rentalEsc||'6'; renInp.style.cssText='width:52px;padding:4px 6px;border:1.5px solid var(--mist);border-radius:5px;font-size:12px';
-      renInp.addEventListener('input',function(e){S.props[i].rentalEsc=e.target.value;});
-      renEscWrap.appendChild(renLb); renEscWrap.appendChild(renInp);
-      renEscWrap.appendChild(el('label','','% p.a.')).style='font-size:11px;color:var(--sub)';
-      r3.appendChild(renEscWrap);
-    }
     card.appendChild(r3);
+
+    // CGT preview — only if base cost entered and not going to spouse
+    if(N(p.baseCost)>0 && N(p.val)>0 && (p.deathBenType||'Estate')!=='Spouse'){
+      var cgtR=calcCGTAsset(p.val, p.baseCost, !!p.primaryResidence);
+      var mr=N(S.cli.grossPM)>0?calcMarginalRate(N(S.cli.grossPM)*12):0.45;
+      var cgtEst=Math.round(cgtR.gainAfterExcl*CGT_INCLUSION*mr);
+      var cgtBox=div(); cgtBox.style.cssText='margin-top:8px;padding:8px 12px;border-radius:6px;background:#fef9ee;border:1px solid var(--gold2);font-size:11px';
+      cgtBox.innerHTML='<strong>CGT estimate on death:</strong> Gain: '+Rfmt(cgtR.gain)+
+        (p.primaryResidence&&N(p.baseCost)>0?' (less R2m primary residence exclusion = '+Rfmt(cgtR.gainAfterExcl)+')':'')+
+        ' · Included gain (40%): '+Rfmt(Math.round(cgtR.gainAfterExcl*CGT_INCLUSION))+
+        ' · Est. CGT @ '+Math.round(mr*100)+'% marginal: <strong>'+Rfmt(cgtEst)+'</strong>'+
+        ' <span style="color:var(--sub)">(before R300k annual exclusion shared across all assets)</span>';
+      card.appendChild(cgtBox);
+    } else if((p.deathBenType||'Estate')==='Spouse'){
+      var rollBox=div(); rollBox.style.cssText='margin-top:8px;padding:6px 10px;border-radius:6px;background:#f0fdf4;border:1px solid #86efac;font-size:11px;color:#166534';
+      rollBox.textContent='✓ Spouse rollover — no CGT on death. CGT deferred until spouse disposes.';
+      card.appendChild(rollBox);
+    }
+
     s.appendChild(card);
   });
-  s.appendChild(addBtn('+ Add Property', function(){S.props.push({desc:'',val:'',bond:'',bondPM:'',rental:'',rentalEsc:'6',baseCost:'',soldAtDeath:false,soldAtRetirement:false});render();}));
+  s.appendChild(addBtn('+ Add Property', function(){
+    S.props.push({desc:'',val:'',bond:'',bondPM:'',rental:'',rentalEsc:'6',baseCost:'',dateBought:'',primaryResidence:false,deathBenType:'Estate',soldAtDeath:false,soldAtRetirement:false});
+    render();
+  }));
 
   // ── Vehicles
   s.appendChild(stitle('Vehicles'));
   S.vehicles.forEach(function(v,i){
     var card=div(); card.style.cssText='background:#fff;border:var(--border);border-radius:8px;padding:12px;margin-bottom:8px';
+
+    // Row 1: Description, Market Value, Finance, delete
     var row=div(); row.style.cssText='display:grid;grid-template-columns:2fr 1fr 1fr 36px;gap:12px;align-items:end';
     var df=div('f'); df.appendChild(el('label','','Description'));
     var di=document.createElement('input'); di.type='text'; di.value=v.desc||''; di.placeholder='e.g. Toyota Fortuner';
     di.addEventListener('input',function(e){S.vehicles[i].desc=e.target.value;}); df.appendChild(di); row.appendChild(df);
-    row.appendChild(rfld('Market Value',      v,'val'));
-    row.appendChild(rfld('Finance Outstanding',v,'finance'));
+    row.appendChild(rfld('Market Value', v, 'val', {onblur:function(){render();}}));
+    row.appendChild(rfld('Finance Outstanding', v, 'finance'));
     var dd=div(); dd.appendChild(delBtn(function(){S.vehicles.splice(i,1);render();})); row.appendChild(dd);
     card.appendChild(row);
-    var vr2=div(); vr2.style.cssText='display:flex;gap:16px;align-items:center;margin-top:10px;padding-top:10px;border-top:1px solid var(--mist)';
-    var vcb=document.createElement('input'); vcb.type='checkbox'; vcb.checked=!!v.soldAtDeath;
-    vcb.addEventListener('change',function(e){S.vehicles[i].soldAtDeath=e.target.checked;render();});
-    var vlb=el('label','','Sold / realised at death'); vlb.style.cssText='font-size:12px;cursor:pointer;color:var(--navy)';
-    vr2.appendChild(vcb); vr2.appendChild(vlb);
+
+    // Row 2: Base cost, Date bought, deathBenType, sold at death
+    var vr2=div(); vr2.style.cssText='display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;margin-top:10px;padding-top:10px;border-top:1px solid var(--mist)';
+
+    var bcFld=div('f'); bcFld.style.minWidth='130px';
+    bcFld.appendChild(el('label','','Base Cost (CGT)'));
+    var bcRw=div('rw'); bcRw.appendChild(el('span','rp','R'));
+    var bcInp=document.createElement('input'); bcInp.type='text'; bcInp.inputMode='numeric';
+    bcInp.value=v.baseCost||''; bcInp.placeholder='0';
+    bcInp.style.cssText='border:1.5px solid var(--mist);border-radius:6px;padding:7px 10px 7px 22px;font-size:13px;font-family:inherit;width:100%';
+    bcInp.addEventListener('blur',function(e){S.vehicles[i].baseCost=e.target.value;render();});
+    bcInp.addEventListener('input',function(e){S.vehicles[i].baseCost=e.target.value;});
+    bcRw.appendChild(bcInp); bcFld.appendChild(bcRw); vr2.appendChild(bcFld);
+
+    var dbFld=div('f'); dbFld.style.minWidth='120px';
+    dbFld.appendChild(el('label','','Date Acquired'));
+    var dbInp=document.createElement('input'); dbInp.type='text'; dbInp.value=v.dateBought||''; dbInp.placeholder='DD/MM/YYYY or year';
+    dbInp.style.cssText='border:1.5px solid var(--mist);border-radius:6px;padding:7px 10px;font-size:13px;font-family:inherit;width:100%';
+    dbInp.addEventListener('input',function(e){S.vehicles[i].dateBought=e.target.value;});
+    dbFld.appendChild(dbInp); vr2.appendChild(dbFld);
+
     // Death beneficiary type
-    var vdbtFld=div('f'); vdbtFld.style.cssText='display:flex;flex-direction:column;gap:4px;min-width:160px;margin-left:16px';
+    var vdbtFld=div('f'); vdbtFld.style.minWidth='150px';
     vdbtFld.appendChild(el('label','','On death, falls to'));
     var vdbtSel=document.createElement('select');
-    vdbtSel.style.cssText='border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-size:12px;font-family:inherit';
+    vdbtSel.style.cssText='border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-size:12px;font-family:inherit;width:100%';
     ['Estate','Spouse','Third Party'].forEach(function(o){
       var opt=document.createElement('option'); opt.value=o; opt.textContent=o;
       if((v.deathBenType||'Estate')===o) opt.selected=true;
       vdbtSel.appendChild(opt);
     });
-    vdbtSel.addEventListener('change',function(e){ S.vehicles[i].deathBenType=e.target.value; render(); });
+    vdbtSel.addEventListener('change',function(e){S.vehicles[i].deathBenType=e.target.value;render();});
     vdbtFld.appendChild(vdbtSel); vr2.appendChild(vdbtFld);
+
+    var vcbWrap=div(); vcbWrap.style.cssText='display:flex;align-items:center;gap:6px;padding-bottom:2px';
+    var vcb=document.createElement('input'); vcb.type='checkbox'; vcb.checked=!!v.soldAtDeath;
+    vcb.addEventListener('change',function(e){S.vehicles[i].soldAtDeath=e.target.checked;render();});
+    var vlb=el('label','','Sold / realised at death'); vlb.style.cssText='font-size:12px;cursor:pointer;color:var(--navy)';
+    vcbWrap.appendChild(vcb); vcbWrap.appendChild(vlb); vr2.appendChild(vcbWrap);
     card.appendChild(vr2);
+
+    // CGT preview
+    if(N(v.baseCost)>0 && N(v.val)>0 && (v.deathBenType||'Estate')!=='Spouse'){
+      var vcgtR=calcCGTAsset(v.val, v.baseCost, false);
+      if(vcgtR.gainAfterExcl>0){
+        var vmr=N(S.cli.grossPM)>0?calcMarginalRate(N(S.cli.grossPM)*12):0.45;
+        var vcgtEst=Math.round(vcgtR.gainAfterExcl*CGT_INCLUSION*vmr);
+        var vcgtBox=div(); vcgtBox.style.cssText='margin-top:8px;padding:8px 12px;border-radius:6px;background:#fef9ee;border:1px solid var(--gold2);font-size:11px';
+        vcgtBox.innerHTML='<strong>CGT estimate on death:</strong> Gain: '+Rfmt(vcgtR.gainAfterExcl)+
+          ' · Included (40%): '+Rfmt(Math.round(vcgtR.gainAfterExcl*CGT_INCLUSION))+
+          ' · Est. CGT @ '+Math.round(vmr*100)+'%: <strong>'+Rfmt(vcgtEst)+'</strong>';
+        card.appendChild(vcgtBox);
+      }
+    } else if((v.deathBenType||'Estate')==='Spouse'){
+      var vrollBox=div(); vrollBox.style.cssText='margin-top:8px;padding:6px 10px;border-radius:6px;background:#f0fdf4;border:1px solid #86efac;font-size:11px;color:#166534';
+      vrollBox.textContent='✓ Spouse rollover — no CGT on death.';
+      card.appendChild(vrollBox);
+    }
+
     s.appendChild(card);
   });
-  s.appendChild(addBtn('+ Add Vehicle', function(){S.vehicles.push({desc:'',val:'',finance:'',soldAtDeath:false});render();}));
+  s.appendChild(addBtn('+ Add Vehicle', function(){
+    S.vehicles.push({desc:'',val:'',finance:'',baseCost:'',dateBought:'',deathBenType:'Estate',soldAtDeath:false});
+    render();
+  }));
 
   // ── Other Assets
   s.appendChild(stitle('Other Assets'));
   S.otherAssets.forEach(function(a,i){
     var card=div(); card.style.cssText='background:#fff;border:var(--border);border-radius:8px;padding:12px;margin-bottom:8px';
+
+    // Row 1: Description, Value, Type, delete
     var row=div(); row.style.cssText='display:grid;grid-template-columns:2fr 1fr 1fr 36px;gap:12px;align-items:end';
     var df=div('f'); df.appendChild(el('label','','Description'));
     var di=document.createElement('input'); di.type='text'; di.value=a.desc||''; di.placeholder='e.g. Listed shares, farm, business';
     di.addEventListener('input',function(e){S.otherAssets[i].desc=e.target.value;}); df.appendChild(di); row.appendChild(df);
-    row.appendChild(rfld('Current Value', a, 'val'));
+    row.appendChild(rfld('Current Value', a, 'val', {onblur:function(){render();}}));
     row.appendChild(sfld('Type', a, 'type', ['Investment','Business Interest','Farm / Agricultural','Inheritance','Personal','Other']));
     var dd=div(); dd.appendChild(delBtn(function(){S.otherAssets.splice(i,1);render();})); row.appendChild(dd);
     card.appendChild(row);
 
-    // Row 2: retirement role + dependent fields + death flag
+    // Row 2: Base cost, Date bought, deathBenType
+    var ar1=div(); ar1.style.cssText='display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;margin-top:10px;padding-top:10px;border-top:1px solid var(--mist)';
+
+    var abcFld=div('f'); abcFld.style.minWidth='130px';
+    abcFld.appendChild(el('label','','Base Cost (CGT)'));
+    var abcRw=div('rw'); abcRw.appendChild(el('span','rp','R'));
+    var abcInp=document.createElement('input'); abcInp.type='text'; abcInp.inputMode='numeric';
+    abcInp.value=a.baseCost||''; abcInp.placeholder='0';
+    abcInp.style.cssText='border:1.5px solid var(--mist);border-radius:6px;padding:7px 10px 7px 22px;font-size:13px;font-family:inherit;width:100%';
+    abcInp.addEventListener('blur',function(e){S.otherAssets[i].baseCost=e.target.value;render();});
+    abcInp.addEventListener('input',function(e){S.otherAssets[i].baseCost=e.target.value;});
+    abcRw.appendChild(abcInp); abcFld.appendChild(abcRw); ar1.appendChild(abcFld);
+
+    var adbFld=div('f'); adbFld.style.minWidth='120px';
+    adbFld.appendChild(el('label','','Date Acquired'));
+    var adbInp=document.createElement('input'); adbInp.type='text'; adbInp.value=a.dateBought||''; adbInp.placeholder='DD/MM/YYYY or year';
+    adbInp.style.cssText='border:1.5px solid var(--mist);border-radius:6px;padding:7px 10px;font-size:13px;font-family:inherit;width:100%';
+    adbInp.addEventListener('input',function(e){S.otherAssets[i].dateBought=e.target.value;});
+    adbFld.appendChild(adbInp); ar1.appendChild(adbFld);
+
+    // Death beneficiary type
+    var adbtFld=div('f'); adbtFld.style.minWidth='150px';
+    adbtFld.appendChild(el('label','','On death, falls to'));
+    var adbtSel=document.createElement('select');
+    adbtSel.style.cssText='border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-size:12px;font-family:inherit;width:100%';
+    ['Estate','Spouse','Third Party'].forEach(function(o){
+      var opt=document.createElement('option'); opt.value=o; opt.textContent=o;
+      if((a.deathBenType||'Estate')===o) opt.selected=true;
+      adbtSel.appendChild(opt);
+    });
+    adbtSel.addEventListener('change',function(e){S.otherAssets[i].deathBenType=e.target.value;render();});
+    adbtFld.appendChild(adbtSel); ar1.appendChild(adbtFld);
+    card.appendChild(ar1);
+
+    // Row 3: Retirement role + dependent fields + growth rate + sold at death
     var ar2=div(); ar2.style.cssText='display:flex;flex-wrap:wrap;gap:14px;align-items:flex-start;margin-top:10px;padding-top:10px;border-top:1px solid var(--mist)';
 
-    // Retirement role dropdown
-    var roleFld = div('f'); roleFld.style.minWidth='210px';
+    var roleFld=div('f'); roleFld.style.minWidth='210px';
     roleFld.appendChild(el('label','','Role at retirement'));
-    var roleSel = document.createElement('select');
+    var roleSel=document.createElement('select');
     roleSel.style.cssText='border:1.5px solid var(--mist);border-radius:7px;padding:7px 10px;font-size:13px;font-family:inherit;width:100%';
     ['Not included','Sold at retirement — proceeds to retirement','Generates income (farm/business)'].forEach(function(opt){
-      var o = document.createElement('option'); o.value = opt; o.textContent = opt;
-      if ((a.retirementRole||'Not included') === opt) o.selected = true;
+      var o=document.createElement('option'); o.value=opt; o.textContent=opt;
+      if((a.retirementRole||'Not included')===opt) o.selected=true;
       roleSel.appendChild(o);
     });
     roleSel.addEventListener('change',function(e){S.otherAssets[i].retirementRole=e.target.value;render();});
     roleFld.appendChild(roleSel); ar2.appendChild(roleFld);
 
-    var role = a.retirementRole||'Not included';
+    var role=a.retirementRole||'Not included';
 
-    // SOLD — show expected sale proceeds
-    if(role === 'Sold at retirement — proceeds to retirement'){
-      var spFld=div('f'); spFld.style.minWidth='160px';
+    if(role==='Sold at retirement — proceeds to retirement'){
+      var spFld=div('f'); spFld.style.minWidth='150px';
       spFld.appendChild(el('label','','Expected sale proceeds'));
       var spRw=div('rw'); spRw.appendChild(el('span','rp','R'));
       var spInp=document.createElement('input'); spInp.type='text'; spInp.inputMode='numeric';
@@ -1316,8 +1486,7 @@ function buildAssets() {
       spInp.style.cssText='border:1.5px solid var(--mist);border-radius:7px;padding:7px 10px 7px 22px;font-size:13px;font-family:inherit;width:100%';
       spInp.addEventListener('input',function(e){S.otherAssets[i].retirementSaleProceeds=e.target.value;});
       spRw.appendChild(spInp); spFld.appendChild(spRw); ar2.appendChild(spFld);
-      // Show inflated proceeds if we have years
-      if(yrsToRet && N(a.retirementSaleProceeds)>0){
+      if(yrsToRet&&N(a.retirementSaleProceeds)>0){
         var gr=N(a.growthRate)>0?N(a.growthRate):N(S.assump.growth)||9;
         var projProceeds=Math.round(N(a.retirementSaleProceeds)*Math.pow(1+gr/100,yrsToRet));
         var spInfo=div('info'); spInfo.style.cssText='font-size:11px;padding:5px 9px;margin-top:0;align-self:flex-end';
@@ -1326,8 +1495,7 @@ function buildAssets() {
       }
     }
 
-    // GENERATES INCOME — income today + escalation to retirement + escalation in retirement
-    if(role === 'Generates income (farm/business)'){
+    if(role==='Generates income (farm/business)'){
       var incFld=div('f'); incFld.style.minWidth='140px';
       incFld.appendChild(el('label','','Income today (R/pm)'));
       var incRw=div('rw'); incRw.appendChild(el('span','rp','R'));
@@ -1337,8 +1505,8 @@ function buildAssets() {
       incInp.addEventListener('input',function(e){S.otherAssets[i].retirementIncomePM=e.target.value;});
       incRw.appendChild(incInp); incFld.appendChild(incRw); ar2.appendChild(incFld);
 
-      var escToFld=div('f'); escToFld.style.minWidth='130px';
-      escToFld.appendChild(el('label','','Escalation to retirement %'));
+      var escToFld=div('f'); escToFld.style.minWidth='120px';
+      escToFld.appendChild(el('label','','Esc to retirement %'));
       var escToPw=div('pw'); escToPw.appendChild(el('span','pp','%'));
       var escToInp=document.createElement('input'); escToInp.type='text'; escToInp.inputMode='numeric';
       escToInp.value=a.retirementIncEsc||''; escToInp.placeholder=S.assump.cpi||'6';
@@ -1346,8 +1514,8 @@ function buildAssets() {
       escToInp.addEventListener('input',function(e){S.otherAssets[i].retirementIncEsc=e.target.value;});
       escToPw.insertBefore(escToInp,escToPw.firstChild); escToFld.appendChild(escToPw); ar2.appendChild(escToFld);
 
-      var escInFld=div('f'); escInFld.style.minWidth='130px';
-      escInFld.appendChild(el('label','','Escalation in retirement %'));
+      var escInFld=div('f'); escInFld.style.minWidth='120px';
+      escInFld.appendChild(el('label','','Esc in retirement %'));
       var escInPw=div('pw'); escInPw.appendChild(el('span','pp','%'));
       var escInInp=document.createElement('input'); escInInp.type='text'; escInInp.inputMode='numeric';
       escInInp.value=a.retirementInRetEsc||''; escInInp.placeholder=S.assump.cpi||'6';
@@ -1355,8 +1523,7 @@ function buildAssets() {
       escInInp.addEventListener('input',function(e){S.otherAssets[i].retirementInRetEsc=e.target.value;});
       escInPw.insertBefore(escInInp,escInPw.firstChild); escInFld.appendChild(escInPw); ar2.appendChild(escInFld);
 
-      // Show inflated income at retirement
-      if(yrsToRet && N(a.retirementIncomePM)>0){
+      if(yrsToRet&&N(a.retirementIncomePM)>0){
         var escTo=N(a.retirementIncEsc)>0?N(a.retirementIncEsc):N(S.assump.cpi)||6;
         var incAtRet=Math.round(N(a.retirementIncomePM)*Math.pow(1+escTo/100,yrsToRet));
         var incInfo=div('info'); incInfo.style.cssText='font-size:11px;padding:5px 9px;margin-top:0;align-self:flex-end';
@@ -1365,40 +1532,77 @@ function buildAssets() {
       }
     }
 
-    // Growth rate (always shown — used for projection / sold proceeds)
-    var grFld = div('f'); grFld.style.minWidth='130px';
+    var grFld=div('f'); grFld.style.minWidth='120px';
     grFld.appendChild(el('label','','Growth rate % p.a.'));
     var grPw=div('pw'); grPw.appendChild(el('span','pp','%'));
-    var grInp = document.createElement('input'); grInp.type='text'; grInp.inputMode='numeric';
-    grInp.value = a.growthRate||''; grInp.placeholder = S.assump.growth||'9';
+    var grInp=document.createElement('input'); grInp.type='text'; grInp.inputMode='numeric';
+    grInp.value=a.growthRate||''; grInp.placeholder=S.assump.growth||'9';
     grInp.style.cssText='border:1.5px solid var(--mist);border-radius:7px;padding:7px 24px 7px 10px;font-size:13px;font-family:inherit;width:100%';
     grInp.addEventListener('input',function(e){S.otherAssets[i].growthRate=e.target.value;});
     grPw.insertBefore(grInp,grPw.firstChild); grFld.appendChild(grPw); ar2.appendChild(grFld);
 
-    // Realised at death tick
-    var deathWrap=div(); deathWrap.style.cssText='display:flex;align-items:center;gap:6px;margin-top:4px';
+    var deathWrap=div(); deathWrap.style.cssText='display:flex;align-items:center;gap:6px;padding-bottom:2px';
     var acb1=document.createElement('input'); acb1.type='checkbox'; acb1.checked=!!a.soldAtDeath;
     acb1.addEventListener('change',function(e){S.otherAssets[i].soldAtDeath=e.target.checked;render();});
     var alb1=el('label','','Realised at death'); alb1.style.cssText='font-size:12px;cursor:pointer;color:var(--navy)';
-    deathWrap.appendChild(acb1); deathWrap.appendChild(alb1);
-    ar2.appendChild(deathWrap);
-    // Death beneficiary type
-    var adbtFld=div('f'); adbtFld.style.cssText='display:flex;flex-direction:column;gap:4px;min-width:160px';
-    adbtFld.appendChild(el('label','','On death, falls to'));
-    var adbtSel=document.createElement('select');
-    adbtSel.style.cssText='border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-size:12px;font-family:inherit';
-    ['Estate','Spouse','Third Party'].forEach(function(o){
-      var opt=document.createElement('option'); opt.value=o; opt.textContent=o;
-      if((a.deathBenType||'Estate')===o) opt.selected=true;
-      adbtSel.appendChild(opt);
-    });
-    adbtSel.addEventListener('change',function(e){ S.otherAssets[i].deathBenType=e.target.value; render(); });
-    adbtFld.appendChild(adbtSel); ar2.appendChild(adbtFld);
-
+    deathWrap.appendChild(acb1); deathWrap.appendChild(alb1); ar2.appendChild(deathWrap);
     card.appendChild(ar2);
+
+    // CGT preview
+    if(N(a.baseCost)>0&&N(a.val)>0&&(a.deathBenType||'Estate')!=='Spouse'){
+      var acgtR=calcCGTAsset(a.val,a.baseCost,false);
+      if(acgtR.gainAfterExcl>0){
+        var amr=N(S.cli.grossPM)>0?calcMarginalRate(N(S.cli.grossPM)*12):0.45;
+        var acgtEst=Math.round(acgtR.gainAfterExcl*CGT_INCLUSION*amr);
+        var acgtBox=div(); acgtBox.style.cssText='margin-top:8px;padding:8px 12px;border-radius:6px;background:#fef9ee;border:1px solid var(--gold2);font-size:11px';
+        acgtBox.innerHTML='<strong>CGT estimate on death:</strong> Gain: '+Rfmt(acgtR.gainAfterExcl)+
+          ' · Included (40%): '+Rfmt(Math.round(acgtR.gainAfterExcl*CGT_INCLUSION))+
+          ' · Est. CGT @ '+Math.round(amr*100)+'%: <strong>'+Rfmt(acgtEst)+'</strong>';
+        card.appendChild(acgtBox);
+      }
+    } else if((a.deathBenType||'Estate')==='Spouse'){
+      var arb=div(); arb.style.cssText='margin-top:8px;padding:6px 10px;border-radius:6px;background:#f0fdf4;border:1px solid #86efac;font-size:11px;color:#166534';
+      arb.textContent='✓ Spouse rollover — no CGT on death.'; card.appendChild(arb);
+    }
+
     s.appendChild(card);
   });
-  s.appendChild(addBtn('+ Add Asset', function(){S.otherAssets.push({desc:'',val:'',type:'Investment',retirementRole:'Not included',growthRate:''});render();}));
+  s.appendChild(addBtn('+ Add Asset', function(){
+    S.otherAssets.push({desc:'',val:'',type:'Investment',baseCost:'',dateBought:'',deathBenType:'Estate',retirementRole:'Not included',growthRate:'',soldAtDeath:false});
+    render();
+  }));
+
+  // ── CGT Summary on death
+  var margRate = N(S.cli.grossPM)>0 ? calcMarginalRate(N(S.cli.grossPM)*12) : 0.45;
+  var cgtSummary = calcTotalCGT(margRate*100);
+  if(cgtSummary.items.length>0){
+    s.appendChild(stitle('Capital Gains Tax — Estimated Liability on Death'));
+    var cgtInf=div('info');
+    cgtInf.innerHTML='On death, SARS deems a disposal of all assets at market value (Eighth Schedule). '+
+      'Assets going to <strong>spouse are excluded</strong> (rollover applies). '+
+      'Year-of-death annual exclusion: <strong>R300,000</strong>. Primary residence exclusion: <strong>R2,000,000</strong> of gain. '+
+      'Inclusion rate: <strong>40%</strong> of net gain included in taxable income, taxed at marginal rate.';
+    s.appendChild(cgtInf);
+    var cgtBox=div(); cgtBox.style.cssText='background:var(--navy);color:#fff;border-radius:9px;padding:16px 18px;margin-bottom:14px';
+    function cgtRow(lbl,val,bold,colour){
+      var r=div(); r.style.cssText='display:flex;justify-content:space-between;padding:'+(bold?'7':'4')+'px 0'+(bold?';border-top:1px solid #334;margin-top:4px':'');
+      var l=el('span','',lbl); l.style.cssText='color:#ccd6f6;font-size:'+(bold?'13':'12')+'px';
+      var v=el('span','',val); v.style.cssText='font-size:'+(bold?'14':'12')+'px;font-weight:'+(bold?'700':'400')+';color:'+(colour||'#c8a84b');
+      r.appendChild(l); r.appendChild(v); cgtBox.appendChild(r);
+    }
+    cgtSummary.items.forEach(function(item){
+      cgtRow(item.desc,Rfmt(item.gainAfterPR));
+    });
+    cgtRow('Total gain (after primary residence exclusion)',Rfmt(cgtSummary.totalGainAfterPR),false);
+    cgtRow('Less: annual exclusion (year of death)','('+Rfmt(CGT_ANNUAL_EXCL)+')',false);
+    cgtRow('Net capital gain',Rfmt(cgtSummary.netGain),true);
+    cgtRow('Included gain (× 40%)',Rfmt(cgtSummary.includedGain),false);
+    cgtRow('Estimated CGT @ '+Math.round(margRate*100)+'% marginal rate',Rfmt(cgtSummary.totalCGT),true,'#f87171');
+    var cgtNote=div(); cgtNote.style.cssText='font-size:10px;color:#667;margin-top:8px;padding-top:6px;border-top:1px solid #334';
+    cgtNote.textContent='This is an estimate. Actual CGT depends on exact base costs, valuation date values (pre-Oct 2001 assets), deductible expenditure and final tax position.';
+    cgtBox.appendChild(cgtNote);
+    s.appendChild(cgtBox);
+  }
 
   // ── Other Liabilities
   s.appendChild(stitle('Other Liabilities'));
@@ -1507,10 +1711,97 @@ function buildNeeds() {
   // ── LIFE COVER TAB
   if (activeNeed === 'death' && S.scope.death) {
     s.appendChild(stitle('Liabilities — payable on death'));
-    var inf1=div('info'); inf1.textContent='Bonds, loans, credit cards — amounts the estate must settle.'; s.appendChild(inf1);
+    var inf1=div('info');
+    inf1.innerHTML='Bonds and vehicle finance pull automatically from the Assets tab. '+
+      'CGT pulls from the Assets tab. Estate costs pull from Estate Planning (if in scope). '+
+      'Add personal loans, income tax and funeral costs manually below.';
+    s.appendChild(inf1);
+
+    // ── Auto rows — read only, sourced from Assets tab
+    var autoLiabs = [];
+
+    // Bonds from properties
+    (S.props||[]).forEach(function(p){
+      if(N(p.bond)>0) autoLiabs.push({desc:(p.desc||'Property')+' — bond outstanding', amt:N(p.bond), _auto:true});
+    });
+
+    // Finance from vehicles
+    (S.vehicles||[]).forEach(function(v){
+      if(N(v.finance)>0) autoLiabs.push({desc:(v.desc||'Vehicle')+' — finance outstanding', amt:N(v.finance), _auto:true});
+    });
+
+    // CGT on death
+    var _mr = N(S.cli.grossPM)>0 ? calcMarginalRate(N(S.cli.grossPM)*12) : 0.45;
+    var _cgt = calcTotalCGT(_mr*100);
+    if(_cgt.totalCGT>0){
+      autoLiabs.push({desc:'Capital Gains Tax on death (estimated)', amt:_cgt.totalCGT, _auto:true, _cgt:true});
+    }
+
+    // Estate costs — if estate in scope, pull duty (estate share), exec fees, accrual
+    if(S.scope.estate){
+      // Recalculate using same logic as buildEstate/buildSummary
+      var _pv=(S.props||[]).reduce(function(a,p){return a+N(p.val);},0)
+        +(S.vehicles||[]).reduce(function(a,v){return a+N(v.val);},0)
+        +(S.otherAssets||[]).reduce(function(a,x){return a+N(x.val);},0);
+      var _pl=(S.props||[]).reduce(function(a,p){return a+N(p.bond);},0)
+        +(S.vehicles||[]).reduce(function(a,v){return a+N(v.finance);},0)
+        +(S.liabilities||[]).reduce(function(a,l){return a+N(l.bal);},0);
+      var _s4q=0,_ep=0,_tp=0,_bd=0;
+      (S.importedPols||[]).forEach(function(p){
+        if(p.Type==='Business Assurance'){if(p.EstateDutiable==='Yes')_bd+=N(p.LoanAmount)||N(p.BenDeath);return;}
+        var b=N(p.BenDeath);if(!b)return;
+        var bt=p.BeneficiaryType||'';
+        if(bt==='Spouse')_s4q+=b;else if(bt==='Estate')_ep+=b;else if(bt==='Third Party')_tp+=b;
+      });
+      var _acc=0;
+      if((S.cli.marital||'').indexOf('accrual')>-1){
+        var _ra=(S.importedPols||[]).reduce(function(a,p){return POL_RA_TYPES.indexOf(p.Type)>-1?a+(N(p.BenFundValue)||N(p.BenDeath)):a;},0);
+        var _ce=_pv+_ra, _se=N(S.accrual&&S.accrual.spouseCurrentAssets);
+        var _cs=N(S.accrual&&S.accrual.clientStartVal), _ss=N(S.accrual&&S.accrual.spouseStartVal);
+        _acc=Math.max(0,(Math.max(0,_ce-_cs)-Math.max(0,_se-_ss))/2);
+      }
+      var _gr=_pv+_s4q+_ep+_tp+_bd;
+      var _ne=Math.max(0,_gr-_pl);
+      var _ad=Math.min(_acc,_ne);
+      var _aa=Math.max(0,_ne-_ad);
+      var _s4d=Math.min(_s4q,_aa);
+      var _as4=Math.max(0,_aa-_s4d);
+      var _dut=Math.max(0,_as4-ABATEMENT);
+      var _duty=_dut<=DUTY_THRESH?_dut*DUTY_RATE1:DUTY_THRESH*DUTY_RATE1+(_dut-DUTY_THRESH)*DUTY_RATE2;
+      var _exec=(_pv+_ep)*EXEC_RATE;
+      // Apportion duty — only estate's share is a cash need
+      function _ap(v){return (_dut>0&&_duty>0)?Math.round(_duty*(v/_dut)):0;}
+      var _de=_ap(_pv+_ep);
+      if(_de>0) autoLiabs.push({desc:'Estate duty — estate\'s share', amt:_de, _auto:true});
+      if(_exec>0) autoLiabs.push({desc:'Executor fees (4.025%)', amt:Math.round(_exec), _auto:true});
+      if(_ad>0) autoLiabs.push({desc:'Accrual payable to spouse', amt:Math.round(_ad), _auto:true});
+    }
+
+    // Render auto rows (read-only)
+    if(autoLiabs.length>0){
+      var autoTbl=document.createElement('table'); autoTbl.style.cssText='width:100%;border-collapse:collapse;margin-bottom:10px;font-size:12px';
+      autoTbl.innerHTML='<thead><tr><th style="text-align:left;padding:5px 8px;background:var(--navy);color:#fff">Item (auto-calculated)</th><th style="text-align:right;padding:5px 8px;background:var(--navy);color:#fff">Amount</th></tr></thead>';
+      var atb=document.createElement('tbody');
+      var autoTotal=0;
+      autoLiabs.forEach(function(r){
+        autoTotal+=r.amt;
+        var tr=document.createElement('tr');
+        tr.innerHTML='<td style="padding:5px 8px;border-bottom:1px solid var(--mist);color:var(--sub);font-style:italic">'+
+          (r._cgt?'⚠ ':'')+(r.desc||'')+'</td>'+
+          '<td style="text-align:right;padding:5px 8px;border-bottom:1px solid var(--mist);color:var(--sub)">'+Rfmt(r.amt)+'</td>';
+        atb.appendChild(tr);
+      });
+      autoTbl.appendChild(atb);
+      var atw=div('twrap'); atw.appendChild(autoTbl); s.appendChild(atw);
+    }
+
+    // ── Manual rows — personal loans, tax, funeral
+    var manInf=div('info'); manInf.style.cssText='font-size:11px;background:#f0f4ff;border-color:#c7d2fe;color:#3730a3;margin-bottom:6px';
+    manInf.textContent='Add personal loans, outstanding income tax and funeral costs below.';
+    s.appendChild(manInf);
     S.deathLiabs.forEach(function(r,i){
       var row=g3();
-      row.appendChild(fld('Description',r,'desc',{placeholder:'e.g. Home loan'}));
+      row.appendChild(fld('Description',r,'desc',{placeholder:'e.g. Personal loan, income tax'}));
       row.appendChild(rfld('Amount',r,'amt',{onblur:function(){render();}}));
       row.appendChild(div());
       var del=delBtn(function(){S.deathLiabs.splice(i,1);render();}); var dw=div('f'); dw.appendChild(del); row.appendChild(dw);
@@ -1535,8 +1826,9 @@ function buildNeeds() {
     });
     var ab3=addBtn('+ Add capital need',function(){S.deathCapital.push({desc:'',amt:''});render();}); s.appendChild(ab3);
 
-    // Summary
-    var totLiab=S.deathLiabs.reduce(function(a,r){return a+N(r.amt);},0);
+    // Summary — auto + manual liabilities combined
+    var autoTotal2=(autoLiabs||[]).reduce(function(a,r){return a+r.amt;},0);
+    var totLiab=autoTotal2+S.deathLiabs.reduce(function(a,r){return a+N(r.amt);},0);
     var totInc=S.deathIncome.reduce(function(a,r){return a+calcIncomeNeed(r);},0);
     var totCap=S.deathCapital.reduce(function(a,r){return a+N(r.amt);},0);
     var totalNeed=totLiab+totInc+totCap;
@@ -1771,41 +2063,18 @@ function buildRetirement() {
   if(yrsToRet && yrsToRet > 0){
     var totalMonthlyNeed = (S.retNeeds||[]).reduce(function(a,r){return a+N(r.amtToday);},0);
     var rentalAtRet = N(S.retRentalPM)>0?Math.round(N(S.retRentalPM)*Math.pow(1+N(S.assump.cpi)/100,yrsToRet)):0;
-
-    // Income-generating assets — inflate using per-asset escalation to retirement
-    var otherIncAtRet = 0;
-    (S.otherAssets||[]).forEach(function(a){
-      if((a.retirementRole||'')!=='Generates income (farm/business)') return;
-      if(!N(a.retirementIncomePM)) return;
-      var escTo = N(a.retirementIncEsc)>0 ? N(a.retirementIncEsc) : N(S.assump.cpi)||6;
-      otherIncAtRet += Math.round(N(a.retirementIncomePM)*Math.pow(1+escTo/100,yrsToRet));
-    });
-
     var monthlyAtRet = totalMonthlyNeed>0?Math.round(totalMonthlyNeed*Math.pow(1+N(S.assump.cpi)/100,yrsToRet)):0;
-    var netMonthlyGap = Math.max(0, monthlyAtRet - rentalAtRet - otherIncAtRet);
+    var netMonthlyGap = Math.max(0, monthlyAtRet - rentalAtRet);
     var netToday = netMonthlyGap>0?netMonthlyGap/Math.pow(1+N(S.assump.cpi)/100,yrsToRet):0;
     var capNeed = netToday>0?retirementCapitalNeeded(netToday,yrsToRet,yrsInRet,S.assump.cpi,S.assump.retReturn):0;
     var lumpNeed = (S.retLumps||[]).reduce(function(a,r){return a+N(r.amt);},0);
     var totalCapNeed = capNeed + lumpNeed;
-
-    // Project existing RA/fund assets
     var totalProj = S.retAssets.reduce(function(a,r){
       if(!N(r.currentVal)&&!N(r.monthlyContrib)) return a;
       var gr=N(r.growthRate)>0?N(r.growthRate):N(S.assump.growth)||9;
       var esc3=N(r.contribEsc)>0?N(r.contribEsc):N(S.assump.incEsc)||6;
       return a+projectFund(r.currentVal,r.monthlyContrib,esc3,gr,yrsToRet);
     },0)+N(S.retOtherCapital);
-
-    // Add sold-asset projected proceeds
-    var soldProceedsAtRet = 0;
-    (S.otherAssets||[]).forEach(function(a){
-      if((a.retirementRole||'')!=='Sold at retirement — proceeds to retirement') return;
-      if(!N(a.retirementSaleProceeds)) return;
-      var gr=N(a.growthRate)>0?N(a.growthRate):N(S.assump.growth)||9;
-      soldProceedsAtRet+=Math.round(N(a.retirementSaleProceeds)*Math.pow(1+gr/100,yrsToRet));
-    });
-    totalProj += soldProceedsAtRet;
-
     var retGap = totalProj - totalCapNeed;
 
     s.appendChild(stitle('Retirement Capital Summary'));
@@ -1819,227 +2088,16 @@ function buildRetirement() {
     rRow('Monthly need today', Rfmt(totalMonthlyNeed)+' /pm');
     rRow('Monthly need at retirement (age '+retAge+')', Rfmt(monthlyAtRet)+' /pm');
     if(rentalAtRet>0) rRow('Less: rental at retirement', '('+Rfmt(rentalAtRet)+'/pm)', true);
-    if(otherIncAtRet>0) rRow('Less: farm/business income at retirement', '('+Rfmt(otherIncAtRet)+'/pm)', true);
     rRow('Net monthly gap at retirement', Rfmt(netMonthlyGap)+' /pm', false, true);
     rRow('Capital needed to fund income', '('+Rfmt(capNeed)+')', false, true);
     if(lumpNeed>0) rRow('Lump sum needs', '('+Rfmt(lumpNeed)+')', true);
     rRow('Total capital required', '('+Rfmt(totalCapNeed)+')', false, true);
     rRow('Projected capital at retirement', Rfmt(totalProj), false, true);
-    if(soldProceedsAtRet>0) rRow('Incl. asset sale proceeds (projected)', Rfmt(soldProceedsAtRet), true);
     var gapRow=div(); gapRow.style.cssText='display:flex;justify-content:space-between;padding:8px 0;margin-top:8px;border-top:2px solid #445;font-size:14px;font-weight:700';
     var gl2=el('span','',retGap>=0?'Surplus':'Shortfall'); gl2.style.color='#ccd6f6';
     var gv2=el('span','',Rfmt(Math.abs(retGap))); gv2.style.color=retGap>=0?'#86efac':'#f87171';
     gapRow.appendChild(gl2); gapRow.appendChild(gv2); calcBox.appendChild(gapRow);
-
-    // PMT: additional monthly contribution needed to close the shortfall
-    if (retGap < 0 && yrsToRet > 0) {
-      var shortfall = Math.abs(retGap);
-      var monthlyRate = N(S.assump.growth) / 100 / 12;
-      var nMonths = yrsToRet * 12;
-      var pmtNeeded = 0;
-      if (monthlyRate > 0) {
-        // PMT to accumulate shortfall: PMT = FV * r / ((1+r)^n - 1)
-        pmtNeeded = Math.round(shortfall * monthlyRate / (Math.pow(1 + monthlyRate, nMonths) - 1));
-      } else {
-        pmtNeeded = Math.round(shortfall / nMonths);
-      }
-      var pmtRow = div();
-      pmtRow.style.cssText = 'display:flex;justify-content:space-between;padding:6px 0;margin-top:4px;font-size:12px';
-      var pmtL = el('span','','To close this gap, save an additional'); pmtL.style.color='#8899bb';
-      var pmtV = el('span','',Rfmt(pmtNeeded)+' /pm'); pmtV.style.cssText='font-weight:700;color:#fbbf24';
-      pmtRow.appendChild(pmtL); pmtRow.appendChild(pmtV);
-      calcBox.appendChild(pmtRow);
-      var pmtNote = div();
-      pmtNote.style.cssText = 'font-size:10px;color:#667;padding-bottom:4px';
-      pmtNote.textContent = 'Assumes '+S.assump.growth+'% p.a. growth, no escalation on new contribution, over '+yrsToRet+' years.';
-      calcBox.appendChild(pmtNote);
-    }
-
     s.appendChild(calcBox);
-
-    // ── What-if Scenario Calculator (client discussion tool)
-    s.appendChild(stitle('Scenario Calculator — Client Discussion'));
-    var scInf=div('info');
-    scInf.innerHTML='The <strong>capital target</strong> is fixed — it comes from the income needs above. '
-      +'Adjust growth rate, annual increase on the new premium and monthly saving amount, then press <strong>Calculate</strong> to see the required monthly saving.';
-    s.appendChild(scInf);
-
-    if(!window._sc){
-      window._sc={
-        retAge:    String(retAge),
-        growth:    String(S.assump.growth||9),
-        contribEsc:String(S.assump.incEsc||6),
-        extraPM:   ''
-      };
-    }
-    var sc=window._sc;
-    sc.retAge = sc.retAge || String(retAge);
-
-    // ── Target box — always visible, shows what we are saving towards
-    var scTargetBox=div();
-    scTargetBox.style.cssText='background:#1a2a4a;border-radius:9px;padding:14px 18px;margin-bottom:14px';
-
-    // Pre-calculate target using saved assumptions so it shows immediately
-    (function(){
-      var _yrsToR = cliAge ? Math.max(0, retAge - cliAge) : 0;
-      var _yrsInR = Math.max(1, 85 - retAge);
-      var _mNeed  = (S.retNeeds||[]).reduce(function(a,r){return a+N(r.amtToday);},0);
-      var _rental = N(S.retRentalPM)>0?Math.round(N(S.retRentalPM)*Math.pow(1+N(S.assump.cpi)/100,_yrsToR)):0;
-      var _mAtRet = _mNeed>0?Math.round(_mNeed*Math.pow(1+N(S.assump.cpi)/100,_yrsToR)):0;
-      var _netToday=Math.max(0,_mAtRet-_rental)>0?Math.max(0,_mAtRet-_rental)/Math.pow(1+N(S.assump.cpi)/100,_yrsToR):0;
-      var _capNeed=_netToday>0?retirementCapitalNeeded(_netToday,_yrsToR,_yrsInR,S.assump.cpi,S.assump.retReturn):0;
-      var _lumps=(S.retLumps||[]).reduce(function(a,r){return a+N(r.amt);},0);
-      var _target=_capNeed+_lumps;
-      var _proj=S.retAssets.reduce(function(a,r){
-        if(!N(r.currentVal)&&!N(r.monthlyContrib)) return a;
-        var gr=N(r.growthRate)>0?N(r.growthRate):N(S.assump.growth)||9;
-        var esc=N(r.contribEsc)>0?N(r.contribEsc):N(S.assump.incEsc)||6;
-        return a+projectFund(r.currentVal,r.monthlyContrib,esc,gr,_yrsToR);
-      },0)+N(S.retOtherCapital);
-      var _shortfall=Math.max(0,_target-_proj);
-
-      function tRow(lbl,val,big,col){
-        var r=div(); r.style.cssText='display:flex;justify-content:space-between;padding:'+(big?'6':'3')+'px 0';
-        var l=el('span','',lbl); l.style.cssText='color:#8899bb;font-size:'+(big?'13':'11')+'px';
-        var v=el('span','',val); v.style.cssText='font-weight:'+(big?'700':'400')+';font-size:'+(big?'15':'11')+'px;color:'+(col||'#c8a84b');
-        r.appendChild(l); r.appendChild(v); scTargetBox.appendChild(r);
-      }
-      var hdr=div(); hdr.style.cssText='font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--gold);margin-bottom:8px';
-      hdr.textContent='Retirement Capital Target'; scTargetBox.appendChild(hdr);
-      tRow('Capital needed at retirement',Rfmt(_target),true);
-      tRow('Projected from existing funds',Rfmt(_proj),false);
-      tRow('Shortfall to close',Rfmt(_shortfall),true,_shortfall>0?'#f87171':'#86efac');
-      if(_mNeed>0) tRow('Based on monthly need of '+Rfmt(_mNeed)+'/pm today, inflated '+_yrsToR+' yrs at '+S.assump.cpi+'% CPI','',false,'#667');
-    })();
-    s.appendChild(scTargetBox);
-
-    // ── Input card
-    var scCard=div();
-    scCard.style.cssText='background:#fff;border:1.5px solid var(--gold);border-radius:9px;padding:16px;margin-bottom:14px';
-
-    var hdr2=div(); hdr2.style.cssText='font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--gold);margin-bottom:12px';
-    hdr2.textContent='Adjust Assumptions'; scCard.appendChild(hdr2);
-
-    var scG=div(); scG.style.cssText='display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:16px';
-
-    function scFld(lbl,key,suffix,hint){
-      var w=div('f');
-      var lb=el('label','',lbl); w.appendChild(lb);
-      if(hint){ var hn=el('div','',hint); hn.style.cssText='font-size:9px;color:var(--sub);margin-bottom:2px'; w.appendChild(hn); }
-      var wrap=div(); wrap.style.cssText='position:relative';
-      var inp=document.createElement('input');
-      inp.type='text'; inp.inputMode='numeric'; inp.value=sc[key]||'';
-      inp.style.cssText='width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;font-size:13px;font-family:inherit;padding:7px 26px 7px 10px';
-      var suf=el('span','',suffix);
-      suf.style.cssText='position:absolute;right:8px;top:50%;transform:translateY(-50%);font-size:11px;color:var(--sub);pointer-events:none';
-      wrap.appendChild(inp); wrap.appendChild(suf); w.appendChild(wrap);
-      inp.addEventListener('input',function(e){ sc[key]=e.target.value; });
-      return w;
-    }
-
-    scG.appendChild(scFld('Retirement Age','retAge','yrs',''));
-    scG.appendChild(scFld('Fund Growth Rate','growth','%','% p.a. on all funds'));
-    scG.appendChild(scFld('Annual Premium Inc.','contribEsc','%','% increase on new saving'));
-    scG.appendChild(scFld('Starting Monthly Saving','extraPM','R/pm','what they can afford today'));
-    scCard.appendChild(scG);
-
-    // Calculate button
-    var scBtn=document.createElement('button');
-    scBtn.className='btn btn-gold';
-    scBtn.style.cssText='width:100%;padding:11px;font-size:14px;font-weight:700;letter-spacing:.5px';
-    scBtn.textContent='Calculate';
-    scCard.appendChild(scBtn);
-    s.appendChild(scCard);
-
-    // Result box
-    var scResult=div();
-    scResult.style.cssText='background:#1a2a4a;border-radius:9px;padding:16px 18px;margin-bottom:14px;display:none';
-    s.appendChild(scResult);
-
-    function scRow(lbl,val,bold,colour){
-      var r=div();
-      r.style.cssText='display:flex;justify-content:space-between;align-items:center;padding:'+(bold?'8':'4')+'px 0'+(bold?';border-top:1px solid #334;margin-top:6px':'');
-      var l=el('span','',lbl); l.style.cssText='color:#ccd6f6;font-size:'+(bold?'13':'12')+'px';
-      var v=el('span','',val); v.style.cssText='font-size:'+(bold?'15':'12')+'px;font-weight:'+(bold?'700':'400')+';color:'+(colour||'#c8a84b');
-      r.appendChild(l); r.appendChild(v); scResult.appendChild(r);
-    }
-
-    scBtn.addEventListener('click', function(){
-      scResult.innerHTML='';
-      scResult.style.display='block';
-
-      var scRetAge  = N(sc.retAge)||65;
-      var scGrowth  = N(sc.growth)||9;
-      var scEsc     = N(sc.contribEsc)||0;
-      var scExtra   = N(sc.extraPM)||0;
-      var scYrsToR  = cliAge ? Math.max(0, scRetAge - cliAge) : 0;
-      var scYrsInR  = Math.max(1, 85 - scRetAge);
-
-      if(!cliAge){
-        scRow('Enter client date of birth on the Client tab first','',false,'#f87171');
-        return;
-      }
-      if(scYrsToR<=0){
-        scRow('Client has already reached retirement age '+scRetAge,'',false,'#86efac');
-        return;
-      }
-
-      // Capital target
-      var scMNeed = (S.retNeeds||[]).reduce(function(a,r){return a+N(r.amtToday);},0);
-      var scRental= N(S.retRentalPM)>0?Math.round(N(S.retRentalPM)*Math.pow(1+N(S.assump.cpi)/100,scYrsToR)):0;
-      var scMAtRet= scMNeed>0?Math.round(scMNeed*Math.pow(1+N(S.assump.cpi)/100,scYrsToR)):0;
-      var scNetToday=Math.max(0,scMAtRet-scRental)>0?Math.max(0,scMAtRet-scRental)/Math.pow(1+N(S.assump.cpi)/100,scYrsToR):0;
-      var scCapNeed=scNetToday>0?retirementCapitalNeeded(scNetToday,scYrsToR,scYrsInR,S.assump.cpi,S.assump.retReturn):0;
-      var scLumps=(S.retLumps||[]).reduce(function(a,r){return a+N(r.amt);},0);
-      var scTarget=scCapNeed+scLumps;
-
-      // Projected capital from existing funds at scenario growth rate
-      var scProj=S.retAssets.reduce(function(a,r){
-        if(!N(r.currentVal)&&!N(r.monthlyContrib)) return a;
-        var gr=N(r.growthRate)>0?N(r.growthRate):scGrowth;
-        var esc=N(r.contribEsc)>0?N(r.contribEsc):N(S.assump.incEsc)||6;
-        return a+projectFund(r.currentVal,r.monthlyContrib,esc,gr,scYrsToR);
-      },0)+N(S.retOtherCapital);
-
-      // Shortfall = FV we need the new saving to accumulate
-      var scShortfall=Math.max(0,scTarget-scProj);
-
-      // FV of extra saving if entered
-      var scExtraFV=scExtra>0?projectFund(0,scExtra,scEsc,scGrowth,scYrsToR):0;
-      var scRemaining=Math.max(0,scShortfall-scExtraFV);
-
-      // PMT to close remaining shortfall — FV target = scRemaining
-      // Use projectFund(0, 1, scEsc, scGrowth, scYrsToR) to find the FV of R1/pm
-      // with the given escalation and growth. Divide shortfall by that unit FV.
-      // This is consistent with how projectFund works everywhere else.
-      var scPMT=0;
-      if(scRemaining>0&&scYrsToR>0){
-        var unitFV=projectFund(0,1,scEsc,scGrowth,scYrsToR);
-        scPMT=unitFV>0?Math.round(scRemaining/unitFV):0;
-      }
-
-      // Show results
-      scRow('Capital target (FV to achieve)',Rfmt(scTarget),true);
-      scRow('Existing funds projected @ '+scGrowth+'% growth',Rfmt(scProj));
-      scRow('Shortfall — FV new saving must accumulate',Rfmt(scShortfall),true,scShortfall>0?'#f87171':'#86efac');
-
-      if(scExtra>0){
-        scRow('Starting saving of '+Rfmt(scExtra)+'/pm @ '+scEsc+'% p.a. increase grows to',Rfmt(scExtraFV));
-        scRow('Remaining shortfall',Rfmt(scRemaining),false,scRemaining>0?'#f87171':'#86efac');
-      }
-
-      if(scRemaining>0){
-        scRow(
-          'Monthly saving needed'+(scEsc>0?' (starting amount, escalates '+scEsc+'% p.a.)':' (flat)'),
-          Rfmt(scPMT)+' /pm',
-          true,
-          '#fbbf24'
-        );
-        scRow(scYrsToR+' years to retirement · Growth '+scGrowth+'% · FV = '+Rfmt(scRemaining),'',false,'#556');
-      } else {
-        scRow('✓ Shortfall fully covered'+(scExtra>0?' — saving of '+Rfmt(scExtra)+'/pm is sufficient':''),'',true,'#86efac');
-      }
-    });
   }
 
   return s;
@@ -2218,8 +2276,7 @@ function buildPolCard(p, i) {
   rtickInp.checked = !!p._retInclude;
   rtickInp.addEventListener('change',function(e){ S.importedPols[i]._retInclude=e.target.checked; });
   rtickLbl.appendChild(rtickInp);
-  rtickLbl.appendChild(document.createTextNode('Include in retirement expenses'));
-  rtickLbl.title = 'Tick to include this premium as an ongoing expense in the retirement projection';
+  rtickLbl.appendChild(document.createTextNode('Ret'));
   ch.appendChild(rtickLbl);
   // Delete button
   var db = delBtn(function() { S.importedPols.splice(i, 1); render(); });
@@ -2310,73 +2367,33 @@ function buildPolCard(p, i) {
   }
 
   if (isRA || isInv) {
-    var bst2 = el('div','stitle','Fund Value & Escalations');
+    var bst2 = el('div','stitle','Fund / Death Benefit');
     bst2.style.marginTop = '10px';
     card.appendChild(bst2);
     var rb2 = g3();
     rb2.appendChild(rfld('Current Fund Value', p, 'BenFundValue'));
-    rb2.appendChild(pfld('Premium esc % p.a.', p, 'PremEscalation', {onblur:function(){render();}}));
+    rb2.appendChild(rfld('Death Benefit',      p, 'BenDeath'));
     rb2.appendChild(pfld('Growth rate % (projection)', p, 'GrowthRate', {onblur:function(){render();}}));
     card.appendChild(rb2);
-    // Age-rated / CPI warning
-    var premEscRaw = String(p.PremEscalation || '').trim().toLowerCase();
-    var raEscIsAgeRated = premEscRaw === 'age rated' || premEscRaw === 'age-rated' || premEscRaw === 'age_rated';
-    var raEscIsCPI      = premEscRaw === 'cpi';
-    if (raEscIsAgeRated || raEscIsCPI) {
-      var escWarn = div('alert');
-      escWarn.style.marginTop = '4px';
-      escWarn.innerHTML = '⚠ <strong>' +
-        (raEscIsAgeRated ? 'Age-rated' : 'CPI') +
-        ' escalation cannot be projected</strong> — please enter a fixed % for FNA purposes.';
-      card.appendChild(escWarn);
-    }
+    // Seed GrowthRate into retAssets on blur
     var premNote = div('info');
     premNote.style.cssText = 'font-size:11px;padding:6px 10px;margin-top:-4px';
-    premNote.textContent = 'Premium = monthly contribution. Fund Value = current balance. Growth rate used for retirement projection.';
+    premNote.textContent = 'Premium = monthly contribution. Growth rate used for retirement projection.';
     card.appendChild(premNote);
-  }
-
-  if (isRisk || t === 'Life / Income Protector') {
-    // Escalation fields for risk policies
-    var bstEsc = el('div','stitle','Premium & Benefit Escalation');
-    bstEsc.style.marginTop = '10px';
-    card.appendChild(bstEsc);
-    var rbEsc = g2();
-    rbEsc.appendChild(pfld('Premium esc % p.a.', p, 'PremEscalation', {onblur:function(){render();}}));
-    rbEsc.appendChild(pfld('Benefit esc % p.a.', p, 'BenEscalation', {onblur:function(){render();}}));
-    card.appendChild(rbEsc);
-    // Age-rated / CPI warnings
-    var premEscRaw2 = String(p.PremEscalation || '').trim().toLowerCase();
-    var benEscRaw2  = String(p.BenEscalation  || '').trim().toLowerCase();
-    var ageRatedPrem = premEscRaw2 === 'age rated' || premEscRaw2 === 'age-rated' || premEscRaw2 === 'age_rated';
-    var ageRatedBen  = benEscRaw2  === 'age rated' || benEscRaw2  === 'age-rated' || benEscRaw2  === 'age_rated';
-    var cpiPrem      = premEscRaw2 === 'cpi';
-    var cpiBen       = benEscRaw2  === 'cpi';
-    if (ageRatedPrem || ageRatedBen || cpiPrem || cpiBen) {
-      var warnParts = [];
-      if (ageRatedPrem) warnParts.push('age-rated premium escalation');
-      if (ageRatedBen)  warnParts.push('age-rated benefit escalation');
-      if (cpiPrem)      warnParts.push('CPI premium escalation');
-      if (cpiBen)       warnParts.push('CPI benefit escalation');
-      var escWarn2 = div('alert');
-      escWarn2.style.marginTop = '4px';
-      escWarn2.innerHTML = '⚠ <strong>' + warnParts.map(function(w){ return w.charAt(0).toUpperCase()+w.slice(1); }).join(' / ') +
-        ' cannot be projected</strong> — please enter a fixed % for FNA purposes.';
-      card.appendChild(escWarn2);
-    }
   }
 
   if (isBiz) {
     var bstBiz = el('div','stitle','Business Assurance Details');
     bstBiz.style.marginTop = '10px';
     card.appendChild(bstBiz);
-    var rbBiz = g2();
+    var rbBiz = g3();
     rbBiz.appendChild(sfld('Business Type', p, 'BizType', ['','Buy & Sell','Keyman','Contingent Liability']));
     rbBiz.appendChild(rfld('Cover / Loan Amount', p, 'LoanAmount'));
+    rbBiz.appendChild(rfld('Death Benefit', p, 'BenDeath'));
     card.appendChild(rbBiz);
     var bizNote = div('info');
     bizNote.style.cssText = 'font-size:11px;padding:6px 10px;margin-top:-4px;background:#eff6ff;border-color:#bfdbfe;color:#1e40af';
-    bizNote.innerHTML = '<strong>Buy &amp; Sell</strong> pays to co-shareholder · <strong>Keyman</strong> pays to business · <strong>Contingent Liability</strong> settles business debt. None form part of personal estate. The Loan Amount IS the death benefit for estate purposes.';
+    bizNote.innerHTML = '<strong>Buy &amp; Sell</strong> pays to co-shareholder · <strong>Keyman</strong> pays to business · <strong>Contingent Liability</strong> settles business debt. None form part of personal estate.';
     card.appendChild(bizNote);
   }
   // Parse Beneficiaries array (CRM format) on first render to seed BeneficiaryType/Beneficiary
@@ -2958,149 +2975,8 @@ function buildSummary() {
       var totInc=S.deathIncome.reduce(function(a,r){return a+calcIncomeNeed(r);},0);
       var totCap=S.deathCapital.reduce(function(a,r){return a+N(r.amt);},0);
       var totalDeathNeed=totLiab+totInc+totCap;
-      var totalDeathHave=pols.reduce(function(a,p){
-        if(p.Type==='Business Assurance') return a;
-        return a+N(p.BenDeath);
-      },0);
-
-      // Estate costs — pull from estate tab calculations if estate is in scope
-      var estCostNeed=0;
-      var estDutyAmt=0, estExecAmt=0, estAccrualAmt=0;
-      if(S.scope.estate){
-        // Recalculate estate costs using same logic as buildEstate
-        var _physVal=(S.props||[]).reduce(function(a,p){return a+N(p.val);},0)
-          +(S.vehicles||[]).reduce(function(a,v){return a+N(v.val);},0)
-          +(S.otherAssets||[]).reduce(function(a,x){return a+N(x.val);},0);
-        var _physLiab=(S.props||[]).reduce(function(a,p){return a+N(p.bond);},0)
-          +(S.vehicles||[]).reduce(function(a,v){return a+N(v.finance);},0)
-          +(S.liabilities||[]).reduce(function(a,l){return a+N(l.bal);},0);
-        var _s4q=0,_estP=0,_thirdP=0,_bizD=0;
-        pols.forEach(function(p){
-          if(p.Type==='Business Assurance'){if(p.EstateDutiable==='Yes')_bizD+=N(p.LoanAmount)||N(p.BenDeath);return;}
-          var b=N(p.BenDeath);if(!b)return;
-          var bt=p.BeneficiaryType||'';
-          if(bt==='Spouse')_s4q+=b;
-          else if(bt==='Estate')_estP+=b;
-          else if(bt==='Third Party')_thirdP+=b;
-        });
-        // Accrual
-        var _accrual=0;
-        if((S.cli.marital||'').indexOf('accrual')>-1){
-          var _raVal=pols.reduce(function(a,p){return POL_RA_TYPES.indexOf(p.Type)>-1?a+(N(p.BenFundValue)||N(p.BenDeath)):a;},0);
-          var _cliEst=_physVal+_raVal;
-          var _spEst=N(S.accrual&&S.accrual.spouseCurrentAssets);
-          var _cliStart=N(S.accrual&&S.accrual.clientStartVal);
-          var _spStart=N(S.accrual&&S.accrual.spouseStartVal);
-          _accrual=Math.max(0,(Math.max(0,_cliEst-_cliStart)-Math.max(0,_spEst-_spStart))/2);
-        }
-        var _gross=_physVal+_s4q+_estP+_thirdP+_bizD;
-        var _net=Math.max(0,_gross-_physLiab);
-        var _accrDed=Math.min(_accrual,_net);
-        var _afterAcc=Math.max(0,_net-_accrDed);
-        var _s4qDed=Math.min(_s4q,_afterAcc);
-        var _afterS4q=Math.max(0,_afterAcc-_s4qDed);
-        var _dutiable=Math.max(0,_afterS4q-ABATEMENT);
-        var _duty=_dutiable<=DUTY_THRESH?_dutiable*DUTY_RATE1:DUTY_THRESH*DUTY_RATE1+(_dutiable-DUTY_THRESH)*DUTY_RATE2;
-        var _exec=(_physVal+_estP)*EXEC_RATE;
-
-        // Apportion duty — estate only pays its share, third parties pay theirs
-        function _apportion(val){ return (_dutiable>0&&_duty>0)?Math.round(_duty*(val/_dutiable)):0; }
-        var _dutyEstate =_apportion(_physVal+_estP);
-        var _dutyThird  =_apportion(_thirdP);
-        var _dutyBiz    =_apportion(_bizD);
-
-        estDutyAmt   = Math.round(_duty);        // full duty (for display)
-        estExecAmt   = Math.round(_exec);
-        estAccrualAmt= Math.round(_accrDed);
-        // Life cover need only includes estate's share of duty — third parties fund their own
-        estCostNeed  = _dutyEstate + estExecAmt + estAccrualAmt;
-      }
-
-      // Show full breakdown before the gap box
-      if(totalDeathNeed>0){
-        var lcBreak=div(); lcBreak.style.cssText='background:#fff;border:var(--border);border-radius:8px;padding:12px 14px;margin-bottom:8px;font-size:12px';
-        var lcTtl=el('div','','Life Cover — Needs Analysis'); lcTtl.style.cssText='font-weight:700;font-size:12px;color:var(--navy);margin-bottom:10px';
-        lcBreak.appendChild(lcTtl);
-
-        function lcSection(lbl){
-          var r=div(); r.style.cssText='font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--gold);margin-top:10px;margin-bottom:4px;padding-bottom:4px;border-bottom:1px solid var(--mist)';
-          r.textContent=lbl; lcBreak.appendChild(r);
-        }
-        function lcRow(lbl,val,bold){
-          var r=div(); r.style.cssText='display:flex;justify-content:space-between;padding:'+(bold?'7':'5')+'px 0'+(bold?';border-top:2px solid var(--mist);margin-top:6px':'');
-          var l=el('span','',lbl); l.style.cssText='font-weight:'+(bold?'700':'600')+';color:'+(bold?'var(--navy)':'var(--text)');
-          var v=el('span','',Rfmt(val)); v.style.cssText='font-weight:'+(bold?'700':'600')+';color:'+(bold?'var(--navy)':'var(--text)');
-          r.appendChild(l); r.appendChild(v); lcBreak.appendChild(r);
-        }
-        function lcSub(lbl,val){
-          var r=div(); r.style.cssText='display:flex;justify-content:space-between;padding:2px 0 2px 16px;font-size:11px;color:var(--sub)';
-          var l=el('span','',lbl);
-          var v=el('span','',val>0?Rfmt(val):'');
-          r.appendChild(l); r.appendChild(v); lcBreak.appendChild(r);
-        }
-
-        lcSection('Need');
-        if(totLiab>0){
-          lcRow('Liabilities to clear',totLiab);
-          S.deathLiabs.forEach(function(r){ if(N(r.amt)>0) lcSub(r.desc||'—',N(r.amt)); });
-        }
-        if(totInc>0){
-          lcRow('Income needs (capitalised)',totInc);
-          S.deathIncome.forEach(function(r){
-            var cap=calcIncomeNeed(r);
-            if(cap>0) lcSub((r.desc||'—')+' ('+Rfmt(r.nettPM||r.grossPM)+'/pm × '+r.years+' yrs)',cap);
-          });
-        }
-        if(totCap>0){
-          lcRow('Once-off capital needs',totCap);
-          S.deathCapital.forEach(function(r){ if(N(r.amt)>0) lcSub(r.desc||'—',N(r.amt)); });
-        }
-        if(estCostNeed>0){
-          lcRow('Estate costs',estCostNeed);
-          if(estDutyAmt>0){
-            lcSub('Estate duty — total: '+Rfmt(estDutyAmt),0);
-            if(typeof _dutyEstate!=='undefined'&&_dutyEstate>0) lcSub('  Estate\'s share (physical + estate policies)',_dutyEstate);
-            if(typeof _dutyThird!=='undefined'&&_dutyThird>0){
-              lcSub('  Third party share — funded by their own policies',_dutyThird);
-              pols.forEach(function(p){
-                if((p.BeneficiaryType||'')==='Third Party'&&N(p.BenDeath)>0&&p.Type!=='Business Assurance'){
-                  var pd=typeof _apportion==='function'?_apportion(N(p.BenDeath)):0;
-                  if(pd>0) lcSub('    '+(p.Insurer||'Policy')+(p.Product?' — '+p.Product:'')+' (cover '+Rfmt(p.BenDeath)+')',pd);
-                }
-              });
-            }
-            if(typeof _dutyBiz!=='undefined'&&_dutyBiz>0){
-              lcSub('  Business assurance share — funded by biz beneficiary',_dutyBiz);
-              pols.forEach(function(p){
-                if(p.Type==='Business Assurance'&&p.EstateDutiable==='Yes'){
-                  var amt=N(p.LoanAmount)||N(p.BenDeath);
-                  var pd=typeof _apportion==='function'?_apportion(amt):0;
-                  if(pd>0) lcSub('    '+(p.Insurer||'Policy')+(p.BizType?' — '+p.BizType:'')+'  ('+Rfmt(amt)+')',pd);
-                }
-              });
-            }
-          }
-          if(estExecAmt>0) lcSub('Executor fees (4.025% of physical + estate policies)',estExecAmt);
-          if(estAccrualAmt>0) lcSub('Accrual payable to spouse',estAccrualAmt);
-        }
-        var totalDeathNeedFull=totalDeathNeed+estCostNeed;
-        lcRow('Total need',totalDeathNeedFull,true);
-        lcSection('Cover in place');
-        if(totalDeathHave>0){
-          S.importedPols.forEach(function(p){
-            if(p.Type!=='Business Assurance'&&N(p.BenDeath)>0)
-              lcRow((p.Insurer||'Policy')+(p.Product?' — '+p.Product:'')+(p.BeneficiaryType?' ('+p.BeneficiaryType+')':''),N(p.BenDeath),false);
-          });
-          lcRow('Total cover',totalDeathHave,true);
-        } else {
-          var noCov=div(); noCov.style.cssText='font-size:12px;color:var(--red);padding:6px 0;font-style:italic';
-          noCov.textContent='No life cover in place'; lcBreak.appendChild(noCov);
-          lcRow('Total cover',0,true);
-        }
-        s.appendChild(lcBreak);
-      }
-
-      gapBox('Life Cover',totalDeathNeed+estCostNeed,totalDeathHave);
+      var totalDeathHave=pols.reduce(function(a,p){return p.Type!=='Business Assurance'?a+N(p.BenDeath):a;},0);
+      gapBox('Life Cover',totalDeathNeed,totalDeathHave);
     }
     if(S.scope.disability){
       var disInc=S.disIncome.reduce(function(a,r){return a+calcIncomeNeed(r);},0);
@@ -3211,82 +3087,28 @@ function buildSummary() {
   }
 
   // ── ESTATE SUMMARY
-  // Uses IDENTICAL calculation logic to buildEstate — must stay in sync
   if(S.scope.estate){
     sTitle('Estate Planning Summary');
-
-    // Physical assets and liabilities
-    var ePhysVal=(S.props||[]).reduce(function(a,p){return a+N(p.val);},0)
+    var physAssets=(S.props||[]).reduce(function(a,p){return a+N(p.val);},0)
       +(S.vehicles||[]).reduce(function(a,v){return a+N(v.val);},0)
       +(S.otherAssets||[]).reduce(function(a,x){return a+N(x.val);},0);
-    var ePhysLiab=(S.props||[]).reduce(function(a,p){return a+N(p.bond);},0)
+    var liabs=(S.props||[]).reduce(function(a,p){return a+N(p.bond);},0)
       +(S.vehicles||[]).reduce(function(a,v){return a+N(v.finance);},0)
       +(S.liabilities||[]).reduce(function(a,l){return a+N(l.bal);},0);
-
-    // Policy routing — match buildEstate exactly
-    var eS4qPols=0, eEstPols=0, eThirdPty=0, eBizDut=0;
-    var eS4qAssets=0;
-    (S.props||[]).forEach(function(p){ if((p.deathBenType||'')==='Spouse') eS4qAssets+=N(p.val)-N(p.bond); });
-    (S.vehicles||[]).forEach(function(v){ if((v.deathBenType||'')==='Spouse') eS4qAssets+=N(v.val)-N(v.finance); });
-    (S.otherAssets||[]).forEach(function(a){ if((a.deathBenType||'')==='Spouse') eS4qAssets+=N(a.val); });
-
+    var s4q=0,estPols=0;
     pols.forEach(function(p){
-      if(p.Type==='Business Assurance'){
-        if(p.EstateDutiable==='Yes') eBizDut+=N(p.LoanAmount)||N(p.BenDeath);
-        return;
-      }
+      if(p.Type==='Business Assurance') return;
       var b=N(p.BenDeath); if(!b) return;
-      var bt=p.BeneficiaryType||'';
-      if(bt==='Spouse')       eS4qPols+=b;
-      else if(bt==='Estate')  eEstPols+=b;
-      else if(bt==='Third Party') eThirdPty+=b;
+      if((p.BeneficiaryType||'')==='Spouse') s4q+=b;
+      else if((p.BeneficiaryType||'')==='Estate') estPols+=b;
     });
-
-    // Accrual — ANC with accrual marriages only, physical + RA policies, not risk
-    var eAccrual=0;
-    if((S.cli.marital||'').indexOf('accrual')>-1){
-      var eRaVal=pols.reduce(function(a,p){
-        if(POL_RA_TYPES.indexOf(p.Type)>-1) return a+(N(p.BenFundValue)||N(p.BenDeath));
-        return a;
-      },0);
-      var eClientEstate=ePhysVal+eRaVal;
-      var eSpouseEstate=N(S.accrual&&S.accrual.spouseCurrentAssets);
-      var eClientStart=N(S.accrual&&S.accrual.clientStartVal);
-      var eSpouseStart=N(S.accrual&&S.accrual.spouseStartVal);
-      var eClientAccrual=Math.max(0,eClientEstate-eClientStart);
-      var eSpouseAccrual=Math.max(0,eSpouseEstate-eSpouseStart);
-      eAccrual=Math.max(0,(eClientAccrual-eSpouseAccrual)/2);
-    }
-
-    var eGross=ePhysVal+eS4qPols+eEstPols+eThirdPty+eBizDut;
-    var eNet=Math.max(0,eGross-ePhysLiab);
-    var eAccrualDed=Math.min(eAccrual,eNet);
-    var eAfterAccrual=Math.max(0,eNet-eAccrualDed);
-    var eSection4q=eS4qPols+eS4qAssets;
-    var eS4qDed=Math.min(eSection4q,eAfterAccrual);
-    var eAfterS4q=Math.max(0,eAfterAccrual-eS4qDed);
-    var eDutiable=Math.max(0,eAfterS4q-ABATEMENT);
-    var eDuty=eDutiable<=DUTY_THRESH
-      ?eDutiable*DUTY_RATE1
-      :DUTY_THRESH*DUTY_RATE1+(eDutiable-DUTY_THRESH)*DUTY_RATE2;
-    var eExecFees=(ePhysVal+eEstPols)*EXEC_RATE;
-
-    // Duty apportionment (s.7) — same logic as buildEstate
-    // Estate pays duty on: physical assets + estate-routed policies
-    // Third parties pay duty on: third party policies + dutiable biz assurance
-    function eAportion(val){
-      return (eDutiable>0&&eDuty>0)?eDuty*(val/eDutiable):0;
-    }
-    var eDutyOnPhys    = eAportion(ePhysVal);
-    var eDutyOnEst     = eAportion(eEstPols);
-    var eDutyOnThird   = eAportion(eThirdPty);
-    var eDutyOnBiz     = eAportion(eBizDut);
-    var eDutyByEstate  = Math.round(eDutyOnPhys + eDutyOnEst);
-    var eDutyByThird   = Math.round(eDutyOnThird + eDutyOnBiz);
-    var hasThirdDuty   = eDutyByThird > 0;
-
-    // What the estate itself must fund
-    var eEstateFunds = eDutyByEstate + Math.round(eExecFees) + (eAccrualDed>0?Math.round(eAccrualDed):0);
+    var gross=physAssets+s4q+estPols;
+    var net=Math.max(0,gross-liabs);
+    var s4qDed=Math.min(s4q,net);
+    var afterS4q=Math.max(0,net-s4qDed);
+    var dutiable=Math.max(0,afterS4q-ABATEMENT);
+    var duty=dutiable<=DUTY_THRESH?dutiable*DUTY_RATE1:DUTY_THRESH*DUTY_RATE1+(dutiable-DUTY_THRESH)*DUTY_RATE2;
+    var execFees=(physAssets+estPols)*EXEC_RATE;
 
     var estBox=div(); estBox.style.cssText='background:#1a2a4a;border-radius:8px;padding:14px 16px;margin-bottom:14px';
     function e3Row(lbl,val,sub,bold){
@@ -3295,33 +3117,20 @@ function buildSummary() {
       var v=el('span','',val); v.style.cssText='font-size:'+(sub?'11':'12')+'px;color:#c8a84b'+(bold?';font-weight:700':'');
       r.appendChild(l); r.appendChild(v); estBox.appendChild(r);
     }
-    function e3Sub(lbl,val){ e3Row(lbl,val,true,false); }
-
-    e3Row('Gross estate',Rfmt(eGross));
-    if(ePhysLiab>0) e3Row('Less: liabilities','('+Rfmt(ePhysLiab)+')',false,false);
-    e3Row('Net estate',Rfmt(eNet),false,true);
-    if(eAccrualDed>0) e3Row('Less: accrual claim (ANC)','('+Rfmt(Math.round(eAccrualDed))+')',false,false);
-    if(eS4qDed>0) e3Row('Less: s.4(q) spouse deduction','('+Rfmt(eS4qDed)+')',false,false);
-    e3Row('Less: abatement','('+Rfmt(Math.min(eAfterS4q,ABATEMENT))+')',false,false);
-    e3Row('Dutiable amount',Rfmt(eDutiable),false,true);
-    e3Row('Total estate duty',Rfmt(Math.round(eDuty)),false,true);
-    if(hasThirdDuty){
-      e3Sub('Estate\'s share of duty (physical + estate policies)',Rfmt(eDutyByEstate));
-      e3Sub('Third party / biz assurance share of duty',Rfmt(eDutyByThird));
-    }
-    e3Row('Executor fees (est.)',Rfmt(Math.round(eExecFees)),false,false);
-    if(eAccrualDed>0) e3Row('Accrual payable to spouse',Rfmt(Math.round(eAccrualDed)),false,false);
-
-    // The critical line: what the estate itself must actually fund
-    e3Row(hasThirdDuty?'Estate must fund (duty + exec + accrual)':'Total estate costs',Rfmt(eEstateFunds),false,true);
-    if(hasThirdDuty){
-      e3Sub('Third parties recover their duty share separately','');
-    }
-
-    // Spouse residue — only if tick is set on Estate tab
-    if(S.cli.spouseInheritsResidue){
-      var eResidue=Math.max(0,eNet-eS4qDed-eDutyByEstate-Math.round(eExecFees)-(eAccrualDed>0?Math.round(eAccrualDed):0));
-      if(eResidue>0) e3Row('Estimated residue to spouse/estate',Rfmt(eResidue),false,false);
+    e3Row('Gross estate',Rfmt(gross));
+    if(liabs>0) e3Row('Less: liabilities','('+Rfmt(liabs)+')',false,false);
+    e3Row('Net estate',Rfmt(net),false,true);
+    if(s4qDed>0) e3Row('Less: s.4(q) spouse deduction','('+Rfmt(s4qDed)+')',false,false);
+    e3Row('Less: abatement','('+Rfmt(Math.min(afterS4q,ABATEMENT))+')',false,false);
+    e3Row('Dutiable amount',Rfmt(dutiable),false,true);
+    e3Row('Estate duty',Rfmt(Math.round(duty)),false,true);
+    e3Row('Executor fees (est.)',Rfmt(Math.round(execFees)),false,false);
+    e3Row('Total estate costs',Rfmt(Math.round(duty+execFees)),false,true);
+    // Spouse residue — informational only
+    var totalEstateCosts = Math.round(duty+execFees);
+    var spouseResidue = Math.max(0, net - s4qDed - totalEstateCosts);
+    if(spouseResidue>0){
+      e3Row('Estimated residue to spouse/estate',Rfmt(spouseResidue),false,false);
     }
     s.appendChild(estBox);
   }
