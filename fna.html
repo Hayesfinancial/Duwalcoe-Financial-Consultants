@@ -438,12 +438,15 @@ function calcTotalCGT(marginalRate) {
   });
 
   // Investment / Unit Trust policies — CGT applies, base cost = lump sum premium
+  // If Frequency = Once Off, Premium IS the lump sum premium (base cost)
   // Endowments, TFS, RA types, Living Annuity — all exempt
   (S.importedPols||[]).forEach(function(p) {
     if (p.Type !== 'Investment' && p.Type !== 'Unit Trust') return;
-    if (!N(p.BenFundValue) || !N(p.LumpSumPremium)) return;
     if ((p.BeneficiaryType||'') === 'Spouse') return; // rollover
-    var r = calcCGTAsset(p.BenFundValue, p.LumpSumPremium, false);
+    // Base cost: Once Off premium = lump sum. Otherwise use manually entered LumpSumPremium.
+    var baseCostPol = (p.Frequency === 'Once Off') ? N(p.Premium) : N(p.LumpSumPremium);
+    if (!N(p.BenFundValue) || !baseCostPol) return;
+    var r = calcCGTAsset(p.BenFundValue, baseCostPol, false);
     if (r.gainAfterExcl > 0) {
       items.push({ desc: (p.Insurer||'Investment')+(p.Product?' — '+p.Product:''), gain: r.gain, gainAfterPR: r.gainAfterExcl });
       totalGainAfterPR += r.gainAfterExcl;
@@ -2395,22 +2398,33 @@ function buildPolCard(p, i) {
     rb2.appendChild(rfld('Current Fund Value', p, 'BenFundValue', {onblur:function(){render();}}));
 
     if(isCGTInv){
-      // Investment / Unit Trust — CGT applies on death
-      // Base cost = lump sum premium paid (not recurring contributions)
-      rb2.appendChild(rfld('Lump sum premium paid (base cost)', p, 'LumpSumPremium', {onblur:function(){render();}}));
+      var isOnceOff = (p.Frequency === 'Once Off');
+      var polBaseCost = isOnceOff ? N(p.Premium) : N(p.LumpSumPremium);
+      if(isOnceOff){
+        // Once Off premium = base cost — show read-only field for clarity
+        var bcReadWrap=div('f'); bcReadWrap.appendChild(el('label','','Lump sum premium (base cost — auto)'));
+        var bcReadRw=div('rw'); bcReadRw.appendChild(el('span','rp','R'));
+        var bcReadInp=document.createElement('input'); bcReadInp.type='text'; bcReadInp.readOnly=true;
+        bcReadInp.value=p.Premium||''; bcReadInp.style.cssText='background:#f9f9f6;border:1.5px solid var(--mist);border-radius:6px;padding:7px 10px 7px 22px;font-size:13px;font-family:inherit;width:100%';
+        bcReadRw.appendChild(bcReadInp); bcReadWrap.appendChild(bcReadRw); rb2.appendChild(bcReadWrap);
+      } else {
+        // Recurring premium — adviser must enter lump sum manually
+        rb2.appendChild(rfld('Lump sum premium paid (base cost)', p, 'LumpSumPremium', {onblur:function(){render();}}));
+      }
     }
 
     rb2.appendChild(pfld('Growth rate % (projection)', p, 'GrowthRate', {onblur:function(){render();}}));
     card.appendChild(rb2);
 
     if(isCGTInv){
-      // CGT preview
-      if(N(p.BenFundValue)>0 && N(p.LumpSumPremium)>0 && (p.BeneficiaryType||'')==='Spouse'){
+      var isOnceOff2 = (p.Frequency === 'Once Off');
+      var polBaseCost2 = isOnceOff2 ? N(p.Premium) : N(p.LumpSumPremium);
+      if(N(p.BenFundValue)>0 && polBaseCost2>0 && (p.BeneficiaryType||'')==='Spouse'){
         var invRollBox=div(); invRollBox.style.cssText='font-size:11px;padding:6px 10px;margin-top:4px;border-radius:6px;background:#f0fdf4;border:1px solid #86efac;color:#166534';
         invRollBox.textContent='✓ Spouse beneficiary — CGT deferred on death (rollover applies).';
         card.appendChild(invRollBox);
-      } else if(N(p.BenFundValue)>0 && N(p.LumpSumPremium)>0){
-        var invGain=Math.max(0, N(p.BenFundValue)-N(p.LumpSumPremium));
+      } else if(N(p.BenFundValue)>0 && polBaseCost2>0){
+        var invGain=Math.max(0, N(p.BenFundValue)-polBaseCost2);
         if(invGain>0){
           var invMR=N(S.cli.grossPM)>0?calcMarginalRate(N(S.cli.grossPM)*12):0.45;
           var invCGT=Math.round(invGain*CGT_INCLUSION*invMR);
@@ -2421,7 +2435,7 @@ function buildPolCard(p, i) {
             ' <span style="color:var(--sub)">(before shared R300k annual exclusion)</span>';
           card.appendChild(invCgtBox);
         }
-      } else if(N(p.BenFundValue)>0){
+      } else if(N(p.BenFundValue)>0 && !polBaseCost2){
         var invNote=div('info'); invNote.style.cssText='font-size:11px;padding:6px 10px;margin-top:4px;background:#fef9ee;border-color:var(--gold2);color:#7a5f1a';
         invNote.textContent='Enter lump sum premium paid to calculate estimated CGT on death.';
         card.appendChild(invNote);
