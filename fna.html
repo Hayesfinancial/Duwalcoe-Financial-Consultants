@@ -162,6 +162,7 @@ table input:focus, table select:focus { outline: none; border-color: var(--gold)
     <button class="btn btn-ghost btn-sm" onclick="refreshFromCRM()" title="Re-pull policies and personal details from CRM without losing FNA data">↻ CRM</button>
     <button class="btn btn-ghost btn-sm" onclick="persist();saveToServer()" title="Save to server — accessible from any computer">☁ Sync</button>
     <button class="btn btn-ghost btn-sm" onclick="printFNA()">🖨 Print FNA</button>
+    <button class="btn btn-ghost btn-sm" onclick="printAandL()" title="Print Asset & Liability Statement for loan applications">🖨 A&L</button>
   </div>
 </div>
 <div class="tabbar" id="tabBar"></div>
@@ -5109,6 +5110,240 @@ function printFNA() {
   h+='</body></html>';
 
   var win=window.open('','_blank');
+  if(win){ win.document.write(h); win.document.close(); }
+  else { alert('Pop-up blocked. Please allow pop-ups for this page.'); }
+}
+
+
+// ═══════════════════════════════════════════════════════════
+// ASSET & LIABILITY STATEMENT — for loan applications
+// ═══════════════════════════════════════════════════════════
+function printAandL() {
+  persist();
+  var today = new Date().toLocaleDateString('en-ZA',{day:'2-digit',month:'long',year:'numeric'});
+  function e(t){ return (t||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+  function R(v){ var n=parseFloat(String(v||'').replace(/[^0-9.-]/g,'')); return isNaN(n)||n===0?'&#8212;':'R&#160;'+Math.round(n).toLocaleString('en-ZA'); }
+  function Rm(v){ var n=parseFloat(String(v||'').replace(/[^0-9.-]/g,'')); return isNaN(n)||n===0?'&#8212;':'R&#160;'+Math.round(n).toLocaleString('en-ZA')+' /pm'; }
+
+  var cli = S.cli || {};
+  var pols = S.importedPols || [];
+
+  // ── Totals
+  var totPropVal  = (S.props||[]).reduce(function(a,p){return a+N(p.val);},0);
+  var totPropBond = (S.props||[]).reduce(function(a,p){return a+N(p.bond);},0);
+  var totVehVal   = (S.vehicles||[]).reduce(function(a,v){return a+N(v.val);},0);
+  var totVehFin   = (S.vehicles||[]).reduce(function(a,v){return a+N(v.finance);},0);
+  var totOthVal   = (S.otherAssets||[]).reduce(function(a,x){return a+N(x.val);},0);
+  var totRetFV    = pols.reduce(function(a,p){return POL_RA_TYPES.indexOf(p.Type)>-1?a+N(p.BenFundValue):a;},0);
+  var totInvFV    = pols.reduce(function(a,p){return POL_INV_TYPES.indexOf(p.Type)>-1?a+N(p.BenFundValue):a;},0);
+  var totOthLiab  = (S.liabilities||[]).reduce(function(a,l){return a+N(l.bal);},0);
+  var totOthPmt   = (S.liabilities||[]).reduce(function(a,l){return a+N(l.pmt);},0);
+  var totBondPmt  = (S.props||[]).reduce(function(a,p){return a+N(p.bondPM);},0);
+  var totVehPmt   = (S.vehicles||[]).reduce(function(a,v){return a+N(v.finance)>0?a:a;},0); // finance balance only, pmt not stored
+
+  var totalAssets = totPropVal + totVehVal + totOthVal + totRetFV + totInvFV;
+  var totalLiabs  = totPropBond + totVehFin + totOthLiab;
+  var netWorth    = totalAssets - totalLiabs;
+
+  // Monthly income
+  var grossPM = N(cli.grossPM) || (S.incRows&&S.incRows[0]?N(S.incRows[0].pm):0);
+  var nettPM  = N(cli.nettPM);
+  var totalPremPM = pols.reduce(function(a,p){
+    return a+((p.Frequency||'Monthly')==='Monthly'&&p.Type!=='Business Assurance'?N(p.Premium):0);
+  },0);
+  var totalDebtPmt = totBondPmt + totOthPmt; // monthly debt commitments
+
+  // ── CSS
+  var h = '<!DOCTYPE html><html><head><meta charset="UTF-8">';
+  h += '<title>Asset &amp; Liability Statement — '+e(cli.name||'Client')+'</title>';
+  h += '<style>';
+  h += '*{box-sizing:border-box;margin:0;padding:0}';
+  h += 'body{font-family:Arial,Helvetica,sans-serif;font-size:10.5px;color:#1a2a4a;line-height:1.5}';
+  h += '@media print{@page{margin:14mm 16mm;size:A4}.noprint{display:none}body{font-size:10px}}';
+  h += '.page{max-width:800px;margin:0 auto;padding:20px 24px}';
+  h += '.letterhead{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:3px solid #1a2a4a;padding-bottom:12px;margin-bottom:16px}';
+  h += '.lh-brand{font-size:16px;font-weight:700;color:#1a2a4a;letter-spacing:1px}';
+  h += '.lh-sub{font-size:9px;color:#888;margin-top:2px}';
+  h += '.lh-right{text-align:right;font-size:9.5px;color:#555}';
+  h += '.doc-title{font-size:14px;font-weight:700;color:#1a2a4a;margin-bottom:2px}';
+  h += '.client-box{background:#f4f4f0;border-radius:6px;padding:10px 14px;margin-bottom:14px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px}';
+  h += '.cb-item{font-size:9.5px}.cb-lbl{color:#888;font-size:8.5px;text-transform:uppercase;letter-spacing:.5px}';
+  h += 'h2{font-size:8.5px;font-weight:700;text-transform:uppercase;letter-spacing:1.2px;color:#c8a84b;border-bottom:1.5px solid #c8a84b;padding-bottom:3px;margin:14px 0 7px}';
+  h += 'table{width:100%;border-collapse:collapse;margin-bottom:10px;font-size:10px}';
+  h += 'thead th{background:#1a2a4a;color:#fff;padding:5px 8px;text-align:left;font-size:8.5px;font-weight:700;text-transform:uppercase;letter-spacing:.4px}';
+  h += 'thead th.r{text-align:right}';
+  h += 'tbody td{padding:4px 8px;border-bottom:1px solid #eef;vertical-align:middle}';
+  h += 'tbody td.r{text-align:right}tbody td.b{font-weight:700}';
+  h += 'tbody tr:last-child td{border-bottom:none}';
+  h += 'tbody tr.subtotal td{background:#f8f9fc;font-weight:700;border-top:1.5px solid #dde}';
+  h += '.summary{background:#1a2a4a;color:#fff;border-radius:7px;padding:12px 16px;margin:14px 0}';
+  h += '.sum-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:10px}';
+  h += '.sum-card{background:rgba(255,255,255,.07);border-radius:5px;padding:8px 12px}';
+  h += '.sum-lbl{font-size:8px;text-transform:uppercase;letter-spacing:.6px;color:#8899bb;margin-bottom:3px}';
+  h += '.sum-val{font-size:15px;font-weight:700;color:#c8a84b}';
+  h += '.sum-val.ok{color:#86efac}.sum-val.bad{color:#f87171}';
+  h += '.income-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px}';
+  h += '.inc-row{display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid #334;font-size:10px}';
+  h += '.inc-lbl{color:#ccd6f6}.inc-val{color:#c8a84b;font-weight:600}';
+  h += '.declaration{border:1px solid #dde;border-radius:6px;padding:10px 14px;margin-top:16px;font-size:9.5px;color:#444}';
+  h += '.sig-grid{display:grid;grid-template-columns:1fr 1fr;gap:32px;margin-top:20px}';
+  h += '.sig-line{border-top:1px solid #1a2a4a;padding-top:4px;font-size:8.5px;color:#888;margin-top:32px}';
+  h += '.fnote{font-size:8px;color:#aaa;text-align:center;margin-top:16px;padding-top:8px;border-top:1px solid #eee}';
+  h += '.disclaimer{font-size:8.5px;color:#666;background:#fafaf8;border-radius:5px;padding:8px 12px;margin-top:10px;border:1px solid #eee}';
+  h += '</style></head><body><div class="page">';
+
+  // ── Letterhead
+  h += '<div class="letterhead">';
+  h += '<div><div class="lh-brand">DUWALCOE FINANCIAL CONSULTANTS CC</div>';
+  h += '<div class="lh-sub">FSP No: 9978 &nbsp;·&nbsp; Authorised Financial Services Provider</div></div>';
+  h += '<div class="lh-right"><strong>ASSET &amp; LIABILITY STATEMENT</strong><br>Date: '+today+'<br>Prepared by: Clinton Hayes</div>';
+  h += '</div>';
+
+  // ── Client details box
+  h += '<div class="client-box">';
+  h += '<div class="cb-item"><div class="cb-lbl">Full Name</div><strong>'+e(cli.name||'—')+'</strong></div>';
+  h += '<div class="cb-item"><div class="cb-lbl">ID Number</div>'+e(cli.id||'—')+'</div>';
+  h += '<div class="cb-item"><div class="cb-lbl">Date of Birth</div>'+e(cli.dob||'—')+'</div>';
+  h += '<div class="cb-item"><div class="cb-lbl">Occupation</div>'+e(cli.occ||'—')+'</div>';
+  h += '<div class="cb-item"><div class="cb-lbl">Marital Status</div>'+e(cli.marital||'—')+'</div>';
+  h += '<div class="cb-item"><div class="cb-lbl">Gross Income /pm</div>'+(grossPM>0?R(grossPM):'—')+'</div>';
+  h += '</div>';
+
+  // ── ASSETS
+  h += '<h2>Assets</h2>';
+
+  // Properties
+  if((S.props||[]).some(function(p){return N(p.val)>0;})){
+    h += '<table><thead><tr><th>Property</th><th class="r">Market Value</th><th class="r">Bond Outstanding</th><th class="r">Bond /pm</th><th class="r">Net Equity</th></tr></thead><tbody>';
+    (S.props||[]).forEach(function(p){
+      if(!N(p.val)) return;
+      var equity=N(p.val)-N(p.bond);
+      h += '<tr><td>'+e(p.desc||'Property')+(p.primaryResidence?' <span style="font-size:8.5px;color:#888">(Primary)</span>':'')+'</td>'
+        +'<td class="r">'+R(p.val)+'</td>'
+        +'<td class="r">'+(N(p.bond)>0?'('+R(p.bond)+')':'&#8212;')+'</td>'
+        +'<td class="r">'+(N(p.bondPM)>0?Rm(p.bondPM):'&#8212;')+'</td>'
+        +'<td class="r b">'+R(equity)+'</td></tr>';
+    });
+    h += '<tr class="subtotal"><td>Property Total</td><td class="r">'+R(totPropVal)+'</td><td class="r">'+(totPropBond>0?'('+R(totPropBond)+')':'&#8212;')+'</td><td class="r"></td><td class="r">'+R(totPropVal-totPropBond)+'</td></tr>';
+    h += '</tbody></table>';
+  }
+
+  // Vehicles
+  if((S.vehicles||[]).some(function(v){return N(v.val)>0;})){
+    h += '<table><thead><tr><th>Vehicle</th><th class="r">Market Value</th><th class="r">Finance Outstanding</th><th class="r">Net Value</th></tr></thead><tbody>';
+    (S.vehicles||[]).forEach(function(v){
+      if(!N(v.val)) return;
+      var net=N(v.val)-N(v.finance);
+      h += '<tr><td>'+e(v.desc||'Vehicle')+'</td>'
+        +'<td class="r">'+R(v.val)+'</td>'
+        +'<td class="r">'+(N(v.finance)>0?'('+R(v.finance)+')':'&#8212;')+'</td>'
+        +'<td class="r b">'+R(net)+'</td></tr>';
+    });
+    h += '<tr class="subtotal"><td>Vehicle Total</td><td class="r">'+R(totVehVal)+'</td><td class="r">'+(totVehFin>0?'('+R(totVehFin)+')':'&#8212;')+'</td><td class="r">'+R(totVehVal-totVehFin)+'</td></tr>';
+    h += '</tbody></table>';
+  }
+
+  // Other assets
+  if((S.otherAssets||[]).some(function(a){return N(a.val)>0;})){
+    h += '<table><thead><tr><th>Other Asset</th><th>Type</th><th class="r">Value</th></tr></thead><tbody>';
+    (S.otherAssets||[]).forEach(function(a){
+      if(!N(a.val)) return;
+      h += '<tr><td>'+e(a.desc||'Asset')+'</td><td style="font-size:9.5px;color:#555">'+e(a.type||'')+'</td><td class="r">'+R(a.val)+'</td></tr>';
+    });
+    h += '<tr class="subtotal"><td colspan="2">Other Assets Total</td><td class="r">'+R(totOthVal)+'</td></tr>';
+    h += '</tbody></table>';
+  }
+
+  // Retirement & Investment fund values
+  var raList=pols.filter(function(p){return POL_RA_TYPES.indexOf(p.Type)>-1&&N(p.BenFundValue)>0;});
+  var invList=pols.filter(function(p){return POL_INV_TYPES.indexOf(p.Type)>-1&&N(p.BenFundValue)>0;});
+  if(raList.length>0||invList.length>0){
+    h += '<table><thead><tr><th>Investment / Retirement Fund</th><th>Type</th><th class="r">Fund Value</th></tr></thead><tbody>';
+    raList.concat(invList).forEach(function(p){
+      h += '<tr><td>'+e((p.Insurer||'')+(p.Product?' — '+p.Product:''))+'</td>'
+        +'<td style="font-size:9.5px;color:#555">'+e(p.Type)+'</td>'
+        +'<td class="r">'+R(p.BenFundValue)+'</td></tr>';
+    });
+    if(totRetFV+totInvFV>0){
+      h += '<tr class="subtotal"><td colspan="2">Funds Total</td><td class="r">'+R(totRetFV+totInvFV)+'</td></tr>';
+    }
+    h += '</tbody></table>';
+  }
+
+  // ── LIABILITIES
+  h += '<h2>Liabilities</h2>';
+  var hasLiabs = totPropBond>0||totVehFin>0||(S.liabilities||[]).some(function(l){return N(l.bal)>0;});
+  if(hasLiabs){
+    h += '<table><thead><tr><th>Liability</th><th class="r">Outstanding Balance</th><th class="r">Monthly Payment</th></tr></thead><tbody>';
+    (S.props||[]).forEach(function(p){
+      if(!N(p.bond)) return;
+      h += '<tr><td>'+e(p.desc||'Property')+' — Bond</td><td class="r">'+R(p.bond)+'</td><td class="r">'+(N(p.bondPM)>0?Rm(p.bondPM):'&#8212;')+'</td></tr>';
+    });
+    (S.vehicles||[]).forEach(function(v){
+      if(!N(v.finance)) return;
+      h += '<tr><td>'+e(v.desc||'Vehicle')+' — Finance</td><td class="r">'+R(v.finance)+'</td><td class="r">&#8212;</td></tr>';
+    });
+    (S.liabilities||[]).forEach(function(l){
+      if(!N(l.bal)) return;
+      h += '<tr><td>'+e(l.desc||'Liability')+'</td><td class="r">'+R(l.bal)+'</td><td class="r">'+(N(l.pmt)>0?Rm(l.pmt):'&#8212;')+'</td></tr>';
+    });
+    h += '<tr class="subtotal"><td>Total Liabilities</td><td class="r">'+R(totalLiabs)+'</td><td class="r">'+(totalDebtPmt>0?Rm(totalDebtPmt):'&#8212;')+'</td></tr>';
+    h += '</tbody></table>';
+  } else {
+    h += '<p style="font-size:10px;color:#888;margin-bottom:10px">No liabilities recorded.</p>';
+  }
+
+  // ── NET WORTH SUMMARY
+  h += '<div class="summary">';
+  h += '<div class="sum-grid">';
+  h += '<div class="sum-card"><div class="sum-lbl">Total Assets</div><div class="sum-val">'+R(totalAssets)+'</div></div>';
+  h += '<div class="sum-card"><div class="sum-lbl">Total Liabilities</div><div class="sum-val">'+R(totalLiabs)+'</div></div>';
+  h += '<div class="sum-card"><div class="sum-lbl">Net Worth</div><div class="sum-val '+(netWorth>=0?'ok':'bad')+'">'+R(netWorth)+'</div></div>';
+  h += '</div>';
+
+  // Monthly income vs commitments
+  if(grossPM>0){
+    h += '<div style="border-top:1px solid #334;padding-top:10px;margin-top:4px">';
+    h += '<div style="font-size:8.5px;text-transform:uppercase;letter-spacing:.6px;color:#8899bb;margin-bottom:6px">Monthly Income &amp; Commitments</div>';
+    h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">';
+    h += '<div>';
+    h += '<div class="inc-row"><span class="inc-lbl">Gross income</span><span class="inc-val">'+Rm(grossPM)+'</span></div>';
+    if(nettPM>0) h += '<div class="inc-row"><span class="inc-lbl">Nett income</span><span class="inc-val">'+Rm(nettPM)+'</span></div>';
+    h += '</div>';
+    h += '<div>';
+    if(totalDebtPmt>0) h += '<div class="inc-row"><span class="inc-lbl">Debt repayments</span><span class="inc-val">'+Rm(totalDebtPmt)+'</span></div>';
+    if(totalPremPM>0)  h += '<div class="inc-row"><span class="inc-lbl">Insurance premiums</span><span class="inc-val">'+Rm(totalPremPM)+'</span></div>';
+    var totalCommit=totalDebtPmt+totalPremPM;
+    if(totalCommit>0&&grossPM>0){
+      var commitPct=Math.round(totalCommit/grossPM*100);
+      h += '<div class="inc-row" style="border-bottom:none;margin-top:4px"><span class="inc-lbl" style="font-weight:700;color:#ccd6f6">Total commitments</span><span class="inc-val" style="color:'+(commitPct>40?'#f87171':'#86efac')+'">'+Rm(totalCommit)+' ('+commitPct+'%)</span></div>';
+    }
+    h += '</div></div></div>';
+  }
+  h += '</div>';
+
+  // ── Declaration
+  h += '<div class="declaration">';
+  h += '<strong>Declaration</strong><br>';
+  h += 'I, <strong>'+e(cli.name||'&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;')+'</strong>, hereby declare that the information contained in this Asset and Liability Statement is true, accurate and complete to the best of my knowledge and belief. I acknowledge that this statement has been prepared for financial planning and/or credit assessment purposes.';
+  h += '<div class="sig-grid">';
+  h += '<div><div class="sig-line">Client Signature</div></div>';
+  h += '<div><div class="sig-line">Date</div></div>';
+  h += '</div>';
+  h += '</div>';
+
+  // ── Disclaimer
+  h += '<div class="disclaimer">Values reflected are estimates based on information provided by the client and/or loaded in the FNA system. Market values of properties and vehicles may differ from professional valuations. Retirement and investment fund values reflect balances at the time of capture and will fluctuate with market conditions. This statement does not constitute a formal valuation and should be read in conjunction with supporting documentation.</div>';
+
+  h += '<div class="fnote">Duwalcoe Financial Consultants CC &nbsp;·&nbsp; FSP No: 9978 &nbsp;·&nbsp; Prepared: '+today+' &nbsp;·&nbsp; This document is confidential and prepared for '+e(cli.name||'the named client')+' only.</div>';
+
+  h += '<div class="noprint" style="position:fixed;bottom:16px;right:16px;display:flex;gap:8px">';
+  h += '<button onclick="window.print()" style="background:#1a2a4a;color:#fff;border:none;padding:10px 20px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:700">Print / Save PDF</button>';
+  h += '<button onclick="window.close()" style="background:#888;color:#fff;border:none;padding:10px 16px;border-radius:6px;cursor:pointer;font-size:13px">Close</button></div>';
+
+  h += '</div></body></html>';
+
+  var win = window.open('','_blank');
   if(win){ win.document.write(h); win.document.close(); }
   else { alert('Pop-up blocked. Please allow pop-ups for this page.'); }
 }
