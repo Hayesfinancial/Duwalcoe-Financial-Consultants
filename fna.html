@@ -2737,11 +2737,58 @@ function buildPolCard(p, i) {
   r1.appendChild(sfld('Status', p, 'Status', ['Active','Lapsed','Paid Up','Cancelled']));
   card.appendChild(r1);
 
-  // ── Row 2: Premium + Frequency
+  // ── Row 2: Premium + Frequency + Escalations
   var r2 = g3();
   r2.appendChild(rfld('Premium / Contribution', p, 'Premium'));
   r2.appendChild(sfld('Frequency', p, 'Frequency', ['Monthly','Quarterly','Annually','Once Off']));
   card.appendChild(r2);
+
+  // Premium escalation + benefit escalation — risk policies only
+  if (isRisk || t === 'Life / Income Protector') {
+    var escRow = div(); escRow.style.cssText='display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;margin-top:6px;margin-bottom:4px';
+
+    // Premium escalation
+    var peWrap=div('f'); peWrap.style.minWidth='160px';
+    peWrap.appendChild(el('label','','Premium escalation'));
+    var peInp=document.createElement('input'); peInp.type='text';
+    peInp.value=String(p.PremEscalation||p.premEsc||''); peInp.placeholder='e.g. 6 or Age rated or CPI';
+    peInp.style.cssText='border:1.5px solid var(--mist);border-radius:6px;padding:7px 10px;font-size:13px;font-family:inherit;width:100%';
+    peInp.addEventListener('input',function(e){
+      S.importedPols[i].PremEscalation=e.target.value;
+      S.importedPols[i].premEsc=e.target.value;
+    });
+    peInp.addEventListener('blur',function(){render();});
+    peWrap.appendChild(peInp);
+    escRow.appendChild(peWrap);
+
+    // Benefit escalation
+    var beWrap=div('f'); beWrap.style.minWidth='160px';
+    beWrap.appendChild(el('label','','Benefit escalation'));
+    var beInp=document.createElement('input'); beInp.type='text';
+    beInp.value=String(p.BenEscalation||''); beInp.placeholder='e.g. 5 or CPI or Age rated';
+    beInp.style.cssText='border:1.5px solid var(--mist);border-radius:6px;padding:7px 10px;font-size:13px;font-family:inherit;width:100%';
+    beInp.addEventListener('input',function(e){ S.importedPols[i].BenEscalation=e.target.value; });
+    beWrap.appendChild(beInp);
+    escRow.appendChild(beWrap);
+
+    card.appendChild(escRow);
+
+    // Warning if age rated or above income escalation
+    var peRaw=String(p.PremEscalation||p.premEsc||'').toLowerCase();
+    var beRaw=String(p.BenEscalation||'').toLowerCase();
+    var incEsc=N(S.assump.incEsc)||6;
+    var peNum=parseFloat(peRaw)||0;
+    var warnings=[];
+    if(peRaw==='age rated'||peRaw==='age-rated') warnings.push('⚠ Premium is age rated — increases accelerate as client ages');
+    else if(peNum>incEsc) warnings.push('⚠ Premium escalation ('+peNum+'%) exceeds income growth ('+incEsc+'%)');
+    if(beRaw==='age rated'||beRaw==='age-rated') warnings.push('⚠ Benefit is age rated');
+    else if(beRaw==='cpi') warnings.push('ℹ Benefit escalates with CPI');
+    if(warnings.length>0){
+      var warnBox=div(); warnBox.style.cssText='font-size:11px;padding:5px 10px;border-radius:5px;background:#fef9ee;border:1px solid var(--gold2);color:#7a5f1a;margin-bottom:4px';
+      warnBox.innerHTML=warnings.join(' · ');
+      card.appendChild(warnBox);
+    }
+  }
 
   // ── Benefits section — varies by type
   if (isRisk || t === 'Life / Income Protector') {
@@ -2792,6 +2839,17 @@ function buildPolCard(p, i) {
         try { var rows = JSON.parse(S.importedPols[i].IncomeBenefits||'[]'); rows[ri].amount = e.target.value; S.importedPols[i].IncomeBenefits = JSON.stringify(rows); } catch(ex) {}
       });
       rw.appendChild(aInp); t2.appendChild(rw); tr.appendChild(t2);
+      // In-claim escalation
+      var t4 = document.createElement('td'); t4.style.paddingLeft='6px';
+      var escWr=div(); escWr.style.cssText='display:flex;align-items:center;gap:4px';
+      var escLb=el('span','','Esc%'); escLb.style.cssText='font-size:10px;color:var(--sub);white-space:nowrap';
+      var escIp=document.createElement('input'); escIp.type='text'; escIp.inputMode='numeric';
+      escIp.value=r.esc||''; escIp.placeholder='0';
+      escIp.style.cssText='width:44px;padding:4px 5px;border:1.5px solid var(--mist);border-radius:4px;font-size:11px';
+      escIp.addEventListener('input',function(e){
+        try { var rows=JSON.parse(S.importedPols[i].IncomeBenefits||'[]'); rows[ri].esc=e.target.value; S.importedPols[i].IncomeBenefits=JSON.stringify(rows); } catch(ex){}
+      });
+      escWr.appendChild(escLb); escWr.appendChild(escIp); t4.appendChild(escWr); tr.appendChild(t4);
       // Delete
       var t3 = document.createElement('td');
       t3.appendChild(delBtn(function() {
@@ -2904,8 +2962,20 @@ function buildPolCard(p, i) {
     card.appendChild(bstBiz);
     var rbBiz = g3();
     rbBiz.appendChild(sfld('Business Type', p, 'BizType', ['','Buy & Sell','Keyman','Contingent Liability']));
-    rbBiz.appendChild(rfld('Cover / Loan Amount', p, 'LoanAmount'));
-    rbBiz.appendChild(rfld('Death Benefit', p, 'BenDeath'));
+    var bizType = p.BizType || '';
+    if(bizType === 'Contingent Liability'){
+      // Contingent liability — only the loan/debt amount matters
+      rbBiz.appendChild(rfld('Loan / Debt Amount (cover)', p, 'LoanAmount'));
+      rbBiz.appendChild(div()); // spacer
+    } else {
+      // Buy & Sell / Keyman — death benefit is the cover amount
+      rbBiz.appendChild(rfld('Death Benefit', p, 'BenDeath'));
+      if(bizType === 'Keyman'){
+        rbBiz.appendChild(rfld('Disability Benefit', p, 'BenDisability'));
+      } else {
+        rbBiz.appendChild(div());
+      }
+    }
     card.appendChild(rbBiz);
     var bizNote = div('info');
     bizNote.style.cssText = 'font-size:11px;padding:6px 10px;margin-top:-4px;background:#eff6ff;border-color:#bfdbfe;color:#1e40af';
