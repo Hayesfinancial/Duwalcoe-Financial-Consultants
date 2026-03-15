@@ -437,6 +437,19 @@ function calcTotalCGT(marginalRate) {
     }
   });
 
+  // Investment / Unit Trust policies — CGT applies, base cost = lump sum premium
+  // Endowments, TFS, RA types, Living Annuity — all exempt
+  (S.importedPols||[]).forEach(function(p) {
+    if (p.Type !== 'Investment' && p.Type !== 'Unit Trust') return;
+    if (!N(p.BenFundValue) || !N(p.LumpSumPremium)) return;
+    if ((p.BeneficiaryType||'') === 'Spouse') return; // rollover
+    var r = calcCGTAsset(p.BenFundValue, p.LumpSumPremium, false);
+    if (r.gainAfterExcl > 0) {
+      items.push({ desc: (p.Insurer||'Investment')+(p.Product?' — '+p.Product:''), gain: r.gain, gainAfterPR: r.gainAfterExcl });
+      totalGainAfterPR += r.gainAfterExcl;
+    }
+  });
+
   // Apply shared annual exclusion (R300k in year of death)
   var netGain     = Math.max(0, totalGainAfterPR - CGT_ANNUAL_EXCL);
   var includedGain= Math.round(netGain * CGT_INCLUSION);
@@ -2366,18 +2379,76 @@ function buildPolCard(p, i) {
     card.appendChild(ipWrap);
   }
 
+  // ── Investment / RA / Living Annuity section
+  var isCGTInv  = (t === 'Investment' || t === 'Unit Trust');
+  var isEndow   = (t === 'Endowment');
+  var isTFS     = (t === 'Tax Free Savings');
+  var isLA      = (t === 'Living Annuity');
+  var isPreRet  = (t === 'Retirement Annuity' || t === 'Pension Fund' || t === 'Provident Fund' || t === 'Preservation Fund');
+
   if (isRA || isInv) {
-    var bst2 = el('div','stitle','Fund / Death Benefit');
+    var bst2 = el('div','stitle', isCGTInv ? 'Fund Value & CGT' : 'Fund Value');
     bst2.style.marginTop = '10px';
     card.appendChild(bst2);
+
     var rb2 = g3();
-    rb2.appendChild(rfld('Current Fund Value', p, 'BenFundValue'));
-    rb2.appendChild(rfld('Death Benefit',      p, 'BenDeath'));
+    rb2.appendChild(rfld('Current Fund Value', p, 'BenFundValue', {onblur:function(){render();}}));
+
+    if(isCGTInv){
+      // Investment / Unit Trust — CGT applies on death
+      // Base cost = lump sum premium paid (not recurring contributions)
+      rb2.appendChild(rfld('Lump sum premium paid (base cost)', p, 'LumpSumPremium', {onblur:function(){render();}}));
+    }
+
     rb2.appendChild(pfld('Growth rate % (projection)', p, 'GrowthRate', {onblur:function(){render();}}));
     card.appendChild(rb2);
-    // Seed GrowthRate into retAssets on blur
+
+    if(isCGTInv){
+      // CGT preview
+      if(N(p.BenFundValue)>0 && N(p.LumpSumPremium)>0 && (p.BeneficiaryType||'')==='Spouse'){
+        var invRollBox=div(); invRollBox.style.cssText='font-size:11px;padding:6px 10px;margin-top:4px;border-radius:6px;background:#f0fdf4;border:1px solid #86efac;color:#166534';
+        invRollBox.textContent='✓ Spouse beneficiary — CGT deferred on death (rollover applies).';
+        card.appendChild(invRollBox);
+      } else if(N(p.BenFundValue)>0 && N(p.LumpSumPremium)>0){
+        var invGain=Math.max(0, N(p.BenFundValue)-N(p.LumpSumPremium));
+        if(invGain>0){
+          var invMR=N(S.cli.grossPM)>0?calcMarginalRate(N(S.cli.grossPM)*12):0.45;
+          var invCGT=Math.round(invGain*CGT_INCLUSION*invMR);
+          var invCgtBox=div(); invCgtBox.style.cssText='font-size:11px;padding:8px 12px;margin-top:4px;border-radius:6px;background:#fef9ee;border:1px solid var(--gold2)';
+          invCgtBox.innerHTML='<strong>CGT on death:</strong> Gain: '+Rfmt(invGain)+
+            ' · Included (40%): '+Rfmt(Math.round(invGain*CGT_INCLUSION))+
+            ' · Est. CGT @ '+Math.round(invMR*100)+'%: <strong>'+Rfmt(invCGT)+'</strong>'+
+            ' <span style="color:var(--sub)">(before shared R300k annual exclusion)</span>';
+          card.appendChild(invCgtBox);
+        }
+      } else if(N(p.BenFundValue)>0){
+        var invNote=div('info'); invNote.style.cssText='font-size:11px;padding:6px 10px;margin-top:4px;background:#fef9ee;border-color:var(--gold2);color:#7a5f1a';
+        invNote.textContent='Enter lump sum premium paid to calculate estimated CGT on death.';
+        card.appendChild(invNote);
+      }
+    } else if(isEndow){
+      var endNote=div(); endNote.style.cssText='font-size:11px;padding:6px 10px;margin-top:4px;border-radius:6px;background:#f0fdf4;border:1px solid #86efac;color:#166534';
+      endNote.textContent='✓ Endowment (local or offshore) — CGT is paid within the fund structure. No CGT applies to the investor on death.';
+      card.appendChild(endNote);
+    } else if(isTFS){
+      var tfsNote=div(); tfsNote.style.cssText='font-size:11px;padding:6px 10px;margin-top:4px;border-radius:6px;background:#f0fdf4;border:1px solid #86efac;color:#166534';
+      tfsNote.textContent='✓ Tax Free Savings — explicitly CGT exempt. No CGT on death.';
+      card.appendChild(tfsNote);
+    } else if(isLA){
+      var laNote=div(); laNote.style.cssText='font-size:11px;padding:6px 10px;margin-top:4px;border-radius:6px;background:#eff6ff;border:1px solid #bfdbfe;color:#1e40af';
+      laNote.innerHTML='<strong>Living Annuity:</strong> No CGT on death. No estate duty if a beneficiary is nominated. '+
+        'Beneficiaries may take a cash lump sum (retirement tax tables apply in their hands) or continue the annuity. '+
+        'This is the beneficiary\'s tax — not an estate cost.';
+      card.appendChild(laNote);
+    } else if(isPreRet){
+      var raNote2=div(); raNote2.style.cssText='font-size:11px;padding:6px 10px;margin-top:4px;border-radius:6px;background:#eff6ff;border:1px solid #bfdbfe;color:#1e40af';
+      raNote2.innerHTML='<strong>Retirement fund:</strong> No CGT on death. Outside estate (trustees governed by s.37C). '+
+        'Retirement lump sum tax applies to cash withdrawals in the beneficiary\'s hands.';
+      card.appendChild(raNote2);
+    }
+
     var premNote = div('info');
-    premNote.style.cssText = 'font-size:11px;padding:6px 10px;margin-top:-4px';
+    premNote.style.cssText = 'font-size:11px;padding:6px 10px;margin-top:4px';
     premNote.textContent = 'Premium = monthly contribution. Growth rate used for retirement projection.';
     card.appendChild(premNote);
   }
