@@ -190,7 +190,7 @@ table input:focus, table select:focus { outline: none; border-color: var(--gold)
 var POL_RA_TYPES  = ['Retirement Annuity','Pension Fund','Provident Fund','Preservation Fund','Living Annuity'];
 var POL_INV_TYPES = ['Tax Free Savings','Investment','Endowment','Unit Trust'];
 var POL_MED_TYPES = ['Medical Aid','Medical'];
-var POL_TYPES     = ['Life / Income Protector','Business Assurance'].concat(POL_RA_TYPES).concat(POL_INV_TYPES).concat(POL_MED_TYPES);
+var POL_TYPES     = ['Life / Income Protector','Business Assurance','Life Annuity'].concat(POL_RA_TYPES).concat(POL_INV_TYPES).concat(POL_MED_TYPES);
 
 // ── SA Estate Duty constants (global)
 var ABATEMENT  = 3500000;   // Primary abatement R3.5m
@@ -201,6 +201,14 @@ var EXEC_RATE  = 0.04025;   // Executor fees 3.5% + VAT
 
 function N(v) { return parseFloat(String(v || '').replace(/[^0-9.\-]/g, '')) || 0; }
 function pct(v) { return N(v) / 100; }
+// Living Annuity sustainable income escalation = growth rate − drawdown rate (floored at 0)
+// Falls back to CPI assumption if rates not set
+function laEscRate(p) {
+  var gr = N(p.GrowthRate) || N(p.PremGrowthRate) || 0;
+  var dr = N(p.DrawdownRate) || 0;
+  if (gr > 0 && dr > 0) return Math.max(0, gr - dr);
+  return 0; // caller should fall back to CPI
+}
 function Rfmt(v) { return 'R\u202f' + Math.round(N(v)).toLocaleString('en-ZA'); }
 function Rval(v) { return N(v) > 0 ? Rfmt(v) : '—'; }
 
@@ -2332,42 +2340,68 @@ function buildRetirement() {
   og.appendChild(div());
   s.appendChild(og);
 
-  // ── Living Annuity income drawings — informational
+  // ── Living Annuity and Life Annuity income drawings — informational
   var laIncPols=(S.importedPols||[]).filter(function(p){ return p.Type==='Living Annuity'&&N(p.BenLAIncome)>0; });
-  if(laIncPols.length>0){
-    s.appendChild(stitle('Living Annuity Income in Retirement'));
+  var lifeAnnPols=(S.importedPols||[]).filter(function(p){ return p.Type==='Life Annuity'&&N(p.BenLifeAnnuityIncome)>0; });
+  if(laIncPols.length>0 || lifeAnnPols.length>0){
+    s.appendChild(stitle('Annuity Income in Retirement'));
     var laInf=div('info');
-    laInf.innerHTML='The Living Annuity fund values are included in <strong>Retirement Assets</strong> above. '
-      +'The income drawings shown here are <strong>for information only</strong> — they confirm what the fund is currently producing. '
-      +'They do not reduce the capital calculation (to avoid double-counting).';
+    laInf.innerHTML='Living Annuity fund values are included in <strong>Retirement Assets</strong> above — '
+      +'income drawings confirm what those funds are currently producing. '
+      +'Life Annuity income has no residual capital. '
+      +'<strong>Both are shown for information only</strong> — they do not reduce the capital gap (to avoid double-counting).';
     s.appendChild(laInf);
 
     var laTbl=document.createElement('table');
     laTbl.innerHTML='<thead><tr>'
       +'<th>Policy</th>'
+      +'<th>Annuity type</th>'
       +'<th style="text-align:right">Drawing today /pm</th>'
-      +'<th style="text-align:right">Inc esc %</th>'
+      +'<th style="text-align:right">Growth − Drawdown</th>'
       +(yrsToRet?'<th style="text-align:right">At retirement /pm</th>':'')
       +'<th>Tax treatment</th>'
       +'</tr></thead>';
     var laTb=document.createElement('tbody');
+
     laIncPols.forEach(function(p){
       var incToday=N(p.BenLAIncome);
-      var escRate=N(p.LAIncEsc)>0?N(p.LAIncEsc):N(S.assump.cpi)||6;
+      var escRate=(function(r){return r>0?r:N(S.assump.cpi)||6;})(laEscRate(p));
       var incAtRet=yrsToRet?Math.round(incToday*Math.pow(1+escRate/100,yrsToRet)):incToday;
       var isTax=p.LAIncomeTaxable!==false;
-      var tr=document.createElement('tr');
       var taxCell=isTax
         ?'<span style="color:var(--orange);font-weight:700">Taxable — marginal rate</span>'
         :'<span style="color:var(--green);font-weight:700">Partially/non-taxable — disallowed contributions</span>';
+      var tr=document.createElement('tr');
       tr.innerHTML='<td><strong>'+(p.Insurer||'—')+'</strong>'
         +(p.Product?'<br><span style="font-size:10px;color:var(--sub)">'+p.Product+'</span>':'')+'</td>'
+        +'<td style="font-size:11px;color:var(--sub)">Living Annuity</td>'
         +'<td style="text-align:right">'+Rfmt(incToday)+'</td>'
         +'<td style="text-align:right">'+escRate+'%</td>'
         +(yrsToRet?'<td style="text-align:right;font-weight:700">'+Rfmt(incAtRet)+'</td>':'')
         +'<td style="font-size:11px">'+taxCell+'</td>';
       laTb.appendChild(tr);
     });
+
+    lifeAnnPols.forEach(function(p){
+      var incToday=N(p.BenLifeAnnuityIncome);
+      var escRate=N(p.LifeAnnuityEsc)>0?N(p.LifeAnnuityEsc):N(S.assump.cpi)||6;
+      var incAtRet=yrsToRet?Math.round(incToday*Math.pow(1+escRate/100,yrsToRet)):incToday;
+      var isTax=p.LifeAnnuityTaxable!==false;
+      var taxCell=isTax
+        ?'<span style="color:var(--orange);font-weight:700">Taxable — PAYE</span>'
+        :'<span style="color:var(--green);font-weight:700">Partially non-taxable — own contributions</span>';
+      var jointNote=N(p.LifeAnnuityJointPct)>0?' · Joint life: '+N(p.LifeAnnuityJointPct)+'% to spouse':'';
+      var tr=document.createElement('tr');
+      tr.innerHTML='<td><strong>'+(p.Insurer||'—')+'</strong>'
+        +(p.Product?'<br><span style="font-size:10px;color:var(--sub)">'+p.Product+'</span>':'')+'</td>'
+        +'<td style="font-size:11px;color:var(--sub)">Life Annuity'+jointNote+'</td>'
+        +'<td style="text-align:right">'+Rfmt(incToday)+'</td>'
+        +'<td style="text-align:right">'+escRate+'%</td>'
+        +(yrsToRet?'<td style="text-align:right;font-weight:700">'+Rfmt(incAtRet)+'</td>':'')
+        +'<td style="font-size:11px">'+taxCell+'</td>';
+      laTb.appendChild(tr);
+    });
+
     laTbl.appendChild(laTb);
     var laTw=div('twrap'); laTw.appendChild(laTbl); s.appendChild(laTw);
   }
@@ -2813,11 +2847,12 @@ function buildPolicies() {
 
 function buildPolCard(p, i) {
   var t = p.Type || 'Life / Income Protector';
-  var isRA  = POL_RA_TYPES.indexOf(t) > -1;
-  var isInv = POL_INV_TYPES.indexOf(t) > -1;
-  var isMed = (t === 'Medical Aid');
-  var isBiz = (t === 'Business Assurance');
-  var isRisk = !isRA && !isInv && !isMed && !isBiz && t !== 'Other';
+  var isRA      = POL_RA_TYPES.indexOf(t) > -1;
+  var isInv     = POL_INV_TYPES.indexOf(t) > -1;
+  var isMed     = (t === 'Medical Aid');
+  var isBiz     = (t === 'Business Assurance');
+  var isLifeAnn = (t === 'Life Annuity');
+  var isRisk    = !isRA && !isInv && !isMed && !isBiz && !isLifeAnn && t !== 'Other';
 
   var card = div();
   card.style.cssText = 'background:#fff;border:1.5px solid var(--mist);border-radius:9px;padding:16px;margin-bottom:14px';
@@ -3089,7 +3124,7 @@ function buildPolCard(p, i) {
       var laIncRow=g3();
       laIncRow.appendChild(rfld('Monthly Income Drawn', p, 'BenLAIncome', {onblur:function(){render();}}));
       laIncRow.appendChild(pfld('Annual Drawdown Rate %', p, 'DrawdownRate', {onblur:function(){render();}}));
-      laIncRow.appendChild(pfld('Income Escalation % p.a.', p, 'LAIncEsc', {onblur:function(){render();}}));
+      laIncRow.appendChild(div()); // spacer — escalation is calculated, not entered
       card.appendChild(laIncRow);
 
       // Taxable / non-taxable tick
@@ -3176,6 +3211,55 @@ function buildPolCard(p, i) {
     bizNote.innerHTML = '<strong>Buy &amp; Sell</strong> pays to co-shareholder · <strong>Keyman</strong> pays to business · <strong>Contingent Liability</strong> settles business debt. None form part of personal estate.';
     card.appendChild(bizNote);
   }
+
+  // ── Life (Guaranteed) Annuity section
+  if (isLifeAnn) {
+    var laGst = el('div','stitle','Guaranteed Annuity Income');
+    laGst.style.marginTop = '10px';
+    card.appendChild(laGst);
+
+    var laGRow1 = g3();
+    laGRow1.appendChild(rfld('Monthly Income Guaranteed', p, 'BenLifeAnnuityIncome', {onblur:function(){render();}}));
+    laGRow1.appendChild(pfld('Annual Income Escalation %', p, 'LifeAnnuityEsc', {onblur:function(){render();}}));
+    laGRow1.appendChild(pfld('Joint Life % (spouse continuation)', p, 'LifeAnnuityJointPct', {onblur:function(){render();}}));
+    card.appendChild(laGRow1);
+
+    var laGRow2 = g3();
+    laGRow2.appendChild(fld('Guaranteed period (years)', p, 'LifeAnnuityGuarYrs', {placeholder:'e.g. 10'}));
+    laGRow2.appendChild(div()); // spacer
+    laGRow2.appendChild(div()); // spacer
+    card.appendChild(laGRow2);
+
+    // Taxable tick — Life Annuity income is always taxable (SARS: annuity income = gross income)
+    var laGTaxRow = div(); laGTaxRow.style.cssText = 'margin-top:8px;margin-bottom:4px';
+    var laGTaxLbl = document.createElement('label');
+    laGTaxLbl.style.cssText = 'display:flex;align-items:flex-start;gap:8px;cursor:pointer;font-size:12px;color:var(--text)';
+    var laGTaxInp = document.createElement('input'); laGTaxInp.type = 'checkbox';
+    laGTaxInp.checked = p.LifeAnnuityTaxable !== false; // always taxable by default
+    laGTaxInp.style.cssText = 'accent-color:var(--gold);width:14px;height:14px;flex-shrink:0;margin-top:1px';
+    laGTaxInp.addEventListener('change', function(e){ S.importedPols[i].LifeAnnuityTaxable = e.target.checked; render(); });
+    var laGTaxText = document.createElement('span');
+    laGTaxText.innerHTML = '<strong>Income is taxable (PAYE)</strong> — annuity income forms part of gross income per SARS. '
+      + 'Only untick if there is a tax-free portion due to own non-deductible contributions (document in ROA).';
+    laGTaxLbl.appendChild(laGTaxInp); laGTaxLbl.appendChild(laGTaxText);
+    laGTaxRow.appendChild(laGTaxLbl); card.appendChild(laGTaxRow);
+
+    // Estate treatment note
+    var laGEstNote = div(); laGEstNote.style.cssText = 'font-size:11px;padding:8px 12px;margin-top:8px;border-radius:6px;background:#eff6ff;border:1px solid #bfdbfe;color:#1e40af';
+    var guarYrs = N(p.LifeAnnuityGuarYrs);
+    if(guarYrs > 0){
+      laGEstNote.innerHTML = '<strong>Life Annuity with ' + guarYrs + '-year guarantee:</strong> If the life assured dies within the guarantee period, '
+        + 'the remaining guaranteed payments are commuted and may form part of the estate. No ongoing fund value after guarantee period. '
+        + 'Income is fully taxable. Once-off purchase premium (not recurring).';
+    } else {
+      laGEstNote.innerHTML = '<strong>Life (Guaranteed) Annuity:</strong> No residual capital on death — income ceases. '
+        + 'No fund value, no CGT, no estate duty. '
+        + (N(p.LifeAnnuityJointPct) > 0 ? 'Joint life: ' + N(p.LifeAnnuityJointPct) + '% continues to spouse on death. ' : '')
+        + 'Income is fully taxable. Once-off purchase premium (not recurring).';
+    }
+    card.appendChild(laGEstNote);
+  }
+
   // Parse Beneficiaries array (CRM format) on first render to seed BeneficiaryType/Beneficiary
   if (p.Beneficiaries && !p._bensSeeded) {
     try {
@@ -3924,13 +4008,20 @@ function buildSummary() {
       });
       if(rentalAtRet3>0) r3Row('Less: rental at retirement','('+Rfmt(rentalAtRet3)+'/pm)',true);
       if(otherIncAtRet3>0) r3Row('Less: farm/business at retirement','('+Rfmt(otherIncAtRet3)+'/pm)',true);
-      // LA income drawings — informational, mirrors buildRetirement
+      // Annuity income drawings — informational, mirrors buildRetirement
       var laPolsS=(S.importedPols||[]).filter(function(p){return p.Type==='Living Annuity'&&N(p.BenLAIncome)>0;});
       laPolsS.forEach(function(p){
-        var escS=N(p.LAIncEsc)>0?N(p.LAIncEsc):N(S.assump.cpi)||6;
+        var escS=(function(r){return r>0?r:N(S.assump.cpi)||6;})(laEscRate(p));
         var laIncS=yrsToR2?Math.round(N(p.BenLAIncome)*Math.pow(1+escS/100,yrsToR2)):N(p.BenLAIncome);
         var taxLbl=(p.LAIncomeTaxable!==false)?'taxable':'partially non-taxable';
         r3Sub('LA drawing: '+(p.Insurer||'LA')+' ('+taxLbl+', from LA fund in assets)',Rfmt(laIncS)+'/pm');
+      });
+      var lifeAnnPolsS=(S.importedPols||[]).filter(function(p){return p.Type==='Life Annuity'&&N(p.BenLifeAnnuityIncome)>0;});
+      lifeAnnPolsS.forEach(function(p){
+        var escS=N(p.LifeAnnuityEsc)>0?N(p.LifeAnnuityEsc):N(S.assump.cpi)||6;
+        var laIncS=yrsToR2?Math.round(N(p.BenLifeAnnuityIncome)*Math.pow(1+escS/100,yrsToR2)):N(p.BenLifeAnnuityIncome);
+        var taxLbl=(p.LifeAnnuityTaxable!==false)?'taxable \u2014 PAYE':'partially non-taxable';
+        r3Sub('Life Annuity: '+(p.Insurer||'LA')+' ('+taxLbl+', no residual capital)',Rfmt(laIncS)+'/pm');
       });
       r3Row('Net monthly gap at retirement',Rfmt(netMonthlyGap3)+' /pm',false,true);
       r3Row('Capital needed to fund income','('+Rfmt(capNeed3)+')',false,true);
@@ -4527,8 +4618,13 @@ function printFNA() {
   var laIncAtRetP=0;
   var laIncPolsP=(pols||[]).filter(function(p){return p.Type==='Living Annuity'&&N(p.BenLAIncome)>0;});
   laIncPolsP.forEach(function(p){
-    var esc=N(p.LAIncEsc)>0?N(p.LAIncEsc):N(S.assump.cpi)||6;
+    var esc=(function(r){return r>0?r:N(S.assump.cpi)||6;})(laEscRate(p));
     laIncAtRetP+=yrsToRet?Math.round(N(p.BenLAIncome)*Math.pow(1+esc/100,yrsToRet)):N(p.BenLAIncome);
+  });
+  var lifeAnnPolsP=(pols||[]).filter(function(p){return p.Type==='Life Annuity'&&N(p.BenLifeAnnuityIncome)>0;});
+  lifeAnnPolsP.forEach(function(p){
+    var esc=N(p.LifeAnnuityEsc)>0?N(p.LifeAnnuityEsc):N(S.assump.cpi)||6;
+    laIncAtRetP+=yrsToRet?Math.round(N(p.BenLifeAnnuityIncome)*Math.pow(1+esc/100,yrsToRet)):N(p.BenLifeAnnuityIncome);
   });
   var retGapP=totalProjP-totalCapNeedP;
 
@@ -4819,19 +4915,30 @@ function printFNA() {
       h+='</tbody></table>';
     }
 
-    if(laIncPolsP.length>0){
-      h+=sec('Living Annuity Income Drawings');
-      h+=tblHead(['Policy','Drawing today /pm','Inc esc %','At retirement /pm','Tax treatment']);
+    if(laIncPolsP.length>0 || lifeAnnPolsP.length>0){
+      h+=sec('Annuity Income Drawings');
+      h+=tblHead(['Policy','Type','Drawing today /pm','Inc esc %','At retirement /pm','Tax treatment']);
       laIncPolsP.forEach(function(p){
         var incToday=N(p.BenLAIncome);
-        var esc=N(p.LAIncEsc)>0?N(p.LAIncEsc):N(S.assump.cpi)||6;
+        var esc=(function(r){return r>0?r:N(S.assump.cpi)||6;})(laEscRate(p));
         var incAtRet=yrsToRet?Math.round(incToday*Math.pow(1+esc/100,yrsToRet)):incToday;
         var taxTreat=(p.LAIncomeTaxable!==false)?'Taxable \u2014 marginal rate':'Partially/non-taxable \u2014 disallowed contributions';
-        h+='<tr>'+td(e((p.Insurer||'\u2014')+(p.Product?' \u2014 '+p.Product:'')))+td(r(incToday),true)
+        h+='<tr>'+td(e((p.Insurer||'\u2014')+(p.Product?' \u2014 '+p.Product:'')))
+          +td('Living Annuity')+td(r(incToday),true)
+          +td(esc+'%',true)+td(r(incAtRet),true)+td(taxTreat)+'</tr>';
+      });
+      lifeAnnPolsP.forEach(function(p){
+        var incToday=N(p.BenLifeAnnuityIncome);
+        var esc=N(p.LifeAnnuityEsc)>0?N(p.LifeAnnuityEsc):N(S.assump.cpi)||6;
+        var incAtRet=yrsToRet?Math.round(incToday*Math.pow(1+esc/100,yrsToRet)):incToday;
+        var taxTreat=(p.LifeAnnuityTaxable!==false)?'Taxable \u2014 PAYE':'Partially non-taxable \u2014 own contributions';
+        var jointNote=N(p.LifeAnnuityJointPct)>0?' (Joint '+N(p.LifeAnnuityJointPct)+'%)':'';
+        h+='<tr>'+td(e((p.Insurer||'\u2014')+(p.Product?' \u2014 '+p.Product:'')))
+          +td('Life Annuity'+jointNote)+td(r(incToday),true)
           +td(esc+'%',true)+td(r(incAtRet),true)+td(taxTreat)+'</tr>';
       });
       h+='</tbody></table>';
-      h+='<p style="font-size:9px;color:#888;margin-bottom:8px">LA fund values are included in Retirement Assets above. Income drawings shown for information \u2014 not deducted from capital gap to avoid double-counting.</p>';
+      h+='<p style="font-size:9px;color:#888;margin-bottom:8px">LA fund values are in Retirement Assets. Life Annuity has no residual capital. Both shown for information \u2014 not deducted from capital gap.</p>';
     }
 
     h+=sec('Retirement Capital Summary');

@@ -1861,7 +1861,6 @@ function buildFnaUrl(c){
       GrowthRate:       p.PremGrowthRate||'',
       BenLAIncome:      p.BenLAIncome||'',
       DrawdownRate:     p.DrawdownRate||'',
-      LAIncEsc:         p.LAIncEsc||'',
       LAIncomeTaxable:  p.LAIncomeTaxable||''
     };
   });
@@ -2130,7 +2129,7 @@ function buildPolicyForm(p){
   if(isLA){
     var fvNum=parseFloat(p.BenFundValue||'0')||0;
     html+=sec('Living Annuity — Fund & Income Drawing');
-    html+='<div class="g2">'+fld('pb_fv','Current Fund Value',p.BenFundValue)+fld('pb_growrate','Growth Rate % (projection)',p.PremGrowthRate||'')+'</div>';
+    html+='<div class="g2">'+fld('pb_fv','Current Fund Value',p.BenFundValue,'text','oninput="laFVChanged()"')+'<div class="fld"><label>Growth Rate % (projection)</label><div style="position:relative"><input id="pb_growrate" type="text" value="'+(p.PremGrowthRate||'')+'" placeholder="e.g. 9" oninput="laShowSust()" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 28px 8px 10px;font-family:inherit;font-size:13px"><span style="position:absolute;right:10px;top:50%;transform:translateY(-50%);color:#889;font-size:11px;pointer-events:none">%</span></div></div></div>';
 
     // Two-way calculation — income ↔ drawdown rate, driven by fund value
     html+='<div style="background:var(--smoke);border-radius:8px;padding:12px 14px;margin-bottom:8px">';
@@ -2157,7 +2156,8 @@ function buildPolicyForm(p){
     html+='<div id="la_rate_msg" style="margin-top:6px;font-size:12px"></div>';
     html+='</div>'; // end smoke box
 
-    html+='<div class="g2">'+fld('pb_la_esc','Income Escalation % p.a.',p.LAIncEsc)+'<div></div></div>';
+    // Sustainable income growth — informational, not editable
+    html+='<div id="la_sust_msg" style="font-size:12px;margin-bottom:8px"></div>';
 
     // Taxable / non-taxable
     html+='<div class="fld" style="margin-top:4px"><label>Income Drawing — Tax Treatment</label>';
@@ -2168,9 +2168,6 @@ function buildPolicyForm(p){
     html+='<div style="font-size:11px;color:#889;margin-top:6px">Taxable: full drawing added to gross income at marginal rate. Non-taxable: SARS &quot;cost&quot; formula applies — document basis in ROA.</div>';
     html+='</div>';
     html+='<div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:7px;padding:8px 12px;font-size:12px;color:#1e40af;margin-top:10px">ℹ <strong>Living Annuity:</strong> No CGT on death. No estate duty if a beneficiary is nominated. Beneficiary may take cash (retirement tax tables in their hands) or continue the annuity.</div>';
-
-    // Embed fund value for JS calculations
-    html+='<script>window._LA_FV='+fvNum+';<\/script>';
   }
 
   // MEDICAL
@@ -2308,31 +2305,42 @@ function addIncomeRow(){
 }
 
 // ── Living Annuity two-way calculation ───────────────────────
-// When income is entered → calculate drawdown rate from fund value
+function _laFV(){
+  var el=document.getElementById('pb_fv');
+  return el?parseFloat(el.value.replace(/[^0-9.]/g,''))||0:0;
+}
 function laCalcFromIncome(){
-  var fv=window._LA_FV||0;
+  var fv=_laFV();
   var incEl=document.getElementById('pb_la_income');
   var rateEl=document.getElementById('pb_la_drawdown');
   var msgEl=document.getElementById('la_rate_msg');
   if(!incEl||!rateEl||!msgEl) return;
   var inc=parseFloat(incEl.value)||0;
+  if(inc>0&&fv<=0){
+    msgEl.innerHTML='<div style="background:#fff7ed;border:1px solid #fed7aa;border-radius:6px;padding:7px 10px;color:#92400e">Enter the <strong>Current Fund Value</strong> above first.</div>';
+    rateEl.value=''; laShowSust(); return;
+  }
   if(inc>0&&fv>0){
-    var rate=Math.round((inc*12/fv)*1000)/10; // 1 decimal place
+    var rate=Math.round((inc*12/fv)*1000)/10;
     rateEl.value=rate;
     laShowMsg(msgEl,fv,rate,inc);
   } else {
     rateEl.value='';
     msgEl.innerHTML='';
   }
+  laShowSust();
 }
-// When drawdown rate is entered → calculate monthly income from fund value
 function laCalcFromRate(){
-  var fv=window._LA_FV||0;
+  var fv=_laFV();
   var incEl=document.getElementById('pb_la_income');
   var rateEl=document.getElementById('pb_la_drawdown');
   var msgEl=document.getElementById('la_rate_msg');
   if(!incEl||!rateEl||!msgEl) return;
   var rate=parseFloat(rateEl.value)||0;
+  if(rate>0&&fv<=0){
+    msgEl.innerHTML='<div style="background:#fff7ed;border:1px solid #fed7aa;border-radius:6px;padding:7px 10px;color:#92400e">Enter the <strong>Current Fund Value</strong> above first.</div>';
+    incEl.value=''; laShowSust(); return;
+  }
   if(rate>0&&fv>0){
     var inc=Math.round(fv*rate/100/12);
     incEl.value=inc;
@@ -2341,12 +2349,48 @@ function laCalcFromRate(){
     incEl.value='';
     msgEl.innerHTML='';
   }
+  laShowSust();
+}
+// Called when fund value changes — recalculates whichever of income/rate is already filled
+function laFVChanged(){
+  var fv=_laFV();
+  var msgEl=document.getElementById('la_rate_msg');
+  if(!msgEl) return;
+  if(fv<=0){ msgEl.innerHTML=''; laShowSust(); return; }
+  var rateEl=document.getElementById('pb_la_drawdown');
+  var incEl=document.getElementById('pb_la_income');
+  var rate=rateEl?parseFloat(rateEl.value)||0:0;
+  var inc=incEl?parseFloat(incEl.value)||0:0;
+  if(rate>0){ laCalcFromRate(); }
+  else if(inc>0){ laCalcFromIncome(); }
+  else { msgEl.innerHTML=''; laShowSust(); }
 }
 function laShowMsg(el,fv,rate,inc){
   if(rate<2.5||rate>17.5){
     el.innerHTML='<div style="background:#fef2f2;border:1px solid #fca5a5;border-radius:6px;padding:7px 10px;color:#991b1b">⚠ FSCA regulation: drawdown rate must be between <strong>2.5% and 17.5%</strong>.</div>';
   } else {
     el.innerHTML='<div style="background:#f0fdf4;border:1px solid #86efac;border-radius:6px;padding:7px 10px;color:#166534">✓ '+rate+'% of R\u202f'+Math.round(fv).toLocaleString('en-ZA')+' fund = R\u202f'+inc.toLocaleString('en-ZA')+' /pm — within FSCA limits (2.5%–17.5%).</div>';
+  }
+}
+function laShowSust(){
+  var sustEl=document.getElementById('la_sust_msg');
+  if(!sustEl) return;
+  var growEl=document.getElementById('pb_growrate');
+  var rateEl=document.getElementById('pb_la_drawdown');
+  if(!growEl||!rateEl) return;
+  var growth=parseFloat(growEl.value)||0;
+  var drawdown=parseFloat(rateEl.value)||0;
+  if(growth>0&&drawdown>0){
+    var netGrowth=Math.round((growth-drawdown)*10)/10;
+    var colour=netGrowth>=0?'#166534':'#991b1b';
+    var bg=netGrowth>=0?'#f0fdf4':'#fef2f2';
+    var border=netGrowth>=0?'#86efac':'#fca5a5';
+    var msg=netGrowth>=0
+      ?'✓ At '+growth+'% growth and '+drawdown+'% drawdown, income will grow at approximately <strong>'+netGrowth+'% p.a.</strong> automatically — no manual escalation needed.'
+      :'⚠ Drawdown ('+drawdown+'%) exceeds growth ('+growth+'%) by '+Math.abs(netGrowth)+'% — the fund will <strong>deplete over time</strong>. Consider reducing the drawdown rate.';
+    sustEl.innerHTML='<div style="background:'+bg+';border:1px solid '+border+';border-radius:6px;padding:7px 10px;color:'+colour+'">'+msg+'</div>';
+  } else {
+    sustEl.innerHTML='';
   }
 }
 
@@ -2371,7 +2415,7 @@ function collectPolicyForm(){
     IllustrativeRate:g('pb_illrate'),PremGrowthRate:g('pb_growrate'),
     WithdrawSavingsPot:getR('p3pot'),IncludeInRetirement:getR('pinret'),
     MedPlan:g('pmedplan'),MedLives:g('pmedlives'),
-    BenLAIncome:g('pb_la_income'),DrawdownRate:g('pb_la_drawdown'),LAIncEsc:g('pb_la_esc'),
+    BenLAIncome:g('pb_la_income'),DrawdownRate:g('pb_la_drawdown'),
     LAIncomeTaxable:(function(){var el=document.querySelector('input[name="platax"]:checked');return el?el.value:'Yes';})(),
     Insured:g('pins'),Payer:g('ppay'),
     Notes:g('pnt'),
