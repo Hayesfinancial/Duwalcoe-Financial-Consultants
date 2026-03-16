@@ -447,12 +447,30 @@ function calcAge(dob, atDate){
 function daysTo(ds){
   if(!ds||ds==='None')return null;
   var today=new Date(); today.setHours(0,0,0,0);
-  var d=new Date(ds); if(isNaN(d))return null;
+  // Parse as local date to avoid UTC timezone shift causing off-by-one
+  var parts=String(ds).split(/[-\/]/);
+  var d;
+  if(parts.length===3){
+    if(parts[0].length===4) d=new Date(+parts[0],+parts[1]-1,+parts[2]);
+    else d=new Date(+parts[2],+parts[1]-1,+parts[0]);
+  } else { d=new Date(ds); }
+  if(!d||isNaN(d))return null;
   var ty=new Date(today.getFullYear(),d.getMonth(),d.getDate());
   if(ty<today)ty.setFullYear(today.getFullYear()+1);
   return Math.round((ty-today)/86400000);
 }
 function cu(){ return document.getElementById('userSel').value||'Clinton'; }
+function remKey(name,type){
+  var yr=new Date().getFullYear();
+  return 'du_rem_'+yr+'_'+String(name||'').replace(/\s+/g,'_')+'_'+String(type||'').replace(/[^a-z0-9]/gi,'_');
+}
+function isRemDone(name,type){ return localStorage.getItem(remKey(name,type))==='1'; }
+function toggleRemDone(name,type){
+  var k=remKey(name,type);
+  if(localStorage.getItem(k)==='1') localStorage.removeItem(k);
+  else localStorage.setItem(k,'1');
+  render();
+}
 function recentKey(){ return 'du_recent_'+cu(); }
 function polsFor(id){ return DB.policies.filter(function(p){return String(p.ClientID)===String(id);}); }
 function roasFor(id){ return DB.roas.filter(function(r){return String(r.ClientID)===String(id);}); }
@@ -731,11 +749,17 @@ function renderDash(){
     (up.length===0?'<div class="empty" style="padding:12px">Nothing coming up 🎉</div>':
     up.map(function(u){
       var col=u.days<=7?'var(--rose)':u.days<=14?'var(--gold)':'var(--sage)';
-      return '<div class="ri" style="cursor:pointer;padding:7px 12px" data-act="open-client" data-id="'+u.id+'">'+
+      var done=isRemDone(u.name,u.type);
+      return '<div class="ri" style="padding:7px 12px;'+(done?'opacity:0.45;':'')+'display:flex;align-items:center;gap:6px">'+
+        '<input type="checkbox" '+(done?'checked':'')+
+        ' onchange="toggleRemDone('+JSON.stringify(u.name)+','+JSON.stringify(u.type)+')"'+
+        ' style="width:15px;height:15px;cursor:pointer;accent-color:var(--sage);flex-shrink:0"'+
+        ' title="Mark done" onclick="event.stopPropagation()">'+
         '<div class="rdot" style="background:'+u.col+';flex-shrink:0"></div>'+
-        '<div style="flex:1"><div style="font-weight:600;font-size:12px">'+u.name+'</div>'+
+        '<div style="flex:1;cursor:pointer;'+(done?'text-decoration:line-through;color:#aaa;':'')+'" data-act="open-client" data-id="'+u.id+'">'+
+        '<div style="font-weight:600;font-size:12px">'+u.name+'</div>'+
         '<div style="font-size:11px;color:#889">'+u.type+'</div></div>'+
-        '<div style="font-weight:700;font-size:11px;color:'+col+'">'+(u.days===0?'Today':u.days===1?'Tmrw':''+u.days+'d')+'</div></div>';
+        '<div style="font-weight:700;font-size:11px;color:'+(done?'#ccc':col)+'">'+(u.days===0?'Today':u.days===1?'Tmrw':''+u.days+'d')+'</div></div>';
     }).join(''))+
     '</div></div>'+
 
