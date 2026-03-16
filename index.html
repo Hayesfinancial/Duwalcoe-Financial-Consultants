@@ -3050,7 +3050,7 @@ function openTaskLogModal(taskId){
     '<textarea id="tlogentry" placeholder="What happened? What was actioned?" style="min-height:120px"></textarea></div>';
   var isDone = isdone(t);
   document.getElementById('tMod').querySelector('.mf').innerHTML=
-    '<button class="btn b-gh sm" data-close="1">Close</button>'+
+    '<button class="btn b-gh sm" onclick="saveTaskLogAndClose()">💾 Save & Close</button>'+
     (!isDone?'<div style="display:flex;align-items:center;gap:8px">'+
     '<select id="treassign" style="border:1.5px solid var(--mist);border-radius:7px;padding:6px 10px;font-size:12px;font-family:inherit">'+
     '<option value="">Reassign to…</option>'+
@@ -3150,6 +3150,54 @@ function saveTaskLog(){
   post({action:'updateTaskNotes',id:TASK_LOG_ID,notes:t.Notes},function(){toast('Entry added ✓','ok');});
   // Stay in the modal — refresh the log view in place without closing
   openTaskLogModal(TASK_LOG_ID);
+}
+
+function saveTaskLogAndClose(){
+  // Save any due date change (and optional note) then close
+  var t = DB.tasks.find(function(x){ return String(x.ID)===String(TASK_LOG_ID); });
+  if(!t){ closeAll(); render(); return; }
+  var changed = false;
+  // Due date
+  fdpSync('tlogdue');
+  var newDue = g('tlogdue');
+  if(newDue && newDue !== t.DueDate){
+    t.DueDate = newDue;
+    changed = true;
+  }
+  // Reassign
+  var reassign = document.getElementById('treassign');
+  var newAssignee = reassign ? reassign.value : '';
+  if(newAssignee && newAssignee !== t.Assignee){
+    t.Assignee = newAssignee;
+    changed = true;
+  }
+  // Priority
+  var priEl = document.getElementById('tpri');
+  var newPri = priEl ? priEl.value : '';
+  if(newPri && newPri !== t.Priority){
+    t.Priority = newPri;
+    changed = true;
+  }
+  // CC Wife
+  var ccEl = document.getElementById('tccwife');
+  var newCC = ccEl ? (ccEl.checked ? 'Yes' : '') : t.CCWife;
+  if(newCC !== t.CCWife){ t.CCWife = newCC; changed = true; }
+  // Optional note in textarea
+  var entry = document.getElementById('tlogentry');
+  var noteText = entry ? entry.value.trim() : '';
+  if(noteText){
+    var log = [];
+    try{ log = JSON.parse(t.Notes||'[]'); }catch(e){ if(t.Notes) log=[{date:t.Timestamp||'',text:t.Notes,user:t.Assignee||''}]; }
+    log.push({date:new Date().toISOString(), text:noteText, user:cu()});
+    t.Notes = JSON.stringify(log);
+    post({action:'updateTaskNotes',id:TASK_LOG_ID,notes:t.Notes},function(){});
+    changed = true;
+  }
+  if(changed){
+    post({action:'updateDueDate',id:TASK_LOG_ID,assignee:t.Assignee,dueDate:t.DueDate},function(){});
+    toast('Saved ✓','ok');
+  }
+  closeAll(); render();
 }
 
 function toggleTask(id,wasDone){
