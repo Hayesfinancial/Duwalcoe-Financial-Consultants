@@ -2048,7 +2048,8 @@ function buildNeeds() {
         +(S.otherAssets||[]).reduce(function(a,x){return a+N(x.val);},0);
       var _pl=(S.props||[]).reduce(function(a,p){return a+N(p.bond);},0)
         +(S.vehicles||[]).reduce(function(a,v){return a+N(v.finance);},0)
-        +(S.liabilities||[]).reduce(function(a,l){return a+N(l.bal);},0);
+        +(S.liabilities||[]).reduce(function(a,l){return a+N(l.bal);},0)
+        +(S.deathLiabs||[]).reduce(function(a,r){return a+N(r.amt);},0);
       var _s4q=0,_ep=0,_tp=0,_bd=0;
       (S.importedPols||[]).forEach(function(p){
         if(p.Type==='Business Assurance'){if(p.EstateDutiable==='Yes')_bd+=N(p.LoanAmount)||N(p.BenDeath);return;}
@@ -3724,8 +3725,15 @@ function buildEstate() {
   var _cgtResult = calcTotalCGT(_estMR*100);
   var cgtLiability = _cgtResult.totalCGT;
 
+  // All deductible liabilities — bonds/finance already in physLiab via assetRow
+  // S.liabilities = other debts entered on Assets tab
+  // S.deathLiabs  = personal loans, income tax, funeral costs entered on Needs tab
+  var otherLiabs   = (S.liabilities||[]).reduce(function(a,l){return a+N(l.bal);},0);
+  var deathLiabs   = (S.deathLiabs||[]).reduce(function(a,r){return a+N(r.amt);},0);
+  var totalLiab    = physLiab + otherLiabs + deathLiabs;
+
   var grossEstate    = totalDutiableAssets + estatePols + thirdPartyPols + bizDutiable + s4qPolicies;
-  var netEstate      = Math.max(0, grossEstate - physLiab - cgtLiability);
+  var netEstate      = Math.max(0, grossEstate - totalLiab - cgtLiability);
 
   // Accrual — on physical assets + RA fund values only (NOT risk policies)
   var accrualClaim = 0;
@@ -3822,7 +3830,15 @@ function buildEstate() {
   var b1 = makeCalcBox('Estate Duty Calculation');
   b1.row('Gross estate', Rfmt(grossEstate));
   b1.sub('Physical assets + all deemed property (policies)', '');
-  if(physLiab>0){ b1.row('Less: Liabilities (bonds, finance, loans)', '('+Rfmt(physLiab)+')', true); }
+  if(physLiab>0){ b1.row('Less: Bonds & vehicle finance', '('+Rfmt(physLiab)+')', true); }
+  if(otherLiabs>0){
+    b1.row('Less: Other liabilities (s.4(a))', '('+Rfmt(otherLiabs)+')', true);
+    (S.liabilities||[]).forEach(function(l){ if(N(l.bal)>0) b1.sub((l.desc||'Liability')+': '+Rfmt(l.bal), ''); });
+  }
+  if(deathLiabs>0){
+    b1.row('Less: Personal liabilities payable on death (s.4(a))', '('+Rfmt(deathLiabs)+')', true);
+    (S.deathLiabs||[]).forEach(function(r){ if(N(r.amt)>0) b1.sub((r.desc||'Liability')+': '+Rfmt(r.amt), ''); });
+  }
   if(cgtLiability>0){
     b1.row('Less: CGT on death (s.4(a) — deemed income tax)', '('+Rfmt(cgtLiability)+')', true);
     b1.sub('Inclusion rate 40% · Marginal rate '+Math.round(_estMR*100)+'% · Annual exclusion R300,000 applied', '');
@@ -3988,13 +4004,53 @@ function buildEstate() {
     benBox.appendChild(residueRow);
 
     if(S.cli.spouseInheritsResidue){
-      // Residue = what's left after ALL deductions from the estate:
-      // Net estate (after liabilities + CGT) − accrual − s.4(q) bequests − estate duty (estate's share) − executor fees
+      // Residue waterfall — show every step so it is auditable
       afterSpouse = Math.max(0, netEstate - Math.round(accrualDed) - Math.round(s4qDed) - Math.round(dutyPayableByEstate) - Math.round(execFees));
+
+      // Build a visible waterfall box
+      var resBox = div();
+      resBox.style.cssText = 'margin:8px 0 4px;padding:10px 14px;background:#0a2e29;border-radius:7px;font-size:11px';
+
+      function resRow(lbl, val, bold, borderTop){
+        var r = div();
+        r.style.cssText = 'display:flex;justify-content:space-between;padding:'+(bold?'7':'4')+'px 0;'
+          +(borderTop?'border-top:1px solid #334;margin-top:4px;padding-top:8px;':'');
+        var l = el('span','',lbl); l.style.cssText = 'color:'+(bold?'#fff':'#8899bb');
+        var v = el('span','',val); v.style.cssText = 'font-weight:'+(bold?'700':'400')+';color:'+(bold?'var(--gold)':'#ccd6f6');
+        r.appendChild(l); r.appendChild(v); resBox.appendChild(r);
+      }
+
+      resRow('Net estate (assets − liabilities − CGT)', Rfmt(netEstate));
+      if(Math.round(accrualDed)>0) resRow('Less: Accrual payable to spouse', '('+Rfmt(Math.round(accrualDed))+')');
+      resRow('Less: s.4(q) — paid direct to spouse (not through estate)', '('+Rfmt(Math.round(s4qDed))+')');
+      resRow('Less: Estate duty (estate\'s share)', '('+Rfmt(Math.round(dutyPayableByEstate))+')');
+      resRow('Less: Executor fees', '('+Rfmt(Math.round(execFees))+')');
+      resRow('Residue of estate', afterSpouse>0?Rfmt(afterSpouse):'R 0', true, true);
+
       if(afterSpouse>0){
-        var residueNote = 'Net estate after accrual, s.4(q), estate duty and executor fees'
-          + (liqGap<0 ? ' \u2014 \u26a0 Includes illiquid assets. Liquidity shortfall of '+Rfmt(Math.abs(Math.round(liqGap)))+' means assets may need to be sold to settle obligations before this passes to spouse.' : '');
-        benRow((S.cli.spouseName||'Spouse')+' \u2014 Residue of estate',Rfmt(afterSpouse),residueNote,'#86efac');
+        var residueNote;
+        if(liqGap<0){
+          residueNote = '⚠ This residue is NET ASSET VALUE — it is not cash. '
+            +'The estate has a liquidity shortfall of '+Rfmt(Math.abs(Math.round(liqGap)))+', meaning assets '
+            +'(likely property) may need to be sold before this value can pass to the spouse.';
+        } else {
+          residueNote = '✓ The estate is liquid — this residue can pass to the spouse without selling assets.';
+        }
+        var rNote = div(); rNote.style.cssText = 'font-size:10px;color:'+(liqGap<0?'#f87171':'#86efac')+';margin-top:6px;line-height:1.5';
+        rNote.textContent = residueNote;
+        resBox.appendChild(rNote);
+      }
+
+      benBox.appendChild(resBox);
+
+      if(afterSpouse>0){
+        benRow((S.cli.spouseName||'Spouse')+' \u2014 Residue of estate',
+          Rfmt(afterSpouse),
+          liqGap<0 ? '\u26a0 Net asset value only — estate has a cash shortfall of '+Rfmt(Math.abs(Math.round(liqGap)))+'. Assets may need to be sold.' : 'Estate is liquid \u2014 passes cleanly to spouse.',
+          liqGap<0 ? '#fbbf24' : '#86efac');
+      } else {
+        benRow((S.cli.spouseName||'Spouse')+' \u2014 Residue of estate',
+          'R 0', 'Nothing remains after settling all estate costs.', '#8899bb');
       }
     }
   }
@@ -4096,8 +4152,8 @@ function buildDeath() {
                +(S.otherAssets||[]).reduce(function(a,x){return a+N(x.val);},0);
   var physLiab = (S.props||[]).reduce(function(a,p){return a+N(p.bond);},0)
                +(S.vehicles||[]).reduce(function(a,v){return a+N(v.finance);},0)
-               +(S.liabilities||[]).reduce(function(a,l){return a+N(l.bal);},0);
-  var s4qPols=0, estPols=0, tpPols=0, bizDut=0, s4qAssets=0;
+               +(S.liabilities||[]).reduce(function(a,l){return a+N(l.bal);},0)
+               +(S.deathLiabs||[]).reduce(function(a,r){return a+N(r.amt);},0);
   pols.forEach(function(p){
     if(p.Type==='Business Assurance'){if(p.EstateDutiable==='Yes')bizDut+=N(p.LoanAmount)||N(p.BenDeath);return;}
     var b=N(p.BenDeath); if(!b)return;
@@ -4315,7 +4371,8 @@ function buildOverview() {
     +(S.otherAssets||[]).reduce(function(a,x){return a+N(x.val);},0);
   var _liabsO = (S.props||[]).reduce(function(a,p){return a+N(p.bond);},0)
     +(S.vehicles||[]).reduce(function(a,v){return a+N(v.finance);},0)
-    +(S.liabilities||[]).reduce(function(a,l){return a+N(l.bal);},0);
+    +(S.liabilities||[]).reduce(function(a,l){return a+N(l.bal);},0)
+    +(S.deathLiabs||[]).reduce(function(a,r){return a+N(r.amt);},0);
   var _s4qO=0,_epO=0,_tpO=0,_bdO=0;
   pols.forEach(function(p){
     if(p.Type==='Business Assurance'){if(p.EstateDutiable==='Yes')_bdO+=N(p.LoanAmount)||N(p.BenDeath);return;}
@@ -5342,9 +5399,8 @@ function printFNA() {
     +(S.otherAssets||[]).reduce(function(a,x){return a+N(x.val);},0);
   var physLiab=(S.props||[]).reduce(function(a,p){return a+N(p.bond);},0)
     +(S.vehicles||[]).reduce(function(a,v){return a+N(v.finance);},0)
-    +(S.liabilities||[]).reduce(function(a,l){return a+N(l.bal);},0);
-
-  var s4qPols=0,estPols=0,tpPols=0,bizDut=0,s4qAssets=0;
+    +(S.liabilities||[]).reduce(function(a,l){return a+N(l.bal);},0)
+    +(S.deathLiabs||[]).reduce(function(a,r){return a+N(r.amt);},0);
   pols.forEach(function(p){
     if(p.Type==='Business Assurance'){if(p.EstateDutiable==='Yes')bizDut+=N(p.LoanAmount)||N(p.BenDeath);return;}
     var b=N(p.BenDeath);if(!b)return;
