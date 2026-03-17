@@ -595,6 +595,12 @@ var DEFAULTS = {
     ]
   },
 
+  // Proposed solution (life cover alternative — does not overwrite needs)
+  proposed: {
+    lumps:   [],  // { desc, cover, premium }
+    incomes: []   // { desc, amount, esc, years, premium }
+  },
+
   // Policies imported from CRM via URL
   importedPols: [],
 
@@ -2148,6 +2154,155 @@ function buildNeeds() {
         '<div class="cr-row"><span>Existing cover</span><span class="gold">'+Rfmt(totalHave)+'</span></div>'+
         '<div class="cr-row big"><span>'+(totalHave>=totalNeed?'Surplus':'Shortfall')+'</span><span style="color:'+(totalHave>=totalNeed?'var(--green)':'var(--red)')+'">'+Rfmt(Math.abs(totalHave-totalNeed))+'</span></div>';
       s.appendChild(sumBox);
+    }
+
+    // ── PROPOSED SOLUTION ──────────────────────────────────────────
+    if(!S.proposed) S.proposed={lumps:[],incomes:[]};
+    var propSec = stitle('🔧 Test a Proposed Solution');
+    propSec.style.marginTop='24px';
+    s.appendChild(propSec);
+    var propInf=div('info');
+    propInf.innerHTML='Enter a proposed combination of cover — lump sum life policies and/or death income benefits. '
+      +'The system capitalises each income benefit and shows whether the proposal covers more than current policies, '
+      +'and how much of the need it addresses. <strong>This does not change the analysis above.</strong>';
+    s.appendChild(propInf);
+
+    // Drawdown rate for capitalisation — use same as income needs
+    var propDr = N(S.assump.drawdown)||4;
+
+    // ── Proposed lump sums
+    var plsTitle=div(); plsTitle.style.cssText='font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--navy);margin:10px 0 6px';
+    plsTitle.textContent='Proposed Lump Sum Policies';
+    s.appendChild(plsTitle);
+
+    (S.proposed.lumps||[]).forEach(function(r,i){
+      var row=g3();
+      row.appendChild(fld('Description',r,'desc',{placeholder:'e.g. Life cover — debt'}));
+      row.appendChild(rfld('Cover amount',r,'cover',{onblur:function(){persist();render();}}));
+      row.appendChild(rfld('Monthly premium',r,'premium',{onblur:function(){persist();render();}}));
+      var dw=div('f'); dw.appendChild(delBtn(function(){S.proposed.lumps.splice(i,1);persist();render();})); row.appendChild(dw);
+      s.appendChild(row);
+    });
+    s.appendChild(addBtn('+ Add lump sum policy',function(){
+      S.proposed.lumps.push({desc:'',cover:'',premium:''});render();
+    }));
+
+    // ── Proposed income benefits
+    var pibTitle=div(); pibTitle.style.cssText='font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--navy);margin:14px 0 6px';
+    pibTitle.textContent='Proposed Death Income Benefits';
+    s.appendChild(pibTitle);
+    var pibInf=div(); pibInf.style.cssText='font-size:11px;color:var(--sub);margin-bottom:8px';
+    pibInf.textContent='Each income benefit is capitalised to a lump sum equivalent using the drawdown assumption. Multiple benefits with different terms can be added.';
+    s.appendChild(pibInf);
+
+    (S.proposed.incomes||[]).forEach(function(r,i){
+      var card=div(); card.style.cssText='background:#fff;border:var(--border);border-radius:8px;padding:12px 14px;margin-bottom:8px';
+      var ch=div(); ch.style.cssText='display:flex;justify-content:space-between;align-items:center;margin-bottom:8px';
+      var df=div('f'); df.appendChild(el('label','','Description'));
+      var di=document.createElement('input'); di.type='text'; di.value=r.desc||''; di.placeholder='e.g. Death income — family expenses';
+      di.addEventListener('input',function(e){S.proposed.incomes[i].desc=e.target.value;});
+      di.addEventListener('blur',function(){persist();});
+      df.appendChild(di); ch.appendChild(df);
+
+      // Capital badge — show capitalised equivalent live
+      var gross_i=N(r.amount);
+      var esc_i=N(r.esc)>0?N(r.esc):N(S.assump.cpi)||6;
+      var yrs_i=N(r.years);
+      if(gross_i>0&&yrs_i>0){
+        var cap_i=Math.round(capitalise(gross_i,yrs_i,esc_i,propDr));
+        var badge_i=div(); badge_i.style.cssText='flex-shrink:0;margin-left:10px;text-align:right';
+        var bl=el('div','','Lump sum equiv.'); bl.style.cssText='font-size:9px;text-transform:uppercase;color:var(--sub);margin-bottom:1px';
+        var bv=el('div','',Rfmt(cap_i)); bv.style.cssText='font-size:13px;font-weight:700;color:var(--navy)';
+        badge_i.appendChild(bl); badge_i.appendChild(bv); ch.appendChild(badge_i);
+      }
+      ch.appendChild(delBtn(function(){S.proposed.incomes.splice(i,1);persist();render();}));
+      card.appendChild(ch);
+
+      var rg=g4();
+      // Amount pm
+      var af2=div('f'); af2.appendChild(el('label','','Monthly benefit (R/pm)'));
+      var arw2=div('rw'); arw2.appendChild(el('span','rp','R'));
+      var ai2=document.createElement('input'); ai2.type='text'; ai2.inputMode='numeric'; ai2.value=r.amount||''; ai2.placeholder='e.g. 25000';
+      ai2.addEventListener('input',function(e){S.proposed.incomes[i].amount=e.target.value;});
+      ai2.addEventListener('blur',function(){persist();render();}); arw2.appendChild(ai2); af2.appendChild(arw2); rg.appendChild(af2);
+      // Escalation
+      var ef2=div('f'); ef2.appendChild(el('label','','Escalation % pa'));
+      var epw2=div('pw'); epw2.appendChild(el('span','pp','%'));
+      var ei2=document.createElement('input'); ei2.type='text'; ei2.value=r.esc||''; ei2.placeholder=S.assump.cpi||'6';
+      ei2.addEventListener('input',function(e){S.proposed.incomes[i].esc=e.target.value;});
+      ei2.addEventListener('blur',function(){persist();render();}); epw2.insertBefore(ei2,epw2.firstChild); ef2.appendChild(epw2); rg.appendChild(ef2);
+      // Term
+      var tf2=div('f'); tf2.appendChild(el('label','','Term (years)'));
+      var ti2=document.createElement('input'); ti2.type='text'; ti2.inputMode='numeric'; ti2.value=r.years||''; ti2.placeholder='e.g. 15';
+      ti2.addEventListener('input',function(e){S.proposed.incomes[i].years=e.target.value;});
+      ti2.addEventListener('blur',function(){persist();render();}); tf2.appendChild(ti2); rg.appendChild(tf2);
+      // Premium
+      var pf2=div('f'); pf2.appendChild(el('label','','Monthly premium'));
+      var prw2=div('rw'); prw2.appendChild(el('span','rp','R'));
+      var pi2=document.createElement('input'); pi2.type='text'; pi2.inputMode='numeric'; pi2.value=r.premium||''; pi2.placeholder='0';
+      pi2.addEventListener('input',function(e){S.proposed.incomes[i].premium=e.target.value;});
+      pi2.addEventListener('blur',function(){persist();render();}); prw2.appendChild(pi2); pf2.appendChild(prw2); rg.appendChild(pf2);
+      card.appendChild(rg);
+      s.appendChild(card);
+    });
+    s.appendChild(addBtn('+ Add death income benefit',function(){
+      S.proposed.incomes.push({desc:'',amount:'',esc:'',years:'',premium:''});render();
+    }));
+
+    // ── Proposed solution summary
+    var propLumpTotal=(S.proposed.lumps||[]).reduce(function(a,r){return a+N(r.cover);},0);
+    var propIncCapTotal=0;
+    var propIncDetails=[];
+    (S.proposed.incomes||[]).forEach(function(r){
+      var g2=N(r.amount); var e2=N(r.esc)>0?N(r.esc):N(S.assump.cpi)||6; var y2=N(r.years);
+      if(g2>0&&y2>0){
+        var c2=Math.round(capitalise(g2,y2,e2,propDr));
+        propIncCapTotal+=c2;
+        propIncDetails.push({desc:r.desc||'Income benefit',amount:g2,esc:e2,years:y2,cap:c2,prem:N(r.premium)});
+      }
+    });
+    var propTotalCover=propLumpTotal+propIncCapTotal;
+    var propTotalPrem=(S.proposed.lumps||[]).reduce(function(a,r){return a+N(r.premium);},0)
+                    +(S.proposed.incomes||[]).reduce(function(a,r){return a+N(r.premium);},0);
+
+    if(propTotalCover>0){
+      var propSum=div(); propSum.style.cssText='background:var(--navy);border-radius:9px;padding:16px 20px;margin-top:14px';
+      function pRow(lbl,val,sub,bold,borderTop){
+        var r2=div(); r2.style.cssText='display:flex;justify-content:space-between;padding:'+(bold?'8':'5')+'px 0;font-size:'+(bold?'14':'12')+'px;'+(borderTop?'border-top:2px solid #334;margin-top:6px;padding-top:10px;':'');
+        var l2=el('span','',lbl); l2.style.cssText='color:'+(sub?'#8899bb':'#ccd6f6')+(sub?';font-size:11px':'')+(bold?';font-weight:700':'');
+        var v2=el('span','',val); v2.style.cssText='font-weight:'+(bold?'700':'400')+';color:#d4f0a8';
+        r2.appendChild(l2); r2.appendChild(v2); propSum.appendChild(r2);
+      }
+      // Lump sums
+      if(propLumpTotal>0){
+        pRow('LUMP SUM POLICIES','',false,true);
+        (S.proposed.lumps||[]).forEach(function(r){
+          if(N(r.cover)>0) pRow((r.desc||'Lump sum')+' — cover',Rfmt(r.cover),true);
+          if(N(r.premium)>0) pRow((r.desc||'Lump sum')+' — premium',Rfmt(r.premium)+'/pm',true);
+        });
+        pRow('Total lump sum cover',Rfmt(propLumpTotal),false,false,true);
+      }
+      // Income benefits
+      if(propIncDetails.length>0){
+        pRow('DEATH INCOME BENEFITS (capitalised)','',false,true);
+        propIncDetails.forEach(function(d){
+          pRow((d.desc)+': '+Rfmt(d.amount)+'/pm × '+d.years+' yrs @ '+d.esc+'% esc','= '+Rfmt(d.cap),true);
+          if(d.prem>0) pRow('Premium',Rfmt(d.prem)+'/pm',true);
+        });
+        pRow('Total income benefits (capital equiv.)',Rfmt(propIncCapTotal),false,false,true);
+      }
+      // Grand totals
+      pRow('TOTAL PROPOSED COVER (equivalent)',Rfmt(propTotalCover),false,true,true);
+      if(propTotalPrem>0) pRow('Total monthly premium',Rfmt(propTotalPrem)+'/pm',false,false);
+      // vs existing
+      var vsExist=propTotalCover-totalHave;
+      pRow('vs Existing cover ('+Rfmt(totalHave)+')',(vsExist>=0?'▲ +':' ')+Rfmt(Math.abs(vsExist)),false,false);
+      // vs full need
+      if(totalNeed>0){
+        var vsNeed=propTotalCover-totalNeed;
+        pRow('vs Full need ('+Rfmt(totalNeed)+')',(vsNeed>=0?'▲ SURPLUS '+Rfmt(vsNeed):'▼ STILL SHORT '+Rfmt(Math.abs(vsNeed))),false,true,true);
+      }
+      s.appendChild(propSum);
     }
   }
 
@@ -4353,7 +4508,80 @@ function buildDeath() {
   }
 
   // ══════════════════════════════════════════════════════
-  // SECTION 4 — DISCLOSURES & SIGNATURE
+  // SECTION 4 — PROPOSED SOLUTION (if entered)
+  // ══════════════════════════════════════════════════════
+  if(S.proposed && (
+    (S.proposed.lumps||[]).some(function(r){return N(r.cover)>0;}) ||
+    (S.proposed.incomes||[]).some(function(r){return N(r.amount)>0&&N(r.years)>0;})
+  )){
+    s.appendChild(stitle('Proposed Solution — Before & After'));
+    var propInf2=div('info');
+    propInf2.innerHTML='This comparison shows how the proposed combination of cover addresses the identified shortfall. '
+      +'Income benefits are capitalised to a lump sum equivalent for comparison. '
+      +'<strong>Existing cover is unchanged — this is the proposed addition.</strong>';
+    s.appendChild(propInf2);
+
+    var propDr2=N(S.assump.drawdown)||4;
+    var propLumpTotal2=(S.proposed.lumps||[]).reduce(function(a,r){return a+N(r.cover);},0);
+    var propIncCap2=0;
+    (S.proposed.incomes||[]).forEach(function(r){
+      var g3=N(r.amount); var e3=N(r.esc)>0?N(r.esc):N(S.assump.cpi)||6; var y3=N(r.years);
+      if(g3>0&&y3>0) propIncCap2+=Math.round(capitalise(g3,y3,e3,propDr2));
+    });
+    var propTotal2=propLumpTotal2+propIncCap2;
+    var propPrem2=(S.proposed.lumps||[]).reduce(function(a,r){return a+N(r.premium);},0)
+                +(S.proposed.incomes||[]).reduce(function(a,r){return a+N(r.premium);},0);
+
+    var compBox=div(); compBox.style.cssText='background:var(--navy);border-radius:9px;padding:18px 20px;margin-bottom:14px';
+    function compRow(lbl,vBefore,vAfter,highlight){
+      var r3=div(); r3.style.cssText='display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;padding:8px 0;border-bottom:1px solid #223;font-size:12px;'+(highlight?'font-weight:700;':'');
+      var l3=el('div','',lbl); l3.style.color=highlight?'#fff':'#ccd6f6';
+      var b3=el('div','',vBefore); b3.style.cssText='text-align:right;color:'+(highlight?'#f87171':'#8899bb');
+      var a3=el('div','',vAfter); a3.style.cssText='text-align:right;color:'+(highlight?'#86efac':'#d4f0a8');
+      r3.appendChild(l3); r3.appendChild(b3); r3.appendChild(a3); compBox.appendChild(r3);
+    }
+    // Header
+    var hdr3=div(); hdr3.style.cssText='display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;padding-bottom:8px;border-bottom:2px solid #334;margin-bottom:4px';
+    function hCell(t){var c=el('div','',t);c.style.cssText='font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:#8899bb;text-align:right';return c;}
+    var hLbl=el('div','',''); hdr3.appendChild(hLbl);
+    hdr3.appendChild(hCell('Current'));
+    hdr3.appendChild(hCell('Proposed'));
+    compBox.appendChild(hdr3);
+
+    compRow('Cover in force',Rfmt(deathHave),Rfmt(deathHave+propTotal2));
+    if(propLumpTotal2>0) compRow('  of which: lump sum','—',Rfmt(deathHave+propLumpTotal2));
+    if(propIncCap2>0)    compRow('  of which: income (capital equiv.)','—',Rfmt(propIncCap2));
+    compRow('Full need',Rfmt(deathNeed),Rfmt(deathNeed));
+    var gapBefore=deathHave-deathNeed;
+    var gapAfter=deathHave+propTotal2-deathNeed;
+    compRow(
+      gapAfter>=0?'SURPLUS':'SHORTFALL',
+      (gapBefore>=0?'▲ ':'▼ ')+Rfmt(Math.abs(gapBefore)),
+      (gapAfter>=0?'▲ ':'▼ ')+Rfmt(Math.abs(gapAfter)),
+      true
+    );
+    if(propPrem2>0){
+      var premRow=div(); premRow.style.cssText='display:flex;justify-content:space-between;padding:8px 0 4px;font-size:11px';
+      var pl3=el('span','','Additional monthly premium'); pl3.style.color='#8899bb';
+      var pv3=el('span','',Rfmt(propPrem2)+'/pm'); pv3.style.cssText='font-weight:700;color:#fcd34d';
+      premRow.appendChild(pl3); premRow.appendChild(pv3); compBox.appendChild(premRow);
+    }
+    s.appendChild(compBox);
+
+    // Narrative line for ROA
+    var improve=gapBefore-gapAfter;
+    var narr=div(); narr.style.cssText='font-size:11px;padding:9px 12px;border-radius:6px;margin-bottom:14px;line-height:1.6;'
+      +(gapAfter>=0?'background:#f0fdf4;border:1px solid #bbf7d0;color:#166534':'background:#fffbeb;border:1px solid #fde68a;color:#92400e');
+    narr.innerHTML='The proposed solution adds <strong>'+Rfmt(propTotal2)+'</strong> of equivalent cover'
+      +(propPrem2>0?' at <strong>'+Rfmt(propPrem2)+'/pm</strong>':'')+'. '
+      +(gapAfter>=0
+        ? 'This <strong>fully addresses the life cover need</strong> with a surplus of '+Rfmt(gapAfter)+'.'
+        : 'The shortfall reduces from <strong>'+Rfmt(Math.abs(gapBefore))+'</strong> to <strong>'+Rfmt(Math.abs(gapAfter))+'</strong> — an improvement of '+Rfmt(improve)+'.');
+    s.appendChild(narr);
+  }
+
+  // ══════════════════════════════════════════════════════
+  // SECTION 5 — DISCLOSURES & SIGNATURE
   // ══════════════════════════════════════════════════════
   s.appendChild(stitle('Disclosures'));
   var discBox=div(); discBox.style.cssText='background:#f4f4f0;border:1px solid #dde0e8;border-radius:7px;padding:14px 16px;font-size:11px;color:#444;line-height:1.7;margin-bottom:16px';
