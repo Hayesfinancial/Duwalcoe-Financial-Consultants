@@ -929,7 +929,7 @@ function status(msg) {
 // ═══════════════════════════════════════════════════════════
 // NAVIGATION
 // ═══════════════════════════════════════════════════════════
-var TABS = ['Client', 'Scope', 'Income', 'Assets', 'Needs', 'Policies', 'Retirement', 'Estate', 'Death & Estate', 'Disability & Dread', 'Retirement Outlook', 'ROA'];
+var TABS = ['Client', 'Scope', 'Income', 'Assets & Liabilities', 'Needs', 'Policies', 'Retirement', 'Estate', 'Death & Estate', 'Disability & Dread', 'Retirement Outlook', 'ROA'];
 var activeTab = 0;
 function go(i)    { persist(); activeTab = i; render(); }
 function nextTab(){ if (activeTab < TABS.length-1) { persist(); activeTab++; render(); window.scrollTo(0,0); } }
@@ -4152,8 +4152,10 @@ function buildDeath() {
                +(S.otherAssets||[]).reduce(function(a,x){return a+N(x.val);},0);
   var physLiab = (S.props||[]).reduce(function(a,p){return a+N(p.bond);},0)
                +(S.vehicles||[]).reduce(function(a,v){return a+N(v.finance);},0)
-               +(S.liabilities||[]).reduce(function(a,l){return a+N(l.bal);},0)
-               +(S.deathLiabs||[]).reduce(function(a,r){return a+N(r.amt);},0);
+               +(S.liabilities||[]).reduce(function(a,l){return a+N(l.bal);},0);
+  var deathLiabsAmt = (S.deathLiabs||[]).reduce(function(a,r){return a+N(r.amt);},0);
+  var totalLiabForDuty = physLiab + deathLiabsAmt;
+  var s4qPols=0, estPols=0, tpPols=0, bizDut=0, s4qAssets=0;
   pols.forEach(function(p){
     if(p.Type==='Business Assurance'){if(p.EstateDutiable==='Yes')bizDut+=N(p.LoanAmount)||N(p.BenDeath);return;}
     var b=N(p.BenDeath); if(!b)return;
@@ -4170,7 +4172,7 @@ function buildDeath() {
     accrual=Math.max(0,(Math.max(0,_ce-_cs)-Math.max(0,_se-_ss))/2);
   }
   var grossEst = physVal+s4qPols+estPols+tpPols+bizDut;
-  var netEst   = Math.max(0,grossEst-physLiab-_cgt);
+  var netEst   = Math.max(0,grossEst-totalLiabForDuty-_cgt);
   var accrDed  = Math.min(accrual,netEst);
   var aftAccr  = Math.max(0,netEst-accrDed);
   var s4qDed   = Math.min(s4qPols+s4qAssets,aftAccr);
@@ -4187,13 +4189,13 @@ function buildDeath() {
     return sum+(tp.indexOf('business')>-1||tp.indexOf('farm')>-1||tp.indexOf('personal')>-1||tp.indexOf('inheritance')>-1?0:N(a.val));
   },0);
   var liqProvs = estPols+liqCash;
-  var liqNeeds = physLiab+(S.deathLiabs||[]).reduce(function(a,r){return a+N(r.amt);},0)+Math.round(duty)+Math.round(execFees)+Math.round(accrDed);
+  var liqNeeds = physLiab+deathLiabsAmt+Math.round(duty)+Math.round(execFees)+Math.round(accrDed);
   var liqGap   = liqProvs-liqNeeds;
 
   // Life cover need
   var estCostForCover = S.scope.estate ? (apDuty(physVal+estPols)+Math.round(execFees)+Math.round(accrDed)) : 0;
   var autoLiab = physLiab+_cgt+estCostForCover;
-  var manLiab  = (S.deathLiabs||[]).reduce(function(a,r){return a+N(r.amt);},0);
+  var manLiab  = deathLiabsAmt;
   var totLiab  = autoLiab+manLiab;
   var totInc   = (S.deathIncome||[]).reduce(function(a,r){return a+calcIncomeNeed(r);},0);
   var totCap   = (S.deathCapital||[]).reduce(function(a,r){return a+N(r.amt);},0);
@@ -4371,8 +4373,9 @@ function buildOverview() {
     +(S.otherAssets||[]).reduce(function(a,x){return a+N(x.val);},0);
   var _liabsO = (S.props||[]).reduce(function(a,p){return a+N(p.bond);},0)
     +(S.vehicles||[]).reduce(function(a,v){return a+N(v.finance);},0)
-    +(S.liabilities||[]).reduce(function(a,l){return a+N(l.bal);},0)
-    +(S.deathLiabs||[]).reduce(function(a,r){return a+N(r.amt);},0);
+    +(S.liabilities||[]).reduce(function(a,l){return a+N(l.bal);},0);
+  var _deathLiabsO = (S.deathLiabs||[]).reduce(function(a,r){return a+N(r.amt);},0);
+  var _totalLiabO  = _liabsO + _deathLiabsO;
   var _s4qO=0,_epO=0,_tpO=0,_bdO=0;
   pols.forEach(function(p){
     if(p.Type==='Business Assurance'){if(p.EstateDutiable==='Yes')_bdO+=N(p.LoanAmount)||N(p.BenDeath);return;}
@@ -4388,7 +4391,7 @@ function buildOverview() {
     _accO=Math.max(0,(Math.max(0,_ceO-_csO)-Math.max(0,_seO-_ssO))/2);
   }
   var _grossO=_physO+_s4qO+_epO+_tpO+_bdO;
-  var _netO=Math.max(0,_grossO-_liabsO-_cgtO);
+  var _netO=Math.max(0,_grossO-_totalLiabO-_cgtO);
   var _netAfAO=Math.max(0,_netO-_accO);
   var _s4qDedO=Math.min(_s4qO,_netAfAO);
   var _aftS4qO=Math.max(0,_netAfAO-_s4qDedO);
@@ -4429,7 +4432,7 @@ function buildOverview() {
     return sum+(tp.indexOf('business')>-1||tp.indexOf('farm')>-1||tp.indexOf('personal')>-1||tp.indexOf('inheritance')>-1?0:N(a.val));
   },0);
   var _liqProvO=_epO+_liqCashO;
-  var _liqNeedO=_liabsO+(S.deathLiabs||[]).reduce(function(a,r){return a+N(r.amt);},0)+Math.round(_dutyO)+Math.round(_execO)+Math.round(_accO);
+  var _liqNeedO=_liabsO+_deathLiabsO+Math.round(_dutyO)+Math.round(_execO)+Math.round(_accO);
   var _liqGapO=_liqProvO-_liqNeedO;
 
   // Retirement
@@ -5399,8 +5402,9 @@ function printFNA() {
     +(S.otherAssets||[]).reduce(function(a,x){return a+N(x.val);},0);
   var physLiab=(S.props||[]).reduce(function(a,p){return a+N(p.bond);},0)
     +(S.vehicles||[]).reduce(function(a,v){return a+N(v.finance);},0)
-    +(S.liabilities||[]).reduce(function(a,l){return a+N(l.bal);},0)
-    +(S.deathLiabs||[]).reduce(function(a,r){return a+N(r.amt);},0);
+    +(S.liabilities||[]).reduce(function(a,l){return a+N(l.bal);},0);
+  var manLiabTotal=(S.deathLiabs||[]).reduce(function(a,rn){return a+N(rn.amt);},0);
+  var totalLiabForDuty=physLiab+manLiabTotal;
   pols.forEach(function(p){
     if(p.Type==='Business Assurance'){if(p.EstateDutiable==='Yes')bizDut+=N(p.LoanAmount)||N(p.BenDeath);return;}
     var b=N(p.BenDeath);if(!b)return;
@@ -5423,7 +5427,7 @@ function printFNA() {
   }
 
   var grossEstate=physAssets+s4qPols+estPols+tpPols+bizDut;
-  var netEstate=Math.max(0,grossEstate-physLiab-_cgtTotal);
+  var netEstate=Math.max(0,grossEstate-totalLiabForDuty-_cgtTotal);
   var accrualDed=Math.min(accrualClaim,netEstate);
   var afterAccrual=Math.max(0,netEstate-accrualDed);
   var s4qDed=Math.min(s4qPols+s4qAssets,afterAccrual);
@@ -5445,7 +5449,6 @@ function printFNA() {
     if(accrualDed>0) autoLiabsP.push({desc:'Accrual payable to spouse',amt:Math.round(accrualDed)});
   }
   var autoLiabTotal=autoLiabsP.reduce(function(a,x){return a+x.amt;},0);
-  var manLiabTotal=(S.deathLiabs||[]).reduce(function(a,rn){return a+N(rn.amt);},0);
   var totLiab=autoLiabTotal+manLiabTotal;
   var totInc=(S.deathIncome||[]).reduce(function(a,rn){return a+calcIncomeNeed(rn);},0);
   var totCap=(S.deathCapital||[]).reduce(function(a,rn){return a+N(rn.amt);},0);
