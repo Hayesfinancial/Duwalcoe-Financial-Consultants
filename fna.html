@@ -4204,120 +4204,151 @@ function buildDeath() {
   var lcGap    = deathHave-deathNeed;
 
   // ══════════════════════════════════════════════════════
-  // SECTION 1 — ESTATE COST IMPACT
+  // ONE WATERFALL — assets in, costs out, cover gap
   // ══════════════════════════════════════════════════════
-  if(S.scope.estate){
-    s.appendChild(stitle('What Winding Up Your Estate Will Cost'));
-    var inf1=div('info');
-    inf1.innerHTML='These costs are settled <strong>before</strong> any beneficiary receives a cent. They are calculated in detail on the <strong>Estate</strong> tab.';
-    s.appendChild(inf1);
-    var eBox=nBox();
-    nRow(eBox,'Capital Gains Tax on death (deemed disposal)',Rfmt(Math.round(_cgt)),true);
-    nRow(eBox,'Estate duty ('+Math.round(_mr*100)+'% marginal rate applied)',Rfmt(Math.round(duty)),true);
-    nRow(eBox,'Executor fees (3.5% + VAT)',Rfmt(Math.round(execFees)),true);
-    if(Math.round(accrDed)>0) nRow(eBox,'Accrual payable to spouse',Rfmt(Math.round(accrDed)),true);
-    nRow(eBox,'TOTAL COST OF WINDING UP THE ESTATE',Rfmt(totalEstateCost),false,true,false,false,true);
-    if(liqGap<0){
-      nRow(eBox,'Liquidity shortfall — estate cannot pay without selling assets',Rfmt(Math.abs(Math.round(liqGap))),false,false,false,true);
-    } else {
-      nRow(eBox,'Liquidity surplus — estate can fund obligations from cash',Rfmt(Math.round(liqGap)),false,false,true);
-    }
-  }
+  s.appendChild(stitle('What Happens On The Day You Die'));
+  var inf1=div('info');
+  inf1.innerHTML='Everything you own goes in at the top. Everything that must be paid comes out. What remains is what your family receives — and life cover must fill any gap.';
+  s.appendChild(inf1);
 
-  // ══════════════════════════════════════════════════════
-  // SECTION 2 — WHAT YOUR FAMILY NEEDS
-  // ══════════════════════════════════════════════════════
-  if(S.scope.death){
-    s.appendChild(stitle('What Your Family Needs If You Die Today'));
-    var inf2=div('info');
-    inf2.innerHTML='Life cover must settle all debts and estate costs, <strong>and</strong> replace the income your family depends on. The gap below is what still needs to be covered.';
-    s.appendChild(inf2);
-    var fBox=nBox();
-    nRow(fBox,'DEBTS & ESTATE COSTS','',false,true);
-    if(physLiab>0) nRow(fBox,'Bonds, vehicle finance & other liabilities',Rfmt(physLiab),true);
-    if(_cgt>0) nRow(fBox,'CGT on death',Rfmt(Math.round(_cgt)),true);
-    if(estCostForCover>0) nRow(fBox,'Estate duty & executor fees',Rfmt(estCostForCover),true);
-    if(manLiab>0){
-      (S.deathLiabs||[]).forEach(function(r){if(N(r.amt)>0)nRow(fBox,r.desc||'Liability',Rfmt(r.amt),true);});
+  var mainBox=nBox();
+
+  // ── ASSETS IN ESTATE
+  nRow(mainBox,'ASSETS IN THE ESTATE','',false,true);
+  var hasAssets=false;
+  (S.props||[]).forEach(function(p){
+    if(N(p.val)>0){
+      hasAssets=true;
+      var net=N(p.val)-N(p.bond);
+      nRow(mainBox,(p.desc||'Property')+(N(p.bond)>0?' (net of bond R'+Rfmt(N(p.bond))+')':''),Rfmt(net),true);
     }
-    nRow(fBox,'Total debts & estate costs',Rfmt(totLiab),false,false,false,false,true);
+  });
+  (S.vehicles||[]).forEach(function(v){
+    if(N(v.val)>0){
+      hasAssets=true;
+      var net=N(v.val)-N(v.finance);
+      nRow(mainBox,(v.desc||'Vehicle')+(N(v.finance)>0?' (net of finance R'+Rfmt(N(v.finance))+')':''),Rfmt(net),true);
+    }
+  });
+  (S.otherAssets||[]).forEach(function(a){
+    if(N(a.val)>0){
+      hasAssets=true;
+      nRow(mainBox,a.desc||'Asset',Rfmt(a.val),true);
+    }
+  });
+  if(s4qPols>0){
+    hasAssets=true;
+    nRow(mainBox,'Life policies — paid direct to spouse (s.4(q), not through estate)',Rfmt(s4qPols),true);
+  }
+  if(estPols>0){
+    hasAssets=true;
+    nRow(mainBox,'Life policies — paid to estate (executor administers)',Rfmt(estPols),true);
+  }
+  if(tpPols>0){
+    hasAssets=true;
+    nRow(mainBox,'Life policies — paid to third parties',Rfmt(tpPols),true);
+  }
+  if(!hasAssets) nRow(mainBox,'No assets captured yet — add on Assets & Liabilities tab','—',true);
+  nRow(mainBox,'TOTAL GROSS ASSETS',Rfmt(physVal+(s4qPols+estPols+tpPols)),false,true,false,false,true);
+
+  // ── COSTS DEDUCTED
+  nRow(mainBox,'LESS: COSTS THAT MUST BE PAID FIRST','',false,true);
+  if(physLiab>0){
+    nRow(mainBox,'Bonds, finance & other liabilities','('+Rfmt(physLiab)+')',true);
+  }
+  if(_cgt>0)   nRow(mainBox,'Capital Gains Tax on death (s.4(a))','('+Rfmt(Math.round(_cgt))+')',true);
+  if(S.scope.estate){
+    if(Math.round(duty)>0)     nRow(mainBox,'Estate duty','('+Rfmt(Math.round(duty))+')',true);
+    if(Math.round(execFees)>0) nRow(mainBox,'Executor fees (3.5% + VAT)','('+Rfmt(Math.round(execFees))+')',true);
+    if(Math.round(accrDed)>0)  nRow(mainBox,'Accrual payable to spouse (ANC)','('+Rfmt(Math.round(accrDed))+')',true);
+  }
+  if(deathLiabsAmt>0){
+    (S.deathLiabs||[]).forEach(function(r){
+      if(N(r.amt)>0) nRow(mainBox,r.desc||'Personal liability','('+Rfmt(r.amt)+')',true);
+    });
+  }
+  var totalCosts = totalLiabForDuty+Math.round(_cgt)+(S.scope.estate?(Math.round(duty)+Math.round(execFees)+Math.round(accrDed)):0);
+  nRow(mainBox,'TOTAL COSTS',Rfmt(totalCosts),false,true,false,true,true);
+
+  // ── NET TO FAMILY
+  var netToFamily = (physVal+estPols+tpPols) - totalCosts;
+  nRow(mainBox,netToFamily>=0?'NET REMAINING FOR THE FAMILY':'NET — ESTATE IS INSOLVENT BY',
+    (netToFamily<0?'− ':'')+Rfmt(Math.abs(Math.round(netToFamily))),
+    false,true,netToFamily>=0,netToFamily<0,true);
+
+  // ── FAMILY INCOME & CAPITAL NEEDS (life cover gap)
+  if(S.scope.death && (totInc>0||totCap>0||deathNeed>0)){
+    nRow(mainBox,'PLUS: LIFE COVER NEEDED FOR FAMILY','',false,true);
     if(totInc>0){
-      nRow(fBox,'FAMILY INCOME NEEDS','',false,true);
       (S.deathIncome||[]).forEach(function(r){
-        if(calcIncomeNeed(r)>0) nRow(fBox,(r.desc||'Income need')+' (capitalised)',Rfmt(calcIncomeNeed(r)),true);
+        if(calcIncomeNeed(r)>0) nRow(mainBox,(r.desc||'Income replacement')+' — capitalised',Rfmt(calcIncomeNeed(r)),true);
       });
-      nRow(fBox,'Total income replacement needed',Rfmt(totInc),false,false,false,false,true);
     }
     if(totCap>0){
-      nRow(fBox,'CAPITAL NEEDS','',false,true);
       (S.deathCapital||[]).forEach(function(r){
-        if(N(r.amt)>0) nRow(fBox,r.desc||'Capital need',Rfmt(r.amt),true);
+        if(N(r.amt)>0) nRow(mainBox,r.desc||'Capital need',Rfmt(r.amt),true);
       });
-      nRow(fBox,'Total capital needs',Rfmt(totCap),false,false,false,false,true);
     }
-    nRow(fBox,'TOTAL LIFE COVER REQUIRED',Rfmt(deathNeed),false,true,false,false,true);
-    nRow(fBox,'Existing life cover in force',Rfmt(deathHave),false,false,lcGap>=0,lcGap<0);
-    nRow(fBox,lcGap>=0?'▲ SURPLUS — family is covered':'▼ SHORTFALL — additional cover needed',Rfmt(Math.abs(lcGap)),false,true,lcGap>=0,lcGap<0,true);
+    nRow(mainBox,'TOTAL LIFE COVER REQUIRED',Rfmt(deathNeed),false,true,false,false,true);
+    nRow(mainBox,'Existing life cover in force',Rfmt(deathHave),false,false,lcGap>=0,lcGap<0);
+    nRow(mainBox,lcGap>=0?'▲ SURPLUS — family is fully covered':'▼ SHORTFALL — additional cover needed',
+      Rfmt(Math.abs(lcGap)),false,true,lcGap>=0,lcGap<0,true);
+  }
+
+  if(S.scope.death){
     if(lcGap<0){
-      alertBox('⚠ <strong>Life cover shortfall of '+Rfmt(Math.abs(lcGap))+'.</strong> Without additional cover, your family would need to liquidate assets or reduce their lifestyle significantly to meet these obligations.','red');
-    } else {
+      alertBox('⚠ <strong>Life cover shortfall of '+Rfmt(Math.abs(lcGap))+'.</strong> Without additional cover, your family would need to sell assets or reduce their lifestyle to meet these obligations.','red');
+    } else if(deathNeed>0){
       alertBox('✓ <strong>Life cover is sufficient.</strong> Existing policies cover all obligations with a surplus of '+Rfmt(lcGap)+'.','green');
     }
   }
 
-  // ══════════════════════════════════════════════════════
-  // SECTION 3 — WHERE THE MONEY GOES (BENEFICIARIES)
-  // ══════════════════════════════════════════════════════
+  // Liquidity note
   if(S.scope.estate){
-    s.appendChild(stitle('Where the Money Goes — Beneficiary Outcomes'));
-    var inf3=div('info');
-    inf3.innerHTML='What each beneficiary actually receives after all estate costs are settled.';
-    s.appendChild(inf3);
-    var bBox=nBox();
-    var anyBen=false;
-    // Spouse — s.4(q) policies and assets
-    if(s4qPols>0||s4qAssets>0){
-      anyBen=true;
-      var spList=pols.filter(function(p){return(p.BeneficiaryType||'')==='Spouse'&&N(p.BenDeath)>0&&p.Type!=='Business Assurance';});
-      var spNote=spList.map(function(p){return(p.Insurer||'')+(p.Product?' — '+p.Product:'')+': '+Rfmt(p.BenDeath);}).join(' · ');
-      nRow(bBox,(S.cli.spouseName||S.cli.spouse||'Spouse')+' — Policies (s.4(q) — not dutiable)',Rfmt(s4qPols+s4qAssets),false,false,true);
-      if(spNote){var sn=div();sn.style.cssText='font-size:10px;color:#8899bb;padding:2px 0 6px 14px';sn.textContent=spNote;bBox.appendChild(sn);}
+    if(liqGap<0){
+      alertBox('⚠ <strong>Liquidity shortfall of '+Rfmt(Math.abs(Math.round(liqGap)))+'.</strong> The estate does not have enough liquid cash (bank accounts, liquid investments, policies paid to estate) to settle all obligations. Assets such as property may need to be sold — which can take months and may force a distressed sale.','red');
+    } else {
+      alertBox('✓ <strong>Estate is liquid.</strong> Liquid provisions (cash + policies to estate) cover all obligations without selling property. Surplus: '+Rfmt(Math.round(liqGap))+'.','green');
     }
-    // Spouse residue
+  }
+
+  // ── BENEFICIARY OUTCOMES
+  if(S.scope.estate && (s4qPols>0||s4qAssets>0||estPols>0||tpPols>0)){
+    s.appendChild(stitle('Where the Money Goes — Beneficiary Outcomes'));
+    var bBox=nBox();
+    if(s4qPols>0||s4qAssets>0){
+      var spList2=pols.filter(function(p){return(p.BeneficiaryType||'')==='Spouse'&&N(p.BenDeath)>0&&p.Type!=='Business Assurance';});
+      var spNote2=spList2.map(function(p){return(p.Insurer||'')+(p.Product?' — '+p.Product:'')+': '+Rfmt(p.BenDeath);}).join(' · ');
+      nRow(bBox,(S.cli.spouseName||S.cli.spouse||'Spouse')+' — s.4(q) policies & assets (not dutiable)',Rfmt(s4qPols+s4qAssets),false,false,true);
+      if(spNote2){var sn=div();sn.style.cssText='font-size:10px;color:#8899bb;padding:2px 0 6px 14px';sn.textContent=spNote2;bBox.appendChild(sn);}
+    }
     if(S.cli.spouseInheritsResidue){
       var residue=Math.max(0,netEst-Math.round(accrDed)-Math.round(s4qDed)-Math.round(duty)-Math.round(execFees));
-      if(residue>0){
-        anyBen=true;
-        nRow(bBox,(S.cli.spouseName||'Spouse')+' — Residue of estate (after all costs)',Rfmt(residue),false,false,true);
+      nRow(bBox,(S.cli.spouseName||'Spouse')+' — Residue of estate',residue>0?Rfmt(residue):'R 0 (nothing remains after costs)',false,false,residue>0,residue===0);
+      if(liqGap<0&&residue>0){
+        var rn=div();rn.style.cssText='font-size:10px;color:#fbbf24;padding:2px 0 6px 14px';
+        rn.textContent='⚠ Residue is net asset value — not cash. Estate has a liquidity shortfall of '+Rfmt(Math.abs(Math.round(liqGap)))+'. Assets may need to be sold.';
+        bBox.appendChild(rn);
       }
     }
-    // Estate-beneficiary policies
     if(estPols>0){
-      anyBen=true;
-      nRow(bBox,'Estate — funds duty, executor fees & bequests',Rfmt(estPols),false,false,false,false,!!(s4qPols||s4qAssets||S.cli.spouseInheritsResidue));
+      nRow(bBox,'Estate — funds duty, executor fees & bequests',Rfmt(estPols),false,false,false,false,!!(s4qPols||s4qAssets));
       pols.filter(function(p){return(p.BeneficiaryType||'')==='Estate'&&N(p.BenDeath)>0;}).forEach(function(p){
         nRow(bBox,(p.Insurer||'')+(p.Product?' — '+p.Product:''),Rfmt(N(p.BenDeath)),true);
       });
     }
-    // Third party
     pols.forEach(function(p){
       if((p.BeneficiaryType||'')==='Third Party'&&N(p.BenDeath)>0&&p.Type!=='Business Assurance'){
-        anyBen=true;
         var dutyOwed=Math.round(apDuty(N(p.BenDeath)));
-        nRow(bBox,(p.Beneficiary||'Third party')+' — pays own duty share of '+Rfmt(dutyOwed),Rfmt(N(p.BenDeath))+' (net: '+Rfmt(N(p.BenDeath)-dutyOwed)+')',true);
+        nRow(bBox,(p.Beneficiary||'Third party')+' — duty share: '+Rfmt(dutyOwed),Rfmt(N(p.BenDeath))+'  (net: '+Rfmt(N(p.BenDeath)-dutyOwed)+')',true);
       }
     });
-    // Business assurance
     pols.forEach(function(p){
       if(p.Type==='Business Assurance'){
         var amt=N(p.LoanAmount)||N(p.BenDeath); if(!amt)return;
-        anyBen=true;
         nRow(bBox,(p.Beneficiary||'Business')+' — Business Assurance'+(p.EstateDutiable==='Yes'?' (dutiable)':' (outside estate)'),Rfmt(amt));
       }
     });
-    if(!anyBen){
-      var nb=div('info'); nb.textContent='No beneficiary allocations set. Go to the Estate tab to configure policy routing.'; s.appendChild(nb);
-    }
   }
 
   // ══════════════════════════════════════════════════════
@@ -4728,6 +4759,241 @@ function buildRetirementOutlook() {
   var cpi       = N(S.assump.cpi)||6;
   var incEsc    = N(S.assump.incEsc)||6;
 
+  // ── Capital at retirement
+  var capitalAtRetirement = 0;
+  S.retAssets.forEach(function(r){
+    if(!N(r.currentVal)&&!N(r.monthlyContrib))return;
+    var gr=N(r.growthRate)>0?N(r.growthRate):growthR;
+    var ec=N(r.contribEsc)>0?N(r.contribEsc):incEsc;
+    capitalAtRetirement+=projectFund(r.currentVal,r.monthlyContrib,ec,gr,yrsToR);
+  });
+  capitalAtRetirement+=N(S.retOtherCapital);
+  (S.props||[]).forEach(function(p){
+    if(!p.soldAtRetirement||!N(p.val))return;
+    var gr=N(p.propGrowth)>0?N(p.propGrowth):growthR;
+    capitalAtRetirement+=Math.round(N(p.val)*Math.pow(1+gr/100,yrsToR)*(N(p.retirementPct)>0?N(p.retirementPct):100)/100);
+  });
+  (S.otherAssets||[]).forEach(function(a){
+    if((a.retirementRole||'')!=='Sold at retirement — proceeds to retirement'||!N(a.retirementSaleProceeds))return;
+    var gr=N(a.growthRate)>0?N(a.growthRate):growthR;
+    capitalAtRetirement+=Math.round(N(a.retirementSaleProceeds)*Math.pow(1+gr/100,yrsToR));
+  });
+
+  var lumpSumsAtRet=(S.retLumps||[]).reduce(function(a,r){return a+N(r.amt);},0);
+  var fundAtRet=Math.max(0,capitalAtRetirement-lumpSumsAtRet);
+
+  // ── Capital required
+  var retNeed=0;
+  var monthlyAtRet=0;
+  var escInRetArr=[];
+  (S.retNeeds||[]).forEach(function(r){
+    if(!N(r.amtToday))return;
+    var et=N(r.esc)>0?N(r.esc):cpi;
+    var ei=(r.escInRet!==''&&r.escInRet!==undefined&&r.escInRet!==null)?N(r.escInRet):et;
+    retNeed+=retirementCapitalNeeded(N(r.amtToday),yrsToR,yrsInR,et,S.assump.retReturn,ei);
+    monthlyAtRet+=N(r.amtToday)*Math.pow(1+et/100,yrsToR);
+    escInRetArr.push(ei);
+  });
+  retNeed+=lumpSumsAtRet;
+  var avgEscInRet=escInRetArr.length>0?escInRetArr.reduce(function(a,v){return a+v;},0)/escInRetArr.length:cpi;
+  var retGap=capitalAtRetirement-retNeed;
+  var funded=retNeed>0?Math.round(capitalAtRetirement/retNeed*100):null;
+
+  // ── KPI CARDS
+  s.appendChild(stitle('Retirement Capital — Age '+retAge+' ('+yrsToR+' years away)'));
+  var cardsWrap=div(); cardsWrap.style.cssText='display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:16px';
+  function kpiCard(lbl,val,col,note){
+    var c=div(); c.style.cssText='background:var(--navy);border-radius:8px;padding:14px 16px;text-align:center';
+    var l2=el('div','',lbl); l2.style.cssText='font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:#8899bb;margin-bottom:6px';
+    var v2=el('div','',val); v2.style.cssText='font-size:17px;font-weight:700;color:'+(col||'var(--gold)');
+    c.appendChild(l2); c.appendChild(v2);
+    if(note){var n2=el('div','',note);n2.style.cssText='font-size:10px;color:#8899bb;margin-top:4px';c.appendChild(n2);}
+    cardsWrap.appendChild(c);
+  }
+  kpiCard('Capital at Retirement',Rfmt(capitalAtRetirement),capitalAtRetirement>=retNeed?'#86efac':'#f87171');
+  kpiCard('Capital Required',retNeed>0?Rfmt(retNeed):'—');
+  kpiCard(retGap>=0?'Surplus':'Shortfall',retNeed>0?Rfmt(Math.abs(retGap)):'—',retGap>=0?'#86efac':'#f87171',funded!==null?funded+'% funded':null);
+  s.appendChild(cardsWrap);
+
+  if(retNeed>0){
+    var capMsg=div(); capMsg.style.cssText='font-size:11px;padding:9px 12px;border-radius:6px;margin-bottom:14px;'
+      +(retGap>=0?'background:#f0fdf4;border:1px solid #bbf7d0;color:#166534':'background:#fef2f2;border:1px solid #fecaca;color:#991b1b');
+    capMsg.innerHTML=retGap>=0
+      ?'✓ On current projections the retirement fund will be sufficient. Monthly income today: <strong>'+Rfmt(Math.round((S.retNeeds||[]).reduce(function(a,r){return a+N(r.amtToday);},0)))+'/pm</strong> — inflated to retirement: <strong>'+Rfmt(Math.round(monthlyAtRet))+'/pm</strong>.'
+      :'⚠ Shortfall of <strong>'+Rfmt(Math.abs(retGap))+'</strong> at retirement. To close this gap, additional monthly contributions or a higher growth rate are needed.';
+    s.appendChild(capMsg);
+  }
+
+  // ── DRAWDOWN MILESTONE TABLE
+  s.appendChild(stitle('Fund Projection — Key Milestones'));
+  var mInf=div('info');
+  mInf.innerHTML='How the retirement fund grows, then draws down. Assumptions: growth '+growthR+'% p.a. to retirement · '+retReturn+'% p.a. in retirement · withdrawal escalation '+avgEscInRet.toFixed(1)+'% p.a.';
+  s.appendChild(mInf);
+
+  // Build milestone years: retirement, then every 5 years
+  var milestones=[];
+  // Accumulation phase — retirement date
+  milestones.push({age:retAge, phase:'Retire', fund:fundAtRet, withdrawal:0});
+  // Drawdown phase
+  var curFund=fundAtRet;
+  var depleted=false;
+  var depAge=null;
+  for(var dy=1;dy<=yrsInR;dy++){
+    var age2=retAge+dy;
+    var annWd=monthlyAtRet*12*Math.pow(1+avgEscInRet/100,dy-1);
+    var newFund=Math.round((curFund-annWd)*(1+retReturn/100));
+    if(newFund<0&&!depleted){depleted=true;depAge=age2;}
+    curFund=Math.max(0,newFund);
+    // Show every 5 years + final year
+    if(dy%5===0||dy===yrsInR){
+      milestones.push({age:age2, phase:depleted&&depAge===age2?'Depleted':'In retirement', fund:curFund, withdrawal:Math.round(annWd/12)});
+    }
+  }
+
+  var milTbl=document.createElement('table');
+  milTbl.style.cssText='width:100%;border-collapse:collapse;font-size:12px;margin-bottom:16px';
+  milTbl.innerHTML='<thead><tr>'
+    +'<th style="text-align:left;padding:7px 10px;background:var(--navy);color:#fff;font-size:10px;text-transform:uppercase;letter-spacing:.4px">Age</th>'
+    +'<th style="text-align:left;padding:7px 10px;background:var(--navy);color:#fff;font-size:10px;text-transform:uppercase;letter-spacing:.4px">Phase</th>'
+    +'<th style="text-align:right;padding:7px 10px;background:var(--navy);color:#fff;font-size:10px;text-transform:uppercase;letter-spacing:.4px">Monthly Withdrawal</th>'
+    +'<th style="text-align:right;padding:7px 10px;background:var(--navy);color:#fff;font-size:10px;text-transform:uppercase;letter-spacing:.4px">Fund Value</th>'
+    +'<th style="text-align:center;padding:7px 10px;background:var(--navy);color:#fff;font-size:10px;text-transform:uppercase;letter-spacing:.4px">Status</th>'
+    +'</tr></thead>';
+  var milTb=document.createElement('tbody');
+  milestones.forEach(function(m,i){
+    var isGood=m.fund>0;
+    var tr2=document.createElement('tr');
+    tr2.style.background=i%2===0?'#fff':'#f8f8f8';
+    tr2.innerHTML='<td style="padding:6px 10px;border-bottom:1px solid #eef;font-weight:700">'+m.age+'</td>'
+      +'<td style="padding:6px 10px;border-bottom:1px solid #eef;color:#555">'+m.phase+'</td>'
+      +'<td style="text-align:right;padding:6px 10px;border-bottom:1px solid #eef">'+(m.withdrawal>0?Rfmt(m.withdrawal)+'/pm':'—')+'</td>'
+      +'<td style="text-align:right;padding:6px 10px;border-bottom:1px solid #eef;font-weight:700;color:'+(isGood?'#16a34a':'#dc2626')+'">'+( isGood?Rfmt(m.fund):'R 0 — Depleted')+'</td>'
+      +'<td style="text-align:center;padding:6px 10px;border-bottom:1px solid #eef;font-size:16px">'+(isGood?'✓':'⚠')+'</td>';
+    milTb.appendChild(tr2);
+  });
+  milTbl.appendChild(milTb);
+  var tw2=div('twrap'); tw2.appendChild(milTbl); s.appendChild(tw2);
+
+  if(depAge){
+    var depMsg=div(); depMsg.style.cssText='background:#fef2f2;border:1px solid #fecaca;border-radius:7px;padding:10px 14px;margin-bottom:16px;font-size:12px;color:#991b1b;font-weight:600';
+    depMsg.innerHTML='⚠ At current withdrawal rates the fund runs out at age <strong>'+depAge+'</strong> — '+(deathAge-depAge)+' years before age '+deathAge+'. Additional capital or reduced withdrawals are needed.';
+    s.appendChild(depMsg);
+  } else if(milestones.length&&milestones[milestones.length-1].fund>0){
+    var surpMsg=div(); surpMsg.style.cssText='background:#f0fdf4;border:1px solid #bbf7d0;border-radius:7px;padding:10px 14px;margin-bottom:16px;font-size:12px;color:#166534;font-weight:600';
+    surpMsg.innerHTML='✓ Fund projected to last to age '+deathAge+' with <strong>'+Rfmt(milestones[milestones.length-1].fund)+'</strong> remaining.';
+    s.appendChild(surpMsg);
+  }
+
+  // ── PREMIUM AFFORDABILITY — THE MAIN EVENT
+  var grossPM  = N(S.cli.grossPM)||N(S.incRows&&S.incRows[0]&&S.incRows[0].pm);
+  var incAtRet = grossPM>0&&yrsToR?Math.round(grossPM*Math.pow(1+incEsc/100,yrsToR)):0;
+  var riskPols = (pols||[]).filter(function(p){
+    return p.Type!=='Business Assurance'&&POL_RA_TYPES.indexOf(p.Type||'')<0
+      &&POL_INV_TYPES.indexOf(p.Type||'')<0&&p.Type!=='Medical Aid'
+      &&(p.Frequency||'Monthly')==='Monthly'&&N(p.Premium)>0;
+  });
+
+  if(riskPols.length>0){
+    s.appendChild(stitle('Risk Policy Premiums at Retirement — The Real Cost'));
+    var aInf=div('info');
+    aInf.innerHTML='These are the premiums you will be paying at retirement age '+retAge+', escalated at each policy\'s own rate. <strong>Risk policies do not generate returns</strong> — they are a pure cost that must be funded from your retirement income. Policies escalating faster than your income are shown in red.';
+    s.appendChild(aInf);
+
+    var affTbl=document.createElement('table'); affTbl.style.cssText='width:100%;border-collapse:collapse;font-size:12px;margin-bottom:4px';
+    affTbl.innerHTML='<thead><tr>'
+      +'<th style="text-align:left;padding:7px 10px;background:var(--navy);color:#fff;font-size:10px;text-transform:uppercase">Policy</th>'
+      +'<th style="text-align:right;padding:7px 10px;background:var(--navy);color:#fff;font-size:10px;text-transform:uppercase">Premium today</th>'
+      +'<th style="text-align:right;padding:7px 10px;background:var(--navy);color:#fff;font-size:10px;text-transform:uppercase">Escalation</th>'
+      +'<th style="text-align:right;padding:7px 10px;background:var(--navy);color:#fff;font-size:10px;text-transform:uppercase">Premium at age '+retAge+'</th>'
+      +'<th style="text-align:right;padding:7px 10px;background:var(--navy);color:#fff;font-size:10px;text-transform:uppercase">% of retire income</th>'
+      +'<th style="text-align:right;padding:7px 10px;background:var(--navy);color:#fff;font-size:10px;text-transform:uppercase">Total paid by '+retAge+'</th>'
+      +'</tr></thead>';
+    var affTb=document.createElement('tbody');
+    var totalPremNow=0, totalAtRet=0, totalPaidIn=0;
+
+    riskPols.forEach(function(pol){
+      var prem=N(pol.Premium);
+      var escRaw=String(pol.PremEscalation!=null&&pol.PremEscalation!==''?pol.PremEscalation:(pol.premEsc!=null&&pol.premEsc!==''?pol.premEsc:'')).replace(/,/g,'.').replace(/[^0-9.]/g,'');
+      var esc=parseFloat(escRaw)||0;
+      var future=esc>0?Math.round(prem*Math.pow(1+esc/100,yrsToR)):prem;
+      // Total paid in = sum of growing annuity over yrsToR years
+      var paidIn=0;
+      if(esc>0){
+        for(var yi=0;yi<yrsToR;yi++) paidIn+=Math.round(prem*Math.pow(1+esc/100,yi))*12;
+      } else {
+        paidIn=prem*12*yrsToR;
+      }
+      totalPremNow+=prem; totalAtRet+=future; totalPaidIn+=paidIn;
+      var pctRet=incAtRet>0?(future/incAtRet*100).toFixed(1):'—';
+      var isHigh=esc>incEsc;
+      var col=isHigh?'#dc2626':'var(--navy)';
+      var tr3=document.createElement('tr');
+      tr3.innerHTML='<td style="padding:6px 10px;border-bottom:1px solid #eef"><strong>'+(pol.Insurer||'—')+'</strong>'+(pol.Product?'<br><span style="font-size:10px;color:var(--sub)">'+pol.Product+'</span>':'')+'</td>'
+        +'<td style="text-align:right;padding:6px 10px;border-bottom:1px solid #eef">'+Rfmt(prem)+'/pm</td>'
+        +'<td style="text-align:right;padding:6px 10px;border-bottom:1px solid #eef;color:'+col+';font-weight:700">'+(esc>0?esc+'%':'—')+(isHigh?' ⚠':'')+'</td>'
+        +'<td style="text-align:right;padding:6px 10px;border-bottom:1px solid #eef;font-weight:700;color:'+col+'">'+Rfmt(future)+'/pm</td>'
+        +'<td style="text-align:right;padding:6px 10px;border-bottom:1px solid #eef;font-weight:700;color:'+col+'">'+pctRet+'%</td>'
+        +'<td style="text-align:right;padding:6px 10px;border-bottom:1px solid #eef;color:#555">'+Rfmt(Math.round(paidIn))+'</td>';
+      affTb.appendChild(tr3);
+    });
+
+    // Totals row
+    var pctTotRet=incAtRet>0?(totalAtRet/incAtRet*100).toFixed(1):'—';
+    var trTot=document.createElement('tr'); trTot.style.cssText='font-weight:700;background:#f0f4fa';
+    trTot.innerHTML='<td style="padding:7px 10px;border-top:2px solid var(--navy)">TOTAL</td>'
+      +'<td style="text-align:right;padding:7px 10px;border-top:2px solid var(--navy)">'+Rfmt(totalPremNow)+'/pm</td>'
+      +'<td style="padding:7px 10px;border-top:2px solid var(--navy)"></td>'
+      +'<td style="text-align:right;padding:7px 10px;border-top:2px solid var(--navy);color:'+(parseFloat(pctTotRet)>15?'#dc2626':'#16a34a')+'">'+Rfmt(totalAtRet)+'/pm</td>'
+      +'<td style="text-align:right;padding:7px 10px;border-top:2px solid var(--navy);color:'+(parseFloat(pctTotRet)>15?'#dc2626':'#16a34a')+'">'+pctTotRet+'%</td>'
+      +'<td style="text-align:right;padding:7px 10px;border-top:2px solid var(--navy)">'+Rfmt(Math.round(totalPaidIn))+'</td>';
+    affTb.appendChild(trTot);
+    affTbl.appendChild(affTb);
+    var tw3=div('twrap'); tw3.appendChild(affTbl); s.appendChild(tw3);
+
+    // Impact summary
+    var impactBox=div(); impactBox.style.cssText='background:var(--navy);border-radius:9px;padding:16px 20px;margin-top:14px;margin-bottom:8px';
+    function impRow(lbl,val,col){
+      var r=div(); r.style.cssText='display:flex;justify-content:space-between;padding:5px 0;font-size:12px';
+      var l=el('span','',lbl); l.style.color='#ccd6f6';
+      var v=el('span','',val); v.style.cssText='font-weight:700;color:'+(col||'var(--gold)');
+      r.appendChild(l); r.appendChild(v); impactBox.appendChild(r);
+    }
+    if(incAtRet>0) impRow('Projected retirement income (gross)',Rfmt(incAtRet)+'/pm');
+    impRow('Total risk premiums at retirement',Rfmt(totalAtRet)+'/pm',parseFloat(pctTotRet)>15?'#f87171':'#86efac');
+    if(incAtRet>0) impRow('Premiums as % of retirement income',pctTotRet+'%',parseFloat(pctTotRet)>15?'#f87171':'#86efac');
+    impRow('Total premiums paid between now and age '+retAge,Rfmt(Math.round(totalPaidIn)),'#fcd34d');
+    s.appendChild(impactBox);
+
+    var benchMsg = parseFloat(pctTotRet)>20
+      ? '⚠ At '+pctTotRet+'% of retirement income, risk premiums will be a severe burden in retirement. Policies with excessive escalation rates should be reviewed urgently.'
+      : parseFloat(pctTotRet)>10
+      ? '⚠ At '+pctTotRet+'% of retirement income, premiums are significant. Review escalation rates on policies marked ⚠ above.'
+      : '✓ At '+pctTotRet+'% of projected retirement income, premiums appear manageable.';
+    var bm=div(); bm.style.cssText='font-size:11px;padding:9px 12px;border-radius:6px;margin-bottom:10px;'
+      +(parseFloat(pctTotRet)>10?'background:#fffbeb;border:1px solid #fde68a;color:#92400e':'background:#f0fdf4;border:1px solid #bbf7d0;color:#166534');
+    bm.textContent=benchMsg; s.appendChild(bm);
+  }
+
+  // Assumptions
+  var assNote=div(); assNote.style.cssText='font-size:10px;color:#888;margin-top:8px;padding:8px 12px;background:#f0f4f8;border-radius:6px;line-height:1.6';
+  assNote.innerHTML='<strong>Assumptions:</strong> Accumulation growth: '+growthR+'% p.a. · Return in retirement: '+retReturn+'% p.a. · Income escalation: '+incEsc+'% p.a. · Withdrawal escalation: '+avgEscInRet.toFixed(1)+'% p.a. · Life expectancy: age '+deathAge+'.';
+  s.appendChild(assNote);
+
+  return s;
+}
+
+
+
+
+  if(!cliAge||!yrsToR){
+    var wi2=div('info'); wi2.textContent='Enter date of birth and retirement age on the Client tab to generate projections.'; s.appendChild(wi2); return s;
+  }
+
+  var growthR   = N(S.assump.growth)||9;
+  var retReturn = N(S.assump.retReturn)||7;
+  var cpi       = N(S.assump.cpi)||6;
+  var incEsc    = N(S.assump.incEsc)||6;
+
   // ── Build year-by-year accumulation (age → fund value)
   // For each year y (0 = today, yrsToR = retirement), sum all RA assets
   var accumYears = [];
@@ -4902,94 +5168,10 @@ function buildRetirementOutlook() {
   svgParts.push('<text x="'+(ml+cW/2)+'" y="'+(H-1)+'" text-anchor="middle" font-size="9" fill="#888">Age</text>');
   svgParts.push('<text x="12" y="'+(mt+cH/2)+'" text-anchor="middle" font-size="9" fill="#888" transform="rotate(-90,12,'+(mt+cH/2)+')">Fund Value</text>');
 
-  // Legend
-  var lx=ml+10, ly=mt+8;
-  svgParts.push('<rect x="'+lx+'" y="'+ly+'" width="10" height="3" rx="1" fill="#0e413a"/>');
-  svgParts.push('<text x="'+(lx+14)+'" y="'+(ly+4)+'" font-size="9" fill="#555">Accumulation</text>');
-  svgParts.push('<rect x="'+(lx+90)+'" y="'+ly+'" width="10" height="3" rx="1" fill="'+(depletionAge!==null?'#dc2626':'#16a34a')+'"/>');
-  svgParts.push('<text x="'+(lx+104)+'" y="'+(ly+4)+'" font-size="9" fill="#555">Drawdown</text>');
-  if(retNeed>0){
-    svgParts.push('<line x1="'+(lx+180)+'" y1="'+(ly+2)+'" x2="'+(lx+190)+'" y2="'+(ly+2)+'" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="4,3"/>');
-    svgParts.push('<text x="'+(lx+194)+'" y="'+(ly+4)+'" font-size="9" fill="#555">Required capital</text>');
-  }
-
-  svgParts.push('</svg>');
-
-  var chartWrap=div(); chartWrap.style.cssText='background:#f8f9fc;border:1px solid var(--mist);border-radius:9px;padding:12px;margin-bottom:16px';
-  chartWrap.innerHTML=svgParts.join('');
-  s.appendChild(chartWrap);
-
-  // Assumptions note
-  var assNote=div(); assNote.style.cssText='font-size:10px;color:#888;margin-bottom:16px;padding:8px 12px;background:#f0f4f8;border-radius:6px;line-height:1.6';
-  assNote.innerHTML='<strong>Assumptions:</strong> Growth during accumulation: '+growthR+'% p.a. · Return in retirement: '+retReturn+'% p.a. · CPI / income escalation: '+cpi+'% p.a. · Drawdown escalation in retirement: '+avgEscInRet.toFixed(1)+'% p.a. · Life expectancy assumed to age '+deathAge+'.';
-  s.appendChild(assNote);
-
-  // ── PREMIUM AFFORDABILITY IN RETIREMENT
-  var incEscRate = N(S.assump.incEsc)||6;
-  var grossPM    = N(S.cli.grossPM)||N(S.incRows&&S.incRows[0]&&S.incRows[0].pm);
-  var incAtRet   = grossPM>0&&yrsToR?Math.round(grossPM*Math.pow(1+incEscRate/100,yrsToR)):0;
-  var riskPols   = (pols||[]).filter(function(p){
-    return p.Type!=='Business Assurance'&&POL_RA_TYPES.indexOf(p.Type||'')<0
-      &&POL_INV_TYPES.indexOf(p.Type||'')<0&&p.Type!=='Medical Aid'
-      &&(p.Frequency||'Monthly')==='Monthly'&&N(p.Premium)>0;
-  });
-
-  if(riskPols.length>0){
-    s.appendChild(stitle('Policy Premium Affordability at Retirement'));
-    var aInf=div('info');
-    aInf.innerHTML='Each risk policy premium is escalated to retirement age. Premiums escalating <strong>faster</strong> than your income ('+incEscRate+'% p.a.) are shown in red — they consume a growing share of your retirement income over time.';
-    s.appendChild(aInf);
-
-    var affTbl=document.createElement('table'); affTbl.style.cssText='width:100%;border-collapse:collapse;font-size:12px;margin-bottom:12px';
-    affTbl.innerHTML='<thead><tr>'
-      +'<th style="text-align:left;padding:6px 8px;background:var(--navy);color:#fff">Policy</th>'
-      +'<th style="text-align:right;padding:6px 8px;background:var(--navy);color:#fff">Premium today</th>'
-      +'<th style="text-align:right;padding:6px 8px;background:var(--navy);color:#fff">Esc %</th>'
-      +'<th style="text-align:right;padding:6px 8px;background:var(--navy);color:#fff">At retirement</th>'
-      +'<th style="text-align:right;padding:6px 8px;background:var(--navy);color:#fff">% of income</th>'
-      +'</tr></thead>';
-    var affTb=document.createElement('tbody'); var totalAtRet=0;
-    riskPols.forEach(function(pol){
-      var prem=N(pol.Premium);
-      var escRaw=String(pol.PremEscalation!=null&&pol.PremEscalation!==''?pol.PremEscalation:(pol.premEsc!=null&&pol.premEsc!==''?pol.premEsc:'')).replace(/,/g,'.').replace(/[^0-9.]/g,'');
-      var esc=parseFloat(escRaw)||0;
-      var future=esc>0?Math.round(prem*Math.pow(1+esc/100,yrsToR)):prem;
-      totalAtRet+=future;
-      var pctRet=incAtRet>0?(future/incAtRet*100).toFixed(1):'—';
-      var isHigh=esc>0&&esc>incEscRate;
-      var col=isHigh?'#dc2626':'var(--navy)';
-      var tr2=document.createElement('tr');
-      tr2.innerHTML='<td style="padding:5px 8px;border-bottom:1px solid var(--mist)"><strong>'+(pol.Insurer||'—')+'</strong>'+(pol.Product?'<br><span style="font-size:10px;color:var(--sub)">'+pol.Product+'</span>':'')+'</td>'
-        +'<td style="text-align:right;padding:5px 8px;border-bottom:1px solid var(--mist)">'+Rfmt(prem)+'/pm</td>'
-        +'<td style="text-align:right;padding:5px 8px;border-bottom:1px solid var(--mist);color:'+col+'">'+( esc>0?esc+'%':'—')+'</td>'
-        +'<td style="text-align:right;padding:5px 8px;border-bottom:1px solid var(--mist);font-weight:700;color:'+col+'">'+Rfmt(future)+'/pm</td>'
-        +'<td style="text-align:right;padding:5px 8px;border-bottom:1px solid var(--mist);font-weight:700;color:'+col+'">'+pctRet+'%'+(isHigh?' ⚠':'')+'</td>';
-      affTb.appendChild(tr2);
-    });
-    var pctTotRet=incAtRet>0?(totalAtRet/incAtRet*100).toFixed(1):'—';
-    var trTot=document.createElement('tr'); trTot.style.fontWeight='700';
-    trTot.innerHTML='<td style="padding:6px 8px;background:#f0f4fa">Total</td>'
-      +'<td style="text-align:right;padding:6px 8px;background:#f0f4fa">'+Rfmt(riskPols.reduce(function(a,p){return a+N(p.Premium);},0))+'/pm</td>'
-      +'<td style="padding:6px 8px;background:#f0f4fa"></td>'
-      +'<td style="text-align:right;padding:6px 8px;background:#f0f4fa">'+Rfmt(totalAtRet)+'/pm</td>'
-      +'<td style="text-align:right;padding:6px 8px;background:#f0f4fa">'+pctTotRet+'%</td>';
-    affTb.appendChild(trTot); affTbl.appendChild(affTb);
-    var tw=div('twrap'); tw.appendChild(affTbl); s.appendChild(tw);
-    if(incAtRet>0){
-      var affMsg=div(); affMsg.style.cssText='font-size:11px;padding:9px 12px;border-radius:6px;margin-bottom:10px;line-height:1.6;'
-        +(parseFloat(pctTotRet)<=10?'background:#f0fdf4;border:1px solid #bbf7d0;color:#166534':'background:#fffbeb;border:1px solid #fde68a;color:#92400e');
-      affMsg.innerHTML='At retirement: <strong>'+Rfmt(totalAtRet)+'/pm</strong> = <strong>'+pctTotRet+'%</strong> of projected income (<strong>'+Rfmt(incAtRet)+'/pm</strong>). '
-        +(parseFloat(pctTotRet)<=10?'✓ Premiums appear manageable.':'⚠ Premiums are a significant portion of projected retirement income.');
-      s.appendChild(affMsg);
-    }
-  }
-
-  return s;
-}
-
 
 function buildROATab() {
   var s = div();
+
   if (!S.roa) S.roa = {};
   var r = S.roa;
   if (!r.needsRows) r.needsRows = [
