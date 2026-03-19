@@ -333,6 +333,27 @@ function capitalise(grossMonthly, years, escalation, drawdown) {
   return Math.round(pv);
 }
 
+// Sum existing death cover — lump sum BenDeath + capitalised Death Income benefits
+function calcDeathHave(pols, drawdown) {
+  var dr = N(drawdown) > 0 ? N(drawdown) : 4;
+  return pols.reduce(function(a, p) {
+    if (p.Type === 'Business Assurance') return a;
+    var lump = N(p.BenDeath);
+    var incCap = 0;
+    try {
+      var ib = p.IncomeBenefits ? JSON.parse(p.IncomeBenefits) : [];
+      ib.forEach(function(r) {
+        if (r.type !== 'Death Income' || !N(r.amount)) return;
+        var capYrs = r.termType === 'to-age'
+          ? Math.max(0, N(r.termTargetAge) - N(r.termDepAge))
+          : N(r.termYears);
+        if (capYrs > 0) incCap += capitalise(N(r.amount), capYrs, N(r.coverEsc) || 0, dr);
+      });
+    } catch(e) {}
+    return a + lump + incCap;
+  }, 0);
+}
+
 // Confirm: monthly income the capital produces
 // cap: capital amount, years: term, escalation, drawdown
 function monthlyFromCapital(cap, years, escalation, drawdown) {
@@ -755,14 +776,33 @@ var S = JSON.parse(JSON.stringify(DEFAULTS));
 function applyPolsFromCRM(pols) {
   S.importedPols = pols;
   if (!S.existingCover) S.existingCover = {death:'',disability:'',dread:'',ipPM:'',totalPrem:''};
-  var totDeath=0,totDis=0,totDD=0,totIP=0,totPrem=0;
+  var totDeath=0,totDis=0,totDD=0,totIP=0,totPrem=0,totDeathIncomeCap=0;
   pols.forEach(function(p){
     var n=function(v){return parseFloat(String(v||'').replace(/[^0-9.\-]/g,''))||0;};
     if(p.Type!=='Business Assurance'){totDeath+=n(p.BenDeath);totDis+=n(p.BenDisability);totDD+=n(p.BenDreadDisease);}
-    try{var ib=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):[];ib.forEach(function(r){totIP+=n(r.amount);});}catch(e){}
+    try{
+      var ib=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):[];
+      ib.forEach(function(r){
+        if(r.type==='Death Income'&&n(r.amount)>0){
+          // Capitalise death income: term = fixed years OR (targetAge - depAge)
+          var capYrs=r.termType==='to-age'?Math.max(0,n(r.termTargetAge)-n(r.termDepAge)):n(r.termYears);
+          if(capYrs>0){
+            var capEsc=n(r.coverEsc)||0, dr=N(S.assump&&S.assump.drawdown)||4;
+            var cap=capEsc>0
+              ?Math.round(n(r.amount)*((Math.pow(1+capEsc/100,capYrs)-1)/((capEsc/100+dr/100)*(1+capEsc/100))))
+              :Math.round(n(r.amount)*capYrs*12/(1+dr/100));
+            totDeathIncomeCap+=cap;
+          }
+        } else if(r.type!=='Death Income'){
+          totIP+=n(r.amount);
+        }
+      });
+    }catch(e){}
     var f=p.Frequency||'Monthly';
     if(f==='Monthly'||f==='') totPrem+=n(p.Premium);
   });
+  // Add capitalised death income to existing death cover total
+  totDeath+=totDeathIncomeCap;
   if(totDeath>0) S.existingCover.death     =String(Math.round(totDeath));
   if(totDis>0)   S.existingCover.disability=String(Math.round(totDis));
   if(totDD>0)    S.existingCover.dread      =String(Math.round(totDD));
@@ -4200,7 +4240,7 @@ function buildDeath() {
   var totInc   = (S.deathIncome||[]).reduce(function(a,r){return a+calcIncomeNeed(r);},0);
   var totCap   = (S.deathCapital||[]).reduce(function(a,r){return a+N(r.amt);},0);
   var deathNeed= totLiab+totInc+totCap;
-  var deathHave= pols.reduce(function(a,p){return p.Type!=='Business Assurance'?a+N(p.BenDeath):a;},0);
+  var deathHave= calcDeathHave(pols, S.assump&&S.assump.drawdown);
   var lcGap    = deathHave-deathNeed;
 
   // SECTION 1 — ESTATE COST IMPACT
@@ -4571,7 +4611,7 @@ function buildROATab() {
         var need = S.deathLiabs.reduce(function(a,x){return a+N(x.amt);},0)
                  + S.deathIncome.reduce(function(a,x){return a+calcIncomeNeed(x);},0)
                  + S.deathCapital.reduce(function(a,x){return a+N(x.amt);},0);
-        var have = pols.reduce(function(a,p){return p.Type!=='Business Assurance'?a+N(p.BenDeath):a;},0);
+        var have = calcDeathHave(pols, S.assump&&S.assump.drawdown);
         return need > 0 ? 'FNA need: '+Rfmt(need)+' / Have: '+Rfmt(have) : '';
       case 1: // Disability
         var dn = S.disIncome.reduce(function(a,x){return a+calcIncomeNeed(x);},0)+S.disCapital.reduce(function(a,x){return a+N(x.amt);},0);
@@ -4679,7 +4719,7 @@ function generateROA() {
   var totIncCap=S.deathIncome.reduce(function(s,x){return s+calcIncomeNeed(x);},0);
   var totCapNeed=S.deathCapital.reduce(function(s,x){return s+N(x.amt);},0);
   var totalDeathNeed=totLiabNeed+totIncCap+totCapNeed;
-  var totalDeathHave=pols.reduce(function(a,p){return p.Type!=='Business Assurance'?a+N(p.BenDeath):a;},0);
+  var totalDeathHave=calcDeathHave(pols, S.assump&&S.assump.drawdown);
   var disIncCap=S.disIncome.reduce(function(a,x){return a+calcIncomeNeed(x);},0);
   var disCapNeed=S.disCapital.reduce(function(a,x){return a+N(x.amt);},0);
   var totalDisNeed=disIncCap+disCapNeed;
@@ -4976,7 +5016,7 @@ function printFNA() {
   var totInc=(S.deathIncome||[]).reduce(function(a,rn){return a+calcIncomeNeed(rn);},0);
   var totCap=(S.deathCapital||[]).reduce(function(a,rn){return a+N(rn.amt);},0);
   var totalDeathNeed=totLiab+totInc+totCap;
-  var totalDeathHave=pols.reduce(function(a,p){return p.Type!=='Business Assurance'?a+N(p.BenDeath):a;},0);
+  var totalDeathHave=calcDeathHave(pols, S.assump&&S.assump.drawdown);
 
   // Retirement
   var rentalAtRetP=0;
@@ -5890,7 +5930,7 @@ function printSelected(opts) {
   var autoLiabTotalP=physLiab+_cgtTotal+(S.scope.estate?(dutyEstateP+Math.round(execFeesP)+Math.round(accrualDedP)):0);
   var totLiabP=autoLiabTotalP+manLiabTotal;
   var totalDeathNeedP=totLiabP+totIncP+totCapP;
-  var totalDeathHaveP=pols.reduce(function(a,p){return p.Type!=='Business Assurance'?a+N(p.BenDeath):a;},0);
+  var totalDeathHaveP=calcDeathHave(pols, S.assump&&S.assump.drawdown);
   var totalEstateCostP=Math.round(estateDutyP)+Math.round(execFeesP)+Math.round(_cgtTotal)+Math.round(accrualDedP);
   // Retirement
   var capNeedP2=0, monthlyAtRetP=0;

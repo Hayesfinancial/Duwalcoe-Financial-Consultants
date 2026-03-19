@@ -3033,32 +3033,139 @@ function addPolBen(){
 
 function renderIncomeRows(){
   if(POL_INCOME_ROWS.length===0) return '<div style="font-size:12px;color:#aaa;padding:8px 0">No income benefits added yet.</div>';
+
   var waitOpts=['7 days','2 weeks','1 month','3 months','6 months','1 year','2 years'];
-  var termOpts=['1 year','2 years','5 years','To age 55','To age 60','To age 65','To age 70','Whole of Life'];
-  var typeOpts=['Temporary IP','Income Protection','Death Income','Sickness Benefit','Hospital Income','Other'];
+  var ipTermOpts=['1 year','2 years','5 years','To age 55','To age 60','To age 65','To age 70','Whole of Life'];
+  var typeOpts=['Death Income','Income Protection','Temporary IP','Sickness Benefit','Hospital Income','Other'];
+
+  function inp(val,placeholder,onchange,extra){
+    return '<input type="text" value="'+(val||'')+'" placeholder="'+(placeholder||'')+'" onchange="'+onchange+'" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px'+(extra||'')+'">'; }
+  function sel(opts,cur,onchange){
+    return '<select onchange="'+onchange+'" style="width:100%;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px">'+opts.map(function(o){return '<option'+(cur===o?' selected':'')+'>'+o+'</option>';}).join('')+'</select>'; }
+  function cell(lbl,content,highlight){
+    return '<div><div style="font-size:10px;color:'+(highlight?'#e97316':'#889')+';margin-bottom:3px;font-weight:'+(highlight?'700':'400')+'">'+(highlight?'⚠ ':'')+lbl+'</div>'+content+'</div>'; }
+
   return POL_INCOME_ROWS.map(function(r,i){
-    return '<div style="background:var(--smoke);border-radius:8px;padding:10px 12px;margin-bottom:8px">'+
-      '<div style="display:flex;gap:6px;align-items:center;margin-bottom:8px">'+
-      '<select onchange="POL_INCOME_ROWS['+i+'].type=this.value" style="border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px;flex:1">'+
-      typeOpts.map(function(o){return '<option'+(r.type===o?' selected':'')+'>'+o+'</option>';}).join('')+
-      '</select>'+
-      '<input type="text" value="'+(r.label||'')+'" placeholder="Benefit label e.g. Income Protection Plus" onchange="POL_INCOME_ROWS['+i+'].label=this.value" style="flex:2;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px">'+
-      '<button type="button" onclick="POL_INCOME_ROWS.splice('+i+',1);document.getElementById(\'incomeRowsWrap\').innerHTML=renderIncomeRows()" style="background:var(--rose);color:#fff;border:none;border-radius:6px;padding:5px 9px;cursor:pointer;font-size:11px;font-weight:700">✕</button>'+
-      '</div>'+
-      '<div style="display:grid;grid-template-columns:repeat(6,1fr);gap:6px">'+
-      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Monthly Amount</div><input type="text" value="'+(r.amount||'')+'" placeholder="R" onchange="POL_INCOME_ROWS['+i+'].amount=this.value" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
-      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Waiting Period</div><select onchange="POL_INCOME_ROWS['+i+'].waiting=this.value" style="width:100%;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px">'+waitOpts.map(function(o){return '<option'+(r.waiting===o?' selected':'')+'>'+o+'</option>';}).join('')+'</select></div>'+
-      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Benefit Period</div><select onchange="POL_INCOME_ROWS['+i+'].term=this.value" style="width:100%;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px">'+termOpts.map(function(o){return '<option'+(r.term===o?' selected':'')+'>'+o+'</option>';}).join('')+'</select></div>'+
-      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Escalation %</div><input type="text" value="'+(r.esc||'')+'" placeholder="%" onchange="POL_INCOME_ROWS['+i+'].esc=this.value" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
-      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Taxable</div><select onchange="POL_INCOME_ROWS['+i+'].taxable=this.value" style="width:100%;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"><option'+(r.taxable==='Yes'?' selected':'')+'>Yes</option><option'+(r.taxable!=='Yes'?' selected':'')+'>No</option></select></div>'+
-      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Lump Sum opt?</div><select onchange="POL_INCOME_ROWS['+i+'].convert=this.value" style="width:100%;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"><option'+(r.convert==='Yes'?' selected':'')+'>Yes</option><option'+(r.convert!=='Yes'?' selected':'')+'>No</option></select></div>'+
-      '</div></div>';
+    var isDeath = r.type==='Death Income';
+    var isIP    = r.type==='Income Protection'||r.type==='Temporary IP';
+    var isAgeRated = r.premEscType==='age-rated';
+
+    // Calculate term years for death income (for FNA info display)
+    var termYrsDisplay = '';
+    if(isDeath){
+      if(r.termType==='fixed'&&N(r.termYears)>0){
+        termYrsDisplay = N(r.termYears)+' years';
+      } else if(r.termType==='to-age'&&N(r.termTargetAge)>0&&N(r.termDepAge)>0){
+        var rem=Math.max(0,N(r.termTargetAge)-N(r.termDepAge));
+        termYrsDisplay = rem+' years remaining (dep. age '+r.termDepAge+' → '+r.termTargetAge+')';
+      }
+    }
+
+    var html='<div style="background:var(--smoke);border-radius:8px;padding:10px 12px;margin-bottom:8px;border-left:3px solid '+(isDeath?'#a8b938':isIP?'#3b82f6':'#8899bb')+'">';
+
+    // Row 1: type + label + delete
+    html+='<div style="display:flex;gap:6px;align-items:center;margin-bottom:8px">';
+    html+='<select onchange="POL_INCOME_ROWS['+i+'].type=this.value;document.getElementById(\'incomeRowsWrap\').innerHTML=renderIncomeRows()" style="border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px;flex:1">'+typeOpts.map(function(o){return '<option'+(r.type===o?' selected':'')+'>'+o+'</option>';}).join('')+'</select>';
+    html+='<input type="text" value="'+(r.label||'')+'" placeholder="Label e.g. \'FamilyProtector Income\'" onchange="POL_INCOME_ROWS['+i+'].label=this.value" style="flex:2;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px">';
+    html+='<button type="button" onclick="POL_INCOME_ROWS.splice('+i+',1);document.getElementById(\'incomeRowsWrap\').innerHTML=renderIncomeRows()" style="background:var(--rose);color:#fff;border:none;border-radius:6px;padding:5px 9px;cursor:pointer;font-size:11px;font-weight:700">✕</button>';
+    html+='</div>';
+
+    if(isDeath){
+      // Death Income — Row 2: amount | cover esc | term type | term value
+      html+='<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:6px;margin-bottom:6px">';
+      html+=cell('Monthly Benefit',inp(r.amount,'R/pm','POL_INCOME_ROWS['+i+'].amount=this.value'));
+      html+=cell('Cover Escalation %',inp(r.coverEsc,'e.g. 6','POL_INCOME_ROWS['+i+'].coverEsc=this.value'));
+      html+=cell('Term Type','<select onchange="POL_INCOME_ROWS['+i+'].termType=this.value;document.getElementById(\'incomeRowsWrap\').innerHTML=renderIncomeRows()" style="width:100%;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"><option value="fixed"'+(r.termType!=='to-age'?' selected':'')+'>Fixed term (years)</option><option value="to-age"'+(r.termType==='to-age'?' selected':'')+'>To dependant age</option></select>');
+      if(r.termType==='to-age'){
+        html+=cell('Dep. Current Age / Target Age',
+          '<div style="display:flex;gap:4px;align-items:center">'+
+          inp(r.termDepAge,'Now','POL_INCOME_ROWS['+i+'].termDepAge=this.value',';width:60px')+
+          '<span style="font-size:11px;color:#889">→</span>'+
+          inp(r.termTargetAge,'Age','POL_INCOME_ROWS['+i+'].termTargetAge=this.value',';width:60px')+
+          '</div>');
+      } else {
+        html+=cell('Term (years)',inp(r.termYears,'e.g. 20','POL_INCOME_ROWS['+i+'].termYears=this.value'));
+      }
+      html+='</div>';
+
+      // Death Income — Row 3: prem portion | prem esc type | prem esc % | taxable | convert
+      html+='<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr 1fr;gap:6px">';
+      html+=cell('Premium Portion /pm',inp(r.premPortion,'R/pm','POL_INCOME_ROWS['+i+'].premPortion=this.value'));
+      html+=cell('Premium Increases','<select onchange="POL_INCOME_ROWS['+i+'].premEscType=this.value;document.getElementById(\'incomeRowsWrap\').innerHTML=renderIncomeRows()" style="width:100%;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"><option value="fixed"'+(r.premEscType!=='age-rated'?' selected':'')+'>Fixed %</option><option value="age-rated"'+(r.premEscType==='age-rated'?' selected':'')+'>Age-rated</option></select>');
+      html+=cell(isAgeRated?'Assumed % (age-rated)':'Premium Esc %', isAgeRated?
+        inp(r.premEsc,'assumed','POL_INCOME_ROWS['+i+'].premEsc=this.value',';border-color:#e97316')+
+        '<div style="font-size:9px;color:#e97316;margin-top:2px">⚠ assumption</div>' :
+        inp(r.premEsc,'e.g. 5','POL_INCOME_ROWS['+i+'].premEsc=this.value'), isAgeRated);
+      html+=cell('Taxable',sel(['Yes','No'],r.taxable||'No','POL_INCOME_ROWS['+i+'].taxable=this.value'));
+      html+=cell('Lump Sum opt?',sel(['No','Yes'],r.convert||'No','POL_INCOME_ROWS['+i+'].convert=this.value'));
+      html+='</div>';
+
+      // Info line showing capitalised value for FNA
+      var capYrs=r.termType==='to-age'?Math.max(0,N(r.termTargetAge)-N(r.termDepAge)):N(r.termYears);
+      if(N(r.amount)>0&&capYrs>0){
+        var capEsc=N(r.coverEsc)||0;
+        // Simple capitalisation preview: PV of growing annuity
+        var dr=4; // default drawdown
+        var capVal=Math.round(N(r.amount)*12*(capYrs/(1+dr/100)));
+        if(capEsc>0) capVal=Math.round(N(r.amount)*((Math.pow(1+capEsc/100,capYrs)-1)/((capEsc/100+dr/100)*(1+capEsc/100))));
+        html+='<div style="font-size:10px;color:#0e413a;background:#f0fdf4;border-radius:4px;padding:4px 8px;margin-top:6px">'+
+          '📐 FNA: '+termYrsDisplay+' · Capitalised value ≈ <strong>R '+Math.round(capVal).toLocaleString('en-ZA')+'</strong> (at '+capEsc+'% esc, 4% drawdown)</div>';
+      }
+
+    } else {
+      // IP / Other — Row 2: amount | waiting | benefit period | cover esc
+      html+='<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:6px;margin-bottom:6px">';
+      html+=cell('Monthly Benefit',inp(r.amount,'R/pm','POL_INCOME_ROWS['+i+'].amount=this.value'));
+      if(isIP){
+        html+=cell('Waiting Period',sel(waitOpts,r.waiting||'1 month','POL_INCOME_ROWS['+i+'].waiting=this.value'));
+        html+=cell('Benefit Period',sel(ipTermOpts,r.term||'To age 65','POL_INCOME_ROWS['+i+'].term=this.value'));
+      } else {
+        html+=cell('Period / Notes',inp(r.term||'','e.g. 24 months','POL_INCOME_ROWS['+i+'].term=this.value'));
+        html+='<div></div>';
+      }
+      html+=cell('Cover Escalation %',inp(r.coverEsc,'e.g. 5','POL_INCOME_ROWS['+i+'].coverEsc=this.value'));
+      html+='</div>';
+
+      // IP / Other — Row 3: prem portion | prem esc type | prem esc % | taxable | convert
+      html+='<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr 1fr;gap:6px">';
+      html+=cell('Premium Portion /pm',inp(r.premPortion,'R/pm','POL_INCOME_ROWS['+i+'].premPortion=this.value'));
+      html+=cell('Premium Increases','<select onchange="POL_INCOME_ROWS['+i+'].premEscType=this.value;document.getElementById(\'incomeRowsWrap\').innerHTML=renderIncomeRows()" style="width:100%;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"><option value="fixed"'+(r.premEscType!=='age-rated'?' selected':'')+'>Fixed %</option><option value="age-rated"'+(r.premEscType==='age-rated'?' selected':'')+'>Age-rated</option></select>');
+      html+=cell(isAgeRated?'Assumed % (age-rated)':'Premium Esc %', isAgeRated?
+        inp(r.premEsc,'assumed','POL_INCOME_ROWS['+i+'].premEsc=this.value',';border-color:#e97316')+
+        '<div style="font-size:9px;color:#e97316;margin-top:2px">⚠ assumption</div>' :
+        inp(r.premEsc,'e.g. 5','POL_INCOME_ROWS['+i+'].premEsc=this.value'), isAgeRated);
+      html+=cell('Taxable',sel(['No','Yes'],r.taxable||'No','POL_INCOME_ROWS['+i+'].taxable=this.value'));
+      html+=cell('Lump Sum opt?',sel(['No','Yes'],r.convert||'No','POL_INCOME_ROWS['+i+'].convert=this.value'));
+      html+='</div>';
+    }
+
+    html+='</div>';
+    return html;
   }).join('');
 }
 
 function addIncomeRow(){
-  POL_INCOME_ROWS.push({type:'Temporary IP',label:'',amount:'',waiting:'1 month',term:'To age 65',esc:'',taxable:'No',convert:'No'});
-  document.getElementById('incomeRowsWrap').innerHTML=renderIncomeRows();
+  // Show type picker first
+  var wrap = document.getElementById('incomeRowsWrap');
+  var picker = document.createElement('div');
+  picker.style.cssText='background:#fff;border:2px solid var(--gold);border-radius:8px;padding:12px 14px;margin-bottom:8px';
+  picker.innerHTML='<div style="font-size:12px;font-weight:700;color:var(--navy);margin-bottom:8px">Select benefit type:</div>'+
+    '<div style="display:flex;gap:8px;flex-wrap:wrap">'+
+    ['Death Income','Income Protection','Temporary IP','Sickness Benefit','Hospital Income','Other'].map(function(t){
+      return '<button type="button" onclick="'+
+        'POL_INCOME_ROWS.push({type:\''+t+'\',label:\'\',amount:\'\','+
+        'coverEsc:\'\',premEsc:\'\',premEscType:\'fixed\','+
+        (t==='Death Income'?'termType:\'fixed\',termYears:\'\',termTargetAge:\'\',termDepAge:\'\',':'waiting:\'1 month\',term:\'To age 65\',')+
+        'premPortion:\'\',taxable:\'No\',convert:\'No\'});'+
+        'document.getElementById(\'incomeRowsWrap\').innerHTML=renderIncomeRows()" '+
+        'style="background:var(--navy);color:#fff;border:none;border-radius:6px;padding:6px 12px;cursor:pointer;font-size:12px;font-weight:600">'+t+'</button>';
+    }).join('')+
+    '</div>';
+  // Replace any existing picker, append new one
+  var old=wrap.querySelector('.add-picker');
+  if(old) old.parentNode.removeChild(old);
+  picker.className='add-picker';
+  wrap.appendChild(picker);
 }
 
 // ── Living Annuity two-way calculation ───────────────────────
