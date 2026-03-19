@@ -333,24 +333,59 @@ function capitalise(grossMonthly, years, escalation, drawdown) {
   return Math.round(pv);
 }
 
-// Sum existing death cover — lump sum BenDeath + capitalised Death Income benefits
-function calcDeathHave(pols, drawdown) {
+// Extract benefit totals from a policy — reads new 'benefits' array if present,
+// falls back to old BenDeath/BenDisability/BenDreadDisease/IncomeBenefits fields.
+function calcBenefitTotals(p, drawdown) {
   var dr = N(drawdown) > 0 ? N(drawdown) : 4;
-  return pols.reduce(function(a, p) {
-    if (p.Type === 'Business Assurance') return a;
-    var lump = N(p.BenDeath);
-    var incCap = 0;
-    try {
-      var ib = p.IncomeBenefits ? JSON.parse(p.IncomeBenefits) : [];
-      ib.forEach(function(r) {
-        if (r.type !== 'Death Income' || !N(r.amount)) return;
+  var result = { death:0, disability:0, dread:0, ipPM:0, deathIncomeCap:0 };
+  var bens = [];
+  try { bens = p.benefits ? JSON.parse(p.benefits) : []; } catch(e) { bens = []; }
+
+  if (bens.length > 0) {
+    bens.forEach(function(r) {
+      var amt = N(r.cover || r.amount);
+      if (!amt) return;
+      if (r.category === 'death')      result.death      += amt;
+      if (r.category === 'disability') result.disability += amt;
+      if (r.category === 'dread')      result.dread      += amt;
+      if (r.category === 'ip')         result.ipPM       += amt;
+      if (r.category === 'death-income') {
         var capYrs = r.termType === 'to-age'
           ? Math.max(0, N(r.termTargetAge) - N(r.termDepAge))
           : N(r.termYears);
-        if (capYrs > 0) incCap += capitalise(N(r.amount), capYrs, N(r.coverEsc) || 0, dr);
+        if (capYrs > 0) result.deathIncomeCap += capitalise(amt, capYrs, N(r.coverEsc) || 0, dr);
+      }
+    });
+  } else {
+    // Fallback to old fields
+    if (p.Type !== 'Business Assurance') {
+      result.death      = N(p.BenDeath);
+      result.disability = N(p.BenDisability);
+      result.dread      = N(p.BenDreadDisease);
+    }
+    try {
+      var ib = p.IncomeBenefits ? JSON.parse(p.IncomeBenefits) : [];
+      ib.forEach(function(r) {
+        if (r.type === 'Death Income' && N(r.amount) > 0) {
+          var capYrs = r.termType === 'to-age'
+            ? Math.max(0, N(r.termTargetAge) - N(r.termDepAge))
+            : N(r.termYears || r.term);
+          if (capYrs > 0) result.deathIncomeCap += capitalise(N(r.amount), capYrs, N(r.coverEsc || r.esc) || 0, dr);
+        } else if (r.type !== 'Death Income') {
+          result.ipPM += N(r.amount);
+        }
       });
     } catch(e) {}
-    return a + lump + incCap;
+  }
+  result.death += result.deathIncomeCap;
+  return result;
+}
+
+// Sum existing death cover across all non-business policies
+function calcDeathHave(pols, drawdown) {
+  return pols.reduce(function(a, p) {
+    if (p.Type === 'Business Assurance') return a;
+    return a + calcBenefitTotals(p, drawdown).death;
   }, 0);
 }
 
@@ -776,33 +811,16 @@ var S = JSON.parse(JSON.stringify(DEFAULTS));
 function applyPolsFromCRM(pols) {
   S.importedPols = pols;
   if (!S.existingCover) S.existingCover = {death:'',disability:'',dread:'',ipPM:'',totalPrem:''};
-  var totDeath=0,totDis=0,totDD=0,totIP=0,totPrem=0,totDeathIncomeCap=0;
+  var totDeath=0,totDis=0,totDD=0,totIP=0,totPrem=0;
   pols.forEach(function(p){
     var n=function(v){return parseFloat(String(v||'').replace(/[^0-9.\-]/g,''))||0;};
-    if(p.Type!=='Business Assurance'){totDeath+=n(p.BenDeath);totDis+=n(p.BenDisability);totDD+=n(p.BenDreadDisease);}
-    try{
-      var ib=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):[];
-      ib.forEach(function(r){
-        if(r.type==='Death Income'&&n(r.amount)>0){
-          // Capitalise death income: term = fixed years OR (targetAge - depAge)
-          var capYrs=r.termType==='to-age'?Math.max(0,n(r.termTargetAge)-n(r.termDepAge)):n(r.termYears);
-          if(capYrs>0){
-            var capEsc=n(r.coverEsc)||0, dr=N(S.assump&&S.assump.drawdown)||4;
-            var cap=capEsc>0
-              ?Math.round(n(r.amount)*((Math.pow(1+capEsc/100,capYrs)-1)/((capEsc/100+dr/100)*(1+capEsc/100))))
-              :Math.round(n(r.amount)*capYrs*12/(1+dr/100));
-            totDeathIncomeCap+=cap;
-          }
-        } else if(r.type!=='Death Income'){
-          totIP+=n(r.amount);
-        }
-      });
-    }catch(e){}
+    if(p.Type!=='Business Assurance'){
+      var bt=calcBenefitTotals(p, S.assump&&S.assump.drawdown);
+      totDeath+=bt.death; totDis+=bt.disability; totDD+=bt.dread; totIP+=bt.ipPM;
+    }
     var f=p.Frequency||'Monthly';
     if(f==='Monthly'||f==='') totPrem+=n(p.Premium);
   });
-  // Add capitalised death income to existing death cover total
-  totDeath+=totDeathIncomeCap;
   if(totDeath>0) S.existingCover.death     =String(Math.round(totDeath));
   if(totDis>0)   S.existingCover.disability=String(Math.round(totDis));
   if(totDD>0)    S.existingCover.dread      =String(Math.round(totDD));
@@ -3193,102 +3211,117 @@ function buildPolCard(p, i) {
 
     card.appendChild(escRow);
 
+
     // Warning if age rated or above income escalation
-    var peRaw=String(p.PremEscalation!=null&&p.PremEscalation!==''?p.PremEscalation:(p.premEsc!=null&&p.premEsc!==''?p.premEsc:'')).toLowerCase();
-    var beRaw=String(p.BenEscalation||'').toLowerCase();
     var incEsc=N(S.assump.incEsc)||6;
-    var peNum=parseFloat(peRaw)||0;
     var warnings=[];
-    if(peRaw==='age rated'||peRaw==='age-rated') warnings.push('⚠ Premium is age rated — increases accelerate as client ages');
-    else if(peNum>incEsc) warnings.push('⚠ Premium escalation ('+peNum+'%) exceeds income growth ('+incEsc+'%)');
-    if(beRaw==='age rated'||beRaw==='age-rated') warnings.push('⚠ Benefit is age rated');
-    else if(beRaw==='cpi') warnings.push('ℹ Benefit escalates with CPI');
+    var bens2=[]; try{bens2=p.benefits?JSON.parse(p.benefits):[];}catch(e){}
+    if(bens2.length>0){
+      var hasAgeRated=bens2.some(function(r){return r.premEscType==='age-rated';});
+      var fixedBens2=bens2.filter(function(r){return r.premEscType!=='age-rated'&&N(r.premEsc)>0&&N(r.premPortion)>0;});
+      var wSum2=fixedBens2.reduce(function(a,r){return a+N(r.premPortion);},0);
+      var wAvgPrem=wSum2>0?fixedBens2.reduce(function(a,r){return a+N(r.premEsc)*N(r.premPortion);},0)/wSum2:0;
+      if(hasAgeRated) warnings.push('\u26a0 One or more benefits are age-rated \u2014 premium increases accelerate with age');
+      if(wAvgPrem>incEsc) warnings.push('\u26a0 Weighted avg premium esc ('+wAvgPrem.toFixed(1)+'%) exceeds income growth ('+incEsc+'%)');
+    } else {
+      var peRaw=String(p.PremEscalation!=null&&p.PremEscalation!==''?p.PremEscalation:(p.premEsc!=null&&p.premEsc!==''?p.premEsc:'')).toLowerCase();
+      var beRaw=String(p.BenEscalation||'').toLowerCase();
+      var peNum=parseFloat(peRaw)||0;
+      if(peRaw==='age rated'||peRaw==='age-rated') warnings.push('\u26a0 Premium is age rated \u2014 increases accelerate as client ages');
+      else if(peNum>incEsc) warnings.push('\u26a0 Premium escalation ('+peNum+'%) exceeds income growth ('+incEsc+'%)');
+      if(beRaw==='age rated'||beRaw==='age-rated') warnings.push('\u26a0 Benefit is age rated');
+      else if(beRaw==='cpi') warnings.push('\u2139 Benefit escalates with CPI');
+    }
     if(warnings.length>0){
       var warnBox=div(); warnBox.style.cssText='font-size:11px;padding:5px 10px;border-radius:5px;background:#fef9ee;border:1px solid var(--gold2);color:#7a5f1a;margin-bottom:4px';
-      warnBox.innerHTML=warnings.join(' · ');
+      warnBox.innerHTML=warnings.join(' \u00b7 ');
       card.appendChild(warnBox);
     }
   }
 
-  // ── Benefits section — varies by type
+
+  // ── Benefits section — read from benefits array, fallback to old fields
   if (isRisk || t === 'Life / Income Protector') {
     var bst = el('div','stitle','Benefits');
     bst.style.marginTop = '10px';
     card.appendChild(bst);
 
-    var rb1 = g3();
-    rb1.appendChild(rfld('Death / Life Cover',    p, 'BenDeath'));
-    rb1.appendChild(rfld('Capital Disability',    p, 'BenDisability'));
-    rb1.appendChild(rfld('Dread Disease Cover',   p, 'BenDreadDisease'));
-    card.appendChild(rb1);
+    var bens = [];
+    try { bens = p.benefits ? JSON.parse(p.benefits) : []; } catch(e) { bens = []; }
 
-    // Income benefits (simplified — monthly amount)
-    var ipWrap = div();
-    ipWrap.style.cssText = 'margin-top:4px';
-    var ipLbl = el('label','','Income Protection / Monthly Benefit');
-    ipLbl.style.cssText = 'font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--sub);display:block;margin-bottom:4px';
-    ipWrap.appendChild(ipLbl);
-
-    // Parse existing IP rows
-    var ipRows = [];
-    try { ipRows = p.IncomeBenefits ? JSON.parse(p.IncomeBenefits) : []; } catch(e) { ipRows = []; }
-
-    var ipTbl = document.createElement('table');
-    var ipTbody = document.createElement('tbody');
-    ipRows.forEach(function(r, ri) {
-      var tr = document.createElement('tr');
-      // Type
-      var t1 = document.createElement('td');
-      var tSel = document.createElement('select');
-      tSel.style.cssText = 'border:var(--border);border-radius:5px;padding:5px 7px;font-family:inherit;font-size:12px;width:100%';
-      ['Income Protection','Temporary IP','Death Income','Sickness Benefit','Hospital Income','Other'].forEach(function(o) {
-        var opt = document.createElement('option'); opt.value = o; opt.textContent = o;
-        if (r.type === o) opt.selected = true;
-        tSel.appendChild(opt);
+    if (bens.length > 0) {
+      // New structure — show each benefit row
+      var CATCOLORS = {death:'#0e413a',disability:'#1d4ed8',dread:'#7c3aed',ip:'#b45309','death-income':'#a8b938','other-income':'#6b7280'};
+      var CATLABELS = {death:'Life Cover',disability:'Capital Disability',dread:'Dread Disease',ip:'IP /pm','death-income':'Death Income /pm','other-income':'Other /pm'};
+      bens.forEach(function(r, ri) {
+        var benRow = div(); benRow.style.cssText = 'display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--smoke);flex-wrap:wrap';
+        var catBadge = el('span','', CATLABELS[r.category]||r.category);
+        catBadge.style.cssText = 'font-size:10px;font-weight:700;color:#fff;background:'+(CATCOLORS[r.category]||'#666')+';border-radius:4px;padding:2px 7px;white-space:nowrap';
+        benRow.appendChild(catBadge);
+        if (r.label) { var lb2 = el('span','',r.label); lb2.style.cssText='font-size:11px;color:var(--sub);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'; benRow.appendChild(lb2); }
+        var coverVal = r.cover||r.amount||'';
+        if (coverVal) {
+          var cv = div(); cv.style.cssText='display:flex;align-items:center;gap:3px';
+          var crp = el('span','rp','R'); crp.style.fontSize='11px';
+          var ci2 = document.createElement('input'); ci2.type='text'; ci2.inputMode='numeric';
+          ci2.value = coverVal; ci2.placeholder='0';
+          ci2.style.cssText='width:100px;padding:3px 6px;border:1.5px solid var(--mist);border-radius:4px;font-size:12px;font-weight:700';
+          ci2.addEventListener('input',function(e){
+            try { var b2=JSON.parse(S.importedPols[i].benefits||'[]'); var key=b2[ri].cover!==undefined?'cover':'amount'; b2[ri][key]=e.target.value; S.importedPols[i].benefits=JSON.stringify(b2); } catch(ex){}
+          });
+          cv.appendChild(crp); cv.appendChild(ci2); benRow.appendChild(cv);
+        }
+        // Cover esc
+        var cescBadge = el('span','',(r.coverEsc||'0')+'% ben esc');
+        cescBadge.style.cssText='font-size:10px;color:var(--sub);white-space:nowrap';
+        benRow.appendChild(cescBadge);
+        // Prem portion
+        if (r.premPortion) { var pp2=el('span','',Rfmt(r.premPortion)+'/pm prem'); pp2.style.cssText='font-size:10px;color:var(--sub);white-space:nowrap'; benRow.appendChild(pp2); }
+        // Prem esc
+        var peDisp = r.premEscType==='age-rated' ? '⚠ age-rated'+(r.premEsc?'≈'+r.premEsc+'%':'') : (r.premEsc||'0')+'% prem esc';
+        var peBadge = el('span','',peDisp);
+        peBadge.style.cssText='font-size:10px;color:'+(r.premEscType==='age-rated'?'#e97316':'var(--sub)')+';white-space:nowrap';
+        benRow.appendChild(peBadge);
+        // Death income term
+        if (r.category==='death-income') {
+          var capYrsD = r.termType==='to-age'?Math.max(0,N(r.termTargetAge)-N(r.termDepAge)):N(r.termYears);
+          var termDisp = r.termType==='to-age'?capYrsD+' yrs (→ age '+r.termTargetAge+')':capYrsD+' yrs fixed';
+          var td2=el('span','',termDisp); td2.style.cssText='font-size:10px;font-weight:700;color:var(--navy);white-space:nowrap'; benRow.appendChild(td2);
+        }
+        card.appendChild(benRow);
       });
-      tSel.addEventListener('change', function(e) {
-        try { var rows = JSON.parse(S.importedPols[i].IncomeBenefits||'[]'); rows[ri].type = e.target.value; S.importedPols[i].IncomeBenefits = JSON.stringify(rows); } catch(ex) {}
-      });
-      t1.appendChild(tSel); tr.appendChild(t1);
-      // Amount
-      var t2 = document.createElement('td');
-      var rw = div('td-r'); rw.appendChild(el('span','rp','R'));
-      var aInp = document.createElement('input'); aInp.type = 'text'; aInp.inputMode = 'numeric';
-      aInp.value = r.amount || ''; aInp.placeholder = '0';
-      aInp.addEventListener('input', function(e) {
-        try { var rows = JSON.parse(S.importedPols[i].IncomeBenefits||'[]'); rows[ri].amount = e.target.value; S.importedPols[i].IncomeBenefits = JSON.stringify(rows); } catch(ex) {}
-      });
-      rw.appendChild(aInp); t2.appendChild(rw); tr.appendChild(t2);
-      // In-claim escalation
-      var t4 = document.createElement('td'); t4.style.paddingLeft='6px';
-      var escWr=div(); escWr.style.cssText='display:flex;align-items:center;gap:4px';
-      var escLb=el('span','','Esc%'); escLb.style.cssText='font-size:10px;color:var(--sub);white-space:nowrap';
-      var escIp=document.createElement('input'); escIp.type='text'; escIp.inputMode='numeric';
-      escIp.value=r.esc||''; escIp.placeholder='0';
-      escIp.style.cssText='width:44px;padding:4px 5px;border:1.5px solid var(--mist);border-radius:4px;font-size:11px';
-      escIp.addEventListener('input',function(e){
-        try { var rows=JSON.parse(S.importedPols[i].IncomeBenefits||'[]'); rows[ri].esc=e.target.value; S.importedPols[i].IncomeBenefits=JSON.stringify(rows); } catch(ex){}
-      });
-      escWr.appendChild(escLb); escWr.appendChild(escIp); t4.appendChild(escWr); tr.appendChild(t4);
-      // Delete
-      var t3 = document.createElement('td');
-      t3.appendChild(delBtn(function() {
-        try { var rows = JSON.parse(S.importedPols[i].IncomeBenefits||'[]'); rows.splice(ri,1); S.importedPols[i].IncomeBenefits = JSON.stringify(rows); render(); } catch(ex) { render(); }
-      }));
-      tr.appendChild(t3);
-      ipTbody.appendChild(tr);
-    });
-    ipTbl.appendChild(ipTbody);
-    ipWrap.appendChild(ipTbl);
-    ipWrap.appendChild(addBtn('+ Add IP Benefit Row', function() {
-      try {
-        var rows = JSON.parse(S.importedPols[i].IncomeBenefits||'[]');
-        rows.push({type:'Income Protection', amount:''});
-        S.importedPols[i].IncomeBenefits = JSON.stringify(rows);
-        render();
-      } catch(ex) { render(); }
-    }));
-    card.appendChild(ipWrap);
+      // Totals summary
+      var bt2 = calcBenefitTotals(p, S.assump&&S.assump.drawdown);
+      var sumBox = div(); sumBox.style.cssText='background:var(--navy);border-radius:6px;padding:8px 12px;margin-top:8px;font-size:11px;display:flex;gap:16px;flex-wrap:wrap';
+      function sItem(lbl,val,col){var d2=div();d2.style.cssText='display:flex;flex-direction:column';var l2=el('span','',lbl);l2.style.cssText='font-size:9px;text-transform:uppercase;color:#8899bb;letter-spacing:.4px';var v2=el('span','',Rfmt(val));v2.style.cssText='font-weight:700;color:'+(col||'var(--gold)');d2.appendChild(l2);d2.appendChild(v2);return d2;}
+      if(bt2.death>0) sumBox.appendChild(sItem('Total death cover',bt2.death));
+      if(bt2.disability>0) sumBox.appendChild(sItem('Total disability',bt2.disability,'#93c5fd'));
+      if(bt2.dread>0) sumBox.appendChild(sItem('Total dread',bt2.dread,'#c4b5fd'));
+      if(bt2.ipPM>0) sumBox.appendChild(sItem('Total IP /pm',bt2.ipPM,'#fcd34d'));
+      if(bt2.deathIncomeCap>0) sumBox.appendChild(sItem('Death income (cap.)',bt2.deathIncomeCap,'#d4f0a8'));
+      card.appendChild(sumBox);
+    } else {
+      // Old structure — show editable single fields
+      var rb1 = g3();
+      rb1.appendChild(rfld('Death / Life Cover',    p, 'BenDeath'));
+      rb1.appendChild(rfld('Capital Disability',    p, 'BenDisability'));
+      rb1.appendChild(rfld('Dread Disease Cover',   p, 'BenDreadDisease'));
+      card.appendChild(rb1);
+      // Old IP rows
+      var ipRows = [];
+      try { ipRows = p.IncomeBenefits ? JSON.parse(p.IncomeBenefits) : []; } catch(e) { ipRows = []; }
+      if (ipRows.length > 0) {
+        ipRows.forEach(function(r, ri) {
+          var ipRow = div(); ipRow.style.cssText = 'display:flex;gap:8px;align-items:center;padding:4px 0;border-bottom:1px solid var(--smoke)';
+          var typeLbl = el('span','',r.type||'Income'); typeLbl.style.cssText='font-size:11px;color:var(--sub);min-width:120px';
+          var rw = div('rw'); rw.appendChild(el('span','rp','R'));
+          var aInp = document.createElement('input'); aInp.type='text'; aInp.inputMode='numeric';
+          aInp.value = r.amount||''; aInp.placeholder='0';
+          aInp.addEventListener('input',function(e){ try{var rows=JSON.parse(S.importedPols[i].IncomeBenefits||'[]');rows[ri].amount=e.target.value;S.importedPols[i].IncomeBenefits=JSON.stringify(rows);}catch(ex){}});
+          rw.appendChild(aInp); ipRow.appendChild(typeLbl); ipRow.appendChild(rw); card.appendChild(ipRow);
+        });
+      }
+    }
   }
 
   // ── Investment / RA / Living Annuity section
@@ -4436,7 +4469,7 @@ function buildDisabilityDread() {
     s.appendChild(stitle('Income Protection'));
     var inf1=div('info'); inf1.innerHTML='If you were unable to work, <strong>how long could you survive without income?</strong> Income protection pays a monthly benefit to replace your salary.'; s.appendChild(inf1);
     var ipNeed=N(S.ipGrossPM||S.ipNettPM);
-    var ipHave=pols.reduce(function(a,p){var ib=[];try{ib=JSON.parse(p.IncomeBenefits||'[]');}catch(e){}return a+ib.reduce(function(s2,b){return s2+N(b.amount);},0);},0);
+    var ipHave=pols.reduce(function(a,p){return a+calcBenefitTotals(p,S.assump&&S.assump.drawdown).ipPM;},0);
     gapCard('Income Protection','Monthly benefit to replace your salary',ipNeed,ipHave,true);
     if(ipNeed>0){var ipDets=div();ipDets.style.cssText='background:#f8fafc;border:1px solid var(--mist);border-radius:7px;padding:10px 14px;margin-bottom:14px;font-size:12px';ipDets.innerHTML='<strong>Waiting period:</strong> '+(S.ipWait||'—')+'&nbsp;&nbsp;|&nbsp;&nbsp;<strong>Benefit period:</strong> '+(S.ipBenefit||'—');s.appendChild(ipDets);}
   }
@@ -4446,7 +4479,7 @@ function buildDisabilityDread() {
     var disInc=(S.disIncome||[]).reduce(function(a,r){return a+calcIncomeNeed(r);},0);
     var disCap=(S.disCapital||[]).reduce(function(a,r){return a+N(r.amt);},0);
     var disTotal=disInc+disCap;
-    var disHave=pols.reduce(function(a,p){return a+N(p.BenDisability);},0);
+    var disHave=pols.reduce(function(a,p){return a+calcBenefitTotals(p,S.assump&&S.assump.drawdown).disability;},0);
     gapCard('Disability Lump Sum','Capital needed if permanently disabled',disTotal,disHave);
     if(disTotal>0){
       var dBox=div();dBox.style.cssText='background:var(--navy);border-radius:8px;padding:14px 16px;margin-bottom:14px';
@@ -4460,7 +4493,7 @@ function buildDisabilityDread() {
     s.appendChild(stitle('Dread Disease / Trauma Cover'));
     var inf3=div('info'); inf3.innerHTML='A dread disease lump sum is paid on diagnosis and used however you need it — treatment, recovery, lifestyle changes.'; s.appendChild(inf3);
     var dreadNeed=N(S.dreadAmt);
-    var dreadHave=pols.reduce(function(a,p){return a+N(p.BenDreadDisease);},0);
+    var dreadHave=pols.reduce(function(a,p){return a+calcBenefitTotals(p,S.assump&&S.assump.drawdown).dread;},0);
     gapCard('Dread Disease / Trauma','Lump sum on diagnosis of a listed condition',dreadNeed,dreadHave);
     if(dreadNeed>0&&N(S.cli.grossPM)>0){var ddInf=div();ddInf.style.cssText='background:#f8fafc;border:1px solid var(--mist);border-radius:7px;padding:10px 14px;margin-bottom:14px;font-size:12px;color:#444';ddInf.innerHTML='<strong>Guideline:</strong> 18\u201324 months gross income. At '+Rfmt(N(S.cli.grossPM))+'/pm gross, that is '+Rfmt(Math.round(N(S.cli.grossPM)*18))+' \u2013 '+Rfmt(Math.round(N(S.cli.grossPM)*24))+'. Cover required: <strong>'+Rfmt(dreadNeed)+'</strong>. '+(dreadHave>=dreadNeed?'<span style="color:#16a34a">\u2713 Adequately covered.</span>':'<span style="color:#dc2626">\u26a0 Shortfall of '+Rfmt(dreadNeed-dreadHave)+'.</span>');s.appendChild(ddInf);}
   }

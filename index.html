@@ -2755,14 +2755,74 @@ function openPolicyModal(cid,idx){
   try {
     buildPolicyForm(p);
     document.getElementById('pMod').classList.add('open');
+    setTimeout(updatePremRecon, 50);
   } catch(err) {
     console.error('Policy modal error:', err);
     toast('Error opening policy: '+err.message,'err');
   }
 }
 
-var POL_INCOME_ROWS=[];
+var POL_BENEFITS=[];  // unified benefits array replacing POL_INCOME_ROWS + lump sum fields
 var POL_BENS=[];
+
+// Migrate old policy structure to unified benefits array
+function migrateToBenefits(p){
+  // If already has benefits array, return it (migrating old rows to new format)
+  var existing=[];
+  try{ existing=p.benefits?JSON.parse(p.benefits):[]; }catch(e){ existing=[]; }
+  if(existing.length>0){
+    // Ensure all rows have new fields
+    existing.forEach(function(r){
+      if(r.coverEsc===undefined && r.esc!==undefined) r.coverEsc=r.esc;
+      if(r.coverEsc===undefined) r.coverEsc='';
+      if(r.premEsc===undefined) r.premEsc='';
+      if(r.premEscType===undefined) r.premEscType='fixed';
+      if(r.premPortion===undefined) r.premPortion='';
+      if(r.termType===undefined) r.termType='fixed';
+      if(r.termYears===undefined) r.termYears='';
+      if(r.termTargetAge===undefined) r.termTargetAge='';
+      if(r.termDepAge===undefined) r.termDepAge='';
+    });
+    return existing;
+  }
+  // Migrate from old fields
+  var rows=[];
+  function pn(v){return parseFloat(String(v||'').replace(/[^0-9.\-]/g,''))||0;}
+  // Lump sum benefits — use old single fields
+  if(pn(p.BenDeath)>0||p.BenDeath){
+    rows.push({category:'death',label:'Life Cover',cover:p.BenDeath||'',coverEsc:p.BenEscalation||'',
+      premPortion:'',premEscType: p.PremEscalation==='age-rated'||p.PremEscalation==='Age rated'?'age-rated':'fixed',
+      premEsc:p.PremEscalation||''});
+  }
+  if(pn(p.BenDisability)>0||p.BenDisability){
+    rows.push({category:'disability',label:'Capital Disability',cover:p.BenDisability||'',coverEsc:p.BenEscalation||'',
+      premPortion:'',premEscType:'fixed',premEsc:''});
+  }
+  if(pn(p.BenDreadDisease)>0||p.BenDreadDisease){
+    rows.push({category:'dread',label:'Dread Disease',cover:p.BenDreadDisease||'',coverEsc:p.BenEscalation||'',
+      dreadType:p.DreadDiseaseType||'Lump Sum',dreadNotes:p.DreadDiseaseNotes||'',
+      premPortion:'',premEscType:'fixed',premEsc:''});
+  }
+  // Old income benefits
+  var oldIB=[];
+  try{oldIB=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):[];}catch(e){}
+  oldIB.forEach(function(r){
+    var cat=r.type==='Death Income'?'death-income':
+            r.type==='Income Protection'||r.type==='Temporary IP'?'ip':'other-income';
+    rows.push({category:cat,label:r.label||r.type||'',amount:r.amount||'',
+      coverEsc:r.coverEsc||r.esc||'',premPortion:r.premPortion||'',
+      premEscType:r.premEscType||'fixed',premEsc:r.premEsc||r.esc||'',
+      waiting:r.waiting||'1 month',term:r.term||'To age 65',
+      termType:r.termType||'fixed',termYears:r.termYears||'',
+      termTargetAge:r.termTargetAge||'',termDepAge:r.termDepAge||'',
+      taxable:r.taxable||'No',convert:r.convert||'No'});
+  });
+  // If nothing found but it's a risk policy, add empty death row as placeholder
+  if(rows.length===0 && (p.Type==='Life / Income Protector'||p.Type===''||!p.Type)){
+    rows.push({category:'death',label:'Life Cover',cover:'',coverEsc:'',premPortion:'',premEscType:'fixed',premEsc:''});
+  }
+  return rows;
+}
 
 function sec(title){
   return '<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--gold);padding:14px 0 6px;border-top:1px solid var(--smoke);margin-top:8px">'+title+'</div>';
@@ -2775,7 +2835,7 @@ function secHdr(title){
 function buildPolicyForm(p){
   p=p||{};
   var type=p.Type||'Life / Income Protector';
-  try{ POL_INCOME_ROWS=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):[]; }catch(e){ POL_INCOME_ROWS=[]; }
+  POL_BENEFITS = migrateToBenefits(p);
   try{ POL_BENS=p.Beneficiaries?JSON.parse(p.Beneficiaries):[]; }catch(e){ POL_BENS=[]; }
 
   var isRisk=(type==='Life / Income Protector'||type==='');
@@ -2837,26 +2897,16 @@ function buildPolicyForm(p){
 
   // PREMIUM
   html+=sec('Premium');
-  html+='<div class="g2">'+fld('ppm','Premium / Contribution',p.Premium)+fs('pfreq','Frequency',['Monthly','Quarterly','Annually','Once Off'],p.Frequency||'Monthly')+'</div>';
-  if(!isLA){
-    html+='<div class="g2">'+fld('pprem_pct','Premium Escalation %',p.PremEscalation)+fld('pben_pct','Benefit Escalation %',p.BenEscalation)+'</div>';
-  }
+  html+='<div class="g2">'+fld('ppm','Premium / Contribution',p.Premium,'text','oninput="updatePremRecon()"')+fs('pfreq','Frequency',['Monthly','Quarterly','Annually','Once Off'],p.Frequency||'Monthly')+'</div>';
 
-  // RISK COVER
-  if(isRisk){
-    html+=sec('Risk Cover — Lump Sums');
-    html+='<div class="g2">'+fld('pb_death','Death Benefit',p.BenDeath)+fld('pb_dis','Capital Disability',p.BenDisability)+'</div>';
-    html+='<div class="g2">';
-    html+='<div class="fld"><label>Dread Disease / Severe Illness — Cover Amount</label><input id="pb_dd" type="text" value="'+(p.BenDreadDisease||'')+'" placeholder="e.g. 500000" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px"></div>';
-    html+='<div class="fld"><label>Dread Disease Type</label><select id="pb_ddtype" style="width:100%;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px"><option'+(p.DreadDiseaseType==='Monthly Income'?'':' selected')+'>Lump Sum</option><option'+(p.DreadDiseaseType==='Monthly Income'?' selected':'')+'>Monthly Income</option></select></div>';
-    html+='</div>';
-    html+='<div class="fld"><label>Dread Disease Notes</label><input id="pb_ddnotes" type="text" value="'+(p.DreadDiseaseNotes||'')+'" placeholder="e.g. Comprehensive, Cancer only..." style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:7px 10px;font-family:inherit;font-size:13px"></div>';
-
-
-    html+=sec('Income Benefits');
-    html+='<div style="font-size:11px;color:#889;margin-bottom:8px">Death income, income protection, sickness benefits — one row per benefit stream.</div>';
-    html+='<div id="incomeRowsWrap">'+renderIncomeRows()+'</div>';
-    html+='<button type="button" class="btn b-gh sm" style="margin-top:6px" onclick="addIncomeRow()">+ Add Income Benefit</button>';
+  // BENEFITS — unified for all risk/life policies (replaces old lump sum fields + income benefits)
+  if(isRisk||isBiz){
+    html+=sec('Benefits');
+    html+='<div style="font-size:11px;color:#889;margin-bottom:6px">Add each benefit as a separate row — death cover, disability, dread disease, income protection, death income. Each with its own cover and premium escalation.</div>';
+    html+='<div id="benefitsWrap">'+renderBenefitRows()+'</div>';
+    html+='<button type="button" class="btn b-gh sm" style="margin-top:6px" onclick="addBenefitRow()">+ Add Benefit</button>';
+    // Premium reconciliation
+    html+='<div id="premRecon" style="margin-top:10px;font-size:11px;padding:7px 12px;border-radius:6px;background:#f8f9fc;border:1px solid var(--mist)">Enter premium portions on each benefit to reconcile against total premium.</div>';
   }
 
   // RA / INVESTMENT
@@ -3034,124 +3084,103 @@ function addPolBen(){
   document.getElementById('polBensWrap').innerHTML=renderPolBens();
 }
 
-function renderIncomeRows(){
+function renderBenefitRows(){
   function N(v){return parseFloat(String(v||'').replace(/[^0-9.\-]/g,''))||0;}
-  if(POL_INCOME_ROWS.length===0) return '<div style="font-size:12px;color:#aaa;padding:8px 0">No income benefits added yet.</div>';
+  if(POL_BENEFITS.length===0) return '<div style="font-size:12px;color:#aaa;padding:8px 0">No benefits added yet. Click + Add Benefit to start.</div>';
 
-  var waitOpts=['7 days','2 weeks','1 month','3 months','6 months','1 year','2 years'];
-  var ipTermOpts=['1 year','2 years','5 years','To age 55','To age 60','To age 65','To age 70','Whole of Life'];
-  var typeOpts=['Death Income','Income Protection','Temporary IP','Sickness Benefit','Hospital Income','Other'];
+  var CATS=[
+    {key:'death',       label:'Death / Life Cover',      color:'#0e413a', isLump:true},
+    {key:'disability',  label:'Capital Disability',      color:'#1d4ed8', isLump:true},
+    {key:'dread',       label:'Dread Disease',           color:'#7c3aed', isLump:true},
+    {key:'ip',          label:'Income Protection',       color:'#b45309', isLump:false},
+    {key:'death-income',label:'Death Income',            color:'#a8b938', isLump:false},
+    {key:'other-income',label:'Other Income Benefit',   color:'#6b7280', isLump:false}
+  ];
 
-  function inp(val,placeholder,onchange,extra){
-    return '<input type="text" value="'+(val||'')+'" placeholder="'+(placeholder||'')+'" onchange="'+onchange+'" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px'+(extra||'')+'">'; }
-  function sel(opts,cur,onchange){
-    return '<select onchange="'+onchange+'" style="width:100%;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px">'+opts.map(function(o){return '<option'+(cur===o?' selected':'')+'>'+o+'</option>';}).join('')+'</select>'; }
-  function cell(lbl,content,highlight){
-    return '<div><div style="font-size:10px;color:'+(highlight?'#e97316':'#889')+';margin-bottom:3px;font-weight:'+(highlight?'700':'400')+'">'+(highlight?'⚠ ':'')+lbl+'</div>'+content+'</div>'; }
+  function inp(val,ph,oc,sty){return '<input type="text" value="'+(val||'')+'" placeholder="'+(ph||'')+'" onchange="'+oc+';updatePremRecon()" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:5px;padding:5px 7px;font-family:inherit;font-size:12px'+(sty||'')+'">'; }
+  function sel(opts,cur,oc){return '<select onchange="'+oc+';updatePremRecon()" style="width:100%;border:1.5px solid var(--mist);border-radius:5px;padding:5px 7px;font-family:inherit;font-size:12px">'+opts.map(function(o){return '<option value="'+(o.key||o)+'"'+((o.key||o)===cur?' selected':'')+'>'+(o.label||o)+'</option>';}).join('')+'</select>';}
+  function cell(lbl,content,warn){return '<div style="min-width:0"><div style="font-size:10px;color:'+(warn?'#e97316':'#889')+';margin-bottom:2px;font-weight:'+(warn?'700':'400')+';white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+(warn?'⚠ ':'')+lbl+'</div>'+content+'</div>';}
 
-  return POL_INCOME_ROWS.map(function(r,i){
-    // Migrate old format rows that only had esc (not coverEsc/premEsc)
-    if(r.esc!==undefined && r.coverEsc===undefined) r.coverEsc=r.esc;
-    if(r.premEsc===undefined) r.premEsc='';
-    if(r.premEscType===undefined) r.premEscType='fixed';
-    if(r.premPortion===undefined) r.premPortion='';
-    if(r.termType===undefined) r.termType='fixed';
-    if(r.termYears===undefined) r.termYears='';
-    if(r.termTargetAge===undefined) r.termTargetAge='';
-    if(r.termDepAge===undefined) r.termDepAge='';
-    // Migrate old type names
-    if(!r.type) r.type='Income Protection';
+  return POL_BENEFITS.map(function(r,i){
+    var catDef=CATS.find(function(c){return c.key===r.category;})||CATS[0];
+    var isLump=catDef.isLump;
+    var isDI=r.category==='death-income';
+    var isAR=r.premEscType==='age-rated';
+    var REF='POL_BENEFITS['+i+']';
 
-    var isDeath = r.type==='Death Income';
-    var isIP    = r.type==='Income Protection'||r.type==='Temporary IP';
-    var isAgeRated = r.premEscType==='age-rated';
+    var html='<div style="background:#fff;border:1.5px solid var(--mist);border-radius:8px;padding:10px 12px;margin-bottom:8px;border-left:4px solid '+catDef.color+'">';
 
-    // Calculate term years for death income (for FNA info display)
-    var termYrsDisplay = '';
-    if(isDeath){
-      if(r.termType==='fixed'&&N(r.termYears)>0){
-        termYrsDisplay = N(r.termYears)+' years';
-      } else if(r.termType==='to-age'&&N(r.termTargetAge)>0&&N(r.termDepAge)>0){
-        var rem=Math.max(0,N(r.termTargetAge)-N(r.termDepAge));
-        termYrsDisplay = rem+' years remaining (dep. age '+r.termDepAge+' → '+r.termTargetAge+')';
-      }
-    }
-
-    var html='<div style="background:var(--smoke);border-radius:8px;padding:10px 12px;margin-bottom:8px;border-left:3px solid '+(isDeath?'#a8b938':isIP?'#3b82f6':'#8899bb')+'">';
-
-    // Row 1: type + label + delete
+    // Row 1 — category | label | delete
     html+='<div style="display:flex;gap:6px;align-items:center;margin-bottom:8px">';
-    html+='<select onchange="POL_INCOME_ROWS['+i+'].type=this.value;document.getElementById(\'incomeRowsWrap\').innerHTML=renderIncomeRows()" style="border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px;flex:1">'+typeOpts.map(function(o){return '<option'+(r.type===o?' selected':'')+'>'+o+'</option>';}).join('')+'</select>';
-    html+='<input type="text" value="'+(r.label||'')+'" placeholder="Label e.g. \'FamilyProtector Income\'" onchange="POL_INCOME_ROWS['+i+'].label=this.value" style="flex:2;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px">';
-    html+='<button type="button" onclick="POL_INCOME_ROWS.splice('+i+',1);document.getElementById(\'incomeRowsWrap\').innerHTML=renderIncomeRows()" style="background:var(--rose);color:#fff;border:none;border-radius:6px;padding:5px 9px;cursor:pointer;font-size:11px;font-weight:700">✕</button>';
+    html+=sel(CATS.map(function(c){return {key:c.key,label:c.label};}),r.category,REF+'.category=this.value;document.getElementById(\'benefitsWrap\').innerHTML=renderBenefitRows()');
+    html+='<input type="text" value="'+(r.label||'')+'" placeholder="Label e.g. \'Life Cover 1\'" onchange="'+REF+'.label=this.value" style="flex:2;min-width:0;border:1.5px solid var(--mist);border-radius:5px;padding:5px 7px;font-family:inherit;font-size:12px">';
+    html+='<button type="button" onclick="POL_BENEFITS.splice('+i+',1);document.getElementById(\'benefitsWrap\').innerHTML=renderBenefitRows();updatePremRecon()" style="background:var(--rose);color:#fff;border:none;border-radius:5px;padding:4px 8px;cursor:pointer;font-size:11px;font-weight:700;flex-shrink:0">✕</button>';
     html+='</div>';
 
-    if(isDeath){
-      // Death Income — Row 2: amount | cover esc | term type | term value
+    if(isLump){
+      // Lump sum: cover | cover esc | prem portion | prem esc type | prem esc
+      html+='<div style="display:grid;grid-template-columns:1.5fr 1fr 1fr 1fr 1fr;gap:6px">';
+      html+=cell('Cover Amount (R)',inp(r.cover,'e.g. 2000000',REF+'.cover=this.value'));
+      html+=cell('Cover Esc %',inp(r.coverEsc,'e.g. 5',REF+'.coverEsc=this.value'));
+      html+=cell('Premium /pm',inp(r.premPortion,'R/pm',REF+'.premPortion=this.value'));
+      html+=cell('Premium Increases',sel([{key:'fixed',label:'Fixed %'},{key:'age-rated',label:'Age-rated'}],r.premEscType||'fixed',REF+'.premEscType=this.value;document.getElementById(\'benefitsWrap\').innerHTML=renderBenefitRows()'));
+      html+=cell(isAR?'Assumed %':'Premium Esc %',inp(r.premEsc,isAR?'assumed':'e.g. 5',REF+'.premEsc=this.value',isAR?';border-color:#e97316':''),isAR);
+      html+='</div>';
+      // Dread disease extra fields
+      if(r.category==='dread'){
+        html+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:6px">';
+        html+=cell('Type',sel([{key:'Lump Sum',label:'Lump Sum'},{key:'Accelerator',label:'Accelerator'},{key:'Monthly Income',label:'Monthly Income'}],r.dreadType||'Lump Sum',REF+'.dreadType=this.value'));
+        html+=cell('Notes',inp(r.dreadNotes||'','e.g. Comprehensive, Cancer only',REF+'.dreadNotes=this.value'));
+        html+='</div>';
+      }
+    } else if(isDI){
+      // Death income: amount | cover esc | term type | term value | prem portion | prem esc
       html+='<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:6px;margin-bottom:6px">';
-      html+=cell('Monthly Benefit',inp(r.amount,'R/pm','POL_INCOME_ROWS['+i+'].amount=this.value'));
-      html+=cell('Cover Escalation %',inp(r.coverEsc,'e.g. 6','POL_INCOME_ROWS['+i+'].coverEsc=this.value'));
-      html+=cell('Term Type','<select onchange="POL_INCOME_ROWS['+i+'].termType=this.value;document.getElementById(\'incomeRowsWrap\').innerHTML=renderIncomeRows()" style="width:100%;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"><option value="fixed"'+(r.termType!=='to-age'?' selected':'')+'>Fixed term (years)</option><option value="to-age"'+(r.termType==='to-age'?' selected':'')+'>To dependant age</option></select>');
+      html+=cell('Monthly Benefit',inp(r.amount,'R/pm',REF+'.amount=this.value'));
+      html+=cell('Cover Esc %',inp(r.coverEsc,'e.g. 6',REF+'.coverEsc=this.value'));
+      html+=cell('Term Type',sel([{key:'fixed',label:'Fixed years'},{key:'to-age',label:'To dependant age'}],r.termType||'fixed',REF+'.termType=this.value;document.getElementById(\'benefitsWrap\').innerHTML=renderBenefitRows()'));
       if(r.termType==='to-age'){
-        html+=cell('Dep. Current Age / Target Age',
+        html+=cell('Dep. age now → target',
           '<div style="display:flex;gap:4px;align-items:center">'+
-          inp(r.termDepAge,'Now','POL_INCOME_ROWS['+i+'].termDepAge=this.value',';width:60px')+
-          '<span style="font-size:11px;color:#889">→</span>'+
-          inp(r.termTargetAge,'Age','POL_INCOME_ROWS['+i+'].termTargetAge=this.value',';width:60px')+
+          inp(r.termDepAge,'now',REF+'.termDepAge=this.value',';width:55px')+
+          '<span style="color:#889;font-size:10px">→</span>'+
+          inp(r.termTargetAge,'age',REF+'.termTargetAge=this.value',';width:55px')+
           '</div>');
       } else {
-        html+=cell('Term (years)',inp(r.termYears,'e.g. 20','POL_INCOME_ROWS['+i+'].termYears=this.value'));
+        html+=cell('Term (years)',inp(r.termYears,'e.g. 20',REF+'.termYears=this.value'));
       }
       html+='</div>';
-
-      // Death Income — Row 3: prem portion | prem esc type | prem esc % | taxable | convert
       html+='<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr 1fr;gap:6px">';
-      html+=cell('Premium Portion /pm',inp(r.premPortion,'R/pm','POL_INCOME_ROWS['+i+'].premPortion=this.value'));
-      html+=cell('Premium Increases','<select onchange="POL_INCOME_ROWS['+i+'].premEscType=this.value;document.getElementById(\'incomeRowsWrap\').innerHTML=renderIncomeRows()" style="width:100%;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"><option value="fixed"'+(r.premEscType!=='age-rated'?' selected':'')+'>Fixed %</option><option value="age-rated"'+(r.premEscType==='age-rated'?' selected':'')+'>Age-rated</option></select>');
-      html+=cell(isAgeRated?'Assumed % (age-rated)':'Premium Esc %', isAgeRated?
-        inp(r.premEsc,'assumed','POL_INCOME_ROWS['+i+'].premEsc=this.value',';border-color:#e97316')+
-        '<div style="font-size:9px;color:#e97316;margin-top:2px">⚠ assumption</div>' :
-        inp(r.premEsc,'e.g. 5','POL_INCOME_ROWS['+i+'].premEsc=this.value'), isAgeRated);
-      html+=cell('Taxable',sel(['Yes','No'],r.taxable||'No','POL_INCOME_ROWS['+i+'].taxable=this.value'));
-      html+=cell('Lump Sum opt?',sel(['No','Yes'],r.convert||'No','POL_INCOME_ROWS['+i+'].convert=this.value'));
+      html+=cell('Premium /pm',inp(r.premPortion,'R/pm',REF+'.premPortion=this.value'));
+      html+=cell('Premium Increases',sel([{key:'fixed',label:'Fixed %'},{key:'age-rated',label:'Age-rated'}],r.premEscType||'fixed',REF+'.premEscType=this.value;document.getElementById(\'benefitsWrap\').innerHTML=renderBenefitRows()'));
+      html+=cell(isAR?'Assumed %':'Prem Esc %',inp(r.premEsc,isAR?'assumed':'e.g. 5',REF+'.premEsc=this.value',isAR?';border-color:#e97316':''),isAR);
+      html+=cell('Taxable',sel([{key:'No',label:'No'},{key:'Yes',label:'Yes'}],r.taxable||'No',REF+'.taxable=this.value'));
+      html+=cell('Lump sum opt?',sel([{key:'No',label:'No'},{key:'Yes',label:'Yes'}],r.convert||'No',REF+'.convert=this.value'));
       html+='</div>';
-
-      // Info line showing capitalised value for FNA
+      // FNA preview
       var capYrs=r.termType==='to-age'?Math.max(0,N(r.termTargetAge)-N(r.termDepAge)):N(r.termYears);
       if(N(r.amount)>0&&capYrs>0){
-        var capEsc=N(r.coverEsc)||0;
-        // Simple capitalisation preview: PV of growing annuity
-        var dr=4; // default drawdown
-        var capVal=Math.round(N(r.amount)*12*(capYrs/(1+dr/100)));
-        if(capEsc>0) capVal=Math.round(N(r.amount)*((Math.pow(1+capEsc/100,capYrs)-1)/((capEsc/100+dr/100)*(1+capEsc/100))));
-        html+='<div style="font-size:10px;color:#0e413a;background:#f0fdf4;border-radius:4px;padding:4px 8px;margin-top:6px">'+
-          '📐 FNA: '+termYrsDisplay+' · Capitalised value ≈ <strong>R '+Math.round(capVal).toLocaleString('en-ZA')+'</strong> (at '+capEsc+'% esc, 4% drawdown)</div>';
+        var capEsc=N(r.coverEsc)||0, dr=4;
+        var capVal=capEsc>0?Math.round(N(r.amount)*((Math.pow(1+capEsc/100,capYrs)-1)/((capEsc/100+dr/100)*(1+capEsc/100)))):Math.round(N(r.amount)*capYrs*12/(1+dr/100));
+        html+='<div style="font-size:10px;color:#0e413a;background:#f0fdf4;border-radius:4px;padding:4px 8px;margin-top:6px">📐 FNA: '+capYrs+' years · Capitalised ≈ <strong>R '+Math.round(capVal).toLocaleString('en-ZA')+'</strong></div>';
       }
-
     } else {
-      // IP / Other — Row 2: amount | waiting | benefit period | cover esc
+      // IP / Other income
+      var isIP=r.category==='ip';
+      var waitOpts=['7 days','2 weeks','1 month','3 months','6 months','1 year','2 years'];
+      var termOpts=['1 year','2 years','5 years','To age 55','To age 60','To age 65','To age 70','Whole of Life'];
       html+='<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:6px;margin-bottom:6px">';
-      html+=cell('Monthly Benefit',inp(r.amount,'R/pm','POL_INCOME_ROWS['+i+'].amount=this.value'));
-      if(isIP){
-        html+=cell('Waiting Period',sel(waitOpts,r.waiting||'1 month','POL_INCOME_ROWS['+i+'].waiting=this.value'));
-        html+=cell('Benefit Period',sel(ipTermOpts,r.term||'To age 65','POL_INCOME_ROWS['+i+'].term=this.value'));
-      } else {
-        html+=cell('Period / Notes',inp(r.term||'','e.g. 24 months','POL_INCOME_ROWS['+i+'].term=this.value'));
-        html+='<div></div>';
-      }
-      html+=cell('Cover Escalation %',inp(r.coverEsc,'e.g. 5','POL_INCOME_ROWS['+i+'].coverEsc=this.value'));
+      html+=cell('Monthly Benefit',inp(r.amount,'R/pm',REF+'.amount=this.value'));
+      html+=isIP?cell('Waiting Period',sel(waitOpts,r.waiting||'1 month',REF+'.waiting=this.value')):cell('Period',inp(r.term||'','e.g. 24 months',REF+'.term=this.value'));
+      html+=isIP?cell('Benefit Period',sel(termOpts,r.term||'To age 65',REF+'.term=this.value')):cell('','<div></div>');
+      html+=cell('Cover Esc %',inp(r.coverEsc,'e.g. 5',REF+'.coverEsc=this.value'));
       html+='</div>';
-
-      // IP / Other — Row 3: prem portion | prem esc type | prem esc % | taxable | convert
       html+='<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr 1fr;gap:6px">';
-      html+=cell('Premium Portion /pm',inp(r.premPortion,'R/pm','POL_INCOME_ROWS['+i+'].premPortion=this.value'));
-      html+=cell('Premium Increases','<select onchange="POL_INCOME_ROWS['+i+'].premEscType=this.value;document.getElementById(\'incomeRowsWrap\').innerHTML=renderIncomeRows()" style="width:100%;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"><option value="fixed"'+(r.premEscType!=='age-rated'?' selected':'')+'>Fixed %</option><option value="age-rated"'+(r.premEscType==='age-rated'?' selected':'')+'>Age-rated</option></select>');
-      html+=cell(isAgeRated?'Assumed % (age-rated)':'Premium Esc %', isAgeRated?
-        inp(r.premEsc,'assumed','POL_INCOME_ROWS['+i+'].premEsc=this.value',';border-color:#e97316')+
-        '<div style="font-size:9px;color:#e97316;margin-top:2px">⚠ assumption</div>' :
-        inp(r.premEsc,'e.g. 5','POL_INCOME_ROWS['+i+'].premEsc=this.value'), isAgeRated);
-      html+=cell('Taxable',sel(['No','Yes'],r.taxable||'No','POL_INCOME_ROWS['+i+'].taxable=this.value'));
-      html+=cell('Lump Sum opt?',sel(['No','Yes'],r.convert||'No','POL_INCOME_ROWS['+i+'].convert=this.value'));
+      html+=cell('Premium /pm',inp(r.premPortion,'R/pm',REF+'.premPortion=this.value'));
+      html+=cell('Premium Increases',sel([{key:'fixed',label:'Fixed %'},{key:'age-rated',label:'Age-rated'}],r.premEscType||'fixed',REF+'.premEscType=this.value;document.getElementById(\'benefitsWrap\').innerHTML=renderBenefitRows()'));
+      html+=cell(isAR?'Assumed %':'Prem Esc %',inp(r.premEsc,isAR?'assumed':'e.g. 5',REF+'.premEsc=this.value',isAR?';border-color:#e97316':''),isAR);
+      html+=cell('Taxable',sel([{key:'No',label:'No'},{key:'Yes',label:'Yes'}],r.taxable||'No',REF+'.taxable=this.value'));
+      html+=cell('Lump sum opt?',sel([{key:'No',label:'No'},{key:'Yes',label:'Yes'}],r.convert||'No',REF+'.convert=this.value'));
       html+='</div>';
     }
 
@@ -3160,29 +3189,61 @@ function renderIncomeRows(){
   }).join('');
 }
 
-function addIncomeRow(){
-  // Show type picker first
-  var wrap = document.getElementById('incomeRowsWrap');
-  var picker = document.createElement('div');
-  picker.style.cssText='background:#fff;border:2px solid var(--gold);border-radius:8px;padding:12px 14px;margin-bottom:8px';
-  picker.innerHTML='<div style="font-size:12px;font-weight:700;color:var(--navy);margin-bottom:8px">Select benefit type:</div>'+
-    '<div style="display:flex;gap:8px;flex-wrap:wrap">'+
-    ['Death Income','Income Protection','Temporary IP','Sickness Benefit','Hospital Income','Other'].map(function(t){
-      return '<button type="button" onclick="'+
-        'POL_INCOME_ROWS.push({type:\''+t+'\',label:\'\',amount:\'\','+
-        'coverEsc:\'\',premEsc:\'\',premEscType:\'fixed\','+
-        (t==='Death Income'?'termType:\'fixed\',termYears:\'\',termTargetAge:\'\',termDepAge:\'\',':'waiting:\'1 month\',term:\'To age 65\',')+
-        'premPortion:\'\',taxable:\'No\',convert:\'No\'});'+
-        'document.getElementById(\'incomeRowsWrap\').innerHTML=renderIncomeRows()" '+
-        'style="background:var(--navy);color:#fff;border:none;border-radius:6px;padding:6px 12px;cursor:pointer;font-size:12px;font-weight:600">'+t+'</button>';
+function updatePremRecon(){
+  var N=function(v){return parseFloat(String(v||'').replace(/[^0-9.\-]/g,''))||0;};
+  var totalPrem=N(document.getElementById('ppm')&&document.getElementById('ppm').value);
+  var portionSum=POL_BENEFITS.reduce(function(a,r){return a+N(r.premPortion);},0);
+  var fixedBens=POL_BENEFITS.filter(function(r){return r.premEscType!=='age-rated'&&N(r.premEsc)>0&&N(r.premPortion)>0;});
+  var weightedEsc=0;
+  if(fixedBens.length>0){
+    var wSum=fixedBens.reduce(function(a,r){return a+N(r.premPortion);},0);
+    weightedEsc=wSum>0?fixedBens.reduce(function(a,r){return a+N(r.premEsc)*N(r.premPortion);},0)/wSum:0;
+  }
+  var ageRated=POL_BENEFITS.filter(function(r){return r.premEscType==='age-rated';});
+  var el=document.getElementById('premRecon');
+  if(!el) return;
+  if(portionSum===0){el.innerHTML='Enter premium portions on each benefit to reconcile against total premium.';el.style.background='#f8f9fc';el.style.borderColor='var(--mist)';return;}
+  var diff=totalPrem>0?portionSum-totalPrem:0;
+  var ok=totalPrem>0&&Math.abs(diff)<1;
+  var html='<strong>Premium reconciliation:</strong> Portions sum to <strong>R '+Math.round(portionSum).toLocaleString('en-ZA')+'</strong>';
+  if(totalPrem>0) html+=' vs total <strong>R '+Math.round(totalPrem).toLocaleString('en-ZA')+'</strong>';
+  if(ok) html+=' ✓';
+  else if(totalPrem>0) html+=' — <span style="color:'+(diff>0?'#dc2626':'#d97706')+'">'+( diff>0?'over by':'under by')+' R'+Math.abs(Math.round(diff)).toLocaleString('en-ZA')+'</span>';
+  if(fixedBens.length>0) html+='<br><strong>Weighted avg escalation (fixed only):</strong> '+weightedEsc.toFixed(1)+'%';
+  if(ageRated.length>0) html+='<br><span style="color:#e97316">⚠ '+ageRated.length+' benefit'+(ageRated.length>1?'s are':' is')+' age-rated — excluded from avg escalation</span>';
+  el.innerHTML=html;
+  el.style.background=ok?'#f0fdf4':totalPrem>0?'#fef9ee':'#f8f9fc';
+  el.style.borderColor=ok?'#bbf7d0':totalPrem>0?'var(--gold2)':'var(--mist)';
+}
+
+function addBenefitRow(){
+  var CATS=[
+    {key:'death',label:'Death / Life Cover'},
+    {key:'disability',label:'Capital Disability'},
+    {key:'dread',label:'Dread Disease'},
+    {key:'ip',label:'Income Protection'},
+    {key:'death-income',label:'Death Income'},
+    {key:'other-income',label:'Other Income'}
+  ];
+  var wrap=document.getElementById('benefitsWrap');
+  var picker=document.createElement('div');
+  picker.style.cssText='background:#fff;border:2px solid var(--gold);border-radius:8px;padding:10px 12px;margin-bottom:8px';
+  picker.innerHTML='<div style="font-size:11px;font-weight:700;color:var(--navy);margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px">Select benefit type:</div>'+
+    '<div style="display:flex;gap:6px;flex-wrap:wrap">'+
+    CATS.map(function(c){
+      var def={category:c.key,label:'',cover:'',amount:'',coverEsc:'',premPortion:'',premEscType:'fixed',premEsc:'',
+        termType:'fixed',termYears:'',termTargetAge:'',termDepAge:'',waiting:'1 month',term:'To age 65',
+        taxable:'No',convert:'No',dreadType:'Lump Sum',dreadNotes:''};
+      return '<button type="button" onclick="POL_BENEFITS.push('+JSON.stringify(def)+');document.getElementById(\'benefitsWrap\').innerHTML=renderBenefitRows();updatePremRecon()" '+
+        'style="background:var(--navy);color:#fff;border:none;border-radius:5px;padding:5px 10px;cursor:pointer;font-size:11px;font-weight:600">'+c.label+'</button>';
     }).join('')+
     '</div>';
-  // Replace any existing picker, append new one
   var old=wrap.querySelector('.add-picker');
   if(old) old.parentNode.removeChild(old);
   picker.className='add-picker';
   wrap.appendChild(picker);
 }
+
 
 // ── Living Annuity two-way calculation ───────────────────────
 function _laFV(){
@@ -3276,17 +3337,55 @@ function laShowSust(){
 
 function collectPolicyForm(){
   function getR(name){ var el=document.querySelector('input[name="'+name+'"]:checked'); return el?el.value:''; }
+  function pn(v){return parseFloat(String(v||'').replace(/[^0-9.\-]/g,''))||0;}
   // Sync all date pickers to their hidden inputs before reading
   ['psd','pb_matdate'].forEach(function(id){ if(document.getElementById(id+'_d')) fdpSync(id); });
+
+  // Compute backward-compat totals from POL_BENEFITS
+  var benDeath=0, benDis=0, benDD='', benIPRows=[];
+  var premEscVals=[], benefitEscVals=[];
+  POL_BENEFITS.forEach(function(r){
+    if(r.category==='death')      benDeath+=pn(r.cover);
+    if(r.category==='disability') benDis+=pn(r.cover);
+    if(r.category==='dread'&&pn(r.cover)>0) benDD=benDD?String(pn(benDD)+pn(r.cover)):r.cover;
+    if(r.category==='ip'||r.category==='death-income'||r.category==='other-income'){
+      benIPRows.push({type:r.category==='ip'?'Income Protection':r.category==='death-income'?'Death Income':'Other',
+        label:r.label,amount:r.amount,esc:r.coverEsc,waiting:r.waiting,term:r.term,
+        termType:r.termType,termYears:r.termYears,termTargetAge:r.termTargetAge,termDepAge:r.termDepAge,
+        taxable:r.taxable,convert:r.convert,premPortion:r.premPortion,premEsc:r.premEsc,premEscType:r.premEscType,
+        coverEsc:r.coverEsc});
+    }
+    if(pn(r.premPortion)>0){
+      if(r.premEscType==='age-rated') premEscVals.push({pn:pn(r.premPortion),esc:'age-rated'});
+      else if(pn(r.premEsc)>0) premEscVals.push({pn:pn(r.premPortion),esc:pn(r.premEsc)});
+    }
+    if(pn(r.coverEsc)>0) benefitEscVals.push(pn(r.coverEsc));
+  });
+  // Weighted average premium escalation (fixed only)
+  var fixedOnly=premEscVals.filter(function(x){return x.esc!=='age-rated';});
+  var wPremEsc='';
+  if(fixedOnly.length>0){
+    var wSum=fixedOnly.reduce(function(a,x){return a+x.pn;},0);
+    if(wSum>0) wPremEsc=(fixedOnly.reduce(function(a,x){return a+x.esc*x.pn;},0)/wSum).toFixed(1);
+  }
+  if(premEscVals.some(function(x){return x.esc==='age-rated';})) wPremEsc=(wPremEsc?wPremEsc+' (+ age-rated)':'age-rated');
+  var avgBenEsc=benefitEscVals.length>0?(benefitEscVals.reduce(function(a,v){return a+v;},0)/benefitEscVals.length).toFixed(1):'';
+
   return {
     Insurer:g('pi'),Product:g('pp'),PolicyNo:g('pn'),Type:g('pt'),
     StartDate:g('psd'),ClientIsOwner:getR('pisowner'),Owner:g('pown'),Status:g('pst'),EstateDutiable:getR('pestate'),
-    BizType:g('pbiztype'),LifeAssuredType:(document.getElementById('plifeassured_type')?document.getElementById('plifeassured_type').value:''),LifeAssured:g('plifeassured'),LoanAmount:g('ploanamt'),KeyPosition:g('pkeypos'),
-    Premium:g('ppm'),Frequency:g('pfreq'),PremEscalation:g('pprem_pct'),BenEscalation:g('pben_pct'),
-    BenDeath:g('pb_death')||g('pb_biz_death'),BenDisability:g('pb_dis')||g('pb_biz_dis'),
-    BenDreadDisease:g('pb_dd')||g('pb_biz_dd'),
-    DreadDiseaseType:(document.getElementById('pb_ddtype')?document.getElementById('pb_ddtype').value:''),
-    DreadDiseaseNotes:g('pb_ddnotes'),
+    BizType:g('pbiztype'),LifeAssuredType:(document.getElementById('plifeassured_type')?document.getElementById('plifeassured_type').value:''),LifeAssured:g('plifeassured'),LoanAmount:g('ploanamt'),
+    Premium:g('ppm'),Frequency:g('pfreq'),
+    // Backward-compat totals (computed from benefits)
+    BenDeath:      benDeath>0?String(Math.round(benDeath)):'',
+    BenDisability: benDis>0?String(Math.round(benDis)):'',
+    BenDreadDisease:benDD?String(Math.round(pn(benDD))):'',
+    // Weighted averages for display
+    PremEscalation:wPremEsc,
+    BenEscalation: avgBenEsc,
+    // New unified benefits array
+    benefits: JSON.stringify(POL_BENEFITS),
+    IncomeBenefits: JSON.stringify(benIPRows), // backward compat for FNA
     BenSurrenderValue:g('pb_surr')||g('pb_surr2'),
     BenFundValue:g('pb_fv'),BenMaturityValue:g('pb_matval'),
     MaturityDate:g('pb_matdate'),RetirementAge:g('pb_retage'),
@@ -3299,8 +3398,7 @@ function collectPolicyForm(){
     LAIncomeTaxable:(function(){var el=document.querySelector('input[name="platax"]:checked');return el?el.value:'Yes';})(),
     Insured:g('pins'),Payer:g('ppay'),
     Notes:g('pnt'),
-    Beneficiaries:JSON.stringify(POL_BENS),
-    IncomeBenefits:JSON.stringify(POL_INCOME_ROWS)
+    Beneficiaries:JSON.stringify(POL_BENS)
   };
 }
 
