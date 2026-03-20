@@ -2770,7 +2770,26 @@ var POL_BENS=[];
 
 // Migrate old policy structure to unified benefits array
 function migrateToBenefits(p){
-  // If already has benefits array, return it (migrating old rows to new format)
+  // Check IncomeBenefits for v2 envelope first (most reliable storage path)
+  try {
+    var ib = p.IncomeBenefits ? JSON.parse(p.IncomeBenefits) : null;
+    if(ib && ib.v2 && ib.v2.length > 0) {
+      // Ensure all rows have required fields
+      ib.v2.forEach(function(r){
+        if(r.coverEsc===undefined && r.esc!==undefined) r.coverEsc=r.esc;
+        if(r.coverEsc===undefined) r.coverEsc='';
+        if(r.premEsc===undefined) r.premEsc='';
+        if(r.premEscType===undefined) r.premEscType='fixed';
+        if(r.premPortion===undefined) r.premPortion='';
+        if(r.termType===undefined) r.termType='fixed';
+        if(r.termYears===undefined) r.termYears='';
+        if(r.termTargetAge===undefined) r.termTargetAge='';
+        if(r.termDepAge===undefined) r.termDepAge='';
+      });
+      return ib.v2;
+    }
+  } catch(e) {}
+  // Fall back to Benefits field (capital B)
   var existing=[];
   try{ existing=p.Benefits?JSON.parse(p.Benefits):[]; }catch(e){ existing=[]; }
   if(existing.length>0){
@@ -3412,7 +3431,9 @@ function collectPolicyForm(){
     BenEscalation: avgBenEsc,
     // New unified benefits array
     Benefits: JSON.stringify(POL_BENEFITS),
-    IncomeBenefits: JSON.stringify(benIPRows), // backward compat for FNA
+    // Store full benefits array inside IncomeBenefits using v2 envelope
+    // Apps Script reliably saves IncomeBenefits — Benefits column may not be in its field list
+    IncomeBenefits: JSON.stringify({v2: POL_BENEFITS, ip: benIPRows}),
     BenSurrenderValue:g('pb_surr')||g('pb_surr2'),
     BenFundValue:g('pb_fv'),BenMaturityValue:g('pb_matval'),
     MaturityDate:g('pb_matdate'),RetirementAge:g('pb_retage'),
