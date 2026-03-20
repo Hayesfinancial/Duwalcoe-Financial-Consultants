@@ -759,7 +759,7 @@ var S = JSON.parse(JSON.stringify(DEFAULTS));
   if (params.get('pols')) {
     try {
       var pols = JSON.parse(decodeURIComponent(params.get('pols')));
-      applyPolsFromCRM(pols);
+      importPolsFromCRM(pols);
     } catch(e) {}
   }
 })();
@@ -775,6 +775,9 @@ var S = JSON.parse(JSON.stringify(DEFAULTS));
   loadFromServer(clientId, function(serverState, savedTime) {
     if (!serverState) {
       if (indicator) { indicator.textContent = ''; }
+      // New FNA — no saved state. Calculate existingCover from imported policies now.
+      if (S.importedPols && S.importedPols.length > 0) recalcExistingCover(S.importedPols);
+      render();
       return;
     }
     // Merge server state into S — but never overwrite importedPols (always from CRM)
@@ -832,8 +835,14 @@ var S = JSON.parse(JSON.stringify(DEFAULTS));
 })();
 
 // Applies CRM policy data to state — used on fresh load and on "Refresh from CRM"
-function applyPolsFromCRM(pols) {
+// Import policies from CRM — sets importedPols only, does NOT touch existingCover
+// Used on initial page load so server-saved FNA data is not overwritten
+function importPolsFromCRM(pols) {
   S.importedPols = pols;
+}
+
+// Recalculate existingCover from imported policies — called ONLY by ↻ CRM button
+function recalcExistingCover(pols) {
   if (!S.existingCover) S.existingCover = {death:'',disability:'',dread:'',ipPM:'',totalPrem:''};
   var totDeath=0,totDis=0,totDD=0,totIP=0,totPrem=0;
   pols.forEach(function(p){
@@ -850,6 +859,12 @@ function applyPolsFromCRM(pols) {
   S.existingCover.dread      = String(Math.round(totDD));
   S.existingCover.ipPM       = String(Math.round(totIP));
   S.existingCover.totalPrem  = String(Math.round(totPrem));
+}
+
+// Full apply — imports policies AND recalculates existingCover (used by ↻ CRM button only)
+function applyPolsFromCRM(pols) {
+  importPolsFromCRM(pols);
+  recalcExistingCover(pols);
 }
 
 // Called by the "Refresh from CRM" button — re-applies URL params over current state
