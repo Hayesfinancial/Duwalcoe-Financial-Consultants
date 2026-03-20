@@ -335,6 +335,13 @@ function capitalise(grossMonthly, years, escalation, drawdown) {
 
 // Get effective premium escalation for a policy — reads benefits array if available, else PremEscalation
 function polPremEsc(pol) {
+  // Priority 1: manually-entered premEsc in FNA table (overrides everything)
+  if(pol.premEsc!==null&&pol.premEsc!==undefined&&pol.premEsc!==''){
+    var manRaw=String(pol.premEsc).replace(/,/g,'.').replace(/[^0-9.]/g,'');
+    var manVal=parseFloat(manRaw);
+    if(manVal>0) return manVal;
+  }
+  // Priority 2: new benefits array (weighted avg of fixed escalations)
   var bens=[]; try{bens=pol.benefits?JSON.parse(pol.benefits):[];}catch(e){}
   if(bens.length>0){
     var escBens=bens.filter(function(b){return N(b.premEsc)>0&&b.premEscType!=='age-rated';});
@@ -345,7 +352,8 @@ function polPremEsc(pol) {
     }
     return 0;
   }
-  var raw=String(pol.PremEscalation!=null&&pol.PremEscalation!==''?pol.PremEscalation:(pol.premEsc!=null&&pol.premEsc!==''?pol.premEsc:'')).replace(/,/g,'.').replace(/[^0-9.]/g,'');
+  // Priority 3: PremEscalation field (old format) — strip non-numeric
+  var raw=String(pol.PremEscalation!=null&&pol.PremEscalation!==''?pol.PremEscalation:'').replace(/,/g,'.').replace(/[^0-9.]/g,'');
   return parseFloat(raw)||0;
 }
 
@@ -2970,9 +2978,11 @@ function buildPolicies() {
           var tdPrem=document.createElement('td'); tdPrem.style.textAlign='right'; tdPrem.textContent=Rfmt(prem); tr2.appendChild(tdPrem);
           var tdPct=document.createElement('td'); tdPct.style.textAlign='right'; tdPct.innerHTML='<span style="font-size:11px;color:var(--sub)">'+pctToday+'%</span>'; tr2.appendChild(tdPct);
           var tdEsc=document.createElement('td'); tdEsc.style.textAlign='right';
+          var isAgedRated=(String(pol.PremEscalation||'').toLowerCase().indexOf('age')>-1);
+          if(isAgedRated&&!pol.premEsc){var arLbl=document.createElement('div');arLbl.textContent='age-rated';arLbl.style.cssText='font-size:10px;color:#e97316;margin-bottom:2px';tdEsc.appendChild(arLbl);}
           var escInp=document.createElement('input'); escInp.type='text'; escInp.inputMode='numeric';
-          escInp.value=pol.premEsc||''; escInp.placeholder='0';
-          escInp.style.cssText='width:48px;padding:3px 5px;border:1.5px solid var(--mist);border-radius:4px;font-size:11px;text-align:right';
+          escInp.value=pol.premEsc||''; escInp.placeholder=isAgedRated?'assumed':'0';
+          escInp.style.cssText='width:52px;padding:3px 5px;border:1.5px solid '+(isAgedRated&&!pol.premEsc?'#e97316':'var(--mist)')+';border-radius:4px;font-size:11px;text-align:right';
           escInp.addEventListener('input',function(e){S.importedPols[polIdx].premEsc=e.target.value;});
           escInp.addEventListener('blur',function(e){S.importedPols[polIdx].premEsc=e.target.value;render();});
           var espct2=document.createElement('span'); espct2.textContent=' %'; espct2.style.fontSize='11px';
