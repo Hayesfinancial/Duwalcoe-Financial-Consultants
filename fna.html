@@ -3306,7 +3306,7 @@ function buildPolCard(p, i) {
   }
 
 
-  // ── Benefits section — mirrors CRM card exactly, read-only
+  // ── Benefits section — fully editable, mirrors CRM card
   if (isRisk || t === 'Life / Income Protector') {
     var bst = el('div','stitle','Benefits');
     bst.style.marginTop = '10px';
@@ -3314,6 +3314,20 @@ function buildPolCard(p, i) {
 
     var bens = [];
     try { bens = p.benefits ? JSON.parse(p.benefits) : []; } catch(e) { bens = []; }
+
+    function saveBens(updated) {
+      S.importedPols[i].benefits = JSON.stringify(updated);
+      // Recompute backward-compat totals
+      var totD=0,totDis=0,totDD=0;
+      updated.forEach(function(b){
+        if(b.category==='death')      totD  +=N(b.cover);
+        if(b.category==='disability') totDis+=N(b.cover);
+        if(b.category==='dread')      totDD +=N(b.cover);
+      });
+      if(totD>0)   S.importedPols[i].BenDeath       =String(Math.round(totD));
+      if(totDis>0) S.importedPols[i].BenDisability  =String(Math.round(totDis));
+      if(totDD>0)  S.importedPols[i].BenDreadDisease=String(Math.round(totDD));
+    }
 
     if (bens.length > 0) {
       var CATS_FNA=[
@@ -3324,64 +3338,108 @@ function buildPolCard(p, i) {
         {key:'death-income',label:'Death Income',         color:'#a8b938', isLump:false},
         {key:'other-income',label:'Other Income Benefit', color:'#6b7280', isLump:false}
       ];
-      function roVal(val){
-        var w=div(); w.style.cssText='width:100%;box-sizing:border-box;border:1.5px solid var(--smoke);border-radius:5px;padding:5px 7px;font-size:12px;background:#f9f9f6;color:var(--navy);font-weight:600;min-height:28px';
-        w.textContent=val||'\u2014'; return w;
+
+      // inp / sel / cell helpers — write directly to bens[ri] then saveBens
+      function mkInp(val, ph, onch, sty) {
+        var inp = document.createElement('input'); inp.type='text';
+        inp.value = val||''; inp.placeholder = ph||'';
+        inp.style.cssText = 'width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:5px;padding:5px 7px;font-family:inherit;font-size:12px'+(sty||'');
+        inp.addEventListener('change', function(e){ onch(e.target.value); saveBens(bens); render(); });
+        return inp;
       }
-      function roCell(lbl,val,warn){
+      function mkSel(opts, cur, onch) {
+        var sel = document.createElement('select');
+        sel.style.cssText = 'width:100%;border:1.5px solid var(--mist);border-radius:5px;padding:5px 7px;font-family:inherit;font-size:12px';
+        opts.forEach(function(o){
+          var opt=document.createElement('option'); opt.value=o.key||o; opt.textContent=o.label||o;
+          if((o.key||o)===cur) opt.selected=true;
+          sel.appendChild(opt);
+        });
+        sel.addEventListener('change', function(e){ onch(e.target.value); saveBens(bens); render(); });
+        return sel;
+      }
+      function mkCell(lbl, el2, warn) {
         var c=div(); c.style.cssText='min-width:0';
         var l=div(); l.style.cssText='font-size:10px;color:'+(warn?'#e97316':'#889')+';margin-bottom:2px;font-weight:'+(warn?'700':'400')+';white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
         l.textContent=(warn?'\u26a0 ':'')+lbl;
-        c.appendChild(l); c.appendChild(roVal(val)); return c;
+        c.appendChild(l); c.appendChild(el2); return c;
       }
-      function fmtR(v){ var n=parseFloat(String(v||'').replace(/[^0-9.]/g,'')); return isNaN(n)||!v?'\u2014':'R '+Math.round(n).toLocaleString('en-ZA'); }
 
-      bens.forEach(function(r){
+      bens.forEach(function(r, ri) {
         var catDef=CATS_FNA.find(function(c){return c.key===r.category;})||CATS_FNA[0];
         var isLump=catDef.isLump, isDI=r.category==='death-income', isAR=r.premEscType==='age-rated';
-        var isRetired=r.paidAtRetirement!=='no';
+        if(r.paidAtRetirement===undefined) r.paidAtRetirement=(isLump?'yes':'no');
 
         var bc=div(); bc.style.cssText='background:#fff;border:1.5px solid var(--mist);border-radius:8px;padding:10px 12px;margin-bottom:8px;border-left:4px solid '+catDef.color;
 
-        // Row 1 — category | label | paid at ret
-        var row1=div(); row1.style.cssText='display:flex;gap:6px;align-items:center;margin-bottom:8px;flex-wrap:wrap';
-        var cb=div(); cb.style.cssText='background:'+catDef.color+';color:#fff;border-radius:5px;padding:4px 10px;font-size:11px;font-weight:700;white-space:nowrap';
-        cb.textContent=catDef.label; row1.appendChild(cb);
-        if(r.label){var lb=div();lb.style.cssText='font-size:12px;font-weight:600;color:var(--navy);flex:1';lb.textContent=r.label;row1.appendChild(lb);}
-        var rb=div(); rb.style.cssText='font-size:10px;border-radius:4px;padding:2px 7px;font-weight:700;white-space:nowrap;background:'+(isRetired?'#f0fdf4':'#f4f4f4')+';color:'+(isRetired?'#16a34a':'#888')+';border:1px solid '+(isRetired?'#bbf7d0':'#ddd');
-        rb.textContent=isRetired?'\u2713 Paid at ret.':'Not at ret.'; row1.appendChild(rb);
+        // Row 1 — category selector | label | paid at ret | delete
+        var row1=div(); row1.style.cssText='display:flex;gap:6px;align-items:center;margin-bottom:8px';
+
+        var catSel=mkSel(CATS_FNA.map(function(c){return {key:c.key,label:c.label};}), r.category, function(v){ bens[ri].category=v; });
+        catSel.style.flex='1.5';
+        row1.appendChild(catSel);
+
+        var lblInp=document.createElement('input'); lblInp.type='text';
+        lblInp.value=r.label||''; lblInp.placeholder="Label e.g. 'Life Cover 1'";
+        lblInp.style.cssText='flex:2;min-width:0;border:1.5px solid var(--mist);border-radius:5px;padding:5px 7px;font-family:inherit;font-size:12px';
+        lblInp.addEventListener('change',function(e){ bens[ri].label=e.target.value; saveBens(bens); });
+        row1.appendChild(lblInp);
+
+        // Paid at retirement checkbox
+        var retLabel=document.createElement('label');
+        retLabel.style.cssText='display:flex;align-items:center;gap:4px;font-size:11px;color:var(--navy);cursor:pointer;flex-shrink:0;white-space:nowrap';
+        var retChk=document.createElement('input'); retChk.type='checkbox';
+        retChk.checked=(r.paidAtRetirement!=='no');
+        retChk.style.cssText='accent-color:var(--navy)';
+        retChk.addEventListener('change',function(e){ bens[ri].paidAtRetirement=e.target.checked?'yes':'no'; saveBens(bens); });
+        retLabel.appendChild(retChk); retLabel.appendChild(document.createTextNode('Paid at ret.'));
+        row1.appendChild(retLabel);
+
+        // Delete button
+        var delBtn2=document.createElement('button'); delBtn2.type='button'; delBtn2.textContent='\u2715';
+        delBtn2.style.cssText='background:var(--rose);color:#fff;border:none;border-radius:5px;padding:4px 8px;cursor:pointer;font-size:11px;font-weight:700;flex-shrink:0';
+        delBtn2.addEventListener('click',function(){ bens.splice(ri,1); saveBens(bens); render(); });
+        row1.appendChild(delBtn2);
         bc.appendChild(row1);
 
         if(isLump){
           var g=div(); g.style.cssText='display:grid;grid-template-columns:1.5fr 1fr 1fr 1fr 1fr;gap:6px';
-          g.appendChild(roCell('Cover Amount (R)', fmtR(r.cover)));
-          g.appendChild(roCell('Cover Esc %', r.coverEsc?r.coverEsc+'%':'\u2014'));
-          g.appendChild(roCell('Premium /pm', fmtR(r.premPortion)));
-          g.appendChild(roCell('Premium Increases', r.premEscType==='age-rated'?'Age-rated':r.premEscType==='level'?'Level':'Fixed %'));
-          g.appendChild(roCell(isAR?'Assumed %':'Premium Esc %', r.premEsc?r.premEsc+'%':'\u2014', isAR));
+          g.appendChild(mkCell('Cover Amount (R)', mkInp(r.cover,'e.g. 2000000',function(v){bens[ri].cover=v;})));
+          g.appendChild(mkCell('Cover Esc %',      mkInp(r.coverEsc,'e.g. 5',   function(v){bens[ri].coverEsc=v;})));
+          g.appendChild(mkCell('Premium /pm',      mkInp(r.premPortion,'R/pm',  function(v){bens[ri].premPortion=v;})));
+          g.appendChild(mkCell('Premium Increases',mkSel([{key:'fixed',label:'Fixed %'},{key:'level',label:'Level'},{key:'age-rated',label:'Age-rated'}],r.premEscType||'fixed',function(v){bens[ri].premEscType=v;})));
+          g.appendChild(mkCell(isAR?'Assumed %':'Premium Esc %', mkInp(r.premEsc,isAR?'assumed':'e.g. 5',function(v){bens[ri].premEsc=v;},isAR?';border-color:#e97316':''), isAR));
           bc.appendChild(g);
           if(r.category==='dread'){
             var gd=div(); gd.style.cssText='display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:6px';
-            gd.appendChild(roCell('Type', r.dreadType||'Lump Sum'));
-            gd.appendChild(roCell('Notes', r.dreadNotes||'\u2014'));
+            gd.appendChild(mkCell('Type',  mkSel([{key:'Lump Sum',label:'Lump Sum'},{key:'Accelerator',label:'Accelerator'},{key:'Monthly Income',label:'Monthly Income'}],r.dreadType||'Lump Sum',function(v){bens[ri].dreadType=v;})));
+            gd.appendChild(mkCell('Notes', mkInp(r.dreadNotes||'','e.g. Comprehensive, Cancer only',function(v){bens[ri].dreadNotes=v;})));
             bc.appendChild(gd);
           }
         } else if(isDI){
-          var capYrs=r.termType==='to-age'?Math.max(0,N(r.termTargetAge)-N(r.termDepAge)):N(r.termYears);
-          var termDisp=r.termType==='to-age'?capYrs+' yrs (dep. age '+r.termDepAge+' \u2192 '+r.termTargetAge+')':capYrs+' yrs fixed';
           var g1=div(); g1.style.cssText='display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:6px;margin-bottom:6px';
-          g1.appendChild(roCell('Monthly Benefit', fmtR(r.amount)+'/pm'));
-          g1.appendChild(roCell('Cover Esc %', r.coverEsc?r.coverEsc+'%':'\u2014'));
-          g1.appendChild(roCell('Term Type', r.termType==='to-age'?'To dependant age':'Fixed years'));
-          g1.appendChild(roCell('Term', termDisp));
+          g1.appendChild(mkCell('Monthly Benefit', mkInp(r.amount,'R/pm',        function(v){bens[ri].amount=v;})));
+          g1.appendChild(mkCell('Cover Esc %',     mkInp(r.coverEsc,'e.g. 6',    function(v){bens[ri].coverEsc=v;})));
+          g1.appendChild(mkCell('Term Type', mkSel([{key:'fixed',label:'Fixed years'},{key:'to-age',label:'To dependant age'}],r.termType||'fixed',function(v){bens[ri].termType=v;})));
+          if(r.termType==='to-age'){
+            var termWrap=div(); termWrap.style.cssText='display:flex;gap:4px;align-items:center';
+            termWrap.appendChild(mkInp(r.termDepAge,'now',  function(v){bens[ri].termDepAge=v;},  ';width:55px'));
+            var arr=document.createTextNode('\u2192'); termWrap.appendChild(arr);
+            termWrap.appendChild(mkInp(r.termTargetAge,'age',function(v){bens[ri].termTargetAge=v;},';width:55px'));
+            g1.appendChild(mkCell('Dep. age \u2192 target', termWrap));
+          } else {
+            g1.appendChild(mkCell('Term (years)', mkInp(r.termYears,'e.g. 20',function(v){bens[ri].termYears=v;})));
+          }
           bc.appendChild(g1);
           var g2=div(); g2.style.cssText='display:grid;grid-template-columns:1fr 1fr 1fr 1fr 1fr;gap:6px';
-          g2.appendChild(roCell('Premium /pm', fmtR(r.premPortion)));
-          g2.appendChild(roCell('Premium Increases', r.premEscType==='age-rated'?'Age-rated':r.premEscType==='level'?'Level':'Fixed %'));
-          g2.appendChild(roCell(isAR?'Assumed %':'Prem Esc %', r.premEsc?r.premEsc+'%':'\u2014', isAR));
-          g2.appendChild(roCell('Taxable', r.taxable||'No'));
-          g2.appendChild(roCell('Lump sum opt?', r.convert||'No'));
+          g2.appendChild(mkCell('Premium /pm',      mkInp(r.premPortion,'R/pm',function(v){bens[ri].premPortion=v;})));
+          g2.appendChild(mkCell('Premium Increases',mkSel([{key:'fixed',label:'Fixed %'},{key:'level',label:'Level'},{key:'age-rated',label:'Age-rated'}],r.premEscType||'fixed',function(v){bens[ri].premEscType=v;})));
+          g2.appendChild(mkCell(isAR?'Assumed %':'Prem Esc %', mkInp(r.premEsc,isAR?'assumed':'e.g. 5',function(v){bens[ri].premEsc=v;},isAR?';border-color:#e97316':''), isAR));
+          g2.appendChild(mkCell('Taxable',      mkSel([{key:'No',label:'No'},{key:'Yes',label:'Yes'}],r.taxable||'No',    function(v){bens[ri].taxable=v;})));
+          g2.appendChild(mkCell('Lump sum opt?',mkSel([{key:'No',label:'No'},{key:'Yes',label:'Yes'}],r.convert||'No',    function(v){bens[ri].convert=v;})));
           bc.appendChild(g2);
+          // FNA capitalisation preview
+          var capYrs=r.termType==='to-age'?Math.max(0,N(r.termTargetAge)-N(r.termDepAge)):N(r.termYears);
           if(N(r.amount)>0&&capYrs>0){
             var capEsc=N(r.coverEsc)||0, dr=N(S.assump&&S.assump.drawdown)||4;
             var capVal=capEsc>0?Math.round(N(r.amount)*((Math.pow(1+capEsc/100,capYrs)-1)/((capEsc/100+dr/100)*(1+capEsc/100)))):Math.round(N(r.amount)*capYrs*12/(1+dr/100));
@@ -3391,36 +3449,49 @@ function buildPolCard(p, i) {
           }
         } else {
           var isIP2=r.category==='ip';
+          var waitOpts=['7 days','2 weeks','1 month','3 months','6 months','1 year','2 years'];
+          var termOpts=['1 year','2 years','5 years','To age 55','To age 60','To age 65','To age 70','Whole of Life'];
           var g3a=div(); g3a.style.cssText='display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:6px;margin-bottom:6px';
-          g3a.appendChild(roCell('Monthly Benefit', fmtR(r.amount)+'/pm'));
-          g3a.appendChild(roCell(isIP2?'Waiting Period':'Period', r.waiting||r.term||'\u2014'));
-          g3a.appendChild(roCell(isIP2?'Benefit Period':'', isIP2?(r.term||'\u2014'):''));
-          g3a.appendChild(roCell('Cover Esc %', r.coverEsc?r.coverEsc+'%':'\u2014'));
+          g3a.appendChild(mkCell('Monthly Benefit', mkInp(r.amount,'R/pm',function(v){bens[ri].amount=v;})));
+          g3a.appendChild(mkCell(isIP2?'Waiting Period':'Period', isIP2?mkSel(waitOpts,r.waiting||'1 month',function(v){bens[ri].waiting=v;}):mkInp(r.term||'','e.g. 24 months',function(v){bens[ri].term=v;})));
+          g3a.appendChild(mkCell(isIP2?'Benefit Period':'', isIP2?mkSel(termOpts,r.term||'To age 65',function(v){bens[ri].term=v;}):div()));
+          g3a.appendChild(mkCell('Cover Esc %', mkInp(r.coverEsc,'e.g. 5',function(v){bens[ri].coverEsc=v;})));
           bc.appendChild(g3a);
           var g4=div(); g4.style.cssText='display:grid;grid-template-columns:1fr 1fr 1fr 1fr 1fr;gap:6px';
-          g4.appendChild(roCell('Premium /pm', fmtR(r.premPortion)));
-          g4.appendChild(roCell('Premium Increases', r.premEscType==='age-rated'?'Age-rated':r.premEscType==='level'?'Level':'Fixed %'));
-          g4.appendChild(roCell(isAR?'Assumed %':'Prem Esc %', r.premEsc?r.premEsc+'%':'\u2014', isAR));
-          g4.appendChild(roCell('Taxable', r.taxable||'No'));
-          g4.appendChild(roCell('Lump sum opt?', r.convert||'No'));
+          g4.appendChild(mkCell('Premium /pm',      mkInp(r.premPortion,'R/pm',function(v){bens[ri].premPortion=v;})));
+          g4.appendChild(mkCell('Premium Increases',mkSel([{key:'fixed',label:'Fixed %'},{key:'level',label:'Level'},{key:'age-rated',label:'Age-rated'}],r.premEscType||'fixed',function(v){bens[ri].premEscType=v;})));
+          g4.appendChild(mkCell(isAR?'Assumed %':'Prem Esc %', mkInp(r.premEsc,isAR?'assumed':'e.g. 5',function(v){bens[ri].premEsc=v;},isAR?';border-color:#e97316':''), isAR));
+          g4.appendChild(mkCell('Taxable',      mkSel([{key:'No',label:'No'},{key:'Yes',label:'Yes'}],r.taxable||'No', function(v){bens[ri].taxable=v;})));
+          g4.appendChild(mkCell('Lump sum opt?',mkSel([{key:'No',label:'No'},{key:'Yes',label:'Yes'}],r.convert||'No', function(v){bens[ri].convert=v;})));
           bc.appendChild(g4);
         }
         card.appendChild(bc);
       });
 
+      // Add benefit button
+      var addBenBtn=document.createElement('button'); addBenBtn.type='button'; addBenBtn.textContent='+ Add Benefit';
+      addBenBtn.style.cssText='margin-top:4px;background:var(--navy);color:#fff;border:none;border-radius:6px;padding:6px 14px;font-size:12px;font-weight:600;cursor:pointer';
+      addBenBtn.addEventListener('click',function(){
+        var def={category:'death',label:'',cover:'',coverEsc:'',premPortion:'',premEscType:'fixed',premEsc:'',
+          amount:'',termType:'fixed',termYears:'',termTargetAge:'',termDepAge:'',
+          waiting:'1 month',term:'To age 65',taxable:'No',convert:'No',dreadType:'Lump Sum',dreadNotes:'',paidAtRetirement:'yes'};
+        bens.push(def); saveBens(bens); render();
+      });
+      card.appendChild(addBenBtn);
+
       // Totals summary bar
       var bt2=calcBenefitTotals(p, S.assump&&S.assump.drawdown);
-      var sumBox=div(); sumBox.style.cssText='background:var(--navy);border-radius:6px;padding:8px 12px;margin-top:4px;font-size:11px;display:flex;gap:16px;flex-wrap:wrap';
+      var sumBox=div(); sumBox.style.cssText='background:var(--navy);border-radius:6px;padding:8px 12px;margin-top:8px;font-size:11px;display:flex;gap:16px;flex-wrap:wrap';
       function sItem2(lbl,val,col){var d2=div();d2.style.cssText='display:flex;flex-direction:column';var l2=el('span','',lbl);l2.style.cssText='font-size:9px;text-transform:uppercase;color:#8899bb;letter-spacing:.4px';var v2=el('span','',Rfmt(val));v2.style.cssText='font-weight:700;color:'+(col||'var(--gold)');d2.appendChild(l2);d2.appendChild(v2);return d2;}
-      if(bt2.death>0) sumBox.appendChild(sItem2('Total death cover',bt2.death));
-      if(bt2.disability>0) sumBox.appendChild(sItem2('Total disability',bt2.disability,'#93c5fd'));
-      if(bt2.dread>0) sumBox.appendChild(sItem2('Total dread',bt2.dread,'#c4b5fd'));
-      if(bt2.ipPM>0) sumBox.appendChild(sItem2('Total IP /pm',bt2.ipPM,'#fcd34d'));
+      if(bt2.death>0)          sumBox.appendChild(sItem2('Total death cover',bt2.death));
+      if(bt2.disability>0)     sumBox.appendChild(sItem2('Total disability',bt2.disability,'#93c5fd'));
+      if(bt2.dread>0)          sumBox.appendChild(sItem2('Total dread',bt2.dread,'#c4b5fd'));
+      if(bt2.ipPM>0)           sumBox.appendChild(sItem2('Total IP /pm',bt2.ipPM,'#fcd34d'));
       if(bt2.deathIncomeCap>0) sumBox.appendChild(sItem2('Death income (cap.)',bt2.deathIncomeCap,'#d4f0a8'));
       card.appendChild(sumBox);
 
     } else {
-      // Old structure — single fields, re-import prompt
+      // Old format — editable single fields + re-import prompt
       var rb1=g3();
       rb1.appendChild(rfld('Death / Life Cover',  p,'BenDeath'));
       rb1.appendChild(rfld('Capital Disability',  p,'BenDisability'));
@@ -3434,12 +3505,12 @@ function buildPolCard(p, i) {
           var ipRow=div(); ipRow.style.cssText='display:flex;gap:8px;align-items:center;padding:4px 0;border-bottom:1px solid var(--smoke);font-size:12px';
           ipRow.appendChild(el('span','',r.type||'Income'));
           var al=el('span','',Rfmt(r.amount)+'/pm'); al.style.fontWeight='700'; ipRow.appendChild(al);
-          if(r.coverEsc||r.esc){var el2=el('span','',(r.coverEsc||r.esc)+'% esc');el2.style.cssText='font-size:11px;color:var(--sub)';ipRow.appendChild(el2);}
+          if(r.coverEsc||r.esc){var es=el('span','',(r.coverEsc||r.esc)+'% esc');es.style.cssText='font-size:11px;color:var(--sub)';ipRow.appendChild(es);}
           card.appendChild(ipRow);
         });
-        var ri2=div(); ri2.style.cssText='font-size:11px;padding:6px 9px;border-radius:5px;background:#fef9ee;border:1px solid var(--gold2);color:#7a5f1a;margin-top:6px';
-        ri2.textContent='Old format \u2014 re-save in CRM then click \u21bb CRM for full detail.'; card.appendChild(ri2);
       }
+      var ri2=div(); ri2.style.cssText='font-size:11px;padding:6px 9px;border-radius:5px;background:#fef9ee;border:1px solid var(--gold2);color:#7a5f1a;margin-top:6px';
+      ri2.textContent='Old format \u2014 re-save in CRM then click \u21bb CRM for full benefit editing.'; card.appendChild(ri2);
     }
   }
 
