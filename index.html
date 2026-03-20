@@ -3106,7 +3106,10 @@ function renderBenefitRows(){
     var isLump=catDef.isLump;
     var isDI=r.category==='death-income';
     var isAR=r.premEscType==='age-rated';
-    var REF='POL_BENEFITS['+i+']';
+    if(r.paidAtRetirement===undefined){
+      // Default: death income and IP expire; lump sum death/disability/dread stay; whole of life stays
+      r.paidAtRetirement = (r.category==='death'||r.category==='disability'||r.category==='dread') ? 'yes' : 'no';
+    }
 
     var html='<div style="background:#fff;border:1.5px solid var(--mist);border-radius:8px;padding:10px 12px;margin-bottom:8px;border-left:4px solid '+catDef.color+'">';
 
@@ -3114,6 +3117,7 @@ function renderBenefitRows(){
     html+='<div style="display:flex;gap:6px;align-items:center;margin-bottom:8px">';
     html+=sel(CATS.map(function(c){return {key:c.key,label:c.label};}),r.category,REF+'.category=this.value;document.getElementById(\'benefitsWrap\').innerHTML=renderBenefitRows()');
     html+='<input type="text" value="'+(r.label||'')+'" placeholder="Label e.g. \'Life Cover 1\'" onchange="'+REF+'.label=this.value" style="flex:2;min-width:0;border:1.5px solid var(--mist);border-radius:5px;padding:5px 7px;font-family:inherit;font-size:12px">';
+    html+='<label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--navy);cursor:pointer;flex-shrink:0;white-space:nowrap"><input type="checkbox"'+(r.paidAtRetirement!=='no'?' checked':'')+' onchange="'+REF+'.paidAtRetirement=this.checked?\"yes\":\"no\"" style="accent-color:var(--navy)"> Paid at ret.</label>';
     html+='<button type="button" onclick="POL_BENEFITS.splice('+i+',1);document.getElementById(\'benefitsWrap\').innerHTML=renderBenefitRows();updatePremRecon()" style="background:var(--rose);color:#fff;border:none;border-radius:5px;padding:4px 8px;cursor:pointer;font-size:11px;font-weight:700;flex-shrink:0">✕</button>';
     html+='</div>';
 
@@ -3193,12 +3197,31 @@ function updatePremRecon(){
   var N=function(v){return parseFloat(String(v||'').replace(/[^0-9.\-]/g,''))||0;};
   var totalPrem=N(document.getElementById('ppm')&&document.getElementById('ppm').value);
   var portionSum=POL_BENEFITS.reduce(function(a,r){return a+N(r.premPortion);},0);
-  var fixedBens=POL_BENEFITS.filter(function(r){return r.premEscType!=='age-rated'&&N(r.premEsc)>0&&N(r.premPortion)>0;});
+  // Include ALL benefits with a portion and an esc% — age-rated uses assumed %, still counts
+  var allEscBens=POL_BENEFITS.filter(function(r){return N(r.premEsc)>0&&N(r.premPortion)>0;});
   var weightedEsc=0;
-  if(fixedBens.length>0){
-    var wSum=fixedBens.reduce(function(a,r){return a+N(r.premPortion);},0);
-    weightedEsc=wSum>0?fixedBens.reduce(function(a,r){return a+N(r.premEsc)*N(r.premPortion);},0)/wSum:0;
+  if(allEscBens.length>0){
+    var wSum=allEscBens.reduce(function(a,r){return a+N(r.premPortion);},0);
+    weightedEsc=wSum>0?allEscBens.reduce(function(a,r){return a+N(r.premEsc)*N(r.premPortion);},0)/wSum:0;
   }
+  var ageRatedNoEsc=POL_BENEFITS.filter(function(r){return r.premEscType==='age-rated'&&!N(r.premEsc)&&N(r.premPortion)>0;});
+  var ageRatedWithEsc=POL_BENEFITS.filter(function(r){return r.premEscType==='age-rated'&&N(r.premEsc)>0&&N(r.premPortion)>0;});
+  var el=document.getElementById('premRecon');
+  if(!el) return;
+  if(portionSum===0){el.innerHTML='Enter premium portions on each benefit to reconcile against total premium.';el.style.background='#f8f9fc';el.style.borderColor='var(--mist)';return;}
+  var diff=totalPrem>0?portionSum-totalPrem:0;
+  var ok=totalPrem>0&&Math.abs(diff)<1;
+  var html='<strong>Premium reconciliation:</strong> Portions sum to <strong>R '+Math.round(portionSum).toLocaleString('en-ZA')+'</strong>';
+  if(totalPrem>0) html+=' vs total <strong>R '+Math.round(totalPrem).toLocaleString('en-ZA')+'</strong>';
+  if(ok) html+=' \u2713';
+  else if(totalPrem>0) html+=' \u2014 <span style="color:'+(diff>0?'#dc2626':'#d97706')+'">'+(diff>0?'over by':'under by')+' R'+Math.abs(Math.round(diff)).toLocaleString('en-ZA')+'</span>';
+  if(allEscBens.length>0) html+='<br><strong>Weighted avg premium escalation:</strong> '+weightedEsc.toFixed(1)+'% (includes assumed rates for age-rated benefits)';
+  if(ageRatedWithEsc.length>0) html+='<br><span style="color:#e97316">\u26a0 '+ageRatedWithEsc.length+' age-rated benefit'+(ageRatedWithEsc.length>1?'s':'')+'\u2014 assumed % used in avg</span>';
+  if(ageRatedNoEsc.length>0) html+='<br><span style="color:#dc2626">\u26a0 '+ageRatedNoEsc.length+' age-rated benefit'+(ageRatedNoEsc.length>1?'s have':' has')+' no assumed % entered \u2014 excluded from avg. Please enter an assumed %.</span>';
+  el.innerHTML=html;
+  el.style.background=ok?'#f0fdf4':totalPrem>0?'#fef9ee':'#f8f9fc';
+  el.style.borderColor=ok?'#bbf7d0':totalPrem>0?'var(--gold2)':'var(--mist)';
+}
   var ageRated=POL_BENEFITS.filter(function(r){return r.premEscType==='age-rated';});
   var el=document.getElementById('premRecon');
   if(!el) return;
@@ -3209,12 +3232,6 @@ function updatePremRecon(){
   if(totalPrem>0) html+=' vs total <strong>R '+Math.round(totalPrem).toLocaleString('en-ZA')+'</strong>';
   if(ok) html+=' ✓';
   else if(totalPrem>0) html+=' — <span style="color:'+(diff>0?'#dc2626':'#d97706')+'">'+( diff>0?'over by':'under by')+' R'+Math.abs(Math.round(diff)).toLocaleString('en-ZA')+'</span>';
-  if(fixedBens.length>0) html+='<br><strong>Weighted avg escalation (fixed only):</strong> '+weightedEsc.toFixed(1)+'%';
-  if(ageRated.length>0) html+='<br><span style="color:#e97316">⚠ '+ageRated.length+' benefit'+(ageRated.length>1?'s are':' is')+' age-rated — excluded from avg escalation</span>';
-  el.innerHTML=html;
-  el.style.background=ok?'#f0fdf4':totalPrem>0?'#fef9ee':'#f8f9fc';
-  el.style.borderColor=ok?'#bbf7d0':totalPrem>0?'var(--gold2)':'var(--mist)';
-}
 
 function addBenefitRow(){
   var CATS=[
@@ -3240,9 +3257,11 @@ function addBenefitRow(){
     btn.textContent=c.label;
     btn.style.cssText='background:var(--navy);color:#fff;border:none;border-radius:5px;padding:5px 10px;cursor:pointer;font-size:11px;font-weight:600';
     btn.addEventListener('click',function(){
+      var defRet=(c.key==='death'||c.key==='disability'||c.key==='dread')?'yes':'no';
       POL_BENEFITS.push({category:c.key,label:'',cover:'',amount:'',coverEsc:'',premPortion:'',
         premEscType:'fixed',premEsc:'',termType:'fixed',termYears:'',termTargetAge:'',termDepAge:'',
-        waiting:'1 month',term:'To age 65',taxable:'No',convert:'No',dreadType:'Lump Sum',dreadNotes:''});
+        waiting:'1 month',term:'To age 65',taxable:'No',convert:'No',dreadType:'Lump Sum',dreadNotes:'',
+        paidAtRetirement:defRet});
       document.getElementById('benefitsWrap').innerHTML=renderBenefitRows();
       updatePremRecon();
     });

@@ -2878,68 +2878,96 @@ function buildPolicies() {
       var totalRetSelected = 0;
 
       _riskTypes.forEach(function(pol, j) {
-        var prem = N(pol.Premium);
-        var idx  = pols.indexOf(pol);
-        var escRaw = String(pol.PremEscalation!=null&&pol.PremEscalation!==''?pol.PremEscalation:(pol.premEsc!=null&&pol.premEsc!==''?pol.premEsc:'')).replace(/,/g,'.').replace(/[^0-9.]/g,'');
-        var esc = parseFloat(escRaw) || 0;
-        var future = esc > 0 ? Math.round(prem * Math.pow(1 + esc/100, yrsToRet2)) : prem;
-        totalAtRet2 += future;
-        if(pol._retInclude) totalRetSelected += future;
+        var polIdx = pols.indexOf(pol);
+        var bens3=[];
+        try{bens3=pol.benefits?JSON.parse(pol.benefits):[];}catch(e){}
 
-        var pctToday  = grossPM > 0 ? (prem / grossPM * 100).toFixed(1) : '—';
-        var pctAtRet  = incAtRet > 0 ? (future / incAtRet * 100).toFixed(1) : '—';
-        var isHigh    = esc > 0 && esc > incEscRate;
-        var colour    = isHigh ? 'var(--red)' : 'var(--navy)';
+        if(bens3.length>0){
+          // New per-benefit structure — one row per benefit that has a premPortion
+          bens3.forEach(function(b,bi){
+            if(!N(b.premPortion)) return;
+            var esc=N(b.premEsc)||0;
+            var future=esc>0?Math.round(N(b.premPortion)*Math.pow(1+esc/100,yrsToRet2)):N(b.premPortion);
+            totalAtRet2+=future;
+            var pctToday=grossPM>0?(N(b.premPortion)/grossPM*100).toFixed(1):'—';
+            var pctAtRet=incAtRet>0?(future/incAtRet*100).toFixed(1):'—';
+            var isHigh=esc>0&&esc>incEscRate;
+            var colour=isHigh?'var(--red)':'var(--navy)';
+            var isRetired=b.paidAtRetirement!=='no';
+            if(isRetired) totalRetSelected+=future;
 
-        var tr2 = document.createElement('tr');
+            var tr2=document.createElement('tr');
+            tr2.style.opacity=isRetired?'1':'0.45';
 
-        // Tick cell
-        var tdChk = document.createElement('td');
-        var chkInp = document.createElement('input'); chkInp.type = 'checkbox';
-        chkInp.checked = !!pol._retInclude;
-        chkInp.style.cssText = 'accent-color:var(--gold);width:14px;height:14px;cursor:pointer';
-        chkInp.addEventListener('change', function(e){
-          S.importedPols[idx]._retInclude = e.target.checked;
-          render();
-        });
-        tdChk.appendChild(chkInp); tr2.appendChild(tdChk);
+            // Retirement checkbox
+            var tdChk=document.createElement('td');
+            var chkInp=document.createElement('input'); chkInp.type='checkbox';
+            chkInp.checked=isRetired;
+            chkInp.style.cssText='accent-color:var(--gold);width:14px;height:14px;cursor:pointer';
+            chkInp.addEventListener('change',function(e){
+              try{var b2=JSON.parse(S.importedPols[polIdx].benefits||'[]');b2[bi].paidAtRetirement=e.target.checked?'yes':'no';S.importedPols[polIdx].benefits=JSON.stringify(b2);}catch(ex){}
+              render();
+            });
+            tdChk.appendChild(chkInp); tr2.appendChild(tdChk);
 
-        // Policy name
-        var tdName = document.createElement('td');
-        tdName.innerHTML = '<strong>' + (pol.Insurer||'—') + '</strong>' +
-          (pol.Product ? '<br><span style="font-size:10px;color:var(--sub)">'+pol.Product+'</span>' : '');
-        tr2.appendChild(tdName);
-
-        // Current premium
-        var tdPrem = document.createElement('td'); tdPrem.style.textAlign='right'; tdPrem.textContent = Rfmt(prem); tr2.appendChild(tdPrem);
-
-        // % of income today
-        var tdPct = document.createElement('td'); tdPct.style.textAlign='right';
-        tdPct.innerHTML = '<span style="font-size:11px;color:var(--sub)">' + pctToday + '%</span>';
-        tr2.appendChild(tdPct);
-
-        // Esc % — editable inline
-        var tdEsc = document.createElement('td'); tdEsc.style.textAlign='right';
-        var escInp = document.createElement('input'); escInp.type='text'; escInp.inputMode='numeric';
-        escInp.value = pol.premEsc||''; escInp.placeholder='0';
-        escInp.style.cssText='width:48px;padding:3px 5px;border:1.5px solid var(--mist);border-radius:4px;font-size:11px;text-align:right';
-        escInp.addEventListener('input',  function(e){ S.importedPols[idx].premEsc=e.target.value; });
-        escInp.addEventListener('blur',   function(e){ S.importedPols[idx].premEsc=e.target.value; render(); });
-        tdEsc.appendChild(escInp);
-        var escLabel = document.createElement('span'); escLabel.textContent=' %'; escLabel.style.fontSize='11px';
-        tdEsc.appendChild(escLabel); tr2.appendChild(tdEsc);
-
-        // At retirement
-        var tdFut = document.createElement('td'); tdFut.style.cssText='text-align:right;font-weight:700;color:'+colour;
-        tdFut.textContent = Rfmt(future); tr2.appendChild(tdFut);
-
-        // % of income at retirement
-        var tdPctRet = document.createElement('td'); tdPctRet.style.textAlign='right';
-        tdPctRet.innerHTML = '<span style="font-size:11px;font-weight:700;color:'+colour+'">' + pctAtRet + '%</span>' +
-          (isHigh ? ' <span style="font-size:9px;color:var(--red)">⚠ faster than income</span>' : '');
-        tr2.appendChild(tdPctRet);
-
-        affTb.appendChild(tr2);
+            // Name — insurer + benefit label
+            var tdName=document.createElement('td');
+            tdName.innerHTML='<strong>'+(pol.Insurer||'—')+'</strong><br><span style="font-size:10px;color:var(--sub)">'+(b.label||(b.category||'Benefit'))+'</span>';
+            tr2.appendChild(tdName);
+            var tdPrem=document.createElement('td'); tdPrem.style.textAlign='right'; tdPrem.textContent=Rfmt(b.premPortion); tr2.appendChild(tdPrem);
+            var tdPct=document.createElement('td'); tdPct.style.textAlign='right'; tdPct.innerHTML='<span style="font-size:11px;color:var(--sub)">'+pctToday+'%</span>'; tr2.appendChild(tdPct);
+            var tdEsc=document.createElement('td'); tdEsc.style.textAlign='right';
+            if(b.premEscType==='age-rated'){var arLbl=document.createElement('span');arLbl.textContent='age-rated';arLbl.style.cssText='font-size:10px;color:#e97316';tdEsc.appendChild(arLbl);}
+            var escIp=document.createElement('input'); escIp.type='text'; escIp.inputMode='numeric';
+            escIp.value=b.premEsc||''; escIp.placeholder='0';
+            escIp.style.cssText='width:48px;padding:3px 5px;border:1.5px solid var(--mist);border-radius:4px;font-size:11px;text-align:right';
+            escIp.addEventListener('blur',function(e){try{var b2=JSON.parse(S.importedPols[polIdx].benefits||'[]');b2[bi].premEsc=e.target.value;S.importedPols[polIdx].benefits=JSON.stringify(b2);}catch(ex){}render();});
+            var espct=document.createElement('span'); espct.textContent=' %'; espct.style.fontSize='11px';
+            tdEsc.appendChild(escIp); tdEsc.appendChild(espct); tr2.appendChild(tdEsc);
+            var tdFut=document.createElement('td'); tdFut.style.cssText='text-align:right;font-weight:700;color:'+colour; tdFut.textContent=Rfmt(future); tr2.appendChild(tdFut);
+            var tdPctRet=document.createElement('td'); tdPctRet.style.textAlign='right';
+            tdPctRet.innerHTML='<span style="font-size:11px;font-weight:700;color:'+colour+'">'+pctAtRet+'%</span>'+(isHigh?' <span style="font-size:9px;color:var(--red)">⚠</span>':'');
+            tr2.appendChild(tdPctRet);
+            affTb.appendChild(tr2);
+          });
+        } else {
+          // Old structure — one row per policy
+          var prem=N(pol.Premium);
+          var escRaw=String(pol.PremEscalation!=null&&pol.PremEscalation!==''?pol.PremEscalation:(pol.premEsc!=null&&pol.premEsc!==''?pol.premEsc:'')).replace(/,/g,'.').replace(/[^0-9.]/g,'');
+          var esc=parseFloat(escRaw)||0;
+          var future=esc>0?Math.round(prem*Math.pow(1+esc/100,yrsToRet2)):prem;
+          totalAtRet2+=future;
+          if(pol._retInclude) totalRetSelected+=future;
+          var pctToday=grossPM>0?(prem/grossPM*100).toFixed(1):'—';
+          var pctAtRet=incAtRet>0?(future/incAtRet*100).toFixed(1):'—';
+          var isHigh=esc>0&&esc>incEscRate;
+          var colour=isHigh?'var(--red)':'var(--navy)';
+          var tr2=document.createElement('tr');
+          var tdChk=document.createElement('td');
+          var chkInp=document.createElement('input'); chkInp.type='checkbox';
+          chkInp.checked=!!pol._retInclude;
+          chkInp.style.cssText='accent-color:var(--gold);width:14px;height:14px;cursor:pointer';
+          chkInp.addEventListener('change',function(e){S.importedPols[polIdx]._retInclude=e.target.checked;render();});
+          tdChk.appendChild(chkInp); tr2.appendChild(tdChk);
+          var tdName=document.createElement('td');
+          tdName.innerHTML='<strong>'+(pol.Insurer||'—')+'</strong>'+(pol.Product?'<br><span style="font-size:10px;color:var(--sub)">'+pol.Product+'</span>':'');
+          tr2.appendChild(tdName);
+          var tdPrem=document.createElement('td'); tdPrem.style.textAlign='right'; tdPrem.textContent=Rfmt(prem); tr2.appendChild(tdPrem);
+          var tdPct=document.createElement('td'); tdPct.style.textAlign='right'; tdPct.innerHTML='<span style="font-size:11px;color:var(--sub)">'+pctToday+'%</span>'; tr2.appendChild(tdPct);
+          var tdEsc=document.createElement('td'); tdEsc.style.textAlign='right';
+          var escInp=document.createElement('input'); escInp.type='text'; escInp.inputMode='numeric';
+          escInp.value=pol.premEsc||''; escInp.placeholder='0';
+          escInp.style.cssText='width:48px;padding:3px 5px;border:1.5px solid var(--mist);border-radius:4px;font-size:11px;text-align:right';
+          escInp.addEventListener('input',function(e){S.importedPols[polIdx].premEsc=e.target.value;});
+          escInp.addEventListener('blur',function(e){S.importedPols[polIdx].premEsc=e.target.value;render();});
+          var espct2=document.createElement('span'); espct2.textContent=' %'; espct2.style.fontSize='11px';
+          tdEsc.appendChild(escInp); tdEsc.appendChild(espct2); tr2.appendChild(tdEsc);
+          var tdFut=document.createElement('td'); tdFut.style.cssText='text-align:right;font-weight:700;color:'+colour; tdFut.textContent=Rfmt(future); tr2.appendChild(tdFut);
+          var tdPctRet=document.createElement('td'); tdPctRet.style.textAlign='right';
+          tdPctRet.innerHTML='<span style="font-size:11px;font-weight:700;color:'+colour+'">'+pctAtRet+'%</span>'+(isHigh?' <span style="font-size:9px;color:var(--red)">⚠ faster than income</span>':'');
+          tr2.appendChild(tdPctRet);
+          affTb.appendChild(tr2);
+        }
       });
 
       // Totals row
