@@ -4464,61 +4464,90 @@ function openPolicySchedule(cid){
       }catch(e){}
     });
   });
+  // Calculate asset totals from RA and investment groups
+  var totFundRA=0, totFundInv=0, totFundLivAnn=0, totFundProv=0, totFundPen=0;
+  groups.ra.pols.forEach(function(p){
+    var t=p.Type||'';
+    var fv=N(p.BenFundValue)||N(p.BenRetirementValue)||0;
+    if(t==='Living Annuity')           totFundLivAnn+=fv;
+    else if(t==='Provident Fund'||t==='Provident Preservation') totFundProv+=fv;
+    else if(t==='Pension Fund'||t==='Pension Preservation')     totFundPen+=fv;
+    else                               totFundRA+=fv;
+  });
+  groups.invest.pols.forEach(function(p){
+    totFundInv+=N(p.BenFundValue)||N(p.BenMaturityValue)||0;
+  });
 
-  // ── NEW TILE-BASED SUMMARY ──
-  function tile(lbl, val, col, bg){
-    if(!val||val==='—') return '';
-    return '<div style="background:'+(bg||'#f5f4ef')+';border-radius:7px;padding:10px 12px;min-width:0">'+
-      '<div style="font-size:10px;color:'+(col?col+'cc':'#888')+';margin-bottom:3px;text-transform:uppercase;letter-spacing:.4px">'+lbl+'</div>'+
-      '<div style="font-size:13px;font-weight:500;color:'+(col||'#0e413a')+'">'+val+'</div>'+
+  // ── THREE-BOX SUMMARY ──
+  function sRow(lbl,val){
+    return '<div style="display:flex;justify-content:space-between;align-items:center;padding:7px 14px;border-bottom:1px solid #f0f0ec">'+
+      '<span style="font-size:12px;color:#667">'+lbl+'</span>'+
+      '<span style="font-size:13px;font-weight:500;color:#0e413a">'+val+'</span>'+
       '</div>';
   }
-  function tileRow(tiles){
-    var t=tiles.filter(Boolean);
-    if(!t.length) return '';
-    return '<div style="display:grid;grid-template-columns:repeat('+t.length+',1fr);gap:8px;margin-bottom:10px">'+t.join('')+'</div>';
+  function sRowBiz(lbl,val){
+    return '<div style="display:flex;justify-content:space-between;align-items:center;padding:7px 14px;border-bottom:1px solid #f0f0ec">'+
+      '<span style="font-size:12px;color:#667">'+lbl+'</span>'+
+      '<span style="font-size:13px;font-weight:500;color:#92400e">'+val+'</span>'+
+      '</div>';
+  }
+  function sBox(title,color,rows){
+    if(!rows.length) return '';
+    return '<div style="flex:1;min-width:180px;border:1px solid #e8e4d8;border-radius:8px;overflow:hidden">'+
+      '<div style="background:'+color+';color:#fff;padding:8px 14px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px">'+title+'</div>'+
+      rows.join('')+
+      '</div>';
+  }
+  function sTotal(lbl,val,color){
+    return '<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 14px">'+
+      '<span style="font-size:12px;font-weight:700;color:'+color+'">'+lbl+'</span>'+
+      '<span style="font-size:14px;font-weight:700;color:'+color+'">'+val+'</span>'+
+      '</div>';
   }
 
   doc+='<div style="background:#a8b938;color:#fff;padding:9px 16px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.8px">Portfolio Summary</div>';
-  doc+='<div style="padding:14px">';
+  doc+='<div style="padding:14px;display:flex;flex-wrap:wrap;gap:12px">';
 
-  // Cost row label
-  doc+='<div style="font-size:10px;font-weight:500;text-transform:uppercase;letter-spacing:.6px;color:#aaa;margin-bottom:6px">Cost</div>';
-  var tGrandTotal = tRiskM+tRAM+tInvM+tMedM+tOtherM+tBizM;
-  var costTiles=[
-    tile('Personal /pm',    tRiskM>0?R2(tRiskM):null),
-    tile('Retirement /pm',  tRAM>0?R2(tRAM):null),
-    tile('Medical aid /pm', tMedM>0?R2(tMedM):null),
-    tile('Investments /pm', tInvM>0?R2(tInvM):null),
-    tile('Business /pm',    tBizM>0?R2(tBizM):null, '#92400e','#fef3e8'),
-    tile('Total /pm',       tGrandTotal>0?R2(tGrandTotal):null, '#27500a','#eaf3de')
-  ];
-  doc+=tileRow(costTiles);
+  // Box 1 — Cost
+  var costRows=[];
+  if(tRiskM>0)  costRows.push(sRow('Personal /pm', R2(tRiskM)));
+  if(tRAM>0)    costRows.push(sRow('Retirement /pm', R2(tRAM)));
+  if(tMedM>0)   costRows.push(sRow('Medical aid /pm', R2(tMedM)));
+  if(tInvM>0)   costRows.push(sRow('Investments /pm', R2(tInvM)));
+  if(tBizM>0)   costRows.push(sRowBiz('Business /pm', R2(tBizM)));
+  var tGrandTotal=tRiskM+tRAM+tInvM+tMedM+tOtherM+tBizM;
+  if(tGrandTotal>0) costRows.push(sTotal('Total /pm', R2(tGrandTotal),'#0e413a'));
+  doc+=sBox('Cost','#0e413a',costRows);
 
-  // Personal cover row
-  if(covDeath>0||covDeathIncomeRaw>0||covDis>0||covDD>0||covIP>0){
-    doc+='<div style="font-size:10px;font-weight:500;text-transform:uppercase;letter-spacing:.6px;color:#aaa;margin-bottom:6px">Personal cover</div>';
-    var covTiles=[
-      tile('Life cover', covDeath>0?R2(covDeath):null),
-      tile('Death income /pm', covDeathIncomeRaw>0?R2(covDeathIncomeRaw)+'<span style="font-size:10px;font-weight:400;color:#a8b938"> /pm</span>':null, '#a8b938'),
-      tile('Disability lump sum', covDis>0?R2(covDis):null),
-      tile('IP /pm', covIP>0?R2(covIP)+'<span style="font-size:10px;font-weight:400"> /pm</span>':null, '#b45309'),
-      tile('Dread disease', covDD>0?R2(covDD):null)
-    ];
-    doc+=tileRow(covTiles);
-  }
+  // Box 2 — Personal Cover
+  var covRows=[];
+  if(covDeath>0)           covRows.push(sRow('Life cover', R2(covDeath)));
+  if(covDeathIncomeRaw>0)  covRows.push(sRow('Death income /pm', R2(covDeathIncomeRaw)+'/pm'));
+  if(covDis>0)             covRows.push(sRow('Capital disability', R2(covDis)));
+  if(covDD>0)              covRows.push(sRow('Dread disease', R2(covDD)));
+  if(covIP>0)              covRows.push(sRow('Income protection /pm', R2(covIP)+'/pm'));
+  doc+=sBox('Personal Cover','#2e7d5a',covRows);
 
-  // Business cover row
-  var hasBizCover=Object.keys(bizGroups).some(function(bt){return bizGroups[bt]>0;});
-  if(hasBizCover){
-    doc+='<div style="font-size:10px;font-weight:500;text-transform:uppercase;letter-spacing:.6px;color:#aaa;margin-bottom:6px">Business cover</div>';
-    var bizTiles=Object.keys(bizGroups).filter(function(bt){return bizGroups[bt]>0;}).map(function(bt){
-      return tile(bt, R2(bizGroups[bt]), '#92400e','#fef3e8');
-    });
-    // Note tile
-    bizTiles.push('<div style="background:#f5f4ef;border-radius:7px;padding:10px 12px;font-size:11px;color:#888;display:flex;align-items:center">Business premiums excluded from personal total</div>');
-    doc+='<div style="display:grid;grid-template-columns:repeat('+(bizTiles.length)+',1fr);gap:8px;margin-bottom:10px">'+bizTiles.join('')+'</div>';
-  }
+  // Box 3 — Assets & Fund Values
+  var assetRows=[];
+  if(totFundRA>0)     assetRows.push(sRow('Retirement annuity', R2(totFundRA)));
+  if(totFundPen>0)    assetRows.push(sRow('Pension fund', R2(totFundPen)));
+  if(totFundProv>0)   assetRows.push(sRow('Provident fund', R2(totFundProv)));
+  if(totFundLivAnn>0) assetRows.push(sRow('Living annuity', R2(totFundLivAnn)));
+  if(totFundInv>0)    assetRows.push(sRow('Investments', R2(totFundInv)));
+  var totAllFunds=totFundRA+totFundPen+totFundProv+totFundLivAnn+totFundInv;
+  if(totAllFunds>0)   assetRows.push(sTotal('Total assets', R2(totAllFunds),'#2563ab'));
+  doc+=sBox('Assets & Fund Values','#2563ab',assetRows);
+
+  // Business cover boxes — one per BizType
+  Object.keys(bizGroups).forEach(function(bt){
+    if(bizGroups[bt]>0){
+      doc+=sBox('Business — '+bt,'#92400e',[
+        sRowBiz('Cover amount', R2(bizGroups[bt])),
+        sRowBiz('Premium /pm', tBizM>0?R2(tBizM):'—')
+      ]);
+    }
+  });
 
   doc+='</div></div>';
 
