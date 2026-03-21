@@ -4230,8 +4230,22 @@ function openPolicySchedule(cid){
   var covDeath=0,covDis=0,covDD=0,covIP=0;
   personalGroups.forEach(function(g){
     g.pols.forEach(function(p){
-      covDeath+=N(p.BenDeath); covDis+=N(p.BenDisability); covDD+=N(p.BenDreadDisease);
-      try{var ib=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):[];ib.forEach(function(r){covIP+=N(r.amount);});}catch(e){}
+      try{
+        var _sch=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):null;
+        var _schBens=(_sch&&_sch.v2&&_sch.v2.length>0)?_sch.v2:null;
+        if(_schBens){
+          _schBens.forEach(function(b){
+            if(b.category==='death')      covDeath+=N(b.cover);
+            if(b.category==='disability') covDis+=N(b.cover);
+            if(b.category==='dread')      covDD+=N(b.cover);
+            if(b.category==='ip')         covIP+=N(b.amount);
+          });
+        } else {
+          covDeath+=N(p.BenDeath); covDis+=N(p.BenDisability); covDD+=N(p.BenDreadDisease);
+          var _ibOld=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):[];
+          if(Array.isArray(_ibOld)) _ibOld.forEach(function(r){covIP+=N(r.amount);});
+        }
+      }catch(e){ covDeath+=N(p.BenDeath); covDis+=N(p.BenDisability); covDD+=N(p.BenDreadDisease); }
     });
   });
 
@@ -4307,8 +4321,16 @@ function openPolicySchedule(cid){
     grp.pols.forEach(function(p,idx){
       var bens=[];
       try{bens=p.Beneficiaries?JSON.parse(p.Beneficiaries):[];}catch(e){}
+      // Read benefits — v2 envelope or fallback
+      var _schib=null; try{_schib=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):null;}catch(e){}
+      var _schnewbens=(_schib&&_schib.v2&&_schib.v2.length>0)?_schib.v2:null;
       var incBens=[];
-      try{incBens=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):[];}catch(e){}
+      if(_schnewbens){
+        // New format — show each benefit row on the schedule
+        incBens=_schnewbens;
+      } else {
+        try{var _tmp=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):[]; if(Array.isArray(_tmp)) incBens=_tmp;}catch(e){}
+      }
       var rowBg = idx%2===0?'#ffffff':'#fafaf8';
       var freq  = p.Frequency&&p.Frequency!=='Monthly'?' /'+p.Frequency.toLowerCase().charAt(0):' /pm';
 
@@ -4344,10 +4366,28 @@ function openPolicySchedule(cid){
       if(p.MaturityDate) details.push('<span style="font-size:11px;color:#888">Maturity: </span><span style="font-size:12px">'+FD(p.MaturityDate)+'</span>');
       if(p.RetirementDate) details.push('<span style="font-size:11px;color:#888">Retirement: </span><span style="font-size:12px">'+FD(p.RetirementDate)+'</span>');
 
-      // Income benefits summary
+      // Benefits summary — new format shows all, old format shows income only
       if(incBens.length){
-        var ipStr=incBens.map(function(r){return (r.label||r.type||'IP')+' '+R(r.amount)+'/pm'+(r.waiting?' (wait '+r.waiting+')':'');}).join(' · ');
-        details.push('<span style="font-size:11px;color:#888">Income Benefit: </span><span style="font-size:12px">'+ipStr+'</span>');
+        if(_schnewbens){
+          // New format — group by category
+          var CATCOL={'death':'#0e413a','disability':'#1d4ed8','dread':'#7c3aed','ip':'#b45309','death-income':'#a8b938','other-income':'#6b7280'};
+          var CATLBL={'death':'Life Cover','disability':'Disability','dread':'Dread Disease','ip':'IP /pm','death-income':'Death Income','other-income':'Other'};
+          var benParts=_schnewbens.map(function(b){
+            var lbl=b.label||(CATLBL[b.category]||b.category);
+            var amt=(b.cover&&N(b.cover)>0)?R(b.cover):(b.amount&&N(b.amount)>0?R(b.amount)+'/pm':'');
+            var esc=b.coverEsc?b.coverEsc+'% esc':'';
+            var premEscDisp=b.premEscType==='age-rated'?'age-rated':(b.premEsc?b.premEsc+'% prem esc':'');
+            var term=(b.category==='death-income')?(b.termType==='to-age'?'to age '+b.termTargetAge:(b.termYears?b.termYears+' yrs':'')):
+                     (b.category==='ip'?('wait '+(b.waiting||'—')+' · '+( b.term||'—')):'');
+            var col=CATCOL[b.category]||'#555';
+            var parts=[amt,esc,premEscDisp,term].filter(Boolean).join(' · ');
+            return '<span style="color:'+col+';font-weight:700;font-size:11px">['+lbl+']</span> <span style="font-size:12px">'+parts+'</span>';
+          }).join(' &nbsp;|&nbsp; ');
+          details.push(benParts);
+        } else {
+          var ipStr=incBens.map(function(r){return (r.label||r.type||'IP')+' '+R(r.amount)+'/pm'+(r.waiting?' (wait '+r.waiting+')':'');}).join(' · ');
+          details.push('<span style="font-size:11px;color:#888">Income Benefit: </span><span style="font-size:12px">'+ipStr+'</span>');
+        }
       }
 
       if(p.Notes) details.push('<span style="font-size:11px;color:#888;font-style:italic">'+p.Notes+'</span>');
