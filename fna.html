@@ -813,13 +813,17 @@ var S = JSON.parse(JSON.stringify(DEFAULTS));
       });
     }
     S.importedPols = currentPols; // always use fresh CRM policies
-    // Restore _retInclude flags from saved retIncludes map
+    // Restore _retInclude flags and premEsc overrides from saved maps
     var retIncludes = serverState.retIncludes || {};
-    if(Object.keys(retIncludes).length && S.importedPols && S.importedPols.length){
+    var premEscOverrides = serverState.premEscOverrides || {};
+    if(S.importedPols && S.importedPols.length){
       S.importedPols.forEach(function(p){
         var k1 = p.PolicyNo;
         var k2 = p.Insurer+'|'+p.Product+'|'+p.Type;
-        if((k1 && retIncludes[k1]) || retIncludes[k2]) p._retInclude = true;
+        var key = (k1 && retIncludes[k1]) ? k1 : (retIncludes[k2] ? k2 : null);
+        if(key) p._retInclude = true;
+        var escKey = (k1 && premEscOverrides[k1]!==undefined) ? k1 : (premEscOverrides[k2]!==undefined ? k2 : null);
+        if(escKey) p.premEsc = premEscOverrides[escKey];
       });
     }
     // If server retAssets is missing RA policies that are now in importedPols, reset so
@@ -941,6 +945,17 @@ function refreshFromCRM() {
     var msg = slim.length + ' polic' + (slim.length===1?'y':'ies') + ' loaded. ' + withBenefits + ' with Benefits data.';
     console.log('CRM sync:', msg, slim);
     applyPolsFromCRM(slim);
+    // Restore premEsc overrides and _retInclude from saved state
+    var savedOverrides = S.premEscOverrides || {};
+    var savedRetInc = S.retIncludes || {};
+    if(S.importedPols && S.importedPols.length){
+      S.importedPols.forEach(function(p){
+        var k1=p.PolicyNo, k2=p.Insurer+'|'+p.Product+'|'+p.Type;
+        if((k1&&savedRetInc[k1])||savedRetInc[k2]) p._retInclude=true;
+        var escKey=(k1&&savedOverrides[k1]!==undefined)?k1:(savedOverrides[k2]!==undefined?k2:null);
+        if(escKey) p.premEsc=savedOverrides[escKey];
+      });
+    }
     S.retAssets = [];
     if(S.importedPols) S.importedPols.forEach(function(p){ p._bensSeeded=false; });
     persist(); render();
@@ -1012,16 +1027,20 @@ function saveToServer(silent) {
   var saveData = {};
   var skip = {importedPols: true};
   Object.keys(S).forEach(function(k){ if(!skip[k]) saveData[k] = S[k]; });
-  // Save _retInclude flags separately keyed by PolicyNo (or Insurer+Product)
-  // so they survive the CRM policy refresh on next load
+  // Save _retInclude flags AND premEsc overrides keyed by PolicyNo
+  // so they survive CRM refresh on next load
   var retIncludes = {};
+  var premEscOverrides = {};
   (S.importedPols||[]).forEach(function(p){
-    if(p._retInclude){
-      var key2 = p.PolicyNo || (p.Insurer+'|'+p.Product+'|'+p.Type);
-      if(key2) retIncludes[key2] = true;
-    }
+    var key1 = p.PolicyNo;
+    var key2 = p.Insurer+'|'+p.Product+'|'+p.Type;
+    var key = key1 || key2;
+    if(!key) return;
+    if(p._retInclude) retIncludes[key] = true;
+    if(p.premEsc!==undefined && p.premEsc!==null && p.premEsc!=='') premEscOverrides[key] = p.premEsc;
   });
   saveData.retIncludes = retIncludes;
+  saveData.premEscOverrides = premEscOverrides;
 
   var payload = JSON.stringify({ action: 'saveFNA', clientId: clientId, jsonData: JSON.stringify(saveData) });
   var indicator = document.getElementById('syncIndicator');
