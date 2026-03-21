@@ -3003,57 +3003,121 @@ function buildPolicies() {
 
       _riskTypes.forEach(function(pol, j) {
         var polIdx = pols.indexOf(pol);
-        // Always one row per policy — use total premium and weighted escalation
-        var prem=N(pol.Premium);
-        var esc=polPremEsc(pol);
-        var future=esc>0?Math.round(prem*Math.pow(1+esc/100,yrsToRet2)):prem;
-        totalAtRet2+=future;
-        if(pol._retInclude) totalRetSelected+=future;
-        var pctToday=grossPM>0?(prem/grossPM*100).toFixed(1):'—';
-        var pctAtRet=incAtRet>0?(future/incAtRet*100).toFixed(1):'—';
-        var isHigh=esc>0&&esc>incEscRate;
-        var colour=isHigh?'var(--red)':'var(--navy)';
+        var bens3=[];
+        try{var _ib6=pol.IncomeBenefits?JSON.parse(pol.IncomeBenefits):null;bens3=(_ib6&&_ib6.v2&&_ib6.v2.length>0)?_ib6.v2:(pol.Benefits?JSON.parse(pol.Benefits):[]);}catch(e){}
+        var hasPortions=bens3.some(function(b){return N(b.premPortion)>0;});
 
-        var tr2=document.createElement('tr');
-        // Tick — sets _retInclude on policy (used by send button)
-        var tdChk=document.createElement('td');
-        var chkInp=document.createElement('input'); chkInp.type='checkbox';
-        chkInp.checked=!!pol._retInclude;
-        chkInp.style.cssText='accent-color:var(--gold);width:14px;height:14px;cursor:pointer';
-        chkInp.addEventListener('change',function(e){S.importedPols[polIdx]._retInclude=e.target.checked;render();});
-        tdChk.appendChild(chkInp); tr2.appendChild(tdChk);
+        if(bens3.length>0 && hasPortions){
+          // Per-benefit rows — one per benefit with premPortion
+          // Policy-level _retInclude = true if ANY benefit is paid at ret
+          var anyRetired=bens3.some(function(b){return b.paidAtRetirement!=='no'&&N(b.premPortion)>0;});
+          if(anyRetired) pol._retInclude=true;
 
-        // Policy name
-        var tdName=document.createElement('td');
-        tdName.innerHTML='<strong>'+(pol.Insurer||'—')+'</strong>'+(pol.Product?'<br><span style="font-size:10px;color:var(--sub)">'+pol.Product+'</span>':'');
-        tr2.appendChild(tdName);
+          bens3.forEach(function(b,bi){
+            if(!N(b.premPortion)) return;
+            var isRetired=b.paidAtRetirement!=='no';
+            var esc=N(b.premEsc)||0;
+            var future=esc>0?Math.round(N(b.premPortion)*Math.pow(1+esc/100,yrsToRet2)):N(b.premPortion);
+            totalAtRet2+=future;
+            if(isRetired) totalRetSelected+=future;
+            var pctToday=grossPM>0?(N(b.premPortion)/grossPM*100).toFixed(1):'—';
+            var pctAtRet=incAtRet>0?(future/incAtRet*100).toFixed(1):'—';
+            var isHigh=esc>0&&esc>incEscRate;
+            var colour=isHigh?'var(--red)':'var(--navy)';
 
-        // Premium today
-        var tdPrem=document.createElement('td'); tdPrem.style.textAlign='right'; tdPrem.textContent=Rfmt(prem); tr2.appendChild(tdPrem);
+            var tr2=document.createElement('tr');
+            tr2.style.opacity=isRetired?'1':'0.4';
 
-        // % of income today
-        var tdPct=document.createElement('td'); tdPct.style.textAlign='right'; tdPct.innerHTML='<span style="font-size:11px;color:var(--sub)">'+pctToday+'%</span>'; tr2.appendChild(tdPct);
+            // Tick — sets paidAtRetirement on this benefit
+            var tdChk=document.createElement('td');
+            var chkInp=document.createElement('input'); chkInp.type='checkbox';
+            chkInp.checked=isRetired;
+            chkInp.style.cssText='accent-color:var(--gold);width:14px;height:14px;cursor:pointer';
+            chkInp.addEventListener('change',function(e){
+              try{
+                var ib=JSON.parse(S.importedPols[polIdx].IncomeBenefits||'{}');
+                if(ib.v2){ib.v2[bi].paidAtRetirement=e.target.checked?'yes':'no';S.importedPols[polIdx].IncomeBenefits=JSON.stringify(ib);}
+              }catch(ex){}
+              render();
+            });
+            tdChk.appendChild(chkInp); tr2.appendChild(tdChk);
 
-        // Esc % — editable, shows weighted avg if benefits exist
-        var tdEsc=document.createElement('td'); tdEsc.style.textAlign='right';
-        var isAgedRated=(String(pol.PremEscalation||'').toLowerCase().indexOf('age')>-1)&&!pol.premEsc;
-        if(isAgedRated){var arLbl=document.createElement('div');arLbl.textContent='age-rated';arLbl.style.cssText='font-size:10px;color:#e97316;margin-bottom:2px';tdEsc.appendChild(arLbl);}
-        var escInp=document.createElement('input'); escInp.type='text'; escInp.inputMode='numeric';
-        escInp.value=esc>0?String(esc):''; escInp.placeholder=isAgedRated?'assumed':'0';
-        escInp.style.cssText='width:52px;padding:3px 5px;border:1.5px solid '+(isAgedRated?'#e97316':'var(--mist)')+';border-radius:4px;font-size:11px;text-align:right';
-        escInp.addEventListener('input',function(e){S.importedPols[polIdx].premEsc=e.target.value;});
-        escInp.addEventListener('blur',function(e){S.importedPols[polIdx].premEsc=e.target.value;render();});
-        var espct2=document.createElement('span'); espct2.textContent=' %'; espct2.style.fontSize='11px';
-        tdEsc.appendChild(escInp); tdEsc.appendChild(espct2); tr2.appendChild(tdEsc);
+            // Insurer + benefit label
+            var tdName=document.createElement('td');
+            tdName.innerHTML='<strong>'+(pol.Insurer||'—')+'</strong><br><span style="font-size:10px;color:var(--sub)">'+(b.label||b.category||'Benefit')+'</span>';
+            tr2.appendChild(tdName);
 
-        // At retirement
-        var tdFut=document.createElement('td'); tdFut.style.cssText='text-align:right;font-weight:700;color:'+colour; tdFut.textContent=Rfmt(future); tr2.appendChild(tdFut);
+            var tdPrem=document.createElement('td'); tdPrem.style.textAlign='right'; tdPrem.textContent=Rfmt(b.premPortion); tr2.appendChild(tdPrem);
+            var tdPct=document.createElement('td'); tdPct.style.textAlign='right'; tdPct.innerHTML='<span style="font-size:11px;color:var(--sub)">'+pctToday+'%</span>'; tr2.appendChild(tdPct);
 
-        // % of income at retirement
-        var tdPctRet=document.createElement('td'); tdPctRet.style.textAlign='right';
-        tdPctRet.innerHTML='<span style="font-size:11px;font-weight:700;color:'+colour+'">'+pctAtRet+'%</span>'+(isHigh?' <span style="font-size:9px;color:var(--red)">\u26a0 faster than income</span>':'');
-        tr2.appendChild(tdPctRet);
-        affTb.appendChild(tr2);
+            // Esc % — editable per benefit
+            var tdEsc=document.createElement('td'); tdEsc.style.textAlign='right';
+            var isAR2=b.premEscType==='age-rated';
+            if(isAR2){var arLbl2=document.createElement('div');arLbl2.textContent='age-rated';arLbl2.style.cssText='font-size:10px;color:#e97316;margin-bottom:2px';tdEsc.appendChild(arLbl2);}
+            var escIp2=document.createElement('input'); escIp2.type='text'; escIp2.inputMode='numeric';
+            escIp2.value=b.premEsc||''; escIp2.placeholder=isAR2?'assumed':'0';
+            escIp2.style.cssText='width:48px;padding:3px 5px;border:1.5px solid '+(isAR2?'#e97316':'var(--mist)')+';border-radius:4px;font-size:11px;text-align:right';
+            escIp2.addEventListener('blur',function(e){
+              try{
+                var ib=JSON.parse(S.importedPols[polIdx].IncomeBenefits||'{}');
+                if(ib.v2){ib.v2[bi].premEsc=e.target.value;S.importedPols[polIdx].IncomeBenefits=JSON.stringify(ib);}
+              }catch(ex){}
+              render();
+            });
+            var espct3=document.createElement('span'); espct3.textContent=' %'; espct3.style.fontSize='11px';
+            tdEsc.appendChild(escIp2); tdEsc.appendChild(espct3); tr2.appendChild(tdEsc);
+
+            var tdFut=document.createElement('td'); tdFut.style.cssText='text-align:right;font-weight:700;color:'+colour; tdFut.textContent=Rfmt(future); tr2.appendChild(tdFut);
+            var tdPctRet=document.createElement('td'); tdPctRet.style.textAlign='right';
+            tdPctRet.innerHTML='<span style="font-size:11px;font-weight:700;color:'+colour+'">'+pctAtRet+'%</span>'+(isHigh?' <span style="font-size:9px;color:var(--red)">\u26a0</span>':'');
+            tr2.appendChild(tdPctRet);
+            affTb.appendChild(tr2);
+          });
+
+        } else {
+          // No portions — single row for whole policy
+          var prem=N(pol.Premium);
+          var esc=polPremEsc(pol);
+          var future=esc>0?Math.round(prem*Math.pow(1+esc/100,yrsToRet2)):prem;
+          totalAtRet2+=future;
+          if(pol._retInclude) totalRetSelected+=future;
+          var pctToday=grossPM>0?(prem/grossPM*100).toFixed(1):'—';
+          var pctAtRet=incAtRet>0?(future/incAtRet*100).toFixed(1):'—';
+          var isHigh=esc>0&&esc>incEscRate;
+          var colour=isHigh?'var(--red)':'var(--navy)';
+
+          var tr2=document.createElement('tr');
+          var tdChk=document.createElement('td');
+          var chkInp=document.createElement('input'); chkInp.type='checkbox';
+          chkInp.checked=!!pol._retInclude;
+          chkInp.style.cssText='accent-color:var(--gold);width:14px;height:14px;cursor:pointer';
+          chkInp.addEventListener('change',function(e){S.importedPols[polIdx]._retInclude=e.target.checked;render();});
+          tdChk.appendChild(chkInp); tr2.appendChild(tdChk);
+
+          var tdName=document.createElement('td');
+          tdName.innerHTML='<strong>'+(pol.Insurer||'—')+'</strong>'+(pol.Product?'<br><span style="font-size:10px;color:var(--sub)">'+pol.Product+'</span>':'');
+          tr2.appendChild(tdName);
+
+          var tdPrem=document.createElement('td'); tdPrem.style.textAlign='right'; tdPrem.textContent=Rfmt(prem); tr2.appendChild(tdPrem);
+          var tdPct=document.createElement('td'); tdPct.style.textAlign='right'; tdPct.innerHTML='<span style="font-size:11px;color:var(--sub)">'+pctToday+'%</span>'; tr2.appendChild(tdPct);
+
+          var tdEsc=document.createElement('td'); tdEsc.style.textAlign='right';
+          var isAgedRated=(String(pol.PremEscalation||'').toLowerCase().indexOf('age')>-1)&&!pol.premEsc;
+          if(isAgedRated){var arLbl=document.createElement('div');arLbl.textContent='age-rated';arLbl.style.cssText='font-size:10px;color:#e97316;margin-bottom:2px';tdEsc.appendChild(arLbl);}
+          var escInp=document.createElement('input'); escInp.type='text'; escInp.inputMode='numeric';
+          escInp.value=esc>0?String(esc):''; escInp.placeholder=isAgedRated?'assumed':'0';
+          escInp.style.cssText='width:52px;padding:3px 5px;border:1.5px solid '+(isAgedRated?'#e97316':'var(--mist)')+';border-radius:4px;font-size:11px;text-align:right';
+          escInp.addEventListener('input',function(e){S.importedPols[polIdx].premEsc=e.target.value;});
+          escInp.addEventListener('blur',function(e){S.importedPols[polIdx].premEsc=e.target.value;render();});
+          var espct2=document.createElement('span'); espct2.textContent=' %'; espct2.style.fontSize='11px';
+          tdEsc.appendChild(escInp); tdEsc.appendChild(espct2); tr2.appendChild(tdEsc);
+
+          var tdFut=document.createElement('td'); tdFut.style.cssText='text-align:right;font-weight:700;color:'+colour; tdFut.textContent=Rfmt(future); tr2.appendChild(tdFut);
+          var tdPctRet=document.createElement('td'); tdPctRet.style.textAlign='right';
+          tdPctRet.innerHTML='<span style="font-size:11px;font-weight:700;color:'+colour+'">'+pctAtRet+'%</span>'+(isHigh?' <span style="font-size:9px;color:var(--red)">\u26a0 faster than income</span>':'');
+          tr2.appendChild(tdPctRet);
+          affTb.appendChild(tr2);
+        }
       });
 
       // Totals row
@@ -3203,9 +3267,23 @@ function buildPolicies() {
       if (!S.retNeeds) S.retNeeds = [];
       S.retNeeds = S.retNeeds.filter(function(r){ return !r._isPremRow; });
       toSend.forEach(function(p){
-        S.retNeeds.push({ desc:(p.Insurer||'')+(p.Product?' — '+p.Product:'')+' premium', amtToday:String(Math.round(N(p.Premium))), esc:String(polPremEsc(p)), _isPremRow:true });
+        // Check for per-benefit data with premPortions
+        var bens4=[];
+        try{var _ib7=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):null;bens4=(_ib7&&_ib7.v2&&_ib7.v2.length>0)?_ib7.v2:[];}catch(e){}
+        var hasPortions4=bens4.some(function(b){return N(b.premPortion)>0;});
+        if(hasPortions4){
+          // Send only ticked benefits
+          bens4.forEach(function(b){
+            if(b.paidAtRetirement==='no'||!N(b.premPortion)) return;
+            var lbl=(p.Insurer||'')+(p.Product?' — '+p.Product:'')+(b.label?' ('+b.label+')':'');
+            S.retNeeds.push({desc:lbl+' premium', amtToday:String(Math.round(N(b.premPortion))), esc:String(N(b.premEsc)||0), _isPremRow:true});
+          });
+        } else {
+          // No portions — send whole policy
+          S.retNeeds.push({desc:(p.Insurer||'')+(p.Product?' — '+p.Product:'')+' premium', amtToday:String(Math.round(N(p.Premium))), esc:String(polPremEsc(p)), _isPremRow:true});
+        }
       });
-      persist(); saveToServer(true); go(6); // go to Retirement tab (index 6 after tab reorder)
+      persist(); saveToServer(true); go(6);
     });
     brow2.appendChild(bSend);
     s.appendChild(brow2);
