@@ -4457,30 +4457,75 @@ function openPolicySchedule(cid){
 
   // ── PORTFOLIO SUMMARY ──
   doc+='<div style="border:2px solid #a8b938;border-radius:10px;margin-bottom:24px;overflow:hidden">';
-  doc+='<div style="background:#a8b938;color:#fff;padding:9px 16px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.8px">Portfolio Summary</div>';
-  doc+='<div style="padding:14px;display:flex;flex-wrap:wrap;gap:12px">';
-
-  // Cost block — personal and business SEPARATED
-  var premRows=[];
-  if(tPersM>0)    premRows.push({lbl:'Personal monthly',  val:R2(tPersM)});
-  if(tBizM>0)     premRows.push({lbl:'Business monthly',  val:R2(tBizM)});
-  if(totAnnual>0) premRows.push({lbl:'Annual premiums',   val:R2(totAnnual)});
-  if(totOnce>0)   premRows.push({lbl:'Once-off / Lump sum',val:R2(totOnce)});
-  if(premRows.length) doc+=summaryBlock('Cost','#0e413a',premRows);
-
-  // Personal cover block
-  var covRows=[];
-  if(covDeath>0)        covRows.push({lbl:'Life cover',                    val:R2(covDeath)});
-  if(covDeathIncome>0)  covRows.push({lbl:'Death income (capitalised)',     val:R2(covDeathIncome)});
-  if(covDis>0)          covRows.push({lbl:'Capital disability',             val:R2(covDis)});
-  if(covDD>0)           covRows.push({lbl:'Dread disease',                  val:R2(covDD)});
-  if(covIP>0)           covRows.push({lbl:'Income protection /pm',          val:R2(covIP)});
-  if(covRows.length) doc+=summaryBlock('Personal Cover','#2e7d5a',covRows);
-
-  // Business blocks
-  Object.keys(bizGroups).forEach(function(bt){
-    if(bizGroups[bt]>0) doc+=summaryBlock('Business — '+bt,'#92400e',[{lbl:'Cover amount',val:R2(bizGroups[bt])}]);
+  var covDeathIncomeRaw=0;
+  personalGroups.forEach(function(g){
+    g.pols.forEach(function(p){
+      try{
+        var _ib=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):null;
+        var _bens=(_ib&&_ib.v2)?_ib.v2:(Array.isArray(_ib)?_ib:[]);
+        _bens.forEach(function(b){ if(b.category==='death-income') covDeathIncomeRaw+=N(b.amount); });
+      }catch(e){}
+    });
   });
+
+  // ── NEW TILE-BASED SUMMARY ──
+  function tile(lbl, val, col, bg){
+    if(!val||val==='—') return '';
+    return '<div style="background:'+(bg||'#f5f4ef')+';border-radius:7px;padding:10px 12px;min-width:0">'+
+      '<div style="font-size:10px;color:'+(col?col+'cc':'#888')+';margin-bottom:3px;text-transform:uppercase;letter-spacing:.4px">'+lbl+'</div>'+
+      '<div style="font-size:13px;font-weight:500;color:'+(col||'#0e413a')+'">'+val+'</div>'+
+      '</div>';
+  }
+  function tileRow(tiles){
+    var t=tiles.filter(Boolean);
+    if(!t.length) return '';
+    return '<div style="display:grid;grid-template-columns:repeat('+t.length+',1fr);gap:8px;margin-bottom:10px">'+t.join('')+'</div>';
+  }
+
+  doc+='<div style="background:#a8b938;color:#fff;padding:9px 16px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.8px">Portfolio Summary</div>';
+  doc+='<div style="padding:14px">';
+
+  // Cost row label
+  doc+='<div style="font-size:10px;font-weight:500;text-transform:uppercase;letter-spacing:.6px;color:#aaa;margin-bottom:6px">Cost</div>';
+  var tPersRA = 0; groups.ra.pols.forEach(function(p){if(!isNonMonthly(p))tPersRA+=N(p.Premium);});
+  var tPersInv = 0; groups.invest.pols.forEach(function(p){if(!isNonMonthly(p))tPersInv+=N(p.Premium);});
+  var tPersOther = 0; groups.other.pols.forEach(function(p){if(!isNonMonthly(p))tPersOther+=N(p.Premium);});
+  var tPersMed = 0; groups.medical.pols.forEach(function(p){if(!isNonMonthly(p))tPersMed+=N(p.Premium);});
+  var tGrandTotal = tPersM+tBizM+tPersRA+tPersInv+tPersOther+tPersMed;
+  var costTiles=[
+    tile('Personal /pm', tPersM>0?R2(tPersM):null),
+    tile('Retirement /pm', tPersRA>0?R2(tPersRA):null),
+    tile('Medical aid /pm', tPersMed>0?R2(tPersMed):null),
+    tile('Investments /pm', tPersInv>0?R2(tPersInv):null),
+    tile('Business /pm', tBizM>0?R2(tBizM):'', '#92400e','#fef3e8'),
+    tile('Total /pm', tGrandTotal>0?R2(tGrandTotal):null, '#27500a','#eaf3de')
+  ];
+  doc+=tileRow(costTiles);
+
+  // Personal cover row
+  if(covDeath>0||covDeathIncomeRaw>0||covDis>0||covDD>0||covIP>0){
+    doc+='<div style="font-size:10px;font-weight:500;text-transform:uppercase;letter-spacing:.6px;color:#aaa;margin-bottom:6px">Personal cover</div>';
+    var covTiles=[
+      tile('Life cover', covDeath>0?R2(covDeath):null),
+      tile('Death income /pm', covDeathIncomeRaw>0?R2(covDeathIncomeRaw)+'<span style="font-size:10px;font-weight:400;color:#a8b938"> /pm</span>':null, '#a8b938'),
+      tile('Disability lump sum', covDis>0?R2(covDis):null),
+      tile('IP /pm', covIP>0?R2(covIP)+'<span style="font-size:10px;font-weight:400"> /pm</span>':null, '#b45309'),
+      tile('Dread disease', covDD>0?R2(covDD):null)
+    ];
+    doc+=tileRow(covTiles);
+  }
+
+  // Business cover row
+  var hasBizCover=Object.keys(bizGroups).some(function(bt){return bizGroups[bt]>0;});
+  if(hasBizCover){
+    doc+='<div style="font-size:10px;font-weight:500;text-transform:uppercase;letter-spacing:.6px;color:#aaa;margin-bottom:6px">Business cover</div>';
+    var bizTiles=Object.keys(bizGroups).filter(function(bt){return bizGroups[bt]>0;}).map(function(bt){
+      return tile(bt, R2(bizGroups[bt]), '#92400e','#fef3e8');
+    });
+    // Note tile
+    bizTiles.push('<div style="background:#f5f4ef;border-radius:7px;padding:10px 12px;font-size:11px;color:#888;display:flex;align-items:center">Business premiums excluded from personal total</div>');
+    doc+='<div style="display:grid;grid-template-columns:repeat('+(bizTiles.length)+',1fr);gap:8px;margin-bottom:10px">'+bizTiles.join('')+'</div>';
+  }
 
   doc+='</div></div>';
 
