@@ -335,11 +335,12 @@ function capitalise(grossMonthly, years, escalation, drawdown) {
 
 // Get effective premium escalation for a policy — reads benefits array if available, else PremEscalation
 function polPremEsc(pol) {
+  function clean(v){ return Math.round(v*100)/100; }
   // Priority 1: manually-entered premEsc in FNA table (overrides everything)
   if(pol.premEsc!==null&&pol.premEsc!==undefined&&pol.premEsc!==''){
     var manRaw=String(pol.premEsc).replace(/,/g,'.').replace(/[^0-9.]/g,'');
     var manVal=parseFloat(manRaw);
-    if(manVal>0) return manVal;
+    if(manVal>0) return clean(manVal);
   }
   // Priority 2: new benefits array (weighted avg of fixed escalations)
   var bens=[]; try{var _ib2=pol.IncomeBenefits?JSON.parse(pol.IncomeBenefits):null;bens=(_ib2&&_ib2.v2&&_ib2.v2.length>0)?_ib2.v2:(pol.Benefits?JSON.parse(pol.Benefits):[]);}catch(e){}
@@ -347,14 +348,14 @@ function polPremEsc(pol) {
     var escBens=bens.filter(function(b){return N(b.premEsc)>0&&b.premEscType!=='age-rated';});
     if(escBens.length>0){
       var wP=escBens.reduce(function(a,b){return a+N(b.premPortion||1);},0);
-      return wP>0?escBens.reduce(function(a,b){return a+N(b.premEsc)*N(b.premPortion||1);},0)/wP
-                 :escBens.reduce(function(a,b){return a+N(b.premEsc);},0)/escBens.length;
+      return clean(wP>0?escBens.reduce(function(a,b){return a+N(b.premEsc)*N(b.premPortion||1);},0)/wP
+                 :escBens.reduce(function(a,b){return a+N(b.premEsc);},0)/escBens.length);
     }
     return 0;
   }
   // Priority 3: PremEscalation field (old format) — strip non-numeric
   var raw=String(pol.PremEscalation!=null&&pol.PremEscalation!==''?pol.PremEscalation:'').replace(/,/g,'.').replace(/[^0-9.]/g,'');
-  return parseFloat(raw)||0;
+  return clean(parseFloat(raw)||0);
 }
 
 // Extract benefit totals from a policy — reads new 'Benefits' array if present,
@@ -3056,7 +3057,8 @@ function buildPolicies() {
             // Esc % — auto from benefit, shown as label (edit in policy card)
             var tdEsc=document.createElement('td'); tdEsc.style.textAlign='right';
             var isAR2=b.premEscType==='age-rated';
-            var escDisp=isAR2?('\u26a0 age-rated'+(esc>0?' \u2248'+esc+'%':'')):(esc>0?esc+'%':'—');
+            var escR=Math.round(esc*100)/100;
+            var escDisp=isAR2?('\u26a0 age-rated'+(escR>0?' \u2248'+escR+'%':'')):(escR>0?escR+'%':'—');
             var escLbl2=document.createElement('span');
             escLbl2.textContent=escDisp;
             escLbl2.style.cssText='font-size:11px;font-weight:600;color:'+(isAR2?'#e97316':(isHigh?'var(--red)':'var(--navy)'));
@@ -3100,7 +3102,7 @@ function buildPolicies() {
           var isAgedRated=(String(pol.PremEscalation||'').toLowerCase().indexOf('age')>-1)&&!pol.premEsc;
           if(isAgedRated){var arLbl=document.createElement('div');arLbl.textContent='age-rated';arLbl.style.cssText='font-size:10px;color:#e97316;margin-bottom:2px';tdEsc.appendChild(arLbl);}
           var escInp=document.createElement('input'); escInp.type='text'; escInp.inputMode='numeric';
-          escInp.value=esc>0?String(esc):''; escInp.placeholder=isAgedRated?'assumed':'0';
+          escInp.value=esc>0?String(Math.round(esc*100)/100):''; escInp.placeholder=isAgedRated?'assumed':'0';
           escInp.style.cssText='width:52px;padding:3px 5px;border:1.5px solid '+(isAgedRated?'#e97316':'var(--mist)')+';border-radius:4px;font-size:11px;text-align:right';
           escInp.addEventListener('input',function(e){S.importedPols[polIdx].premEsc=e.target.value;});
           escInp.addEventListener('blur',function(e){S.importedPols[polIdx].premEsc=e.target.value;render();});
@@ -4960,12 +4962,12 @@ function buildRetirementOutlook() {
         var escBens=bensR.filter(function(b){return N(b.premEsc)>0;});
         if(escBens.length>0){
           var wPortion=escBens.reduce(function(a,b){return a+N(b.premPortion);},0);
-          if(wPortion>0) esc=escBens.reduce(function(a,b){return a+N(b.premEsc)*N(b.premPortion);},0)/wPortion;
-          else esc=escBens.reduce(function(a,b){return a+N(b.premEsc);},0)/escBens.length;
+          if(wPortion>0) esc=Math.round(escBens.reduce(function(a,b){return a+N(b.premEsc)*N(b.premPortion);},0)/wPortion*100)/100;
+          else esc=Math.round(escBens.reduce(function(a,b){return a+N(b.premEsc);},0)/escBens.length*100)/100;
         }
       } else {
         esc=polPremEsc(pol);
-      }var future=esc>0?Math.round(prem*Math.pow(1+esc/100,yrsToR)):prem;var paidIn=0;if(esc>0){for(var yi=0;yi<yrsToR;yi++)paidIn+=Math.round(prem*Math.pow(1+esc/100,yi))*12;}else{paidIn=prem*12*yrsToR;}totalPremNow+=prem;totalAtRet+=future;totalPaidIn+=paidIn;var pctRet=incAtRet>0?(future/incAtRet*100).toFixed(1):'—';var isHigh=esc>incEsc;var col=isHigh?'#dc2626':'var(--navy)';var tr3=document.createElement('tr');tr3.innerHTML='<td style="padding:6px 10px;border-bottom:1px solid #eef"><strong>'+(pol.Insurer||'—')+'</strong>'+(pol.Product?'<br><span style="font-size:10px;color:var(--sub)">'+pol.Product+'</span>':'')+'</td><td style="text-align:right;padding:6px 10px;border-bottom:1px solid #eef">'+Rfmt(prem)+'/pm</td><td style="text-align:right;padding:6px 10px;border-bottom:1px solid #eef;color:'+col+';font-weight:700">'+(esc>0?esc+'%':'—')+(isHigh?' \u26a0':'')+'</td><td style="text-align:right;padding:6px 10px;border-bottom:1px solid #eef;font-weight:700;color:'+col+'">'+Rfmt(future)+'/pm</td><td style="text-align:right;padding:6px 10px;border-bottom:1px solid #eef;font-weight:700;color:'+col+'">'+pctRet+'%</td><td style="text-align:right;padding:6px 10px;border-bottom:1px solid #eef;color:#555">'+Rfmt(Math.round(paidIn))+'</td>';affTb.appendChild(tr3);});
+      }var future=esc>0?Math.round(prem*Math.pow(1+esc/100,yrsToR)):prem;var paidIn=0;if(esc>0){for(var yi=0;yi<yrsToR;yi++)paidIn+=Math.round(prem*Math.pow(1+esc/100,yi))*12;}else{paidIn=prem*12*yrsToR;}totalPremNow+=prem;totalAtRet+=future;totalPaidIn+=paidIn;var pctRet=incAtRet>0?(future/incAtRet*100).toFixed(1):'—';var isHigh=esc>incEsc;var col=isHigh?'#dc2626':'var(--navy)';var tr3=document.createElement('tr');tr3.innerHTML='<td style="padding:6px 10px;border-bottom:1px solid #eef"><strong>'+(pol.Insurer||'—')+'</strong>'+(pol.Product?'<br><span style="font-size:10px;color:var(--sub)">'+pol.Product+'</span>':'')+'</td><td style="text-align:right;padding:6px 10px;border-bottom:1px solid #eef">'+Rfmt(prem)+'/pm</td><td style="text-align:right;padding:6px 10px;border-bottom:1px solid #eef;color:'+col+';font-weight:700">'+(esc>0?(Math.round(esc*100)/100)+'%':'—')+(isHigh?' \u26a0':'')+'</td><td style="text-align:right;padding:6px 10px;border-bottom:1px solid #eef;font-weight:700;color:'+col+'">'+Rfmt(future)+'/pm</td><td style="text-align:right;padding:6px 10px;border-bottom:1px solid #eef;font-weight:700;color:'+col+'">'+pctRet+'%</td><td style="text-align:right;padding:6px 10px;border-bottom:1px solid #eef;color:#555">'+Rfmt(Math.round(paidIn))+'</td>';affTb.appendChild(tr3);});
     var pctTotRet=incAtRet>0?(totalAtRet/incAtRet*100).toFixed(1):'—';var trTot=document.createElement('tr');trTot.style.cssText='font-weight:700;background:#f0f4fa';trTot.innerHTML='<td style="padding:7px 10px;border-top:2px solid var(--navy)">TOTAL</td><td style="text-align:right;padding:7px 10px;border-top:2px solid var(--navy)">'+Rfmt(totalPremNow)+'/pm</td><td style="padding:7px 10px;border-top:2px solid var(--navy)"></td><td style="text-align:right;padding:7px 10px;border-top:2px solid var(--navy);color:'+(parseFloat(pctTotRet)>15?'#dc2626':'#16a34a')+'">'+Rfmt(totalAtRet)+'/pm</td><td style="text-align:right;padding:7px 10px;border-top:2px solid var(--navy);color:'+(parseFloat(pctTotRet)>15?'#dc2626':'#16a34a')+'">'+pctTotRet+'%</td><td style="text-align:right;padding:7px 10px;border-top:2px solid var(--navy)">'+Rfmt(Math.round(totalPaidIn))+'</td>';affTb.appendChild(trTot);affTbl.appendChild(affTb);var tw3=div('twrap');tw3.appendChild(affTbl);s.appendChild(tw3);
     var impactBox=div();impactBox.style.cssText='background:var(--navy);border-radius:9px;padding:16px 20px;margin-top:14px;margin-bottom:8px';function impRow(lbl,val,col){var r=div();r.style.cssText='display:flex;justify-content:space-between;padding:5px 0;font-size:12px';var l=el('span','',lbl);l.style.color='#ccd6f6';var v=el('span','',val);v.style.cssText='font-weight:700;color:'+(col||'var(--gold)');r.appendChild(l);r.appendChild(v);impactBox.appendChild(r);}
     if(incAtRet>0)impRow('Projected retirement income (gross)',Rfmt(incAtRet)+'/pm');
