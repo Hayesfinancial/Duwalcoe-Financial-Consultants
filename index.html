@@ -2251,6 +2251,8 @@ function buildFnaUrl(c){
       DrawdownRate:     p.DrawdownRate||'',
       LAIncomeTaxable:  p.LAIncomeTaxable||'',
       RetirementAge:    p.RetirementAge||'',
+      ProjYears:        p.ProjYears||'',
+      IllustrativeRate: p.IllustrativeRate||'',
       LifeAnnuityEsc:   p.LifeAnnuityEsc||'',
       Notes:            p.Notes||''
     };
@@ -2947,7 +2949,22 @@ function buildPolicyForm(p){
     if(isRA){
       html+='<div class="g2">'+fld('pb_vested','Vested Component (Pot 1)',p.VestedValue)+fld('pb_nonvested','Non-Vested Component',p.NonVestedValue)+'</div>';
       html+='<div class="g2">'+fld('pb_retcomp','Retirement Component (Pot 2)',p.RetirementComponent)+fld('pb_savcomp','Savings Component (Pot 3)',p.SavingsComponent)+'</div>';
-      html+='<div class="g2">'+fld('pb_retage','Retirement Age',p.RetirementAge||'65')+fdp('pb_matdate','Maturity Date',p.MaturityDate||'')+'</div>';
+      // Auto-calculate years to retirement and maturity date from client DOB
+      var raClientDOB=(DB.clients.find(function(c){return String(c.ID)===String(EPC);})||{}).DOB||'';
+      var raRetAge=parseInt(p.RetirementAge)||65;
+      var raYearsToRet=0, raMatDateStr=p.MaturityDate||'';
+      try{
+        var raDobParts=String(raClientDOB).replace(/[^0-9\/\-]/g,'').split(/[\/\-]/);
+        var raBirthYear=raDobParts.length===3?(raDobParts[2].length===4?parseInt(raDobParts[2]):parseInt(raDobParts[0])):0;
+        var raBirthMonth=raDobParts.length===3?(raDobParts[2].length===4?parseInt(raDobParts[1]):parseInt(raDobParts[1])):0;
+        if(raBirthYear>0){
+          var raRetYear=raBirthYear+raRetAge;
+          raYearsToRet=Math.max(0,raRetYear-new Date().getFullYear());
+          if(!raMatDateStr) raMatDateStr=raBirthMonth>0?(raBirthMonth+'/'+raRetYear):(raRetYear+'');
+        }
+      }catch(e){}
+      html+='<div class="g2"><div class="fld"><label>Retirement Age</label><input id="pb_retage" type="text" value="'+(p.RetirementAge||'65')+'" oninput="updateInvProjection()" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px"></div>';
+      html+=fdp('pb_matdate','Maturity Date (auto from ret. age)',raMatDateStr)+'</div>';
       var isOnceOffRA=(p.Frequency||'Monthly')==='Once Off'||(p.Frequency||'Monthly')==='Lump Sum';
       html+='<div class="g2">'+fld('pb_illrate','Illustrative Rate %',p.IllustrativeRate||'9');
       if(!isOnceOffRA){
@@ -2961,6 +2978,21 @@ function buildPolicyForm(p){
       html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="p3pot" value="No"'+(p.WithdrawSavingsPot==='No'?' checked':'')+'>No</label>';
       html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="p3pot" value="Undecided"'+((!p.WithdrawSavingsPot||p.WithdrawSavingsPot==='Undecided')?' checked':'')+'>Undecided</label>';
       html+='</div></div>';
+      // Projection calculator — same as investment section
+      html+='<div id="invProjWrap" style="margin-top:8px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:12px 14px">';
+      html+='<div style="font-size:11px;font-weight:700;color:#166534;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Projected Value at Retirement</div>';
+      html+='<div class="g2">';
+      html+='<div class="fld"><label>Years to retirement</label><input type="text" id="pb_projyrs" value="'+(p.ProjYears||raYearsToRet||'')+'" placeholder="e.g. 20" oninput="updateInvProjection()" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px"></div>';
+      html+='<div class="fld"><label>Annual growth rate %</label><input type="text" id="pb_projrate" value="'+(p.IllustrativeRate||'9')+'" placeholder="e.g. 9" oninput="updateInvProjection()" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px"></div>';
+      html+='</div>';
+      if(!isOnceOffRA){
+        html+='<div class="g2" style="margin-top:6px">';
+        html+='<div class="fld"><label>Annual premium increase %</label><input type="text" id="pb_projpremesc" value="'+(p.PremGrowthRate||'10')+'" placeholder="e.g. 10" oninput="updateInvProjection()" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px"></div>';
+        html+='<div class="fld"></div>';
+        html+='</div>';
+      }
+      html+='<div id="invProjResult" style="margin-top:8px;font-size:13px;color:#166534">Enter years and rate to see projection.</div>';
+      html+='</div>';
     } else {
       var isOnceOff2=(p.Frequency||'Monthly')==='Once Off'||(p.Frequency||'Monthly')==='Lump Sum';
       html+='<div class="g2">'+fld('pb_matval','Maturity Value',p.BenMaturityValue)+fdp('pb_matdate','Maturity Date',p.MaturityDate||'')+'</div>';

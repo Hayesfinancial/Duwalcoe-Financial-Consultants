@@ -921,6 +921,8 @@ function refreshFromCRM() {
         GrowthRate:p.PremGrowthRate||'', BenLAIncome:p.BenLAIncome||'',
         DrawdownRate:p.DrawdownRate||'', LAIncomeTaxable:p.LAIncomeTaxable||'',
         RetirementAge:p.RetirementAge||'',
+        ProjYears:p.ProjYears||'',
+        IllustrativeRate:p.IllustrativeRate||'',
         Notes:p.Notes||''
       };
     });
@@ -3632,7 +3634,7 @@ function buildPolCard(p, i) {
   var isEndow   = (t === 'Endowment');
   var isTFS     = (t === 'Tax Free Savings');
   var isLA      = (t === 'Living Annuity');
-  var isPreRet  = (t === 'Retirement Annuity' || t === 'Pension Fund' || t === 'Provident Fund' || t === 'Preservation Fund');
+  var isPreRet  = (t === 'Retirement Annuity' || t === 'Pension Fund' || t === 'Provident Fund' || t === 'Preservation Fund' || t === 'Pension Preservation' || t === 'Provident Preservation');
 
   if (isRA || isInv) {
     var bst2 = el('div','stitle', isCGTInv ? 'Fund Value & CGT' : 'Fund Value');
@@ -3659,8 +3661,9 @@ function buildPolCard(p, i) {
     }
 
     rb2.appendChild(pfld('Growth rate % (projection)', p, 'GrowthRate', {onblur:function(){persist();render();}}));
-    // Annual premium increase — relevant for RA/retirement policies
-    if(isPreRet || isLA){
+    // Annual premium increase — hidden for Once Off
+    var fnaIsOnceOff=(p.Frequency||'Monthly')==='Once Off'||(p.Frequency||'Monthly')==='Lump Sum';
+    if((isPreRet || isLA) && !fnaIsOnceOff){
       var raEscWrap=div('f');
       raEscWrap.appendChild(el('label','','Annual premium increase %'));
       var raEscInp=document.createElement('input'); raEscInp.type='text'; raEscInp.inputMode='numeric';
@@ -3675,9 +3678,90 @@ function buildPolCard(p, i) {
       raEscWrap.appendChild(raEscInp);
       rb2.appendChild(raEscWrap);
     } else {
-      rb2.appendChild(div()); // spacer for non-RA investment types
+      rb2.appendChild(div()); // spacer
     }
     card.appendChild(rb2);
+
+    // Projection calculator for RA and investment policies
+    if(isPreRet || isInv || isEndow || isTFS){
+      // Years to retirement — from saved ProjYears or calculated from DOB
+      var fnaRetAge2=N(p.RetirementAge)||65;
+      var fnaYrsToRet=N(p.ProjYears)||0;
+      if(!fnaYrsToRet){
+        try{
+          var fnaDobParts=String(S.cli.dob||'').split('/');
+          // dob stored as DD/MM/YYYY
+          var fnaBirthYear2=fnaDobParts.length===3?parseInt(fnaDobParts[2]):0;
+          if(fnaBirthYear2>0) fnaYrsToRet=Math.max(0,(fnaBirthYear2+fnaRetAge2)-new Date().getFullYear());
+        }catch(e){}
+      }
+      var projBox=div();
+      projBox.style.cssText='margin-top:8px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:12px 14px';
+      var projHdr=div();
+      projHdr.style.cssText='font-size:11px;font-weight:700;color:#166534;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px';
+      projHdr.textContent='Projected Value at Retirement';
+      projBox.appendChild(projHdr);
+
+      var projRow1=g3(); projBox.appendChild(projRow1);
+
+      var projYrsWrap=div('f'); projYrsWrap.appendChild(el('label','','Years to retirement'));
+      var projYrsInp=document.createElement('input'); projYrsInp.type='text'; projYrsInp.inputMode='numeric';
+      projYrsInp.value=fnaYrsToRet>0?String(fnaYrsToRet):''; projYrsInp.placeholder='e.g. 20';
+      projYrsInp.style.cssText='border:1.5px solid var(--mist);border-radius:6px;padding:7px 10px;font-size:13px;font-family:inherit;width:100%';
+      projYrsWrap.appendChild(projYrsInp); projRow1.appendChild(projYrsWrap);
+
+      var projRateWrap=div('f'); projRateWrap.appendChild(el('label','','Growth rate %'));
+      var projRateInp=document.createElement('input'); projRateInp.type='text'; projRateInp.inputMode='numeric';
+      var initGR=N(p.GrowthRate)||N(p.IllustrativeRate)||9;
+      projRateInp.value=initGR>0?String(initGR):''; projRateInp.placeholder='e.g. 9';
+      projRateInp.style.cssText='border:1.5px solid var(--mist);border-radius:6px;padding:7px 10px;font-size:13px;font-family:inherit;width:100%';
+      projRateWrap.appendChild(projRateInp); projRow1.appendChild(projRateWrap);
+      projRow1.appendChild(div());
+
+      var projPremEscInp2=null;
+      if(!fnaIsOnceOff){
+        var projRow2=g3(); projBox.appendChild(projRow2);
+        var projPEWrap=div('f'); projPEWrap.appendChild(el('label','','Annual premium increase %'));
+        projPremEscInp2=document.createElement('input'); projPremEscInp2.type='text'; projPremEscInp2.inputMode='numeric';
+        var initPE2=N(p.PremEscalation)||N(p.premEsc)||N(p.PremGrowthRate)||0;
+        projPremEscInp2.value=initPE2>0?String(initPE2):''; projPremEscInp2.placeholder='e.g. 10';
+        projPremEscInp2.style.cssText='border:1.5px solid var(--mist);border-radius:6px;padding:7px 10px;font-size:13px;font-family:inherit;width:100%';
+        projPEWrap.appendChild(projPremEscInp2); projRow2.appendChild(projPEWrap);
+        projRow2.appendChild(div()); projRow2.appendChild(div());
+      }
+
+      var projRes=div();
+      projRes.style.cssText='margin-top:8px;font-size:13px;color:#166534';
+      projRes.textContent='Enter years and rate to see projection.';
+      projBox.appendChild(projRes);
+      card.appendChild(projBox);
+
+      function runFnaProjection(){
+        var fv=N(p.BenFundValue)||0;
+        var prem=(!fnaIsOnceOff)?N(p.Premium)||0:0;
+        var yrs=N(projYrsInp.value)||0;
+        var rate=N(projRateInp.value)||0;
+        var pe=projPremEscInp2?N(projPremEscInp2.value)||0:0;
+        if(yrs<=0||rate<=0){projRes.textContent='Enter years and rate to see projection.';return;}
+        var r=rate/100;
+        var fvF=fv>0?Math.round(fv*Math.pow(1+r,yrs)):0;
+        var premF=0;
+        if(prem>0){
+          if(pe>0){var g3=pe/100; premF=Math.abs(r-g3)<0.0001?Math.round(prem*12*yrs*Math.pow(1+r,yrs)):Math.round(prem*12*((Math.pow(1+r,yrs)-Math.pow(1+g3,yrs))/(r-g3)));}
+          else{premF=Math.round(prem*12*((Math.pow(1+r,yrs)-1)/r));}
+        }
+        var total=fvF+premF;
+        var parts=[];
+        if(fvF>0) parts.push('Fund: R\u00a0'+fvF.toLocaleString('en-ZA'));
+        if(premF>0) parts.push('Contributions: R\u00a0'+premF.toLocaleString('en-ZA'));
+        projRes.innerHTML='\uD83D\uDCB0 Projected after '+yrs+' yrs at '+rate+'%: <strong style="font-size:14px">R\u00a0'+total.toLocaleString('en-ZA')+'</strong>'+(parts.length>1?' ('+parts.join(' + ')+')':'');
+      }
+      projYrsInp.addEventListener('input',runFnaProjection);
+      projRateInp.addEventListener('input',runFnaProjection);
+      if(projPremEscInp2) projPremEscInp2.addEventListener('input',runFnaProjection);
+      // Auto-run if we have enough data
+      if(fnaYrsToRet>0&&initGR>0) runFnaProjection();
+    }
 
     if(isCGTInv){
       var isOnceOff2 = (p.Frequency === 'Once Off');
