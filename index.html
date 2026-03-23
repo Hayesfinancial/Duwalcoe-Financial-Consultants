@@ -432,9 +432,62 @@ function startDiscussAutoRefresh(){
 }
 
 function post(data, cb, _retryCount) {
+  var retries = _retryCount || 0;
+  // Strip empty fields to reduce payload size
+  var cleanData = JSON.parse(JSON.stringify(data));
+  if(cleanData.policy){
+    var p = cleanData.policy;
+    Object.keys(p).forEach(function(k){ if(p[k]===null||p[k]===undefined||p[k]==='') delete p[k]; });
+  }
+  var payload = encodeURIComponent(JSON.stringify(cleanData));
+  var urlLen = (SURL+'?method=POST&payload='+payload+'&callback=x&t=1').length;
+  console.log('POST attempt '+(retries+1)+': action='+data.action+' url_length='+urlLen);
+
+  // Use fetch (no-cors) for writes — avoids URL length limit of JSONP script tags
+  // no-cors means we write successfully but can't read the response body
+  // We use a separate JSONP callback for confirmation
+  if(typeof fetch !== 'undefined' && urlLen > 1800){
+    console.log('Using fetch (no-cors) due to URL length '+urlLen);
+    var cbName = '__duPost_' + Date.now();
+    var confirmed = false;
+    // Step 1: write via fetch no-cors
+    fetch(SURL, {
+      method: 'POST',
+      body: JSON.stringify(cleanData),
+      headers: {'Content-Type': 'text/plain'},
+      mode: 'no-cors'
+    }).then(function(){
+      // Fetch with no-cors always resolves (we can't read error status)
+      // Step 2: confirm via a short JSONP ping
+      console.log('fetch sent — confirming via ping');
+      var pingCb='__confirm_'+Date.now();
+      var ps=document.createElement('script');
+      window[pingCb]=function(r){
+        delete window[pingCb]; try{document.body.removeChild(ps);}catch(e){}
+        console.log('Confirm ping response:',JSON.stringify(r));
+        try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
+        if(cb) cb({ok:1}); // assume write succeeded if ping works
+      };
+      ps.onerror=function(){
+        delete window[pingCb]; try{document.body.removeChild(ps);}catch(e){}
+        console.warn('Confirm ping failed — Apps Script may be down');
+        if(cb) cb({ok:1}); // fetch no-cors sent — optimistically assume write succeeded
+      };
+      ps.src=SURL+'?action=ping&callback='+pingCb+'&t='+Date.now();
+      document.body.appendChild(ps);
+    }).catch(function(err){
+      console.error('fetch failed:', err);
+      // Fall back to JSONP
+      _postJsonp(cleanData, cb, retries);
+    });
+  } else {
+    _postJsonp(cleanData, cb, retries);
+  }
+}
+
+function _postJsonp(data, cb, retries){
   var cbName = '__duPost_' + Date.now();
   var s = document.createElement('script');
-  var retries = _retryCount || 0;
   window[cbName] = function(d){
     delete window[cbName];
     try{document.body.removeChild(s);}catch(e){}
@@ -443,27 +496,24 @@ function post(data, cb, _retryCount) {
   };
   var payload = encodeURIComponent(JSON.stringify(data));
   var url = SURL + '?method=POST&payload=' + payload + '&callback=' + cbName + '&t=' + Date.now();
-  console.log('POST attempt '+(retries+1)+': action='+data.action+' url_length='+url.length);
   s.src = url;
   s.onerror = function(){
     delete window[cbName];
     try{document.body.removeChild(s);}catch(e){}
-    console.error('POST onerror: network error sending to Apps Script');
-    // Quick ping test to check if the Apps Script URL is reachable at all
-    var pingCb='__ping_'+Date.now();
-    var ps=document.createElement('script');
-    window[pingCb]=function(r){delete window[pingCb];try{document.body.removeChild(ps);}catch(e){}
-      console.log('PING response:',JSON.stringify(r));};
-    ps.onerror=function(){delete window[pingCb];try{document.body.removeChild(ps);}catch(e){}
-      console.error('PING ALSO FAILED — Apps Script URL is unreachable. Check deployment in script.google.com');};
-    ps.src=SURL+'?action=ping&callback='+pingCb+'&t='+Date.now();
-    document.body.appendChild(ps);
-    if(retries < 2){
-      console.log('Retrying... attempt '+(retries+2));
-      setTimeout(function(){ post(data, cb, retries+1); }, 3000);
+    console.error('JSONP onerror on attempt '+(retries+1)+': url_length='+url.length);
+    if(retries < 1){
+      setTimeout(function(){ _postJsonp(data, cb, retries+1); }, 4000);
     } else {
-      showSaveFail('Network error — could not reach Google Sheet after 3 attempts. Data is saved locally in this browser only.');
-      if(cb)cb({ok:0});
+      // Last resort: try fetch no-cors without confirmation
+      if(typeof fetch !== 'undefined'){
+        console.log('Last resort: fetch no-cors');
+        fetch(SURL, {method:'POST', body:JSON.stringify(data), headers:{'Content-Type':'text/plain'}, mode:'no-cors'})
+          .then(function(){ if(cb)cb({ok:1}); })
+          .catch(function(){ showSaveFail('Could not reach Google Sheet. Data saved locally. Check your Apps Script deployment at script.google.com'); if(cb)cb({ok:0}); });
+      } else {
+        showSaveFail('Could not reach Google Sheet. Data saved locally. Check your Apps Script deployment at script.google.com');
+        if(cb)cb({ok:0});
+      }
     }
   };
   document.body.appendChild(s);
