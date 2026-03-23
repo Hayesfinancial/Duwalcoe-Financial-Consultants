@@ -314,7 +314,30 @@ function syncNow() {
         c[f] = fixIDField(c[f]);
       });
     });
-    DB.policies = d.policies || [];
+    // Preserve any policies saved locally today that the server didn't return
+    // This protects against Apps Script sheet mismatch (write to one sheet, read from another)
+    var today = new Date().toISOString().slice(0,10);
+    var serverPolIDs = {};
+    (d.policies||[]).forEach(function(p){ if(p.ID) serverPolIDs[p.ID]=true; });
+    var localPolsToKeep = [];
+    try{
+      var oldStr2 = localStorage.getItem('du_db');
+      if(oldStr2){
+        var oldDB2 = JSON.parse(oldStr2);
+        (oldDB2.policies||[]).forEach(function(p){
+          // Keep local policy if: saved today AND server didn't return it
+          if(p.LastUpdated===today && !serverPolIDs[p.ID]){
+            localPolsToKeep.push(p);
+            console.warn('SYNC MERGE: keeping local policy not in server response:', p.ID, p.Insurer, p.Type);
+          }
+        });
+      }
+    }catch(e){}
+
+    DB.policies = (d.policies || []).concat(localPolsToKeep);
+    if(localPolsToKeep.length>0){
+      showSaveFail(localPolsToKeep.length+' policy record(s) saved today were NOT returned by the Google Sheet sync. They are being kept locally. Please check your Apps Script — it may be reading from the wrong sheet tab (Policies vs Policies (1)).');
+    }
     DB.tasks    = d.tasks    || [];
     DB.roas     = d.roas     || [];
     DB.links    = d.links    || [];
@@ -422,7 +445,7 @@ function post(data, cb) {
   s.onerror = function(){
     delete window[cbName];
     try{document.body.removeChild(s);}catch(e){}
-    toast('Save failed','err');
+    showSaveFail('Network error — could not reach Google Sheet. Data is saved locally in this browser only.');
     if(cb)cb({ok:0});
   };
   document.body.appendChild(s);
@@ -500,6 +523,29 @@ function toast(msg,type){
   t.textContent=(type==='ok'?'✓ ':'⚠ ')+msg;
   t.className='toast show '+(type||'ok');
   setTimeout(function(){t.className='toast';},3000);
+}
+
+// Persistent save failure banner — stays until dismissed or cleared by successful save
+function showSaveFail(msg){
+  var existing=document.getElementById('saveFail');
+  if(existing) existing.parentNode.removeChild(existing);
+  var b=document.createElement('div');
+  b.id='saveFail';
+  b.style.cssText='position:fixed;top:0;left:0;right:0;z-index:99999;background:#dc2626;color:#fff;padding:14px 20px;display:flex;justify-content:space-between;align-items:center;font-size:13px;font-weight:600;box-shadow:0 2px 8px rgba(0,0,0,.3)';
+  b.innerHTML='<span>⚠ SAVE FAILED — '+msg+' Your data is saved locally in this browser but may NOT be in the Google Sheet. Please try saving again or check your internet connection.</span>';
+  var dismiss=document.createElement('button');
+  dismiss.textContent='✕ Dismiss';
+  dismiss.style.cssText='background:rgba(255,255,255,.2);border:1px solid rgba(255,255,255,.5);color:#fff;border-radius:4px;padding:4px 12px;cursor:pointer;font-weight:600;margin-left:16px;flex-shrink:0';
+  dismiss.onclick=function(){b.parentNode.removeChild(b);};
+  b.appendChild(dismiss);
+  document.body.insertBefore(b,document.body.firstChild);
+  // Also store in localStorage so it shows on next load if not cleared
+  try{localStorage.setItem('du_unsaved_warning',msg);}catch(e){}
+}
+function clearSaveFail(){
+  var b=document.getElementById('saveFail');
+  if(b) b.parentNode.removeChild(b);
+  try{localStorage.removeItem('du_unsaved_warning');}catch(e){}
 }
 function updateBadge(){
   var n=DB.tasks.filter(function(t){return !isdone(t);}).length;
@@ -3831,7 +3877,19 @@ function savePolicy(){
   if(EPI!==null&&oldPol){var gi=DB.policies.indexOf(oldPol);if(gi>=0)DB.policies[gi]=pol;}
   else DB.policies.push(pol);
   closeAll();render();
-  post({action:'savePolicy',policy:pol},function(){toast('Policy saved','ok');});
+  // Set a timeout — if no sheet confirmation within 15s, show persistent failure banner
+  var saveTimer=setTimeout(function(){
+    showSaveFail('Policy for '+(pol.Insurer||'unknown insurer')+' ('+pol.Type+') — no confirmation received from Google Sheet within 15 seconds.');
+  },15000);
+  post({action:'savePolicy',policy:pol},function(res){
+    clearTimeout(saveTimer);
+    if(res&&res.ok===0){
+      showSaveFail('Policy for '+(pol.Insurer||'unknown insurer')+' — Apps Script returned an error. Check your connection and try again.');
+    } else {
+      clearSaveFail();
+      toast('Policy saved to sheet ✓','ok');
+    }
+  });
 }
 
 function logAnnualReview(){
@@ -4864,6 +4922,11 @@ function bootApp(){
       render();
     }
   } catch(e){}
+  // Show persistent warning if a previous save failed
+  try{
+    var unsynced=localStorage.getItem('du_unsaved_warning');
+    if(unsynced) showSaveFail('PREVIOUS SESSION: '+unsynced+' — Please re-enter and save this record.');
+  }catch(e){}
   // Then sync from sheet in background
   syncNow();
   // Attach persistent search listener
