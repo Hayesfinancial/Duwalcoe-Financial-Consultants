@@ -3587,7 +3587,8 @@ function collectPolicyForm(){
     PremEscalation:wPremEsc,
     BenEscalation: avgBenEsc,
     // New unified benefits array
-    Benefits: JSON.stringify(POL_BENEFITS),
+    // Note: Benefits field omitted from save payload — IncomeBenefits v2 envelope contains the full array
+    // This reduces URL payload size significantly
     // Store full benefits array inside IncomeBenefits using v2 envelope
     // Apps Script reliably saves IncomeBenefits — Benefits column may not be in its field list
     IncomeBenefits: JSON.stringify({v2: POL_BENEFITS, ip: benIPRows}),
@@ -3878,13 +3879,20 @@ function savePolicy(){
   else DB.policies.push(pol);
   closeAll();render();
   // Set a timeout — if no sheet confirmation within 15s, show persistent failure banner
+  // Check payload size before sending — large payloads can silently fail
+  var payloadSize = encodeURIComponent(JSON.stringify({action:'savePolicy',policy:pol})).length;
+  console.log('savePolicy payload size:', payloadSize, 'chars');
+  if(payloadSize > 6000){
+    console.warn('WARNING: savePolicy payload is '+payloadSize+' chars — may exceed URL limits. IncomeBenefits length: '+(pol.IncomeBenefits||'').length);
+  }
   var saveTimer=setTimeout(function(){
     showSaveFail('Policy for '+(pol.Insurer||'unknown insurer')+' ('+pol.Type+') — no confirmation received from Google Sheet within 15 seconds.');
   },15000);
   post({action:'savePolicy',policy:pol},function(res){
     clearTimeout(saveTimer);
-    if(res&&res.ok===0){
-      showSaveFail('Policy for '+(pol.Insurer||'unknown insurer')+' — Apps Script returned an error. Check your connection and try again.');
+    if(!res || res.ok!==1 || res.error){
+      var errMsg = (res&&res.error) ? res.error : 'No confirmation received from Apps Script.';
+      showSaveFail('Policy for '+(pol.Insurer||'unknown insurer')+' — '+errMsg+' Please try saving again.');
     } else {
       clearSaveFail();
       toast('Policy saved to sheet ✓','ok');
