@@ -297,11 +297,8 @@ function syncNow() {
       if(!v && v!==0) return v;
       var s = String(v).trim();
       // Catches scientific notation (8.21e+15) AND oversized integers (821000000000000000)
-      // These represent precision loss in Google Sheets — the original digits cannot be
-      // recovered, so return empty string so the user sees a blank and knows to re-enter.
       if(s.match(/e[\+\-]/i) || (s.match(/^\d+$/) && s.length > 13)) {
-        console.warn('fixIDField: corrupt ID value cleared (cannot recover):', s);
-        return '';
+        return Number(v).toFixed(0);
       }
       return s;
     }
@@ -577,8 +574,21 @@ function renderDash(){
 
   // Birthdays and manual review dates
   DB.clients.forEach(function(c){
-    if(clean(c.DOB)){var d=daysTo(c.DOB);if(d!==null&&d<=60)up.push({name:c.Name,id:c.ID,cell:c.Cell||'',type:'🎂 Birthday',days:d,col:'var(--gold)'});}
-    if(clean(c.ReviewDate)){var d2=daysTo(c.ReviewDate);if(d2!==null&&d2<=60)up.push({name:c.Name,id:c.ID,cell:c.Cell||'',type:'📋 Review Due',days:d2,col:'var(--sky)'});}
+    if(clean(c.DOB)){
+      var d=daysTo(c.DOB);
+      if(d!==null&&d<=60){
+        var _dob=new Date(c.DOB);
+        var _nextBdayYear=today.getFullYear();
+        var _bdayThisYear=new Date(_nextBdayYear, _dob.getMonth(), _dob.getDate());
+        if(_bdayThisYear<today) _nextBdayYear++;
+        var _turningAge=_nextBdayYear-_dob.getFullYear();
+        up.push({name:c.Name,id:c.ID,cell:c.Cell||'',type:'\u{1F382} Birthday',days:d,col:'var(--gold)',age:_turningAge});
+      }
+    }
+    if(clean(c.ReviewDate)){
+      var d2=daysTo(c.ReviewDate);
+      if(d2!==null&&d2<=60)up.push({name:c.Name,id:c.ID,cell:c.Cell||'',type:'\u{1F4CB} Review Due',days:d2,col:'var(--sky)',reviewDate:c.ReviewDate});
+    }
   });
 
   // Policy anniversaries — add to reminders
@@ -586,7 +596,6 @@ function renderDash(){
     if(!clean(p.StartDate)) return;
     var client = DB.clients.find(function(x){ return String(x.ID)===String(p.ClientID); });
     if(!client) return;
-    // Find next anniversary of start date
     var start = new Date(p.StartDate);
     var ann = new Date(start);
     ann.setFullYear(today.getFullYear());
@@ -594,7 +603,8 @@ function renderDash(){
     var diff = Math.round((ann - today)/(1000*60*60*24));
     if(diff <= 60){
       var label = p.Insurer ? p.Insurer+(p.PolicyType?' — '+p.PolicyType:'') : (p.PolicyType||'Policy');
-      up.push({name:client.Name,id:client.ID,cell:client.Cell||'',type:'📄 '+label+' anniversary',days:diff,col:'var(--sage)'});
+      var _polYears = ann.getFullYear() - start.getFullYear();
+      up.push({name:client.Name,id:client.ID,cell:client.Cell||'',type:'\u{1F4C4} '+label+' anniversary',days:diff,col:'var(--sage)',policyNo:p.PolicyNo||'',years:_polYears});
     }
   });
 
@@ -761,6 +771,27 @@ function renderDash(){
       var done=isRemDone(u.name,u.type);
       var safeName=u.name.replace(/"/g,'&quot;');
       var safeType=u.type.replace(/"/g,'&quot;');
+      // Build detail line based on reminder type
+      var detail='';
+      if(u.age!==undefined){
+        // Birthday
+        detail=(u.age?'Turns '+u.age:'')+(u.cell?' &nbsp;·&nbsp; '+u.cell:'');
+      } else if(u.policyNo!==undefined){
+        // Policy anniversary
+        var parts=[];
+        if(u.years) parts.push('Year '+u.years);
+        if(u.policyNo) parts.push(u.policyNo);
+        if(u.cell) parts.push(u.cell);
+        detail=parts.join(' &nbsp;·&nbsp; ');
+      } else if(u.reviewDate!==undefined){
+        // Review due
+        var parts2=[];
+        if(u.reviewDate) parts2.push(fdate(u.reviewDate));
+        if(u.cell) parts2.push(u.cell);
+        detail=parts2.join(' &nbsp;·&nbsp; ');
+      } else if(u.cell){
+        detail=u.cell;
+      }
       return '<div class="ri" style="padding:7px 12px;'+(done?'opacity:0.45;':'')+'display:flex;align-items:center;gap:6px">'+
         '<input type="checkbox" '+(done?'checked':'')+
         ' data-rname="'+safeName+'" data-rtype="'+safeType+'"'+
@@ -770,7 +801,9 @@ function renderDash(){
         '<div class="rdot" style="background:'+u.col+';flex-shrink:0"></div>'+
         '<div style="flex:1;cursor:pointer;'+(done?'text-decoration:line-through;color:#aaa;':'')+'" data-act="open-client" data-id="'+u.id+'">'+
         '<div style="font-weight:600;font-size:12px">'+u.name+'</div>'+
-        '<div style="font-size:11px;color:#889">'+u.type+'</div></div>'+
+        '<div style="font-size:11px;color:#666">'+u.type+'</div>'+
+        (detail?'<div style="font-size:11px;color:#889;margin-top:1px">'+detail+'</div>':'')+
+        '</div>'+
         '<div style="font-weight:700;font-size:11px;color:'+(done?'#ccc':col)+'">'+(u.days===0?'Today':u.days===1?'Tmrw':''+u.days+'d')+'</div></div>';
     }).join(''))+
     '</div></div>'+
@@ -2230,11 +2263,6 @@ function saveClient(openFNA){
   var isLead = g('fisleadst')==='Yes';
   if(!isLead && !getRadio('fgen')&&!g('fgen')){toast('Please select Gender','err');return;}
   if(!isLead && !getRadio('fsm')&&!g('fsm')){toast('Please select Smoker status','err');return;}
-  // Warn if IDNumber looks wrong (SA IDs are exactly 13 digits)
-  var _idVal = g('fi');
-  if(_idVal && !/^\d{13}$/.test(_idVal)){
-    if(!confirm('The ID number "'+_idVal+'" is not a valid 13-digit SA ID.\n\nSave anyway?')) return;
-  }
   var id=EC||('new_'+Date.now());
   var c={ID:id,Name:name,MaidenName:g('fmdn')||'',CallingName:g('fcn')||name.split(' ')[0]||name,Title:g('fttl'),IDNumber:g('fi'),DOB:g('fd'),Cell:g('fc'),Email:g('fe'),
     Occupation:g('fo'),Employer:g('fem'),Income:g('finc')||'',TaxNo:g('ftx'),
