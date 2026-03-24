@@ -309,14 +309,6 @@ function syncNow() {
       });
     });
     DB.policies = d.policies || [];
-    // Fix sheet column typo: 'NonVestedVaue' should be 'NonVestedValue'
-    // The sheet column was misnamed; remap on load so the form displays correctly
-    // until the sheet column is renamed to the correct spelling.
-    DB.policies.forEach(function(p){
-      if(p.NonVestedVaue !== undefined && p.NonVestedValue === undefined){
-        p.NonVestedValue = p.NonVestedVaue;
-      }
-    });
     DB.tasks    = d.tasks    || [];
     DB.roas     = d.roas     || [];
     DB.links    = d.links    || [];
@@ -2407,8 +2399,8 @@ function buildPolicyForm(p){
   // PREMIUM
   html+=sec('Premium');
   html+='<div class="g2">'+fld('ppm','Premium / Contribution',p.Premium)+fs('pfreq','Frequency',['Monthly','Quarterly','Annually','Once Off'],p.Frequency||'Monthly')+'</div>';
-  if(!isLA){
-    html+='<div class="g2">'+fld('pprem_pct','Premium Escalation %',p.PremEscalation)+fld('pben_pct','Benefit Escalation %',p.BenEscalation)+'</div>';
+  if(!isLA && !isLifeAnn){
+    html+='<div class="g2">'+fld('pprem_pct','Premium Escalation %',p.PremEscalation)+(isRA?'<div></div>':fld('pben_pct','Benefit Escalation %',p.BenEscalation))+'</div>';
   }
 
   // RISK COVER
@@ -2433,9 +2425,9 @@ function buildPolicyForm(p){
     html+=sec(isRA?'Fund & Retirement Values':'Investment Values');
     html+='<div class="g2">'+fld('pb_fv','Current Fund Value',p.BenFundValue)+fld('pb_surr2','Nett Surrender Value',p.BenSurrenderValue)+'</div>';
     if(isRA){
-      html+='<div class="g2">'+fld('pb_vested','Vested Component (Pot 1)',p.VestedValue,'text','oninput="raAutoSum()"')+fld('pb_nonvested','Non-Vested Component',p.NonVestedValue,'text','oninput="raAutoSum()"')+'</div>';
-      html+='<div class="g2">'+fld('pb_retcomp','Retirement Component (Pot 2)',p.RetirementComponent,'text','oninput="raAutoSum()"')+fld('pb_savcomp','Savings Component (Pot 3)',p.SavingsComponent,'text','oninput="raAutoSum()"')+'</div>';
-      html+='<div class="g2">'+fld('pb_retage','Retirement Age',p.RetirementAge||'65')+fdp('pb_matdate','Maturity Date',p.MaturityDate||'')+'</div>';
+      html+='<div class="g2">'+fld('pb_vested','Vested Component (Pot 1)',p.VestedValue)+fld('pb_nonvested','Non-Vested Component',p.NonVestedValue)+'</div>';
+      html+='<div class="g2">'+fld('pb_retcomp','Retirement Component (Pot 2)',p.RetirementComponent)+fld('pb_savcomp','Savings Component (Pot 3)',p.SavingsComponent)+'</div>';
+      html+='<div class="g2">'+fld('pb_retage','Retirement Age',p.RetirementAge||'65','text','oninput="raCalcMaturity()"')+fdp('pb_matdate','Maturity Date',p.MaturityDate||'')+'</div>';
       html+='<div class="g2">'+fld('pb_illrate','Illustrative Rate %',p.IllustrativeRate||'9')+fld('pb_growrate','Premium Growth Rate %',p.PremGrowthRate||'10')+'</div>';
       html+='<div class="fld"><label>Will client withdraw Savings Pot (Pot 3) before retirement?</label><div style="display:flex;gap:12px;margin-top:8px">';
       html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="p3pot" value="Yes"'+(p.WithdrawSavingsPot==='Yes'?' checked':'')+'>Yes</label>';
@@ -2633,14 +2625,40 @@ function addIncomeRow(){
   document.getElementById('incomeRowsWrap').innerHTML=renderIncomeRows();
 }
 
-// ── RA component auto-sum ────────────────────────────────────
-// When any of the three 2-pot component fields change, recalculate
-// the Fund Value as their total so the user never has to do it manually.
-function raAutoSum(){
-  var N=function(id){ var el=document.getElementById(id); return el?parseFloat(el.value.replace(/[^0-9.\-]/g,''))||0:0; };
-  var total = N('pb_vested') + N('pb_nonvested') + N('pb_retcomp') + N('pb_savcomp');
-  var fvEl = document.getElementById('pb_fv');
-  if(fvEl && total > 0) fvEl.value = Math.round(total);
+// ── RA maturity date auto-calculation ────────────────────────
+// When retirement age is entered, calculate the maturity date from
+// the client's DOB: same month and day as birthday, in the year they
+// reach the entered retirement age.
+function raCalcMaturity(){
+  var ageEl = document.getElementById('pb_retage');
+  if(!ageEl) return;
+  var age = parseInt(ageEl.value);
+  if(isNaN(age) || age < 40 || age > 85) return;
+  // Get client DOB from DB using EPC
+  var c = DB.clients.find(function(x){ return String(x.ID)===String(EPC); });
+  if(!c || !clean(c.DOB)) return;
+  var dob = new Date(c.DOB);
+  if(isNaN(dob)) return;
+  // Maturity = birthday in the year they turn [age]
+  var matYear = dob.getFullYear() + age;
+  var matMon  = String(dob.getMonth()+1); if(matMon.length===1) matMon='0'+matMon;
+  var matDay  = String(dob.getDate());    if(matDay.length===1) matDay='0'+matDay;
+  var matDate = matYear+'-'+matMon+'-'+matDay;
+  // Set the hidden input and rebuild the visible dropdowns
+  var hid = document.getElementById('pb_matdate');
+  if(hid){ hid.value = matDate; }
+  // Update the three visible selects
+  var yEl = document.getElementById('pb_matdate_y');
+  var mEl = document.getElementById('pb_matdate_m');
+  var dEl = document.getElementById('pb_matdate_d');
+  if(yEl) yEl.value = String(matYear);
+  if(mEl) mEl.value = matMon;
+  if(dEl){
+    dEl.innerHTML = fdpDayOpts(String(matYear), matMon, matDay);
+    dEl.value = matDay;
+  }
+  // Update the day label
+  fdpUpdateDay('pb_matdate');
 }
 
 // ── Living Annuity two-way calculation ───────────────────────
@@ -3025,17 +3043,7 @@ function savePolicy(){
   if(EPI!==null&&oldPol){var gi=DB.policies.indexOf(oldPol);if(gi>=0)DB.policies[gi]=pol;}
   else DB.policies.push(pol);
   closeAll();render();
-  post({action:'savePolicy',policy:pol},function(){
-    // Re-assert the saved policy into DB in case a background sync fired
-    // between the user clicking Save and the server responding.
-    // Without this, a sync that completes mid-save restores old server values,
-    // causing the user to lose notes, fund values, and component fields.
-    var _gi=DB.policies.findIndex(function(x){return x.ID===pol.ID;});
-    if(_gi>=0) DB.policies[_gi]=pol;
-    else DB.policies.push(pol);
-    try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
-    toast('Policy saved','ok');
-  });
+  post({action:'savePolicy',policy:pol},function(){toast('Policy saved','ok');});
 }
 
 function logAnnualReview(){
