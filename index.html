@@ -268,7 +268,9 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--cream);c
 
 <script>
 // ══ CONFIG ═══════════════════════════════════════════════════
-var SURL = 'https://script.google.com/macros/s/AKfycbw_I8Md3snxG36VJb00gIIgbag_2-k0zUkkmzS15kDzpCO37RJSS16hTdhhpS_v5onr/exec';
+var SB_URL = 'https://ayyexuwxaghzljykslxr.supabase.co';   // e.g. https://xxxxxxxxxxxx.supabase.co
+var SB_KEY = 'sb_publishable_u0ehRbeBeI8ctOvvQ6Qsog_J8a1Wt6c';       // eyJ...
+var SURL = SB_URL; // legacy alias — not used for JSONP any more
 
 // ══ STATE ════════════════════════════════════════════════════
 var DB = {clients:[], policies:[], tasks:[], roas:[], links:[]};
@@ -282,36 +284,51 @@ var EPI = null; // edit policy index
 var RC = null;  // roa client id
 var TC = '';    // task client name
 
-// ══ NETWORK ══════════════════════════════════════════════════
+// ══ NETWORK (Supabase) ═══════════════════════════════════════
+
+// Core Supabase REST helper — fetch wrapper used by all operations
+function sbFetch(method, path, body, cb){
+  var opts = {
+    method: method,
+    headers: {
+      'apikey': SB_KEY,
+      'Authorization': 'Bearer ' + SB_KEY,
+      'Content-Type': 'application/json',
+      'Prefer': method === 'POST' ? 'resolution=merge-duplicates' : ''
+    }
+  };
+  if(body) opts.body = JSON.stringify(body);
+  fetch(SB_URL + path, opts)
+    .then(function(r){
+      if(!r.ok){ r.text().then(function(t){ console.error('Supabase error:', r.status, t); if(cb) cb(null, t); }); return; }
+      var ct = r.headers.get('content-type')||'';
+      if(ct.indexOf('json')>=0) r.json().then(function(d){ if(cb) cb(d); });
+      else r.text().then(function(){ if(cb) cb({}); });
+    })
+    .catch(function(e){ console.error('Supabase fetch error:', e); if(cb) cb(null, e.message); });
+}
+
 function syncNow() {
   setSS('ld');
-  window.__duSync = function(d){
-    // Preserve LastAccessed timestamps before overwriting with fresh sheet data
-    var lastAccessed = {};
-    try {
-      var oldStr = localStorage.getItem('du_db');
-      if(oldStr){ var oldDB=JSON.parse(oldStr); (oldDB.clients||[]).forEach(function(c){ if(c.LastAccessed) lastAccessed[String(c.ID)]=c.LastAccessed; }); }
-    } catch(e){}
-    if(d.clients&&d.clients[0]) console.log('DATE DEBUG - first client StartDate sample from policies:', d.policies&&d.policies[0]?d.policies[0].StartDate:'no policies');
-    function fixIDField(v){
-      if(!v && v!==0) return v;
-      var s = String(v).trim();
-      // Catches scientific notation (8.21e+15) AND oversized integers (821000000000000000)
-      if(s.match(/e[\+\-]/i) || (s.match(/^\d+$/) && s.length > 13)) {
-        return Number(v).toFixed(0);
-      }
-      return s;
-    }
-    DB.clients  = d.clients  || [];
-    DB.clients.forEach(function(c){
-      ['IDNumber','SpouseIDNumber','Cell','TaxNo'].forEach(function(f){
-        c[f] = fixIDField(c[f]);
-      });
+
+  // Load all core tables in parallel
+  var loaded = {};
+  var needed = ['clients','policies','tasks','roas','familylinks','settings','notes'];
+  var done = 0;
+
+  function checkDone(){
+    done++;
+    if(done < needed.length) return;
+
+    // Clients
+    DB.clients = (loaded.clients||[]).map(function(c){
+      // No more scientific notation corruption — Supabase stores text as text
+      return c;
     });
-    DB.policies = d.policies || [];
-    // Re-apply any locally-saved policies that haven't been confirmed by server yet.
-    // This protects against a sync that fires between Save click and server confirmation
-    // (including an F5 page refresh before server responds).
+
+    // Policies
+    DB.policies = loaded.policies||[];
+    // Re-apply any locally pending saves (in case sync fires mid-save)
     try{
       var _ldb=JSON.parse(localStorage.getItem('du_db')||'{}');
       (_ldb.policies||[]).forEach(function(lp){
@@ -322,117 +339,166 @@ function syncNow() {
         }
       });
     }catch(e){}
-    DB.tasks    = d.tasks    || [];
-    DB.roas     = d.roas     || [];
-    DB.links    = d.links    || [];
-    DB.links.forEach(function(l){
-      l.IDNumber = fixIDField(l.IDNumber);
-      l.Cell     = fixIDField(l.Cell);
+
+    DB.tasks  = loaded.tasks||[];
+    DB.roas   = loaded.roas||[];
+    DB.links  = loaded.familylinks||[];
+
+    // Notes — convert array to object keyed by ClientID
+    window._sharedNotes = {};
+    (loaded.notes||[]).forEach(function(n){
+      if(n.ClientID) window._sharedNotes[String(n.ClientID)] = {text:n.Text||'',by:n.By||'',date:n.LastUpdated||''};
     });
-    // Restore LastAccessed ONLY from dedicated per-user recent store — never from sheet data
-    DB.clients.forEach(function(c){ c.LastAccessed=null; }); // wipe any stale sheet values
+
+    // Settings — discuss board
+    var settingsRows = loaded.settings||[];
+    var discussRow = settingsRows.find(function(r){ return r.Key==='discuss'; });
+    if(discussRow && discussRow.Value){
+      try{
+        var serverPosts = JSON.parse(discussRow.Value);
+        var localPosts = [];
+        try{ localPosts = JSON.parse(localStorage.getItem('du_discuss')||'[]'); }catch(e){}
+        if(serverPosts.length >= localPosts.length){
+          localStorage.setItem('du_discuss', discussRow.Value);
+        }
+      }catch(e){}
+    }
+
+    // Restore LastAccessed from local store
+    DB.clients.forEach(function(c){ c.LastAccessed=null; });
     try{
       var ra=JSON.parse(localStorage.getItem(recentKey())||'{}');
       DB.clients.forEach(function(c){ if(ra[String(c.ID)]) c.LastAccessed=ra[String(c.ID)]; });
     }catch(e){}
-    try { localStorage.setItem('du_db', JSON.stringify(DB)); } catch(e){}
-    // Pull shared discussion board from server — only update if server has newer data
-    if(d.discuss && d.discuss !== ''){
-      try{
-        var serverPosts = JSON.parse(d.discuss);
-        var localPosts = [];
-        try{ localPosts = JSON.parse(localStorage.getItem('du_discuss')||'[]'); }catch(e){}
-        // Use server version only if it has posts and matches or exceeds local count
-        // This prevents a slow-saving delete from being undone by sync
-        if(serverPosts.length >= localPosts.length){
-          localStorage.setItem('du_discuss', d.discuss);
-        }
-      }catch(e){
-        // if invalid JSON, ignore and keep local copy
-      }
-    }
-    // Load appts from server
-    if(d.appts){
-      try{
-        var serverAppts = JSON.parse(d.appts);
-        Object.keys(serverAppts).forEach(function(k){
-          localStorage.setItem('du_appts_srv_'+k, serverAppts[k]);
-        });
-      }catch(e){}
-    }
-    // Load shared notes from server
-    if(d.notes){
-      try{
-        window._sharedNotes = typeof d.notes === "string" ? JSON.parse(d.notes) : d.notes;
-      }catch(e){ window._sharedNotes = {}; }
-    }
+
+    try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
     setSS('ok');
     render();
     toast('Synced — ' + DB.clients.length + ' clients','ok');
     if(!window._discussTimer) startDiscussAutoRefresh();
-  };
-  var old = document.getElementById('__duScript');
-  if(old) old.parentNode.removeChild(old);
-  var s = document.createElement('script');
-  s.id = '__duScript';
-  s.src = SURL + '?action=getAll&callback=__duSync&t=' + Date.now();
-  s.onerror = function(){
-    setSS('err');
-    try {
-      var c = localStorage.getItem('du_db');
-      if(c){ DB = JSON.parse(c); render(); toast('Offline — showing cached data','err'); }
-      else { render(); toast('Sync failed','err'); }
-    } catch(e){ render(); }
-  };
-  document.head.appendChild(s);
+  }
+
+  needed.forEach(function(table){
+    sbFetch('GET', '/rest/v1/'+table+'?select=*&limit=10000', null, function(data){
+      loaded[table] = data||[];
+      checkDone();
+    });
+  });
 }
 
 function startDiscussAutoRefresh(){
   if(window._discussTimer) clearInterval(window._discussTimer);
   window._discussTimer = setInterval(function(){
-    // Silent background fetch of discuss only — no toast, no full render flicker
-    var cbName = '__duDiscuss_' + Date.now();
-    var s = document.createElement('script');
-    window[cbName] = function(d){
-      delete window[cbName];
-      try{ document.head.removeChild(s); }catch(e){}
-      if(d && d.discuss && d.discuss !== ''){
-        try{
-          var serverPosts = JSON.parse(d.discuss);
-          var localPosts = [];
-          try{ localPosts = JSON.parse(localStorage.getItem('du_discuss')||'[]'); }catch(e){}
-          var current = localStorage.getItem('du_discuss')||'[]';
-          if(d.discuss !== current && serverPosts.length >= localPosts.length){
-            localStorage.setItem('du_discuss', d.discuss);
-            if(PAGE==='dash') render();
-          }
-        }catch(e){}
-      }
-    };
-    s.src = SURL + '?action=getAll&callback=' + cbName + '&t=' + Date.now();
-    s.onerror = function(){ delete window[cbName]; try{document.head.removeChild(s);}catch(e){}; };
-    document.head.appendChild(s);
-  }, 5 * 60 * 1000); // every 5 minutes
+    sbFetch('GET', '/rest/v1/settings?select=*&Key=eq.discuss', null, function(rows){
+      if(!rows||!rows.length) return;
+      var val = rows[0].Value||'';
+      if(!val) return;
+      try{
+        var serverPosts = JSON.parse(val);
+        var localPosts = [];
+        try{ localPosts=JSON.parse(localStorage.getItem('du_discuss')||'[]'); }catch(e){}
+        var current = localStorage.getItem('du_discuss')||'[]';
+        if(val !== current && serverPosts.length >= localPosts.length){
+          localStorage.setItem('du_discuss', val);
+          if(PAGE==='dash') render();
+        }
+      }catch(e){}
+    });
+  }, 5 * 60 * 1000);
 }
 
-function post(data, cb) {
-  var cbName = '__duPost_' + Date.now();
-  var s = document.createElement('script');
-  window[cbName] = function(d){
-    delete window[cbName];
-    document.body.removeChild(s);
-    try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
-    if(cb)cb(d);
-  };
-  var payload = encodeURIComponent(JSON.stringify(data));
-  s.src = SURL + '?method=POST&payload=' + payload + '&callback=' + cbName + '&t=' + Date.now();
-  s.onerror = function(){
-    delete window[cbName];
-    try{document.body.removeChild(s);}catch(e){}
-    toast('Save failed','err');
-    if(cb)cb({ok:0});
-  };
-  document.body.appendChild(s);
+// post() — maps every legacy action to a direct Supabase call
+function post(data, cb){
+  var action = data.action;
+
+  // upsert a single row into a table
+  function upsert(table, row, callback){
+    sbFetch('POST', '/rest/v1/'+table, [row], function(res, err){
+      try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
+      if(callback) callback(err?{ok:0}:{ok:1});
+    });
+  }
+
+  // delete a row by ID
+  function del(table, id, callback){
+    sbFetch('DELETE', '/rest/v1/'+table+'?ID=eq.'+encodeURIComponent(id), null, function(res, err){
+      try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
+      if(callback) callback(err?{ok:0}:{ok:1});
+    });
+  }
+
+  // partial update — patch specific columns
+  function patch(table, id, fields, callback){
+    sbFetch('PATCH', '/rest/v1/'+table+'?ID=eq.'+encodeURIComponent(id), fields, function(res, err){
+      try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
+      if(callback) callback(err?{ok:0}:{ok:1});
+    });
+  }
+
+  if(action==='saveClient'){
+    upsert('clients', data.client, cb);
+  }
+  else if(action==='savePolicy'){
+    var p = Object.assign({}, data.policy);
+    delete p._pendingSave;
+    upsert('policies', p, cb);
+  }
+  else if(action==='saveTask'){
+    upsert('tasks', data.task, cb);
+  }
+  else if(action==='saveROA'){
+    upsert('roas', data.roa, cb);
+  }
+  else if(action==='saveFamMember'){
+    upsert('familylinks', data.member, cb);
+  }
+  else if(action==='upgradeFamMember'){
+    patch('familylinks', data.id, {IsClient:'Yes', ClientID:data.clientId}, cb);
+  }
+  else if(action==='deleteRow'){
+    var tbl = data.sheet==='Tasks'?'tasks':data.sheet==='ROA'?'roas':data.sheet.toLowerCase()+'s';
+    del(tbl, data.id, cb);
+  }
+  else if(action==='toggleTask'){
+    patch('tasks', data.id, {Done: data.done?'true':'false'}, cb);
+  }
+  else if(action==='updateTaskNotes'){
+    patch('tasks', data.id, {Notes: data.notes}, cb);
+  }
+  else if(action==='updateDueDate'){
+    var fields2 = {};
+    if(data.assignee) fields2.Assignee = data.assignee;
+    if(data.dueDate)  fields2.DueDate  = data.dueDate;
+    patch('tasks', data.id, fields2, cb);
+  }
+  else if(action==='saveDiscuss'){
+    sbFetch('POST', '/rest/v1/settings', [{Key:'discuss', Value:data.posts}], function(res, err){
+      try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
+      if(cb) cb(err?{ok:0}:{ok:1, posts:data.posts});
+    });
+  }
+  else if(action==='saveAppts'){
+    sbFetch('POST', '/rest/v1/appts', [{User:data.user, WeekKey:data.weekKey, Appts:data.appts}], function(res, err){
+      if(cb) cb(err?{ok:0}:{ok:1});
+    });
+  }
+  else if(action==='saveNote'){
+    upsert('notes', {ClientID:data.clientId, Text:data.text, By:data.by, LastUpdated:new Date().toISOString().slice(0,10)}, cb);
+  }
+  else if(action==='saveFNA'){
+    var now = new Date().toISOString().slice(0,16).replace('T',' ');
+    upsert('fnadata', {ClientID:data.clientId, Data:data.jsonData, LastSaved:now, SavedBy:'Clinton Hayes'}, cb);
+  }
+  else if(action==='loadFNA'){
+    sbFetch('GET', '/rest/v1/fnadata?ClientID=eq.'+encodeURIComponent(data.clientId)+'&select=*', null, function(rows){
+      if(rows&&rows.length){ if(cb) cb({ok:1, data:rows[0].Data||'', saved:rows[0].LastSaved||''}); }
+      else { if(cb) cb({ok:1, data:null}); }
+    });
+  }
+  else {
+    console.warn('post(): unknown action:', action);
+    if(cb) cb({ok:0, error:'unknown action'});
+  }
 }
 
 function setSS(s) {
@@ -3017,24 +3083,10 @@ function savePolicy(){
   if(!oldPol&&window.REPLACING_POL_ID){window.REPLACING_POL_ID=null;window.REPLACING_POL_NO=null;}
   // Keep existing history, don't overwrite
   pol.ReviewHistory=oldPol?(oldPol.ReviewHistory||''):'';
-  // Mark as pending so syncNow won't overwrite before server confirms
-  pol._pendingSave = true;
   if(EPI!==null&&oldPol){var gi=DB.policies.indexOf(oldPol);if(gi>=0)DB.policies[gi]=pol;}
   else DB.policies.push(pol);
-  // Write to localStorage IMMEDIATELY — before server confirms.
-  // This means an F5 refresh before the server responds still shows the correct values.
-  try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
   closeAll();render();
-  // Send to server — on confirm, clear the pending flag and re-save localStorage
-  var _polForServer = JSON.parse(JSON.stringify(pol));
-  delete _polForServer._pendingSave;
-  post({action:'savePolicy',policy:_polForServer},function(){
-    // Server confirmed — clear pending flag in DB and localStorage
-    var _ci=DB.policies.findIndex(function(x){return x.ID===pol.ID;});
-    if(_ci>=0){ DB.policies[_ci]=_polForServer; }
-    try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
-    toast('Policy saved ✓','ok');
-  });
+  post({action:'savePolicy',policy:pol},function(){toast('Policy saved','ok');});
 }
 
 function logAnnualReview(){
