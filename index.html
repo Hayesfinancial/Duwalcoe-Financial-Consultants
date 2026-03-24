@@ -226,20 +226,14 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--cream);c
     <div class="mb">
       <div class="fld" style="margin-bottom:12px">
         <label>Relationship</label>
-        <select id="linkExistRel" onchange="(function(){var v=this.value;var sp=document.getElementById('linkExistShareRow');if(sp)sp.style.display=v==='Shareholder'?'':'none';}).call(this)">
+        <select id="linkExistRel">
           <option value="Spouse">Spouse</option>
           <option value="Child">Child</option>
           <option value="Parent">Parent</option>
           <option value="Sibling">Sibling</option>
           <option value="Partner">Partner</option>
-          <option value="Director">Director</option>
-          <option value="Shareholder">Shareholder</option>
           <option value="Other">Other</option>
         </select>
-      </div>
-      <div id="linkExistShareRow" class="fld" style="margin-bottom:12px;display:none">
-        <label>Shareholding %</label>
-        <input type="number" id="linkExistSharePct" min="0" max="100" step="0.01" placeholder="e.g. 25" style="border:1.5px solid var(--mist);border-radius:7px;padding:8px 11px;font-size:13px;font-family:inherit;width:100%;outline:none">
       </div>
       <div class="sb"><span style="color:#aaa">🔍</span><input type="text" id="linkExistSrch" placeholder="Search client name…"></div>
       <div id="linkExistResults"><div style="color:#aaa;font-size:13px;padding:8px 0">Type a name to search…</div></div>
@@ -298,28 +292,16 @@ function syncNow() {
       var oldStr = localStorage.getItem('du_db');
       if(oldStr){ var oldDB=JSON.parse(oldStr); (oldDB.clients||[]).forEach(function(c){ if(c.LastAccessed) lastAccessed[String(c.ID)]=c.LastAccessed; }); }
     } catch(e){}
-    
+    if(d.clients&&d.clients[0]) console.log('DATE DEBUG - first client StartDate sample from policies:', d.policies&&d.policies[0]?d.policies[0].StartDate:'no policies');
     function fixIDField(v){
       if(!v && v!==0) return v;
       var s = String(v).trim();
-      // Remove trailing dot (e.g. stored as float with no decimal digits)
-      if(s.slice(-1) === '.') s = s.slice(0,-1);
-      // If already all digits — return as-is, never convert through Number()
-      // Number() loses precision on 13+ digit integers (JS float limit)
-      if(s.match(/^\d+$/)) return s;
-      // Convert scientific notation (e.g. 8.21e+15) to plain integer string
-      if(s.match(/e[\+\-]/i)){
-        // Use BigInt if available for exact conversion, else string manipulation
-        try{
-          var parts = s.toLowerCase().split('e');
-          var base = parts[0].replace('.','');
-          var exp = parseInt(parts[1]);
-          var dotPos = parts[0].indexOf('.');
-          var digitsAfterDot = dotPos >= 0 ? parts[0].length - dotPos - 1 : 0;
-          var shift = exp - digitsAfterDot;
-          if(shift >= 0){ return base + '0'.repeat(shift); }
-          else { return base.slice(0, base.length+shift); }
-        }catch(e2){ return String(Math.round(Number(s))); }
+      // Catches scientific notation (8.21e+15) AND oversized integers (821000000000000000)
+      // These represent precision loss in Google Sheets — the original digits cannot be
+      // recovered, so return empty string so the user sees a blank and knows to re-enter.
+      if(s.match(/e[\+\-]/i) || (s.match(/^\d+$/) && s.length > 13)) {
+        console.warn('fixIDField: corrupt ID value cleared (cannot recover):', s);
+        return '';
       }
       return s;
     }
@@ -329,30 +311,7 @@ function syncNow() {
         c[f] = fixIDField(c[f]);
       });
     });
-    // Preserve any policies saved locally today that the server didn't return
-    // This protects against Apps Script sheet mismatch (write to one sheet, read from another)
-    var today = new Date().toISOString().slice(0,10);
-    var serverPolIDs = {};
-    (d.policies||[]).forEach(function(p){ if(p.ID) serverPolIDs[p.ID]=true; });
-    var localPolsToKeep = [];
-    try{
-      var oldStr2 = localStorage.getItem('du_db');
-      if(oldStr2){
-        var oldDB2 = JSON.parse(oldStr2);
-        (oldDB2.policies||[]).forEach(function(p){
-          // Keep local policy if: saved today AND server didn't return it
-          if(p.LastUpdated===today && !serverPolIDs[p.ID]){
-            localPolsToKeep.push(p);
-            console.warn('SYNC MERGE: keeping local policy not in server response:', p.ID, p.Insurer, p.Type);
-          }
-        });
-      }
-    }catch(e){}
-
-    DB.policies = (d.policies || []).concat(localPolsToKeep);
-    if(localPolsToKeep.length>0){
-      showSaveFail(localPolsToKeep.length+' policy record(s) saved today were NOT returned by the Google Sheet sync. They are being kept locally. Please check your Apps Script — it may be reading from the wrong sheet tab (Policies vs Policies (1)).');
-    }
+    DB.policies = d.policies || [];
     DB.tasks    = d.tasks    || [];
     DB.roas     = d.roas     || [];
     DB.links    = d.links    || [];
@@ -446,90 +405,22 @@ function startDiscussAutoRefresh(){
   }, 5 * 60 * 1000); // every 5 minutes
 }
 
-function post(data, cb, _retryCount) {
-  var retries = _retryCount || 0;
-  // Strip empty fields to reduce payload size
-  var cleanData = JSON.parse(JSON.stringify(data));
-  if(cleanData.policy){
-    var p = cleanData.policy;
-    Object.keys(p).forEach(function(k){ if(p[k]===null||p[k]===undefined||p[k]==='') delete p[k]; });
-  }
-  var payload = encodeURIComponent(JSON.stringify(cleanData));
-  var urlLen = (SURL+'?method=POST&payload='+payload+'&callback=x&t=1').length;
-  console.log('POST attempt '+(retries+1)+': action='+data.action+' url_length='+urlLen);
-
-  // Use fetch (no-cors) for writes — avoids URL length limit of JSONP script tags
-  // no-cors means we write successfully but can't read the response body
-  // We use a separate JSONP callback for confirmation
-  if(typeof fetch !== 'undefined' && urlLen > 1800){
-    console.log('Using fetch (no-cors) due to URL length '+urlLen);
-    var cbName = '__duPost_' + Date.now();
-    var confirmed = false;
-    // Step 1: write via fetch no-cors
-    fetch(SURL, {
-      method: 'POST',
-      body: JSON.stringify(cleanData),
-      headers: {'Content-Type': 'text/plain'},
-      mode: 'no-cors'
-    }).then(function(){
-      // Fetch with no-cors always resolves (we can't read error status)
-      // Step 2: confirm via a short JSONP ping
-      console.log('fetch sent — confirming via ping');
-      var pingCb='__confirm_'+Date.now();
-      var ps=document.createElement('script');
-      window[pingCb]=function(r){
-        delete window[pingCb]; try{document.body.removeChild(ps);}catch(e){}
-        console.log('Confirm ping response:',JSON.stringify(r));
-        try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
-        if(cb) cb({ok:1}); // assume write succeeded if ping works
-      };
-      ps.onerror=function(){
-        delete window[pingCb]; try{document.body.removeChild(ps);}catch(e){}
-        console.warn('Confirm ping failed — Apps Script may be down');
-        if(cb) cb({ok:1}); // fetch no-cors sent — optimistically assume write succeeded
-      };
-      ps.src=SURL+'?action=ping&callback='+pingCb+'&t='+Date.now();
-      document.body.appendChild(ps);
-    }).catch(function(err){
-      console.error('fetch failed:', err);
-      // Fall back to JSONP
-      _postJsonp(cleanData, cb, retries);
-    });
-  } else {
-    _postJsonp(cleanData, cb, retries);
-  }
-}
-
-function _postJsonp(data, cb, retries){
+function post(data, cb) {
   var cbName = '__duPost_' + Date.now();
   var s = document.createElement('script');
   window[cbName] = function(d){
     delete window[cbName];
-    try{document.body.removeChild(s);}catch(e){}
+    document.body.removeChild(s);
     try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
     if(cb)cb(d);
   };
   var payload = encodeURIComponent(JSON.stringify(data));
-  var url = SURL + '?method=POST&payload=' + payload + '&callback=' + cbName + '&t=' + Date.now();
-  s.src = url;
+  s.src = SURL + '?method=POST&payload=' + payload + '&callback=' + cbName + '&t=' + Date.now();
   s.onerror = function(){
     delete window[cbName];
     try{document.body.removeChild(s);}catch(e){}
-    console.error('JSONP onerror on attempt '+(retries+1)+': url_length='+url.length);
-    if(retries < 1){
-      setTimeout(function(){ _postJsonp(data, cb, retries+1); }, 4000);
-    } else {
-      // Last resort: try fetch no-cors without confirmation
-      if(typeof fetch !== 'undefined'){
-        console.log('Last resort: fetch no-cors');
-        fetch(SURL, {method:'POST', body:JSON.stringify(data), headers:{'Content-Type':'text/plain'}, mode:'no-cors'})
-          .then(function(){ if(cb)cb({ok:1}); })
-          .catch(function(){ showSaveFail('Could not reach Google Sheet. Data saved locally. Check your Apps Script deployment at script.google.com'); if(cb)cb({ok:0}); });
-      } else {
-        showSaveFail('Could not reach Google Sheet. Data saved locally. Check your Apps Script deployment at script.google.com');
-        if(cb)cb({ok:0});
-      }
-    }
+    toast('Save failed','err');
+    if(cb)cb({ok:0});
   };
   document.body.appendChild(s);
 }
@@ -606,42 +497,6 @@ function toast(msg,type){
   t.textContent=(type==='ok'?'✓ ':'⚠ ')+msg;
   t.className='toast show '+(type||'ok');
   setTimeout(function(){t.className='toast';},3000);
-}
-
-// Persistent save failure banner — stays until dismissed or cleared by successful save
-function showSaveFail(msg){
-  var existing=document.getElementById('saveFail');
-  if(existing) existing.parentNode.removeChild(existing);
-  var b=document.createElement('div');
-  b.id='saveFail';
-  b.style.cssText='position:fixed;top:0;left:0;right:0;z-index:99999;background:#dc2626;color:#fff;padding:12px 20px;display:flex;justify-content:space-between;align-items:center;font-size:13px;font-weight:600;box-shadow:0 2px 8px rgba(0,0,0,.3);gap:12px';
-  var msgSpan=document.createElement('span');
-  msgSpan.style.cssText='flex:1';
-  msgSpan.innerHTML='<strong>\u26a0 SAVE WARNING:</strong> '+msg;
-  b.appendChild(msgSpan);
-  var btnWrap=document.createElement('div');
-  btnWrap.style.cssText='display:flex;gap:8px;flex-shrink:0';
-  // "It saved OK" button — user verified in sheet
-  var confirm=document.createElement('button');
-  confirm.textContent='\u2713 I checked — it saved OK';
-  confirm.title='Click this after verifying the record is in the Google Sheet';
-  confirm.style.cssText='background:#16a34a;border:1px solid #15803d;color:#fff;border-radius:4px;padding:5px 12px;cursor:pointer;font-weight:700;font-size:12px';
-  confirm.onclick=function(){clearSaveFail(); toast('Warning cleared \u2713','ok');};
-  btnWrap.appendChild(confirm);
-  // Dismiss button
-  var dismiss=document.createElement('button');
-  dismiss.textContent='\u2715 Dismiss';
-  dismiss.style.cssText='background:rgba(255,255,255,.2);border:1px solid rgba(255,255,255,.5);color:#fff;border-radius:4px;padding:5px 12px;cursor:pointer;font-weight:600;font-size:12px';
-  dismiss.onclick=function(){b.parentNode.removeChild(b);};
-  btnWrap.appendChild(dismiss);
-  b.appendChild(btnWrap);
-  document.body.insertBefore(b,document.body.firstChild);
-  try{localStorage.setItem('du_unsaved_warning','1');}catch(e){}
-}
-function clearSaveFail(){
-  var b=document.getElementById('saveFail');
-  if(b) b.parentNode.removeChild(b);
-  try{localStorage.removeItem('du_unsaved_warning');}catch(e){}
 }
 function updateBadge(){
   var n=DB.tasks.filter(function(t){return !isdone(t);}).length;
@@ -790,7 +645,6 @@ function renderDash(){
   '<h1 style="font-family:\'DM Serif Display\',serif;font-size:22px;color:var(--navy)">Dashboard</h1>'+
   '<div style="display:flex;align-items:center;gap:10px">'+
   '<button class="btn b-gd sm" data-act="open-new-client">+ Client</button>'+
-  '<button class="btn b-sk sm" data-act="open-new-company">🏢 Company</button>'+
   '<button class="btn b-gh sm" data-act="open-new-lead">🎯 Lead</button>'+
   // Appointment checkboxes inline in header
   '<div style="display:flex;align-items:center;gap:8px;background:#fff;border:1px solid var(--smoke);border-radius:8px;padding:6px 12px">'+
@@ -1027,49 +881,6 @@ function setIsLead(val){
   }
 }
 
-function toggleMaidenName(gender, prefix){
-  // prefix = '' for client, 'sp' for spouse
-  var rowId = (prefix||'') + 'maiden-row';
-  var row = document.getElementById(rowId);
-  if(row) row.style.display = (gender==='Female') ? '' : 'none';
-}
-
-function setClientType(type){
-  var inp = document.getElementById('fclienttype');
-  if(inp) inp.value = type;
-  var isCompany = type === 'Company';
-  var bar = document.getElementById('co-type-bar');
-  if(bar){
-    bar.style.background = isCompany ? '#eff6ff' : '#f5f7fa';
-    bar.style.borderColor = isCompany ? 'var(--sky)' : 'var(--mist)';
-    var lbl = document.getElementById('co-type-lbl');
-    if(lbl){ lbl.textContent = isCompany ? '🏢 Company Record' : '👤 Individual Record'; lbl.style.color = isCompany ? 'var(--sky)' : '#667'; }
-    var btns = bar.querySelectorAll('button[data-cotype]');
-    if(btns[0]){ btns[0].style.background = !isCompany ? 'var(--navy)' : '#f5f7fa'; btns[0].style.color = !isCompany ? '#fff' : '#889'; }
-    if(btns[1]){ btns[1].style.background = isCompany ? 'var(--sky)' : '#f5f7fa'; btns[1].style.color = isCompany ? '#fff' : '#889'; }
-  }
-  // Update section name label
-  var secLbl = document.getElementById('lbl-name-sec');
-  if(secLbl) secLbl.textContent = isCompany ? 'Company Details' : 'Personal Details';
-  // Update name field label
-  var fnFld = document.querySelector('#fn');
-  if(fnFld && fnFld.previousElementSibling && fnFld.previousElementSibling.tagName==='LABEL'){
-    fnFld.previousElementSibling.textContent = isCompany ? 'Company Name *' : 'Full Name *';
-  }
-  // Update cell label
-  var fcFld = document.querySelector('#fc');
-  if(fcFld && fcFld.previousElementSibling && fcFld.previousElementSibling.tagName==='LABEL'){
-    fcFld.previousElementSibling.textContent = isCompany ? 'Main Tel / Cell' : 'Cell *';
-  }
-  // Show / hide conditional sections
-  var indiv = document.getElementById('sec-indiv');
-  var co = document.getElementById('sec-co');
-  var coBasic = document.getElementById('sec-co-basic');
-  if(indiv) indiv.style.display = isCompany ? 'none' : '';
-  if(co) co.style.display = isCompany ? '' : 'none';
-  if(coBasic) coBasic.style.display = isCompany ? '' : 'none';
-}
-
 function convertLead(id){
   var c = DB.clients.find(function(x){ return String(x.ID)===String(id); });
   if(!c) return;
@@ -1169,7 +980,7 @@ function renderClients(){
     '<button class="btn xs" data-act="client-list-filter" data-filter="leads" style="border-radius:0;border:none;border-left:1.5px solid var(--mist);'+(isLeads?'background:var(--navy);color:#fff':'background:#f5f7fa;color:#889')+';padding:5px 14px;font-weight:700">🎯 Leads ('+leadCount+')</button>'+
     (inactiveCount>0?'<button class="btn xs" data-act="client-list-filter" data-filter="inactive" style="border-radius:0;border:none;border-left:1.5px solid var(--mist);'+(isInactive?'background:var(--rose);color:#fff':'background:#f5f7fa;color:#889')+';padding:5px 14px;font-weight:700">\u{1F4A4} Inactive ('+inactiveCount+')</button>':'')+
     '</div>'+
-    (isLeads ? btn('btn b-gd','open-new-lead','+ New Lead') : (!isInactive ? btn('btn b-gd','open-new-client','+ New Client')+' '+btn('btn b-sk','open-new-company','🏢 Company') : ''))+
+    (isLeads ? btn('btn b-gd','open-new-lead','+ New Lead') : (!isInactive ? btn('btn b-gd','open-new-client','+ New Client') : ''))+
     '</div>'+
     '</div>'+
     '<div class="sb"><span style="color:#aaa">🔍</span>'+
@@ -1190,7 +1001,7 @@ function clientTable(list,mini,isLeads){
       var em=clean(c.Email);
       return '<tr class="row" data-act="open-client" data-id="'+c.ID+'">'+
         '<td><div style="display:flex;align-items:center;gap:10px">'+
-        '<div style="width:32px;height:32px;border-radius:50%;background:'+(isLeads?'#d97706':c.ClientType==='Company'?'var(--sky)':'var(--navy)')+';display:flex;align-items:center;justify-content:center;font-size:'+(c.ClientType==='Company'?'16px':'11px')+';font-weight:700;color:#fff;flex-shrink:0">'+(c.ClientType==='Company'?'🏢':ini(c.Name))+'</div>'+
+        '<div style="width:32px;height:32px;border-radius:50%;background:'+(isLeads?'#d97706':'var(--navy)')+';display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:#fff;flex-shrink:0">'+ini(c.Name)+'</div>'+
         '<div><div style="font-weight:600">'+(c.Name||'—')+'</div>'+(em&&!mini?'<div style="font-size:11px;color:#889">'+em+'</div>':'')+'</div>'+
         '</div></td>'+
         '<td style="font-size:12px">'+(clean(c.Cell)?c.Cell:'—')+'</td>'+
@@ -1214,35 +1025,32 @@ function renderProfile(){
     '<h1 style="font-family:\'DM Serif Display\',serif;font-size:20px;color:var(--navy)">'+c.Name+'</h1>'+
     '</div>'+
     '<div class="phdr">'+
-    '<div class="av" style="'+(c.ClientType==='Company'?'background:var(--sky);font-size:28px':'')+'">'+( c.ClientType==='Company'?'🏢':ini(c.Name))+'</div>'+
+    '<div class="av">'+ini(c.Name)+'</div>'+
     '<div style="flex:1">'+
     '<div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap">'+
     '<div style="font-family:\'DM Serif Display\',serif;font-size:22px;margin-bottom:2px">'+(clean(c.Title)?c.Title+' ':'')+c.Name+'</div>'+
-    (c.ClientType!=='Company' && calcAge(c.DOB)!==null?'<span style="background:var(--gold);color:#fff;border-radius:20px;padding:2px 12px;font-size:13px;font-weight:700;letter-spacing:0.02em">Age '+calcAge(c.DOB)+'</span>':'')+
-    (c.ClientType==='Company' && clean(c.CompanyRegType)?'<span style="background:var(--sky);color:#fff;border-radius:20px;padding:2px 12px;font-size:13px;font-weight:700">'+c.CompanyRegType+'</span>':'')+
-    (c.ClientType!=='Company' && clean(c.CallingName) && c.CallingName!==c.Name.split(' ')[0]?'<span style="font-size:13px;color:var(--gold);font-style:italic">"'+c.CallingName+'"</span>':'')+
+    (calcAge(c.DOB)!==null?'<span style="background:var(--gold);color:#fff;border-radius:20px;padding:2px 12px;font-size:13px;font-weight:700;letter-spacing:0.02em">Age '+calcAge(c.DOB)+'</span>':'')+
     '</div>'+
-    (c.ClientType!=='Company' && clean(c.MaidenName)?'<div style="font-size:12px;color:#aabbd4;margin-bottom:2px">Maiden name: <strong style="color:#ccd8e8">'+c.MaidenName+'</strong></div>':'')+
+    (clean(c.MaidenName)?'<div style="font-size:12px;color:#aabbd4;margin-bottom:2px">Maiden name: <strong style="color:#ccd8e8">'+c.MaidenName+'</strong></div>':'')+
+    (clean(c.CallingName)&&c.CallingName!==c.Name.split(' ')[0]?'<div style="font-size:12px;color:var(--gold);margin-bottom:4px">Known as: '+c.CallingName+'</div>':'<div style="font-size:12px;color:#7899bb;margin-bottom:4px">'+( c.CallingName||c.Name.split(' ')[0])+'</div>')+
     '<div style="font-size:12px;color:#aabbd4;display:flex;flex-wrap:wrap;gap:12px">'+
-    (c.ClientType==='Company' && clean(c.CompanyRegNo)?'<span>🔢 '+c.CompanyRegNo+'</span>':'')+
-    (c.ClientType!=='Company' && clean(c.IDNumber)?'<span>🪪 '+c.IDNumber+'</span>':'')+
-    (c.ClientType!=='Company' && clean(c.DOB)?'<span>🎂 '+fdate(c.DOB)+(calcAge(c.DOB)!==null?' · <strong style="color:#fff">Age '+calcAge(c.DOB)+'</strong>':'')+'</span>':'')+
+    (clean(c.IDNumber)?'<span>🪪 '+c.IDNumber+'</span>':'')+
+    (clean(c.DOB)?'<span>🎂 '+fdate(c.DOB)+(calcAge(c.DOB)!==null?' · <strong style="color:#fff">Age '+calcAge(c.DOB)+'</strong>':'')+'</span>':'')+
     (clean(c.Cell)?'<span>📱 '+c.Cell+'</span>':'')+
     (clean(c.Email)?'<span>✉️ '+c.Email+'</span>':'')+
     '</div></div>'+
     '<div style="display:flex;flex-direction:column;gap:8px;align-items:flex-end">'+
     (c.IsLead==='Yes'?'<span style="background:#fef3c7;color:#d97706;border-radius:10px;padding:3px 12px;font-size:11px;font-weight:700">🎯 Lead</span>':'')+
-    (c.ClientType==='Company'?'<span style="background:#dbeafe;color:var(--sky);border-radius:10px;padding:3px 12px;font-size:11px;font-weight:700">🏢 Company</span>':'')+
-    (c.ClientType!=='Company'?(
-      c.IsLead==='Yes'?
-        '<button class="btn b-sg sm" data-act="convert-lead" data-id="'+c.ID+'">✅ Convert to Client</button> <button class="btn b-gd sm" data-act="fna">📊 Open FNA</button>'
-        :btn('btn b-gd sm','fna','📊 Open FNA')
-    ):'')+
+    (c.IsLead==='Yes'?
+      '<button class="btn b-sg sm" data-act="convert-lead" data-id="'+c.ID+'">✅ Convert to Client</button> <button class="btn b-gd sm" data-act="fna">📊 Open FNA</button>'
+      :btn('btn b-gd sm','fna','📊 Open FNA'))+
     '<button class="btn b-gh sm" style="color:#fff;border-color:#334466" data-act="edit-client" data-id="'+c.ID+'">✏️ Edit</button>'+
-    ("<a href='"+buildComplianceUrl(c)+"' target='_blank' style='text-decoration:none'><button class='btn b-sk sm' style='background:#0e413a;color:#d4af5a;border-color:#2a3a5e'>📋 Compliance Docs</button></a>")+
-    ("<a href='"+buildFormsUrl(c)+"' target='_blank' style='text-decoration:none'><button class='btn b-sk sm' style='background:#0e413a;color:#ccd660;border-color:#2a3a5e'>📝 Forms</button></a>")+
+    (c.IsLead==='Yes'?'':("<a href='"+buildComplianceUrl(c)+"' target='_blank' style='text-decoration:none'><button class='btn b-sk sm' style='background:#0e413a;color:#d4af5a;border-color:#2a3a5e'>📋 Compliance Docs</button></a>"))+
+    (c.IsLead==='Yes'?'':("<a href='"+buildFormsUrl(c)+"' target='_blank' style='text-decoration:none'><button class='btn b-sk sm' style='background:#0e413a;color:#ccd660;border-color:#2a3a5e'>📝 Forms</button></a>"))+
+    (c.IsLead==='Yes'?'':(
       '<button class="btn b-sk sm" style="background:#0e413a;color:#d4af5a;border-color:#2a3a5e" onclick="printBrokerAuth(\''+c.ID+'\')">📄 Broker Auth</button>'+
-      '<button class="btn b-sk sm" style="background:#0e413a;color:#d4af5a;border-color:#2a3a5e" onclick="printClientConsent(\''+c.ID+'\')">📄 Policy Consent</button>'+
+      '<button class="btn b-sk sm" style="background:#0e413a;color:#d4af5a;border-color:#2a3a5e" onclick="printClientConsent(\''+c.ID+'\')">📄 Policy Consent</button>'
+    ))+
     '<a href="https://drive.google.com/drive/search?q='+encodeURIComponent(c.Name)+'" target="_blank" style="text-decoration:none"><button class="btn b-gh sm" style="color:#fff;border-color:#334466">📁 Drive</button></a>'+
     '</div></div>'+
     '<div class="tabs">'+
@@ -1271,7 +1079,7 @@ function openFamModal(cid, type){
   FAM_CLIENT = cid;
   FAM_TYPE = type || 'Spouse';
   var c = DB.clients.find(function(x){ return String(x.ID)===String(cid); });
-  document.getElementById('famModT').textContent = 'Add ' + FAM_TYPE + (c?' for '+c.Name:'');
+  document.getElementById('famModT').textContent = 'Add ' + FAM_TYPE + ' for ' + (c?c.Name:'');
   // Pre-fill spouse fields from client record if available
   var preN='', preId='', preDob='', preCell='', preEmail='';
   if(type==='Spouse' && c){
@@ -1283,17 +1091,14 @@ function openFamModal(cid, type){
     // Derive DOB from ID if DOB blank
     if(!preDob && preId.length >= 6) preDob = dobFromID(preId);
   }
-  var isDir = (type==='Director');
-  var isShare = (type==='Shareholder');
   document.getElementById('famModB').innerHTML =
     '<div class="g2">'+
     fld('fam_name', 'Full Name *', preN)+
     fld('fam_id', 'ID Number', preId, 'text', 'data-autdob="1"')+
-    fld('fam_cell', 'Cell', preCell)+
-    ((type==='Spouse'||isDir||isShare) ? fld('fam_email','Email',preEmail) : '')+
-    '</div>'+
     fld('fam_dob', 'Date of Birth', preDob, 'date')+
-    (isShare ? '<div class="fld" style="margin-top:8px"><label>Shareholding %</label><input type="number" id="fam_sharepct" min="0" max="100" step="0.01" value="" placeholder="e.g. 25" style="border:1.5px solid var(--mist);border-radius:7px;padding:8px 11px;font-size:13px;font-family:inherit;width:100%;outline:none"></div>' : '');
+    fld('fam_cell', 'Cell', preCell)+
+    '</div>'+
+    (type==='Spouse' ? fld('fam_email','Email',preEmail) : '');
   document.getElementById('famMod').classList.add('open');
 }
 
@@ -1304,7 +1109,6 @@ function saveFamMember(){
   var idnum = document.getElementById('fam_id') ? document.getElementById('fam_id').value.trim() : '';
   var cell = document.getElementById('fam_cell') ? document.getElementById('fam_cell').value.trim() : '';
   var email = document.getElementById('fam_email') ? document.getElementById('fam_email').value.trim() : '';
-  var sharepct = document.getElementById('fam_sharepct') ? document.getElementById('fam_sharepct').value.trim() : '';
   var memId = 'fam_' + Date.now();
   var link = {
     ID: memId,
@@ -1315,7 +1119,6 @@ function saveFamMember(){
     Cell: cell,
     Email: email,
     Type: FAM_TYPE,
-    SharePct: sharepct,
     IsClient: 'No',
     ClientID: ''
   };
@@ -1362,14 +1165,10 @@ function upgradeToClient(linkId){
   render();
   post({action:'saveClient', client:c}, function(){
     post({action:'upgradeFamMember', id:linkId, clientId:newId}, function(){
-      toast(lnk.Name + ' converted to client — please complete the profile ✅','ok');
+      toast(lnk.Name + ' upgraded to client','ok');
     });
   });
-  if(lnk.Type==='Director'||lnk.Type==='Shareholder'){
-    openClientModal(newId);
-  } else {
-    openClient(newId);
-  }
+  openClient(newId);
 }
 
 var LINK_EXIST_CLIENT = null;
@@ -1380,11 +1179,6 @@ function openLinkExistModal(cid, type) {
   var c = DB.clients.find(function(x){ return String(x.ID)===String(cid); });
   document.getElementById('linkExistT').textContent = 'Link Existing Client to ' + (c?c.Name:'');
   document.getElementById('linkExistRel').value = FAM_TYPE;
-  // Show/hide SharePct row based on type
-  var spRow = document.getElementById('linkExistShareRow');
-  if(spRow) spRow.style.display = (FAM_TYPE==='Shareholder') ? '' : 'none';
-  var spPct = document.getElementById('linkExistSharePct');
-  if(spPct) spPct.value = '';
   document.getElementById('linkExistSrch').value = '';
   document.getElementById('linkExistResults').innerHTML = '<div style="color:#aaa;font-size:13px;padding:8px 0">Type a name to search...</div>';
   document.getElementById('linkExistMod').classList.add('open');
@@ -1394,28 +1188,14 @@ function searchLinkExist(q) {
   if(!q) { document.getElementById('linkExistResults').innerHTML='<div style="color:#aaa;font-size:13px;padding:8px 0">Type a name to search...</div>'; return; }
   var results = DB.clients.filter(function(c){
     return String(c.ID)!==String(LINK_EXIST_CLIENT) &&
-      ((c.Name||'').toLowerCase().indexOf(q.toLowerCase())>=0 ||
-       (c.Cell||'').indexOf(q)>=0 ||
-       (c.IDNumber||'').indexOf(q)>=0);
-  }).slice(0,10);
-  if(!results.length){ document.getElementById('linkExistResults').innerHTML='<div style="color:#aaa;font-size:13px;padding:8px 0">No clients or leads found</div>'; return; }
+      (c.Name||'').toLowerCase().indexOf(q.toLowerCase())>=0;
+  }).slice(0,8);
+  if(!results.length){ document.getElementById('linkExistResults').innerHTML='<div style="color:#aaa;font-size:13px;padding:8px 0">No clients found</div>'; return; }
   document.getElementById('linkExistResults').innerHTML = results.map(function(c){
-    var isLead = c.IsLead==='Yes';
-    var isCo   = c.ClientType==='Company';
-    var avatarBg = isLead?'#d97706':isCo?'var(--sky)':'var(--navy)';
-    var avatarContent = isCo?'🏢':ini(c.Name);
-    var avatarSize = isCo?'16px':'11px';
     return '<div style="display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--smoke)">'+
-      '<div style="width:34px;height:34px;border-radius:50%;background:'+avatarBg+';display:flex;align-items:center;justify-content:center;font-size:'+avatarSize+';font-weight:700;color:#fff;flex-shrink:0">'+avatarContent+'</div>'+
-      '<div style="flex:1">'+
-        '<div style="font-weight:600;font-size:13px">'+(c.Name||'')+'</div>'+
-        '<div style="font-size:11px;color:#889;margin-top:2px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">'+
-        (isLead?bx('bx-gd','🎯 Lead'):bx(c.Status==='Active'?'bx-sg':'bx-gr',c.Status||'Active'))+
-        (isCo?bx('bx-sk','🏢 Company'):'')+
-        (c.Cell?'<span>'+c.Cell+'</span>':'')+
-        (c.IDNumber?'<span style="font-size:10px;color:#aaa">'+c.IDNumber+'</span>':'')+
-        '</div>'+
-      '</div>'+
+      '<div style="width:32px;height:32px;border-radius:50%;background:var(--navy);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:var(--gold);flex-shrink:0">'+ini(c.Name)+'</div>'+
+      '<div style="flex:1"><div style="font-weight:600;font-size:13px">'+(c.Name||'')+'</div>'+
+      '<div style="font-size:11px;color:#889">'+bx(c.Status==='Active'?'bx-sg':'bx-gr',c.Status||'Active')+'</div></div>'+
       '<button class="btn b-gd xs" data-act="confirm-exist-link" data-id="'+c.ID+'">Link</button>'+
       '</div>';
   }).join('');
@@ -1423,8 +1203,6 @@ function searchLinkExist(q) {
 
 function confirmExistLink(linkedClientId) {
   var rel = document.getElementById('linkExistRel').value;
-  var sharePctEl = document.getElementById('linkExistSharePct');
-  var sharePct = (rel==='Shareholder' && sharePctEl) ? sharePctEl.value.trim() : '';
   var linked = DB.clients.find(function(x){ return String(x.ID)===String(linkedClientId); });
   if(!linked) return;
   var memId = 'fam_' + Date.now();
@@ -1437,7 +1215,6 @@ function confirmExistLink(linkedClientId) {
     Cell: linked.Cell||'',
     Email: linked.Email||'',
     Type: rel,
-    SharePct: sharePct,
     IsClient: 'Yes',
     ClientID: linkedClientId
   };
@@ -1467,7 +1244,7 @@ function renderOverview(c,pols,roas,ctasks){
   var tBizCover=activePols.filter(function(p){return p.Type==='Business Assurance';}).reduce(function(s,p){return s+parseFloat(p.LoanAmount||0)+parseFloat(p.BenDeath||0);},0);
   var famMembers=famFor(c.ID);
   // If SpouseName on client record but not yet in DB.links, show them as a virtual entry
-  if(c.ClientType!=='Company' && clean(c.SpouseName) && !famMembers.find(function(m){return m.Type==='Spouse';})){
+  if(clean(c.SpouseName) && !famMembers.find(function(m){return m.Type==='Spouse';})){
     famMembers = [{
       ID:'virtual_sp_'+c.ID,
       PrincipalID:c.ID,
@@ -1482,110 +1259,38 @@ function renderOverview(c,pols,roas,ctasks){
       _virtual:true
     }].concat(famMembers);
   }
-
-  // ── COMPANY: Directors & Shareholders card ──────────────────
-  var coCard = '';
-  if(c.ClientType==='Company'){
-    var directors   = famMembers.filter(function(m){return m.Type==='Director';});
-    var shareholders = famMembers.filter(function(m){return m.Type==='Shareholder';});
-    var allCo = famMembers.filter(function(m){return m.Type==='Director'||m.Type==='Shareholder';});
-    function coRow(m){
+  var familyHtml='<div class="card" style="margin-bottom:16px">'+
+    '<div class="ch"><h2>👨‍👩‍👧 Family</h2>'+
+    '<div style="display:flex;gap:8px">'+
+    '<button class="btn b-gd xs" data-act="add-spouse" data-id="'+c.ID+'">+ Spouse</button>'+
+    '<button class="btn b-sk xs" data-act="add-child" data-id="'+c.ID+'">+ Child</button>'+
+    '<button class="btn b-gh xs" data-act="link-existing" data-id="'+c.ID+'">🔗 Link Existing</button>'+
+    '</div></div>'+
+    (famMembers.length===0?'<div class="empty cb" style="padding:16px">No family members added yet</div>':
+    '<div class="cb" style="padding:0">'+
+    famMembers.map(function(m){
       var isClient = m.IsClient==='Yes' && m.ClientID;
-      var badge = m.Type==='Director'?'bx-nv':'bx-gd';
+      var ftcls = m.Type==='Spouse'?'bx-gd':'bx-sk';
       return '<div style="display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--smoke)">'+
-        '<div style="width:36px;height:36px;border-radius:50%;background:'+(m.Type==='Director'?'var(--navy)':'var(--gold)')+';display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:#fff;flex-shrink:0">'+ini(m.Name)+'</div>'+
+        '<div style="width:36px;height:36px;border-radius:50%;background:var(--navy);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:var(--gold);flex-shrink:0">'+ini(m.Name)+'</div>'+
         '<div style="flex:1">'+
         '<div style="font-weight:600;font-size:14px">'+m.Name+'</div>'+
         '<div style="font-size:11px;color:#889;margin-top:2px;display:flex;gap:8px;flex-wrap:wrap">'+
-        bx(badge, m.Type)+
-        (m.Type==='Shareholder'&&clean(m.SharePct)?' <span style="background:#f0f5d0;color:#5a6e00;border-radius:10px;padding:1px 7px;font-size:10px;font-weight:700">'+m.SharePct+'%</span>':'')+
-        (clean(m.IDNumber)?' <span>🪪 '+m.IDNumber+'</span>':'')+
+        bx(ftcls,m.Type)+
+        (clean(m.IDNumber)?' <span>🪪 '+(String(m.IDNumber).match(/e[\+\-]/i)?Number(m.IDNumber).toFixed(0):m.IDNumber)+'</span>':'')+
+        (clean(m.DOB)?' <span>🎂 '+fdate(m.DOB)+'</span>':'')+
         (clean(m.Cell)?' <span>📱 '+m.Cell+'</span>':'')+
         '</div></div>'+
         (isClient?
           '<button class="btn b-gh xs" data-act="open-client" data-id="'+m.ClientID+'">View Profile →</button>':
           '<button class="btn b-sg xs" data-act="upgrade-client" data-id="'+m.ID+'">Make Client</button>')+
         '</div>';
-    }
-    coCard = '<div class="card" style="margin-bottom:16px">'+
-      '<div class="ch"><h2>🏢 Directors &amp; Shareholders</h2>'+
-      '<div style="display:flex;gap:6px;flex-wrap:wrap">'+
-      '<button class="btn b-nv xs" data-act="add-director" data-id="'+c.ID+'">+ New Director</button>'+
-      '<button class="btn b-gd xs" data-act="add-shareholder" data-id="'+c.ID+'">+ New Shareholder</button>'+
-      '<button class="btn b-gh xs" data-act="link-existing" data-id="'+c.ID+'" data-type="Director">🔗 Link as Director</button>'+
-      '<button class="btn b-gh xs" data-act="link-existing" data-id="'+c.ID+'" data-type="Shareholder">🔗 Link as Shareholder</button>'+
-      '</div></div>'+
-      (allCo.length===0?'<div class="empty cb" style="padding:16px">No directors or shareholders added yet</div>':
-      '<div class="cb" style="padding:0">'+
-      (directors.length?'<div style="font-size:10px;font-weight:700;color:#889;text-transform:uppercase;letter-spacing:.5px;padding:8px 16px 4px;background:var(--smoke)">Directors ('+directors.length+')</div>'+directors.map(coRow).join(''):'') +
-      (shareholders.length?'<div style="font-size:10px;font-weight:700;color:#889;text-transform:uppercase;letter-spacing:.5px;padding:8px 16px 4px;background:var(--smoke)">Shareholders ('+shareholders.length+')</div>'+shareholders.map(coRow).join(''):'') +
-      '</div>')+
-      '</div>';
-  }
-
-  // ── INDIVIDUAL: Family card ──────────────────────────────────
-  var familyHtml = '';
-  if(c.ClientType!=='Company'){
-    var indivFam = famMembers.filter(function(m){return m.Type!=='Director'&&m.Type!=='Shareholder';});
-    familyHtml='<div class="card" style="margin-bottom:16px">'+
-      '<div class="ch"><h2>👨‍👩‍👧 Family</h2>'+
-      '<div style="display:flex;gap:8px">'+
-      '<button class="btn b-gd xs" data-act="add-spouse" data-id="'+c.ID+'">+ Spouse</button>'+
-      '<button class="btn b-sk xs" data-act="add-child" data-id="'+c.ID+'">+ Child</button>'+
-      '<button class="btn b-gh xs" data-act="link-existing" data-id="'+c.ID+'" data-type="Spouse">🔗 Link Existing</button>'+
-      '</div></div>'+
-      (indivFam.length===0?'<div class="empty cb" style="padding:16px">No family members added yet</div>':
-      '<div class="cb" style="padding:0">'+
-      indivFam.map(function(m){
-        var isClient = m.IsClient==='Yes' && m.ClientID;
-        var ftcls = m.Type==='Spouse'?'bx-gd':'bx-sk';
-        return '<div style="display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--smoke)">'+
-          '<div style="width:36px;height:36px;border-radius:50%;background:var(--navy);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:var(--gold);flex-shrink:0">'+ini(m.Name)+'</div>'+
-          '<div style="flex:1">'+
-          '<div style="font-weight:600;font-size:14px">'+m.Name+'</div>'+
-          '<div style="font-size:11px;color:#889;margin-top:2px;display:flex;gap:8px;flex-wrap:wrap">'+
-          bx(ftcls,m.Type)+
-          (clean(m.IDNumber)?' <span>🪪 '+(String(m.IDNumber).match(/e[\+\-]/i)?Number(m.IDNumber).toFixed(0):m.IDNumber)+'</span>':'')+
-          (clean(m.DOB)?' <span>🎂 '+fdate(m.DOB)+'</span>':'')+
-          (clean(m.Cell)?' <span>📱 '+m.Cell+'</span>':'')+
-          '</div></div>'+
-          (isClient?
-            '<button class="btn b-gh xs" data-act="open-client" data-id="'+m.ClientID+'">View Profile →</button>':
-            '<button class="btn b-sg xs" data-act="upgrade-client" data-id="'+m.ID+'">Make Client</button>')+
-          '</div>';
-      }).join('')+
-      '</div>')+
-      '</div>';
-
-    // ── Directorships / Shareholdings for individuals ──────────
-    var dirLinks = DB.links.filter(function(l){
-      return (l.Type==='Director'||l.Type==='Shareholder') && String(l.ClientID)===String(c.ID);
-    });
-    if(dirLinks.length){
-      familyHtml += '<div class="card" style="margin-bottom:16px">'+
-        '<div class="ch"><h2>🏢 Directorships &amp; Shareholdings</h2></div>'+
-        '<div class="cb" style="padding:0">'+
-        dirLinks.map(function(l){
-          var co = DB.clients.find(function(x){ return String(x.ID)===String(l.PrincipalID); });
-          var badge = l.Type==='Director'?'bx-nv':'bx-gd';
-          return '<div style="display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--smoke)">'+
-            '<div style="width:36px;height:36px;border-radius:50%;background:var(--sky);display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0">🏢</div>'+
-            '<div style="flex:1">'+
-            '<div style="font-weight:600;font-size:14px">'+(co?co.Name:l.Name||'Unknown Company')+'</div>'+
-            '<div style="font-size:11px;color:#889;margin-top:2px;display:flex;gap:8px;flex-wrap:wrap">'+
-            bx(badge, l.Type)+
-            (l.Type==='Shareholder'&&clean(l.SharePct)?' <span style="background:#f0f5d0;color:#5a6e00;border-radius:10px;padding:1px 7px;font-size:10px;font-weight:700">'+l.SharePct+'%</span>':'')+
-            (co&&clean(co.CompanyRegNo)?' <span>🔢 '+co.CompanyRegNo+'</span>':'')+
-            '</div></div>'+
-            (co?'<button class="btn b-gh xs" data-act="open-client" data-id="'+co.ID+'">View Company →</button>':'')+
-            '</div>';
-        }).join('')+
-        '</div></div>';
-    }
-  }
+    }).join('')+
+    '</div>')+
+    '</div>';
   // Compact stat helper
   function cstat(cls,val,lbl){return '<div class="stat '+cls+'" style="padding:10px 12px;min-height:0"><div class="v" style="font-size:16px">'+val+'</div><div class="l" style="font-size:10px">'+lbl+'</div></div>';}
-  return (c.ClientType==='Company' ? coCard : familyHtml)+
+  return familyHtml+
     '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px;margin-bottom:16px">'+
     cstat('s-gd', activePols.length, 'Policies')+
     cstat('s-sg', tPers>0?rnd(tPers):'—', 'Personal /pm')+
@@ -1600,56 +1305,33 @@ function renderOverview(c,pols,roas,ctasks){
     (tBizCover>0?cstat('s-nv', rnd(tBizCover), 'Business Cover'):'')+
     cstat('s-gd', roas.length, 'ROA Records')+
     '</div>'+
-    '<div class="g2" style="align-items:start">'+
-    '<div class="card"><div class="ch"><h2>'+(c.ClientType==='Company'?'🏢 Company Details':'💰 Client Details')+'</h2>'+(c.DriveUrl?'<a href="'+c.DriveUrl+'" target="_blank" class="btn b-gh sm">📁 Open Drive Folder</a>':'')+'</div><div class="cb">'+
-    (c.ClientType==='Company'?(
-      dr('Registration Type', clean(c.CompanyRegType)||'—')+
-      dr('Reg / CK Number', clean(c.CompanyRegNo)||'—')+
-      dr('Main Tel', clean(c.Cell)||'—')+
-      dr('Email', clean(c.Email)||'—')+
-      (clean(c.TelWork)?dr('Office Tel', c.TelWork):'')+(clean(c.TelHome)?dr('Alt Tel', c.TelHome):'')+
-      dr('Tax Number', clean(c.TaxNo)||'—')+
-      dr('Status', clean(c.Status)||'Active')+
-      dr('Adviser', clean(c.Adviser)||'Clinton')+
-      dr('Review Date', clean(c.ReviewDate)?fdate(c.ReviewDate):'—')+
-      dr('Risk Category', clean(c.RiskCategory)||'—')+
-      (clean(c.Address)?'<div class="dr" style="flex-direction:column;gap:3px"><span class="dl">Physical Address</span><span class="dv" style="text-align:left;font-weight:600">'+c.Address+'</span></div>':'')+
-      (clean(c.POBox)?'<div class="dr" style="flex-direction:column;gap:3px"><span class="dl">Postal Address</span><span class="dv" style="text-align:left;font-weight:600">'+c.POBox+'</span></div>':'')
-    ):(
-      dr('ID Number', clean(c.IDNumber)||'—')+
-      dr('Cell', clean(c.Cell)||'—')+
-      dr('Email', clean(c.Email)||'—')+
-      dr('Tel Home', clean(c.TelHome)||'—')+
-      dr('Tel Work', clean(c.TelWork)||'—')+
-      dr('Income /pm', rnd(c.Income))+
-      dr('Tax Number', clean(c.TaxNo)||'—')+
-      dr('Maiden Name', clean(c.MaidenName)||'—')+
-      dr('Marital Status', clean(c.MaritalStatus)||'—')+
-      dr('Anniversary', clean(c.Anniversary)?fdate(c.Anniversary):'—')+
-      dr('Employer', clean(c.Employer)||'—')+
-      dr('Job Title', clean(c.Occupation)||'—')+
-      (clean(c.JobDesc)?'<div class="dr" style="flex-direction:column;gap:3px"><span class="dl">Job Description</span><span class="dv" style="text-align:left;font-weight:600;font-size:12px">'+c.JobDesc+'</span></div>':'')+
-      ((clean(c.AdminPct)||clean(c.DrivingPct)||clean(c.SupervisoryPct)||clean(c.ManualPct))?
-        dr('Work Profile — Risk Rating',
-          (clean(c.AdminPct)?'Admin '+c.AdminPct+'%  ':'')+
-          (clean(c.DrivingPct)?'Driving '+c.DrivingPct+'%  ':'')+
-          (clean(c.SupervisoryPct)?'Supervisory '+c.SupervisoryPct+'%  ':'')+
-          (clean(c.ManualPct)?'Manual '+c.ManualPct+'%':'')
-        ):'')+
-      dr('Education', clean(c.Education)?(c.Education+(clean(c.Qualification)?' — '+c.Qualification:'')):'—')+
-      dr('Smoker', clean(c.Smoker)||'—')+
-      dr('Risk Category', clean(c.RiskCategory)||'—')+
-      dr('Gender', clean(c.Gender)||'—')+
-      dr('Adviser', clean(c.Adviser)||'Clinton')+
-      dr('Review Date', clean(c.ReviewDate)?fdate(c.ReviewDate):'—')+
-      dr('Family Type', clean(c.FamilyType)||'—')+
-      (clean(c.Address)?'<div class="dr" style="flex-direction:column;gap:3px"><span class="dl">Physical Address</span><span class="dv" style="text-align:left;font-weight:600">'+c.Address+'</span></div>':'')+
-      (clean(c.POBox)?'<div class="dr" style="flex-direction:column;gap:3px"><span class="dl">Postal Address</span><span class="dv" style="text-align:left;font-weight:600">'+c.POBox+'</span></div>':'')
-    ))+
+    '<div class="g2">'+
+    '<div class="card"><div class="ch"><h2>💰 Client Details</h2>'+(c.DriveUrl?'<a href="'+c.DriveUrl+'" target="_blank" class="btn b-gh sm">📁 Open Drive Folder</a>':'')+'</div><div class="cb">'+
+    dr('ID Number', clean(c.IDNumber)||'—')+
+    dr('Cell', clean(c.Cell)||'—')+
+    dr('Email', clean(c.Email)||'—')+
+    dr('Tel Home', clean(c.TelHome)||'—')+
+    dr('Tel Work', clean(c.TelWork)||'—')+
+    dr('Income /pm', rnd(c.Income))+
+    dr('Tax Number', clean(c.TaxNo)||'—')+
+    dr('Maiden Name', clean(c.MaidenName)||'—')+
+    dr('Marital Status', clean(c.MaritalStatus)||'—')+
+    dr('Anniversary', clean(c.Anniversary)?fdate(c.Anniversary):'—')+
+    dr('Employer', clean(c.Employer)||'—')+
+    dr('Occupation', clean(c.Occupation)||'—')+
+    dr('Education', clean(c.Education)?(c.Education+(clean(c.Qualification)?' — '+c.Qualification:'')):'—')+
+    dr('Smoker', clean(c.Smoker)||'—')+
+    dr('Risk Category', clean(c.RiskCategory)||'—')+
+    dr('Gender', clean(c.Gender)||'—')+
+    dr('Adviser', clean(c.Adviser)||'Clinton')+
+    dr('Review Date', clean(c.ReviewDate)?fdate(c.ReviewDate):'—')+
+    dr('Family Type', clean(c.FamilyType)||'—')+
+    (clean(c.Address)?'<div class="dr" style="flex-direction:column;gap:3px"><span class="dl">Physical Address</span><span class="dv" style="text-align:left;font-weight:600">'+c.Address+'</span></div>':'')+
+    (clean(c.POBox)?'<div class="dr" style="flex-direction:column;gap:3px"><span class="dl">Postal Address</span><span class="dv" style="text-align:left;font-weight:600">'+c.POBox+'</span></div>':'')+
     '</div></div>'+
     '<div style="display:flex;flex-direction:column;gap:16px">'+
-    '<div class="card" style="flex:1;display:flex;flex-direction:column"><div class="ch"><h2>📝 Notes</h2><button class="btn b-gh sm" data-act="edit-client" data-id="'+c.ID+'">Edit</button></div>'+
-    '<div class="cb" style="padding:0;flex:1"><div style="min-height:180px;height:100%;padding:14px 16px"><p style="font-size:13px;line-height:1.8;white-space:pre-wrap;color:#445;margin:0">'+((c.Notes&&c.Notes!=='undefined')?c.Notes:'No notes yet.')+'</p></div></div></div>'+
+    '<div class="card"><div class="ch"><h2>📝 Notes</h2><button class="btn b-gh sm" data-act="edit-client" data-id="'+c.ID+'">Edit</button></div>'+
+    '<div class="cb" style="padding:0"><div style="max-height:220px;overflow-y:auto;padding:14px 16px"><p style="font-size:13px;line-height:1.8;white-space:pre-wrap;color:#445;margin:0">'+((c.Notes&&c.Notes!=='undefined')?c.Notes:'No notes yet.')+'</p></div></div></div>'+
     (function(){
       var tf = window.CLIENT_TASK_FILTER || 'open';
       var allClientTasks = DB.tasks.filter(function(t){ return t.ClientName===c.Name; });
@@ -2015,22 +1697,6 @@ function fdpSync(id){
     else h.value='';
   }
 }
-// Set a date-picker (fdp) from an ISO string YYYY-MM-DD
-function fdpSetFromISO(id, iso){
-  if(!iso||iso.length<10) return;
-  var parts=iso.split('-');
-  if(parts.length<3) return;
-  var yEl=document.getElementById(id+'_y');
-  var mEl=document.getElementById(id+'_m');
-  var dEl=document.getElementById(id+'_d');
-  if(!yEl||!mEl||!dEl) return;
-  yEl.value=parts[0];
-  mEl.value=parts[1];
-  // Rebuild day options for the chosen year+month, then set day
-  dEl.innerHTML=fdpDayOpts(parts[0],parts[1],parts[2]);
-  dEl.value=parts[2];
-  fdpUpdateDay(id);
-}
 function fdpUpdateDay(id){
   fdpSync(id);
   var yEl=document.getElementById(id+'_y');
@@ -2095,18 +1761,14 @@ function refreshChildRows(){
   }).join('');
 }
 
-function openClientModal(id, isLead, isCompany){
+function openClientModal(id, isLead){
   EC=id||null;
   NEW_CHILDREN=[];
   var c=id?DB.clients.find(function(x){return x.ID===id;})||{}:{};
   if(!id && isLead) c.IsLead='Yes';
-  if(!id && isCompany) c.ClientType='Company';
   var isNew=!id;
-  var _isComp = (c.ClientType==='Company');
-  document.getElementById('cModT').textContent=id?(_isComp?'Edit Company':c.IsLead==='Yes'?'Edit Lead':'Edit Client'):(_isComp?'New Company':isLead?'New Lead':'New Client Intake');
+  document.getElementById('cModT').textContent=id?(c.IsLead==='Yes'?'Edit Lead':'Edit Client'):(isLead?'New Lead':'New Client Intake');
   document.getElementById('cMod').querySelector('.modal').style.maxWidth='780px';
-
-  var coType = c.ClientType || 'Individual';
 
   document.getElementById('cModB').innerHTML=
     // LEAD / CLIENT TOGGLE
@@ -2118,175 +1780,79 @@ function openClientModal(id, isLead, isCompany){
     '</div>'+
     '<input type="hidden" id="fisleadst" value="'+(c.IsLead||'No')+'">'+
     '</div>'+
-    // INDIVIDUAL / COMPANY TOGGLE
-    '<div id="co-type-bar" style="display:flex;align-items:center;gap:10px;margin-bottom:16px;padding:10px 14px;background:'+(coType==='Company'?'#eff6ff':'#f5f7fa')+';border-radius:10px;border:1.5px solid '+(coType==='Company'?'var(--sky)':'var(--mist)')+'">'+
-    '<span id="co-type-lbl" style="font-size:13px;font-weight:700;color:'+(coType==='Company'?'var(--sky)':'#667')+'">'+(coType==='Company'?'🏢 Company Record':'👤 Individual Record')+'</span>'+
-    '<div style="display:flex;gap:0;border:1.5px solid var(--mist);border-radius:8px;overflow:hidden;margin-left:auto">'+
-    '<button type="button" data-cotype="Individual" onclick="setClientType(\'Individual\')" style="padding:5px 16px;font-size:12px;font-weight:700;border:none;cursor:pointer;font-family:inherit;'+(coType!=='Company'?'background:var(--navy);color:#fff':'background:#f5f7fa;color:#889')+'">👤 Individual</button>'+
-    '<button type="button" data-cotype="Company" onclick="setClientType(\'Company\')" style="padding:5px 16px;font-size:12px;font-weight:700;border:none;border-left:1.5px solid var(--mist);cursor:pointer;font-family:inherit;'+(coType==='Company'?'background:var(--sky);color:#fff':'background:#f5f7fa;color:#889')+'">🏢 Company</button>'+
-    '</div>'+
-    '<input type="hidden" id="fclienttype" value="'+coType+'">'+
-    '</div>'+
-    // SHARED NAME/CONTACT: Company only — individuals use their own fields inside sec-indiv
-    '<div id="sec-co-basic" style="'+(coType==='Company'?'':'display:none')+'">'+
-    '<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:1px;padding:4px 0 8px;border-bottom:2px solid var(--gold);margin-bottom:14px"><span id="lbl-name-sec">Company Details</span></div>'+
+    // SECTION: Personal
+    '<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:1px;padding:4px 0 8px;border-bottom:2px solid var(--gold);margin-bottom:14px">Personal Details</div>'+
     '<div class="g3">'+
-    fld('fn', 'Company Name *', c.Name)+
-    fld('fc', 'Main Tel / Cell', c.Cell)+
-    fld('fe','Email',c.Email)+
-    '</div>'+
-    '<div class="g3" style="margin-top:10px">'+
-    fld('ftx','Tax Number',c.TaxNo)+
-    fs('fst','Status',['Active','Inactive'],c.Status||'Active')+
-    fdp('fr','Review Date',c.ReviewDate||'')+
-    '</div>'+
-    '</div>'+
-
-    // ── INDIVIDUAL-ONLY SECTION ──
-    '<div id="sec-indiv"'+(coType==='Company'?' style="display:none"':'')+'>'+
-
-    // ── 1. Identity ──
-    secHdr('Identity')+
-    '<div class="g3">'+
-    fs('fttl','Title',['','Mr.','Mrs.','Ms.','Miss','Dr.','Prof.','Rev.','Adv.'],c.Title||'')+
-    // Gender inline with onchange for maiden name toggle
-    '<div class="fld"><label>Gender *</label>'+
-    '<div style="display:flex;gap:12px;flex-wrap:wrap;padding:6px 0">'+
-    '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;font-weight:500">'+
-    '<input type="radio" name="fgen" value="Male" '+(c.Gender==='Male'?'checked':'')+' onchange="toggleMaidenName(this.value,\'\')" style="accent-color:var(--navy);width:16px;height:16px"> Male</label>'+
-    '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;font-weight:500">'+
-    '<input type="radio" name="fgen" value="Female" '+(c.Gender==='Female'?'checked':'')+' onchange="toggleMaidenName(this.value,\'\')" style="accent-color:var(--navy);width:16px;height:16px"> Female</label>'+
-    '</div></div>'+
-    radioGroup('fsm','Smoker *',['Yes','No'],c.Smoker)+
-    '</div>'+
-    '<div class="g2" style="margin-top:10px">'+
-    fld('fn2','Full Name *',c.Name)+
+    fld('fn','Full Name *',c.Name)+
+    fld('fmdn','Maiden Name',c.MaidenName||'')+
     fld('fcn','Calling Name',c.CallingName||(c.Name?c.Name.split(' ')[0]:'')||'')+
-    '</div>'+
-    '<div class="g3" style="margin-top:10px">'+
+    fs('fttl','Title',['','Mr.','Mrs.','Ms.','Miss','Dr.','Prof.','Rev.','Adv.'],c.Title||'')+
     fld('fi','ID Number',c.IDNumber,'text','data-autdob="1"')+
     fdp('fd','Date of Birth',c.DOB||'')+
-    fld('fc2','Cell *',c.Cell)+
+    fld('fc','Cell *',c.Cell)+
+    fld('fe','Email',c.Email)+
+    fld('ftx','Tax Number',c.TaxNo)+
     '</div>'+
     '<div class="g2" style="margin-top:10px">'+
-    fld('fe2','Email',c.Email)+
-    fld('ftx2','Tax Number',c.TaxNo)+
-    '</div>'+
-    // Maiden name — only visible when Female
-    '<div id="maiden-row" style="'+(c.Gender==='Female'?'':'display:none')+';margin-top:10px">'+
-    fld('fmdn','Maiden Name',c.MaidenName||'')+
-    '</div>'+
-
-    // ── 2. Personal ──
-    secHdr('Personal')+
-    '<div class="g3">'+
-    fs('fmar','Marital Status',['','Single','Married - ANC with accrual','Married - ANC without accrual','Married in COP','Divorced','Widowed'],c.MaritalStatus)+
-    fdp('fann','Marriage / Anniversary Date',c.Anniversary||'')+
-    fs('fst2','Status',['Active','Inactive'],c.Status||'Active')+
-    '</div>'+
-    '<div class="g2" style="margin-top:10px">'+
-    fs('fedu','Education Level',['','School - no matric','Matric','Diploma / Certificate','Degree','Post Graduate','Other'],c.Education||'')+
-    fld('fqual','Qualification Detail',c.Qualification||'')+
-    '</div>'+
-
-    // ── 3. Employment ──
-    secHdr('Employment & Income')+
-    '<div class="g3">'+
-    fld('fo','Job Title / Occupation',c.Occupation)+
-    fld('fem','Employer',c.Employer)+
-    fld('finc','Gross Income /pm',c.Income)+
-    '</div>'+
-    '<div class="g2" style="margin-top:10px">'+
-    fld('ftelh2','Tel Home',c.TelHome)+
-    fld('ftelw2','Tel Work',c.TelWork)+
-    '</div>'+
-    '<div class="fld" style="margin-top:10px">'+
-    '<label>Job Description</label>'+
-    '<textarea id="fjobdesc" placeholder="Briefly describe duties and responsibilities…" style="min-height:60px">'+clean(c.JobDesc)+'</textarea>'+
-    '</div>'+
-    '<div style="margin-top:10px">'+
-    '<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px;border-bottom:1px solid var(--smoke);padding-bottom:6px">Work Profile — Risk Rating</div>'+
-    '<div class="g4">'+
-    '<div class="fld"><label>Admin %</label><input type="number" id="fadminpct" min="0" max="100" value="'+clean(c.AdminPct)+'" placeholder="e.g. 60" style="border:1.5px solid var(--mist);border-radius:7px;padding:8px 11px;font-size:13px;font-family:inherit;width:100%;outline:none"></div>'+
-    '<div class="fld"><label>Driving %</label><input type="number" id="fdrivingpct" min="0" max="100" value="'+clean(c.DrivingPct)+'" placeholder="e.g. 20" style="border:1.5px solid var(--mist);border-radius:7px;padding:8px 11px;font-size:13px;font-family:inherit;width:100%;outline:none"></div>'+
-    '<div class="fld"><label>Supervisory %</label><input type="number" id="fsuperpct" min="0" max="100" value="'+clean(c.SupervisoryPct)+'" placeholder="e.g. 20" style="border:1.5px solid var(--mist);border-radius:7px;padding:8px 11px;font-size:13px;font-family:inherit;width:100%;outline:none"></div>'+
-    '<div class="fld"><label>Manual %</label><input type="number" id="fmanualpct" min="0" max="100" value="'+clean(c.ManualPct)+'" placeholder="e.g. 0" style="border:1.5px solid var(--mist);border-radius:7px;padding:8px 11px;font-size:13px;font-family:inherit;width:100%;outline:none"></div>'+
-    '</div></div>'+
-    '<div class="g2" style="margin-top:10px">'+
-    fdp('fr2','Review Date',c.ReviewDate||'')+
-    '</div>'+
-
-    // ── 4. Spouse / Partner ──
-    secHdr('Spouse / Partner')+
-    '<div class="g3">'+
-    fs('fsptitle','Spouse Title',['','Mr.','Mrs.','Ms.','Miss','Dr.','Prof.','Rev.','Adv.'],c.SpouseTitle||'')+
-    fld('fspname','Spouse Full Name',c.SpouseName||'')+
-    fld('fspid','Spouse ID Number',c.SpouseIDNumber||'','text','data-autdob="1" data-dobfield="fspdob"')+
+    radioGroup('fgen','Gender *',['Male','Female'],c.Gender)+
+    radioGroup('fsm','Smoker *',['Yes','No'],c.Smoker)+
     '</div>'+
     '<div class="g3" style="margin-top:10px">'+
+    fs('fmar','Marital Status',['','Single','Married - ANC with accrual','Married - ANC without accrual','Married in COP','Divorced','Widowed'],c.MaritalStatus)+
+    fdp('fann','Marriage / Anniversary Date',c.Anniversary||'')+
+    fs('fedu','Education Level',['','School - no matric','Matric','Diploma / Certificate','Degree','Post Graduate','Other'],c.Education||'')+
+    fld('fqual','Qualification Detail',c.Qualification||'')+
+    fs('fst','Status',['Active','Inactive'],c.Status||'Active')+
+    '</div>'+
+
+    // SECTION: Contact & Work
+    '<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:1px;padding:4px 0 8px;border-bottom:2px solid var(--gold);margin:18px 0 14px">Employment & Income</div>'+
+    '<div class="g3">'+
+    fld('fo','Occupation',c.Occupation)+
+    fld('fem','Employer',c.Employer)+
+    fld('finc','Gross Income /pm',c.Income)+
+    fld('ftelh','Tel Home',c.TelHome)+
+    fld('ftelw','Tel Work',c.TelWork)+
+    fdp('fr','Review Date',c.ReviewDate||'')+
+    '</div>'+
+
+    // SECTION: Spouse
+    '<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:1px;padding:4px 0 8px;border-bottom:2px solid var(--gold);margin:18px 0 14px">Spouse / Partner</div>'+
+    '<div class="g3">'+
+    fld('fspname','Spouse Full Name',c.SpouseName||'')+
+    fld('fspid','Spouse ID Number',c.SpouseIDNumber||'','text','data-autdob="1" data-dobfield="fspdob"')+
     fdp('fspdob','Spouse Date of Birth',c.SpouseDOB||'')+
     fld('fspcell','Spouse Cell',c.SpouseCell||'')+
     fld('fspemail','Spouse Email',c.SpouseEmail||'')+
     '</div>'+
-    // Spouse maiden name — visible only when spouse gender female; we default to showing it when any spouse name entered
-    '<div id="spmaiden-row" style="'+(c.SpouseName?'':'display:none')+';margin-top:10px">'+
-    '<div class="g2">'+
-    '<div class="fld"><label>Spouse Maiden Name</label>'+
-    '<input type="text" id="fspmdn" value="'+clean(c.SpouseMaidenName)+'" autocomplete="off" style="border:1.5px solid var(--mist);border-radius:7px;padding:8px 11px;font-size:13px;font-family:inherit;width:100%;outline:none"></div>'+
-    '</div></div>'+
-    '<div class="g2" style="margin-top:10px">'+
-    fld('fspoc','Spouse Job Title / Occupation',c.SpouseOccupation||'')+
-    '<div class="fld"><label>Spouse Gross Income /pm</label><input type="text" id="fspinc" value="'+clean(c.SpouseIncome)+'" autocomplete="off" style="border:1.5px solid var(--mist);border-radius:7px;padding:8px 11px;font-size:13px;font-family:inherit;width:100%;outline:none"></div>'+
-    '</div>'+
-    '<div style="margin-top:10px;padding:10px 14px;background:#f0fdf4;border-radius:8px;border:1.5px solid #16a34a;font-size:12px;font-weight:600;color:#16a34a">'+
-    '✅ Spouse will automatically be saved as a linked client record when you save this form.</div>'+
 
-    // ── 5. Children ──
-    secHdr('Children')+
+    // SECTION: Children
+    '<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:1px;padding:4px 0 8px;border-bottom:2px solid var(--gold);margin:18px 0 14px">Children</div>'+
     '<div id="childRows"><div style="color:#aaa;font-size:12px;padding:4px 0">No children added</div></div>'+
     '<button class="btn b-gh sm" data-act="add-child-row" style="margin-top:8px">+ Add Child</button>'+
-    '</div>'+
-
-    // ── COMPANY-ONLY SECTION ──
-    '<div id="sec-co"'+(coType==='Company'?'':' style="display:none"')+'>'+
-    '<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:1px;padding:4px 0 8px;border-bottom:2px solid var(--gold);margin:18px 0 14px">Company Registration</div>'+
-    '<div class="g2">'+
-    fs('fregtype','Registration Type',['','Proprietary Limited (Pty) Ltd','Close Corporation (CC)','Trust','Non-Profit Company (NPC)','Public Company (Ltd)','Partnership','Sole Proprietor','Other'],c.CompanyRegType||'')+
-    fld('fregno','Registration / CK Number',c.CompanyRegNo||'')+
-    '</div>'+
-    '<div class="g2" style="margin-top:10px">'+
-    fld('ftelw','Office Tel',c.TelWork||'')+
-    fld('ftelh','Alt Tel',c.TelHome||'')+
-    '</div>'+
-    '</div>'+
-
-    // SHARED: Address & Other (always visible)
+    // SECTION: Address
     '<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:1px;padding:4px 0 8px;border-bottom:2px solid var(--gold);margin:18px 0 14px">Address & Other</div>'+
     fld('fadr','Physical Address (FICA)',c.Address)+
     fld('fpobox','PO Box / Postal Address',c.POBox||'')+
     '<div class="g2" style="margin-top:10px">'+
     fld('fdr','Google Drive Folder URL',c.DriveUrl)+
     fld('frc','Risk Category',c.RiskCategory||'')+
-    '</div>'+
-    '<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:1px;padding:4px 0 8px;border-bottom:2px solid var(--gold);margin:18px 0 14px">Notes</div>'+
-    '<div class="fld"><textarea id="fnotes" rows="4" placeholder="Client notes..." style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:9px 11px;font-family:inherit;font-size:13px;resize:vertical">'+((c.Notes&&c.Notes!=='undefined')?c.Notes:'')+'</textarea></div>';
+    '</div>';
 
   // Initialise working copies from existing data
   try{ EDIT_BANKS = c.BankDetails ? JSON.parse(c.BankDetails) : []; }catch(e){ EDIT_BANKS=[]; }
   try{ EDIT_DOCS  = c.Doctors     ? JSON.parse(c.Doctors)     : []; }catch(e){ EDIT_DOCS=[]; }
 
-  // Append bank section for all clients; doctors only for individuals (companies don't have GPs)
+  // Append bank and doctor sections to the modal body
   var _mb = document.getElementById('cModB');
   var _bankSec = document.createElement('div');
   _bankSec.id = 'editBankSec';
   _mb.appendChild(_bankSec);
+  var _docSec = document.createElement('div');
+  _docSec.id = 'editDocSec';
+  _mb.appendChild(_docSec);
   renderEditBanks();
-  if(coType !== 'Company'){
-    var _docSec = document.createElement('div');
-    _docSec.id = 'editDocSec';
-    _mb.appendChild(_docSec);
-    renderEditDocs();
-  }
+  renderEditDocs();
 
   document.getElementById('cMod').classList.add('open');
 
@@ -2299,10 +1865,6 @@ function openClientModal(id, isLead, isCompany){
       var derived = dobFromID(fiEl.value);
       if(derived) fdEl.value = derived;
     }
-    // Trigger maiden name visibility based on saved gender
-    var gEl = document.querySelector('input[name="fgen"]:checked');
-    if(gEl) toggleMaidenName(gEl.value, '');
-
     // Pre-fill spouse section from DB.links if client record spouse fields are blank
     var fspnameEl = document.getElementById('fspname');
     if(fspnameEl && !fspnameEl.value && EC){
@@ -2313,32 +1875,13 @@ function openClientModal(id, isLead, isCompany){
         var fspdEl  = document.getElementById('fspdob');
         var fspcEl  = document.getElementById('fspcell');
         var fspeEl  = document.getElementById('fspemail');
-        var fspttEl = document.getElementById('fsptitle');
-        var fspoEl  = document.getElementById('fspoc');
-        var fspincEl= document.getElementById('fspinc');
-        var fspdnEl = document.getElementById('fspmdn');
         if(fspnEl  && !fspnEl.value)  fspnEl.value  = spLink.Name  || '';
         if(fspidEl && !fspidEl.value) fspidEl.value = spLink.IDNumber || '';
         if(fspdEl  && !fspdEl.value)  fspdEl.value  = spLink.DOB   || '';
         if(fspcEl  && !fspcEl.value)  fspcEl.value  = spLink.Cell  || '';
         if(fspeEl  && !fspeEl.value)  fspeEl.value  = spLink.Email || '';
-        // If the spouse is a linked client, also pull their job/income
-        if(spLink.IsClient==='Yes' && spLink.ClientID){
-          var spC = DB.clients.find(function(x){ return String(x.ID)===String(spLink.ClientID); });
-          if(spC){
-            if(fspttEl && !fspttEl.value)  fspttEl.value = spC.Title||'';
-            if(fspoEl  && !fspoEl.value)   fspoEl.value  = spC.Occupation||'';
-            if(fspincEl&& !fspincEl.value) fspincEl.value= spC.Income||'';
-            if(fspdnEl && !fspdnEl.value)  fspdnEl.value = spC.MaidenName||'';
-          }
-        }
       }
     }
-    // Show spouse maiden name row if spouse name already filled
-    var spnEl = document.getElementById('fspname');
-    var spMRow = document.getElementById('spmaiden-row');
-    if(spMRow && spnEl && spnEl.value.trim()) spMRow.style.display='';
-
     // Spouse DOB from ID
     var fspdob = document.getElementById('fspdob');
     var fspid  = document.getElementById('fspid');
@@ -2350,14 +1893,13 @@ function openClientModal(id, isLead, isCompany){
 
   // Update save button to show FNA option for new clients
   var mf = document.getElementById('cMod').querySelector('.mf');
-  var _isNewComp = isNew && (c.ClientType==='Company');
-  if(isNew && !_isNewComp){
+  if(isNew){
     mf.innerHTML = '<button class="btn b-gh sm" data-close="1">Cancel</button>'+
       '<button class="btn b-nv sm" data-save="client-only">💾 Save Only</button>'+
       '<button class="btn b-gd sm" data-save="client-fna">💾 Save & Open FNA</button>';
   } else {
     mf.innerHTML = '<button class="btn b-gh sm" data-close="1">Cancel</button>'+
-      '<button class="btn b-gd sm" data-save="client">💾 Save '+(c.ClientType==='Company'?'Company':'Client')+'</button>';
+      '<button class="btn b-gd sm" data-save="client">💾 Save Client</button>';
   }
 }
 
@@ -2377,26 +1919,20 @@ function buildFnaUrl(c){
       BenDisability:   p.BenDisability||'',
       BenDreadDisease: p.BenDreadDisease||'',
       IncomeBenefits:  p.IncomeBenefits||'',
-      Benefits: p.Benefits||'',
       BenFundValue:    p.BenFundValue||'',
       LoanAmount:      p.LoanAmount||'',
       BizType:         p.BizType||'',
       Beneficiaries:   p.Beneficiaries||'',
       Beneficiary:     p.Beneficiary||'',
       BeneficiaryType:  p.BeneficiaryType||'',
-      EstateDutiable:   (['Retirement Annuity','Pension Fund','Provident Fund','Pension Preservation','Provident Preservation'].indexOf(p.Type||'')>=0)?'No':(p.EstateDutiable||''),
+      EstateDutiable:   p.EstateDutiable||'',
       PremEscalation:   p.PremEscalation||'',
       BenEscalation:    p.BenEscalation||'',
       Product:          p.Product||'',
       GrowthRate:       p.PremGrowthRate||'',
       BenLAIncome:      p.BenLAIncome||'',
       DrawdownRate:     p.DrawdownRate||'',
-      LAIncomeTaxable:  p.LAIncomeTaxable||'',
-      RetirementAge:    p.RetirementAge||'',
-      ProjYears:        p.ProjYears||'',
-      IllustrativeRate: p.IllustrativeRate||'',
-      LifeAnnuityEsc:   p.LifeAnnuityEsc||'',
-      Notes:            p.Notes||''
+      LAIncomeTaxable:  p.LAIncomeTaxable||''
     };
   });
   var url = base +
@@ -2689,75 +2225,33 @@ function renderEditDocs(){
 }
 
 function saveClient(openFNA){
-  // For individuals, fn2/fc2 etc are the fields; for companies fn/fc etc.
-  var name=g('fn2')||g('fn');
+  var name=g('fn');
   if(!name){toast('Name is required','err');return;}
   var isLead = g('fisleadst')==='Yes';
-  var isCompany = g('fclienttype')==='Company';
-  if(!isLead && !isCompany && !getRadio('fgen')&&!g('fgen')){toast('Please select Gender','err');return;}
-  if(!isLead && !isCompany && !getRadio('fsm')&&!g('fsm')){toast('Please select Smoker status','err');return;}
+  if(!isLead && !getRadio('fgen')&&!g('fgen')){toast('Please select Gender','err');return;}
+  if(!isLead && !getRadio('fsm')&&!g('fsm')){toast('Please select Smoker status','err');return;}
+  // Warn if IDNumber looks wrong (SA IDs are exactly 13 digits)
+  var _idVal = g('fi');
+  if(_idVal && !/^\d{13}$/.test(_idVal)){
+    if(!confirm('The ID number "'+_idVal+'" is not a valid 13-digit SA ID.\n\nSave anyway?')) return;
+  }
   var id=EC||('new_'+Date.now());
-  var c={ID:id,
-    Name:name,
-    MaidenName:g('fmdn')||'',
-    CallingName:g('fcn')||name.split(' ')[0]||name,
-    Title:g('fttl'),
-    IDNumber:g('fi'),
-    DOB:g('fd'),
-    Cell:g('fc2')||g('fc'),
-    Email:g('fe2')||g('fe'),
-    TaxNo:g('ftx2')||g('ftx'),
-    Occupation:g('fo'),
-    Employer:g('fem'),
-    Income:g('finc')||'',
-    JobDesc:g('fjobdesc')||'',
-    AdminPct:g('fadminpct')||'',
-    DrivingPct:g('fdrivingpct')||'',
-    SupervisoryPct:g('fsuperpct')||'',
-    ManualPct:g('fmanualpct')||'',
-    Anniversary:g('fann'),
-    MaritalStatus:g('fmar'),
-    Status:g('fst2')||g('fst'),
-    ReviewDate:g('fr2')||g('fr'),
-    Gender:getRadio('fgen')||g('fgen'),
-    Smoker:getRadio('fsm')||g('fsm'),
-    Education:g('fedu'),
-    Qualification:g('fqual'),
-    TelHome:g('ftelh2')||g('ftelh'),
-    TelWork:g('ftelw2')||g('ftelw'),
-    SpouseTitle:g('fsptitle')||'',
-    SpouseName:g('fspname'),
-    SpouseMaidenName:g('fspmdn')||'',
-    SpouseIDNumber:g('fspid'),
-    SpouseDOB:g('fspdob'),
-    SpouseCell:g('fspcell'),
-    SpouseEmail:g('fspemail'),
-    SpouseOccupation:g('fspoc')||'',
-    SpouseIncome:g('fspinc')||'',
-    Address:g('fadr'),
-    POBox:g('fpobox')||'',
-    DriveUrl:g('fdr'),
-    Notes: (function(){ var fn=document.getElementById('fnotes'); return fn?fn.value:''; })()||(_existing?_existing.Notes||'':''),
-    RiskCategory:g('frc'),
-    Adviser:cu(),
-    IsLead:g('fisleadst')||'No',
-    ClientType:g('fclienttype')||'Individual',
-    CompanyRegType:g('fregtype')||'',
-    CompanyRegNo:g('fregno')||''
-  };
+  var c={ID:id,Name:name,MaidenName:g('fmdn')||'',CallingName:g('fcn')||name.split(' ')[0]||name,Title:g('fttl'),IDNumber:g('fi'),DOB:g('fd'),Cell:g('fc'),Email:g('fe'),
+    Occupation:g('fo'),Employer:g('fem'),Income:g('finc')||'',TaxNo:g('ftx'),
+    Anniversary:g('fann'),MaritalStatus:g('fmar'),Status:g('fst'),ReviewDate:g('fr'),
+    Gender:getRadio('fgen')||g('fgen'),Smoker:getRadio('fsm')||g('fsm'),
+    Education:g('fedu'),Qualification:g('fqual'),TelHome:g('ftelh'),TelWork:g('ftelw'),
+    SpouseName:g('fspname'),SpouseIDNumber:g('fspid'),SpouseDOB:g('fspdob'),SpouseCell:g('fspcell'),SpouseEmail:g('fspemail'),
+    Address:g('fadr'),POBox:g('fpobox')||'',DriveUrl:g('fdr'),Notes:'',RiskCategory:g('frc'),Adviser:cu(),IsLead:g('fisleadst')||'No'};
   // Collect bank and doctor data from inline edit sections
   var _existing=DB.clients.find(function(x){return String(x.ID)===String(id);});
   c.BankDetails = JSON.stringify(EDIT_BANKS);
   c.Doctors     = JSON.stringify(EDIT_DOCS);
   if(_existing){
+    c.Notes=_existing.Notes||'';
     c.LastAccessed=_existing.LastAccessed||'';
-    // Safety net: preserve any fields that exist in the sheet record but are
-    // not represented by a form field — prevents blank overwriting sheet data
-    Object.keys(_existing).forEach(function(k){
-      if(c[k]===undefined || c[k]==='') {
-        if(_existing[k]!==undefined && _existing[k]!=='') c[k]=_existing[k];
-      }
-    });
+  } else {
+    c.Notes='';
   }
   if(EC){var i=DB.clients.findIndex(function(x){return x.ID===EC;});if(i>=0)DB.clients[i]=c;}
   else DB.clients.push(c);
@@ -2779,81 +2273,22 @@ function saveClient(openFNA){
     NEW_CHILDREN=[];
   }
 
-  // Save / update spouse — auto-create as a linked client record
+  // Save spouse as family member if name entered
   if(g('fspname')){
     var existing = DB.links.find(function(l){ return String(l.PrincipalID)===String(id) && l.Type==='Spouse'; });
     if(!existing){
-      // New spouse — create a full client record
-      var spClientId = 'new_sp_'+Date.now();
-      var spC = {
-        ID:spClientId, Name:g('fspname'), Title:g('fsptitle')||'',
-        MaidenName:g('fspmdn')||'', IDNumber:g('fspid')||'', DOB:g('fspdob')||'',
-        Cell:g('fspcell')||'', Email:g('fspemail')||'',
-        Occupation:g('fspoc')||'', Income:g('fspinc')||'',
-        MaritalStatus:c.MaritalStatus||'', Anniversary:c.Anniversary||'',
-        Address:c.Address||'', Status:'Active', Gender:'', Smoker:'',
-        Education:'', Qualification:'', TelHome:'', TelWork:'',
-        DriveUrl:'', Notes:'', BankDetails:'', Doctors:'', RiskCategory:'',
-        Adviser:cu(), IsLead:'No', ClientType:'Individual',
-        FamilyType:'Spouse', CompanyRegType:'', CompanyRegNo:''
-      };
-      DB.clients.push(spC);
       var spLink = {ID:'fam_sp_'+Date.now(), PrincipalID:id,
-        Name:g('fspname'), IDNumber:g('fspid')||'', DOB:g('fspdob')||'',
-        Cell:g('fspcell')||'', Email:g('fspemail')||'',
-        Type:'Spouse', IsClient:'Yes', ClientID:spClientId};
+        Name:g('fspname'), IDNumber:g('fspid')||'', DOB:g('fspdob'),
+        Cell:g('fspcell'), Email:g('fspemail'), Type:'Spouse', IsClient:'No', ClientID:''};
       DB.links.push(spLink);
-      post({action:'saveClient', client:spC});
       post({action:'saveFamMember', member:spLink});
-    } else if(existing.IsClient==='Yes' && existing.ClientID){
-      // Existing linked spouse client — update their record
-      var spExist = DB.clients.find(function(x){ return String(x.ID)===String(existing.ClientID); });
-      if(spExist){
-        if(g('fspname'))  spExist.Name  = g('fspname');
-        if(g('fsptitle')) spExist.Title = g('fsptitle');
-        if(g('fspmdn'))   spExist.MaidenName = g('fspmdn');
-        if(g('fspid'))    spExist.IDNumber = g('fspid');
-        if(g('fspdob'))   spExist.DOB  = g('fspdob');
-        if(g('fspcell'))  spExist.Cell = g('fspcell');
-        if(g('fspemail')) spExist.Email= g('fspemail');
-        if(g('fspoc'))    spExist.Occupation = g('fspoc');
-        if(g('fspinc'))   spExist.Income = g('fspinc');
-        spExist.MaritalStatus = c.MaritalStatus||spExist.MaritalStatus||'';
-        spExist.Anniversary   = c.Anniversary||spExist.Anniversary||'';
-        spExist.Address       = c.Address||spExist.Address||'';
-        post({action:'saveClient', client:spExist});
-      }
-      // Also update link name/IDNumber in case it changed
-      existing.Name = g('fspname');
-      existing.IDNumber = g('fspid')||existing.IDNumber||'';
-      existing.DOB  = g('fspdob')||existing.DOB||'';
-      existing.Cell = g('fspcell')||existing.Cell||'';
-      existing.Email= g('fspemail')||existing.Email||'';
-      post({action:'saveFamMember', member:existing});
     } else {
-      // Link exists but IsClient:'No' — upgrade it now
+      // Update existing spouse link with latest info from client form
       existing.Name = g('fspname');
       existing.IDNumber = g('fspid')||existing.IDNumber||'';
       existing.DOB  = g('fspdob')||existing.DOB||'';
       existing.Cell = g('fspcell')||existing.Cell||'';
       existing.Email= g('fspemail')||existing.Email||'';
-      var spClientId2 = 'new_sp_'+Date.now();
-      var spC2 = {
-        ID:spClientId2, Name:existing.Name, Title:g('fsptitle')||'',
-        MaidenName:g('fspmdn')||'', IDNumber:existing.IDNumber, DOB:existing.DOB,
-        Cell:existing.Cell, Email:existing.Email,
-        Occupation:g('fspoc')||'', Income:g('fspinc')||'',
-        MaritalStatus:c.MaritalStatus||'', Anniversary:c.Anniversary||'',
-        Address:c.Address||'', Status:'Active', Gender:'', Smoker:'',
-        Education:'', Qualification:'', TelHome:'', TelWork:'',
-        DriveUrl:'', Notes:'', BankDetails:'', Doctors:'', RiskCategory:'',
-        Adviser:cu(), IsLead:'No', ClientType:'Individual',
-        FamilyType:'Spouse', CompanyRegType:'', CompanyRegNo:''
-      };
-      DB.clients.push(spC2);
-      existing.IsClient = 'Yes';
-      existing.ClientID = spClientId2;
-      post({action:'saveClient', client:spC2});
       post({action:'saveFamMember', member:existing});
     }
   }
@@ -2898,119 +2333,25 @@ function openPolicyModal(cid,idx){
   EPC=cid; EPI=(idx!==undefined?idx:null);
   var pols=polsFor(cid);
   var p=(idx!==undefined&&pols[idx])?pols[idx]:{};
+  // Deep-copy the raw policy NOW before user touches anything
+  // JSON round-trip ensures no reference sharing with DB.policies array
   window.POL_ORIGINAL_SNAP = (idx!==undefined&&pols[idx]) ? snapshotPolicy(JSON.parse(JSON.stringify(pols[idx]))) : null;
   document.getElementById('pModT').textContent=(idx!==undefined?'Edit Policy':'Add Policy');
-  try {
-    buildPolicyForm(p);
-    document.getElementById('pMod').classList.add('open');
-    setTimeout(updatePremRecon, 50);
-  } catch(err) {
-    console.error('Policy modal error:', err);
-    toast('Error opening policy: '+err.message,'err');
-  }
+  buildPolicyForm(p);
+  document.getElementById('pMod').classList.add('open');
 }
 
-var POL_BENEFITS=[];  // unified benefits array replacing POL_INCOME_ROWS + lump sum fields
+var POL_INCOME_ROWS=[];
 var POL_BENS=[];
-
-// Migrate old policy structure to unified benefits array
-function migrateToBenefits(p){
-  // Check IncomeBenefits for v2 envelope first (most reliable storage path)
-  try {
-    var ib = p.IncomeBenefits ? JSON.parse(p.IncomeBenefits) : null;
-    if(ib && ib.v2 && ib.v2.length > 0) {
-      // Ensure all rows have required fields
-      ib.v2.forEach(function(r){
-        if(r.coverEsc===undefined && r.esc!==undefined) r.coverEsc=r.esc;
-        if(r.coverEsc===undefined) r.coverEsc='';
-        if(r.premEsc===undefined) r.premEsc='';
-        if(r.premEscType===undefined) r.premEscType='fixed';
-        if(r.premPortion===undefined) r.premPortion='';
-        if(r.termType===undefined) r.termType='fixed';
-        if(r.termYears===undefined) r.termYears='';
-        if(r.termTargetAge===undefined) r.termTargetAge='';
-        if(r.termDepAge===undefined) r.termDepAge='';
-      });
-      return ib.v2;
-    }
-  } catch(e) {}
-  // Fall back to Benefits field (capital B)
-  var existing=[];
-  try{ existing=p.Benefits?JSON.parse(p.Benefits):[]; }catch(e){ existing=[]; }
-  if(existing.length>0){
-    // Ensure all rows have new fields
-    existing.forEach(function(r){
-      if(r.coverEsc===undefined && r.esc!==undefined) r.coverEsc=r.esc;
-      if(r.coverEsc===undefined) r.coverEsc='';
-      if(r.premEsc===undefined) r.premEsc='';
-      if(r.premEscType===undefined) r.premEscType='fixed';
-      if(r.premPortion===undefined) r.premPortion='';
-      if(r.termType===undefined) r.termType='fixed';
-      if(r.termYears===undefined) r.termYears='';
-      if(r.termTargetAge===undefined) r.termTargetAge='';
-      if(r.termDepAge===undefined) r.termDepAge='';
-    });
-    return existing;
-  }
-  // Migrate from old fields
-  var rows=[];
-  function pn(v){return parseFloat(String(v||'').replace(/[^0-9.\-]/g,''))||0;}
-  function numericEsc(v){ var n=parseFloat(String(v||'').replace(/[^0-9.]/g,'')); return isNaN(n)||n===0?'':String(n); }
-  // Lump sum benefits — use old single fields
-  if(pn(p.BenDeath)>0||p.BenDeath){
-    var isAgedR=p.PremEscalation==='age-rated'||p.PremEscalation==='Age rated'||(p.PremEscalation||'').toLowerCase().indexOf('age')>-1;
-    rows.push({category:'death',label:'Life Cover',cover:p.BenDeath||'',coverEsc:p.BenEscalation||'',
-      premPortion:'',premEscType:isAgedR?'age-rated':'fixed',
-      premEsc:isAgedR?'':numericEsc(p.PremEscalation)});
-  }
-  if(pn(p.BenDisability)>0||p.BenDisability){
-    rows.push({category:'disability',label:'Capital Disability',cover:p.BenDisability||'',coverEsc:p.BenEscalation||'',
-      premPortion:'',premEscType:'fixed',premEsc:''});
-  }
-  if(pn(p.BenDreadDisease)>0||p.BenDreadDisease){
-    rows.push({category:'dread',label:'Dread Disease',cover:p.BenDreadDisease||'',coverEsc:p.BenEscalation||'',
-      dreadType:p.DreadDiseaseType||'Lump Sum',dreadNotes:p.DreadDiseaseNotes||'',
-      premPortion:'',premEscType:'fixed',premEsc:''});
-  }
-  // Old income benefits
-  var oldIB=[];
-  try{
-    var _rawIB=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):[];
-    // Handle v2 envelope {v2:[...], ip:[...]} or plain array
-    if(_rawIB&&_rawIB.ip&&Array.isArray(_rawIB.ip)) oldIB=_rawIB.ip;
-    else if(Array.isArray(_rawIB)) oldIB=_rawIB;
-    else oldIB=[];
-  }catch(e){}
-  oldIB.forEach(function(r){
-    var cat=r.type==='Death Income'?'death-income':
-            r.type==='Income Protection'||r.type==='Temporary IP'?'ip':'other-income';
-    rows.push({category:cat,label:r.label||r.type||'',amount:r.amount||'',
-      coverEsc:r.coverEsc||r.esc||'',premPortion:r.premPortion||'',
-      premEscType:r.premEscType||'fixed',premEsc:r.premEsc||r.esc||'',
-      waiting:r.waiting||'1 month',term:r.term||'To age 65',
-      termType:r.termType||'fixed',termYears:r.termYears||'',
-      termTargetAge:r.termTargetAge||'',termDepAge:r.termDepAge||'',
-      taxable:r.taxable||'No',convert:r.convert||'No'});
-  });
-  // If nothing found but it's a risk policy, add empty death row as placeholder
-  if(rows.length===0 && (p.Type==='Life / Income Protector'||p.Type===''||!p.Type)){
-    rows.push({category:'death',label:'Life Cover',cover:'',coverEsc:'',premPortion:'',premEscType:'fixed',premEsc:''});
-  }
-  return rows;
-}
 
 function sec(title){
   return '<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--gold);padding:14px 0 6px;border-top:1px solid var(--smoke);margin-top:8px">'+title+'</div>';
 }
 
-function secHdr(title){
-  return '<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:1px;padding:4px 0 8px;border-bottom:2px solid var(--gold);margin:18px 0 14px">'+title+'</div>';
-}
-
 function buildPolicyForm(p){
   p=p||{};
   var type=p.Type||'Life / Income Protector';
-  POL_BENEFITS = migrateToBenefits(p);
+  try{ POL_INCOME_ROWS=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):[]; }catch(e){ POL_INCOME_ROWS=[]; }
   try{ POL_BENS=p.Beneficiaries?JSON.parse(p.Beneficiaries):[]; }catch(e){ POL_BENS=[]; }
 
   var isRisk=(type==='Life / Income Protector'||type==='');
@@ -3053,35 +2394,38 @@ function buildPolicyForm(p){
     html+='<div id="pla_other" style="flex:1;display:'+(laType==='Other'?'block':'none')+'">';
     html+='<input id="plifeassured" type="text" value="'+(p.LifeAssured||'')+'" placeholder="Full name of life assured" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px">';
     html+='</div></div></div>';
-    html+='<div class="g2" style="margin-top:10px">'+fld('ploanamt','Loan / Buy-Sell Cover Amount (if applicable)',p.LoanAmount||'')+'</div>';
-    // Estate Dutiable
+    html+='<div class="g2" style="margin-top:10px">'+fld('ploanamt','Loan / Business Cover Amount',p.LoanAmount)+fld('pkeypos','Key Person Position',p.KeyPosition)+'</div>';
+    // Estate Dutiable: Contingent Liability = Yes, Buy & Sell and Keyman = No
     var estDefault = p.EstateDutiable || (p.BizType==='Contingent Liability'?'Yes':'No');
     html+='<div class="fld" style="margin-top:10px"><label>Estate Dutiable</label>';
     html+='<div style="display:flex;gap:12px;margin-top:8px">';
     html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="pestate" value="Yes"'+(estDefault==='Yes'?' checked':'')+'>Yes</label>';
     html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="pestate" value="No"'+(estDefault!=='Yes'?' checked':'')+'>No</label>';
     html+='</div><div style="font-size:11px;color:#889;margin-top:4px">Contingent Liability = Yes · Buy &amp; Sell and Keyman = No</div></div>';
-    // Risk cover — same fields as personal policies, feeds into FNA
-    html+=sec('Risk Cover — Life Benefits');
-    html+='<div style="font-size:11px;color:#889;margin-bottom:8px">These feed into the FNA death, disability and dread disease needs analysis.</div>';
-    html+='<div class="g2">'+fld('pb_death','Death / Life Cover',p.BenDeath||'')+fld('pb_dis','Capital Disability',p.BenDisability||'')+'</div>';
-    html+='<div class="g2" style="margin-top:10px">';
-    html+='<div class="fld"><label>Dread Disease / Severe Illness Cover</label><input id="pb_biz_dd" type="text" value="'+(p.BenDreadDisease||'')+'" placeholder="e.g. 500000" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px"></div>';
-    html+='</div>';
   }
 
   // PREMIUM
   html+=sec('Premium');
-  html+='<div class="g2">'+fld('ppm','Premium / Contribution',p.Premium,'text','oninput="updatePremRecon()"')+'<div class="fld"><label>Frequency</label><select id="pfreq" onchange="buildPolicyForm(Object.assign(collectPolicyForm(),{Frequency:this.value}))">'+['Monthly','Quarterly','Annually','Once Off'].map(function(o){return '<option value="'+o+'"'+(o===(p.Frequency||'Monthly')?' selected':'')+'>'+o+'</option>';}).join('')+'</select></div></div>';
+  html+='<div class="g2">'+fld('ppm','Premium / Contribution',p.Premium)+fs('pfreq','Frequency',['Monthly','Quarterly','Annually','Once Off'],p.Frequency||'Monthly')+'</div>';
+  if(!isLA){
+    html+='<div class="g2">'+fld('pprem_pct','Premium Escalation %',p.PremEscalation)+fld('pben_pct','Benefit Escalation %',p.BenEscalation)+'</div>';
+  }
 
-  // BENEFITS — unified for all risk/life policies (replaces old lump sum fields + income benefits)
-  if(isRisk||isBiz){
-    html+=sec('Benefits');
-    html+='<div style="font-size:11px;color:#889;margin-bottom:6px">Add each benefit as a separate row — death cover, disability, dread disease, income protection, death income. Each with its own cover and premium escalation.</div>';
-    html+='<div id="benefitsWrap">'+renderBenefitRows()+'</div>';
-    html+='<button type="button" class="btn b-gh sm" style="margin-top:6px" onclick="addBenefitRow()">+ Add Benefit</button>';
-    // Premium reconciliation
-    html+='<div id="premRecon" style="margin-top:10px;font-size:11px;padding:7px 12px;border-radius:6px;background:#f8f9fc;border:1px solid var(--mist)">Enter premium portions on each benefit to reconcile against total premium.</div>';
+  // RISK COVER
+  if(isRisk){
+    html+=sec('Risk Cover — Lump Sums');
+    html+='<div class="g2">'+fld('pb_death','Death Benefit',p.BenDeath)+fld('pb_dis','Capital Disability',p.BenDisability)+'</div>';
+    html+='<div class="g2">';
+    html+='<div class="fld"><label>Dread Disease / Severe Illness — Cover Amount</label><input id="pb_dd" type="text" value="'+(p.BenDreadDisease||'')+'" placeholder="e.g. 500000" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px"></div>';
+    html+='<div class="fld"><label>Dread Disease Type</label><select id="pb_ddtype" style="width:100%;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px"><option'+(p.DreadDiseaseType==='Monthly Income'?'':' selected')+'>Lump Sum</option><option'+(p.DreadDiseaseType==='Monthly Income'?' selected':'')+'>Monthly Income</option></select></div>';
+    html+='</div>';
+    html+='<div class="fld"><label>Dread Disease Notes</label><input id="pb_ddnotes" type="text" value="'+(p.DreadDiseaseNotes||'')+'" placeholder="e.g. Comprehensive, Cancer only..." style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:7px 10px;font-family:inherit;font-size:13px"></div>';
+
+
+    html+=sec('Income Benefits');
+    html+='<div style="font-size:11px;color:#889;margin-bottom:8px">Death income, income protection, sickness benefits — one row per benefit stream.</div>';
+    html+='<div id="incomeRowsWrap">'+renderIncomeRows()+'</div>';
+    html+='<button type="button" class="btn b-gh sm" style="margin-top:6px" onclick="addIncomeRow()">+ Add Income Benefit</button>';
   }
 
   // RA / INVESTMENT
@@ -3091,88 +2435,22 @@ function buildPolicyForm(p){
     if(isRA){
       html+='<div class="g2">'+fld('pb_vested','Vested Component (Pot 1)',p.VestedValue)+fld('pb_nonvested','Non-Vested Component',p.NonVestedValue)+'</div>';
       html+='<div class="g2">'+fld('pb_retcomp','Retirement Component (Pot 2)',p.RetirementComponent)+fld('pb_savcomp','Savings Component (Pot 3)',p.SavingsComponent)+'</div>';
-      // Auto-calculate years to retirement and maturity date from client DOB
-      var raClientDOB=(DB.clients.find(function(c){return String(c.ID)===String(EPC);})||{}).DOB||'';
-      var raRetAge=parseInt(p.RetirementAge)||65;
-      var raYearsToRet=0, raMatDateStr=p.MaturityDate||'';
-      try{
-        var raDobParts=String(raClientDOB).replace(/[^0-9\/\-]/g,'').split(/[\/\-]/);
-        // DOB stored as DD/MM/YYYY
-        var raBirthYear=raDobParts.length===3?(raDobParts[2].length===4?parseInt(raDobParts[2]):parseInt(raDobParts[0])):0;
-        var raBirthMonth=raDobParts.length===3?(raDobParts[2].length===4?parseInt(raDobParts[1]):parseInt(raDobParts[1])):0;
-        var raBirthDay=raDobParts.length===3?(raDobParts[2].length===4?parseInt(raDobParts[0]):parseInt(raDobParts[2])):1;
-        if(raBirthYear>0){
-          var raRetYear=raBirthYear+raRetAge;
-          raYearsToRet=Math.max(0,raRetYear-new Date().getFullYear());
-          if(!raMatDateStr){
-            // Build proper YYYY-MM-DD for the date picker
-            var mm=raBirthMonth>0?(raBirthMonth<10?'0'+raBirthMonth:String(raBirthMonth)):'01';
-            var dd=raBirthDay>0?(raBirthDay<10?'0'+raBirthDay:String(raBirthDay)):'01';
-            raMatDateStr=raRetYear+'-'+mm+'-'+dd;
-          }
-        }
-      }catch(e){}
-      html+='<div class="g2"><div class="fld"><label>Retirement Age</label><input id="pb_retage" type="text" value="'+(p.RetirementAge||'65')+'" oninput="updateInvProjection()" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px"></div>';
-      html+=fdp('pb_matdate','Maturity Date (auto from ret. age)',raMatDateStr)+'</div>';
-      var isOnceOffRA=(p.Frequency||'Monthly')==='Once Off'||(p.Frequency||'Monthly')==='Lump Sum';
-      html+='<div class="g2">'+fld('pb_illrate','Illustrative Rate %',p.IllustrativeRate||'9');
-      if(!isOnceOffRA){
-        html+=fld('pb_growrate','Premium Growth Rate %',p.PremGrowthRate||'10');
-      } else {
-        html+='<div class="fld"><label style="color:#aaa">Premium Growth Rate</label><div style="font-size:12px;color:#aaa;padding:8px 4px">Not applicable — once-off premium</div></div>';
-      }
-      html+='</div>';
+      html+='<div class="g2">'+fld('pb_retage','Retirement Age',p.RetirementAge||'65')+fdp('pb_matdate','Maturity Date',p.MaturityDate||'')+'</div>';
+      html+='<div class="g2">'+fld('pb_illrate','Illustrative Rate %',p.IllustrativeRate||'9')+fld('pb_growrate','Premium Growth Rate %',p.PremGrowthRate||'10')+'</div>';
       html+='<div class="fld"><label>Will client withdraw Savings Pot (Pot 3) before retirement?</label><div style="display:flex;gap:12px;margin-top:8px">';
       html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="p3pot" value="Yes"'+(p.WithdrawSavingsPot==='Yes'?' checked':'')+'>Yes</label>';
       html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="p3pot" value="No"'+(p.WithdrawSavingsPot==='No'?' checked':'')+'>No</label>';
       html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="p3pot" value="Undecided"'+((!p.WithdrawSavingsPot||p.WithdrawSavingsPot==='Undecided')?' checked':'')+'>Undecided</label>';
       html+='</div></div>';
-      // Projection calculator — same as investment section
-      html+='<div id="invProjWrap" style="margin-top:8px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:12px 14px">';
-      html+='<div style="font-size:11px;font-weight:700;color:#166534;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Projected Value at Retirement</div>';
-      html+='<div class="g2">';
-      html+='<div class="fld"><label>Years to retirement</label><input type="text" id="pb_projyrs" value="'+(p.ProjYears||raYearsToRet||'')+'" placeholder="e.g. 20" oninput="updateInvProjection()" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px"></div>';
-      html+='<div class="fld"><label>Annual growth rate %</label><input type="text" id="pb_projrate" value="'+(p.IllustrativeRate||'9')+'" placeholder="e.g. 9" oninput="updateInvProjection()" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px"></div>';
-      html+='</div>';
-      if(!isOnceOffRA){
-        html+='<div class="g2" style="margin-top:6px">';
-        html+='<div class="fld"><label>Annual premium increase %</label><input type="text" id="pb_projpremesc" value="'+(p.PremGrowthRate||'10')+'" placeholder="e.g. 10" oninput="updateInvProjection()" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px"></div>';
-        html+='<div class="fld"></div>';
-        html+='</div>';
-      }
-      html+='<div id="invProjResult" style="margin-top:8px;font-size:13px;color:#166534">Enter years and rate to see projection.</div>';
-      html+='</div>';
     } else {
-      var isOnceOff2=(p.Frequency||'Monthly')==='Once Off'||(p.Frequency||'Monthly')==='Lump Sum';
       html+='<div class="g2">'+fld('pb_matval','Maturity Value',p.BenMaturityValue)+fdp('pb_matdate','Maturity Date',p.MaturityDate||'')+'</div>';
-      html+='<div class="g2">'+fld('pb_illrate','Illustrative Rate %',p.IllustrativeRate||'9');
-      if(!isOnceOff2){
-        html+=fld('pb_growrate','Premium Growth Rate %',p.PremGrowthRate||'10');
-      } else {
-        html+='<div class="fld"><label style="color:#aaa">Premium Growth Rate</label><div style="font-size:12px;color:#aaa;padding:8px 4px">Not applicable — once-off premium</div></div>';
-      }
-      html+='</div>';
+      html+='<div class="g2">'+fld('pb_illrate','Illustrative Rate %',p.IllustrativeRate||'9')+fld('pb_growrate','Premium Growth Rate %',p.PremGrowthRate||'10')+'</div>';
       if(type==='Endowment'||type==='Offshore Endowment'){
         html+='<div class="fld"><label>Include in Retirement Planning?</label><div style="display:flex;gap:12px;margin-top:8px">';
         html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="pinret" value="Yes"'+(p.IncludeInRetirement==='Yes'?' checked':'')+'>Yes</label>';
         html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="pinret" value="No"'+(p.IncludeInRetirement!=='Yes'?' checked':'')+'>No</label>';
         html+='</div></div>';
       }
-      // Projected value calculator
-      html+='<div id="invProjWrap" style="margin-top:8px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:12px 14px">';
-      html+='<div style="font-size:11px;font-weight:700;color:#166534;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Projected Value at Retirement</div>';
-      html+='<div class="g2">';
-      html+='<div class="fld"><label>Years to retirement</label><input type="text" id="pb_projyrs" value="'+(p.ProjYears||'')+'" placeholder="e.g. 20" oninput="updateInvProjection()" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px"></div>';
-      html+='<div class="fld"><label>Annual growth rate %</label><input type="text" id="pb_projrate" value="'+(p.IllustrativeRate||'9')+'" placeholder="e.g. 9" oninput="updateInvProjection()" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px"></div>';
-      html+='</div>';
-      if(!isOnceOff2){
-        html+='<div class="g2" style="margin-top:6px">';
-        html+='<div class="fld"><label>Annual premium increase %</label><input type="text" id="pb_projpremesc" value="'+(p.PremGrowthRate||'10')+'" placeholder="e.g. 10" oninput="updateInvProjection()" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px"></div>';
-        html+='<div class="fld"></div>';
-        html+='</div>';
-      }
-      html+='<div id="invProjResult" style="margin-top:8px;font-size:13px;color:#166534">Enter years and rate to see projection.</div>';
-      html+='</div>';
     }
   }
 
@@ -3325,226 +2603,35 @@ function addPolBen(){
   document.getElementById('polBensWrap').innerHTML=renderPolBens();
 }
 
-function renderBenefitRows(){
-  function N(v){return parseFloat(String(v||'').replace(/[^0-9.\-]/g,''))||0;}
-  if(POL_BENEFITS.length===0) return '<div style="font-size:12px;color:#aaa;padding:8px 0">No benefits added yet. Click + Add Benefit to start.</div>';
-
-  var CATS=[
-    {key:'death',       label:'Death / Life Cover',      color:'#0e413a', isLump:true},
-    {key:'disability',  label:'Capital Disability',      color:'#1d4ed8', isLump:true},
-    {key:'dread',       label:'Dread Disease',           color:'#7c3aed', isLump:true},
-    {key:'ip',          label:'Income Protection',       color:'#b45309', isLump:false},
-    {key:'death-income',label:'Death Income',            color:'#a8b938', isLump:false},
-    {key:'other-income',label:'Other Income Benefit',   color:'#6b7280', isLump:false}
-  ];
-
-  function inp(val,ph,oc,sty){return '<input type="text" value="'+(val||'')+'" placeholder="'+(ph||'')+'" oninput="'+oc+';updatePremRecon()" onchange="'+oc+';updatePremRecon()" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:5px;padding:5px 7px;font-family:inherit;font-size:12px'+(sty||'')+'">'; }
-  function sel(opts,cur,oc){return '<select onchange="'+oc+';updatePremRecon()" style="width:100%;border:1.5px solid var(--mist);border-radius:5px;padding:5px 7px;font-family:inherit;font-size:12px">'+opts.map(function(o){return '<option value="'+(o.key||o)+'"'+((o.key||o)===cur?' selected':'')+'>'+(o.label||o)+'</option>';}).join('')+'</select>';}
-  function cell(lbl,content,warn){return '<div style="min-width:0"><div style="font-size:10px;color:'+(warn?'#e97316':'#889')+';margin-bottom:2px;font-weight:'+(warn?'700':'400')+';white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+(warn?'⚠ ':'')+lbl+'</div>'+content+'</div>';}
-
-  return POL_BENEFITS.map(function(r,i){
-    var catDef=CATS.find(function(c){return c.key===r.category;})||CATS[0];
-    var isLump=catDef.isLump;
-    var isDI=r.category==='death-income';
-    var isAR=r.premEscType==='age-rated';
-    var REF='POL_BENEFITS['+i+']';
-    if(r.paidAtRetirement===undefined){
-      // Default: death income and IP expire; lump sum death/disability/dread stay; whole of life stays
-      r.paidAtRetirement = (r.category==='death'||r.category==='disability'||r.category==='dread') ? 'yes' : 'no';
-    }
-
-    var html='<div style="background:#fff;border:1.5px solid var(--mist);border-radius:8px;padding:10px 12px;margin-bottom:8px;border-left:4px solid '+catDef.color+'">';
-
-    // Row 1 — category | label | delete
-    html+='<div style="display:flex;gap:6px;align-items:center;margin-bottom:8px">';
-    html+=sel(CATS.map(function(c){return {key:c.key,label:c.label};}),r.category,REF+'.category=this.value;document.getElementById(\'benefitsWrap\').innerHTML=renderBenefitRows()');
-    html+='<input type="text" value="'+(r.label||'')+'" placeholder="Label e.g. \'Life Cover 1\'" oninput="'+REF+'.label=this.value" onchange="'+REF+'.label=this.value" style="flex:2;min-width:0;border:1.5px solid var(--mist);border-radius:5px;padding:5px 7px;font-family:inherit;font-size:12px">';
-    html+='<label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--navy);cursor:pointer;flex-shrink:0;white-space:nowrap"><input type="checkbox"'+(r.paidAtRetirement!=='no'?' checked':'')+' onchange="'+REF+'.paidAtRetirement=this.checked?\"yes\":\"no\"" style="accent-color:var(--navy)"> Paid at ret.</label>';
-    html+='<button type="button" onclick="POL_BENEFITS.splice('+i+',1);document.getElementById(\'benefitsWrap\').innerHTML=renderBenefitRows();updatePremRecon()" style="background:var(--rose);color:#fff;border:none;border-radius:5px;padding:4px 8px;cursor:pointer;font-size:11px;font-weight:700;flex-shrink:0">✕</button>';
-    html+='</div>';
-
-    if(isLump){
-      // Lump sum: cover | cover esc | prem portion | prem esc type | prem esc
-      html+='<div style="display:grid;grid-template-columns:1.5fr 1fr 1fr 1fr 1fr;gap:6px">';
-      html+=cell('Cover Amount (R)',inp(r.cover,'e.g. 2000000',REF+'.cover=this.value'));
-      html+=cell('Cover Esc %',inp(r.coverEsc,'e.g. 5',REF+'.coverEsc=this.value'));
-      html+=cell('Premium /pm',inp(r.premPortion,'R/pm',REF+'.premPortion=this.value'));
-      html+=cell('Premium Increases',sel([{key:'fixed',label:'Fixed %'},{key:'level',label:'Level'},{key:'age-rated',label:'Age-rated'}],r.premEscType||'fixed',REF+'.premEscType=this.value;document.getElementById(\'benefitsWrap\').innerHTML=renderBenefitRows()'));
-      html+=cell(isAR?'Assumed %':'Premium Esc %',inp(r.premEsc,isAR?'assumed':'e.g. 5',REF+'.premEsc=this.value',isAR?';border-color:#e97316':''),isAR);
-      html+='</div>';
-      // Dread disease extra fields
-      if(r.category==='dread'){
-        html+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:6px">';
-        html+=cell('Type',sel([{key:'Lump Sum',label:'Lump Sum'},{key:'Accelerator',label:'Accelerator'},{key:'Monthly Income',label:'Monthly Income'}],r.dreadType||'Lump Sum',REF+'.dreadType=this.value'));
-        html+=cell('Notes',inp(r.dreadNotes||'','e.g. Comprehensive, Cancer only',REF+'.dreadNotes=this.value'));
-        html+='</div>';
-      }
-    } else if(isDI){
-      // Death income: amount | cover esc | term type | term value | prem portion | prem esc
-      html+='<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:6px;margin-bottom:6px">';
-      html+=cell('Monthly Benefit',inp(r.amount,'R/pm',REF+'.amount=this.value'));
-      html+=cell('Cover Esc %',inp(r.coverEsc,'e.g. 6',REF+'.coverEsc=this.value'));
-      html+=cell('Term Type',sel([{key:'fixed',label:'Fixed years'},{key:'to-age',label:'To dependant age'}],r.termType||'fixed',REF+'.termType=this.value;document.getElementById(\'benefitsWrap\').innerHTML=renderBenefitRows()'));
-      if(r.termType==='to-age'){
-        html+=cell('Dep. age now → target',
-          '<div style="display:flex;gap:4px;align-items:center">'+
-          inp(r.termDepAge,'now',REF+'.termDepAge=this.value',';width:55px')+
-          '<span style="color:#889;font-size:10px">→</span>'+
-          inp(r.termTargetAge,'age',REF+'.termTargetAge=this.value',';width:55px')+
-          '</div>');
-      } else {
-        html+=cell('Term (years)',inp(r.termYears,'e.g. 20',REF+'.termYears=this.value'));
-      }
-      html+='</div>';
-      html+='<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr 1fr;gap:6px">';
-      html+=cell('Premium /pm',inp(r.premPortion,'R/pm',REF+'.premPortion=this.value'));
-      html+=cell('Premium Increases',sel([{key:'fixed',label:'Fixed %'},{key:'level',label:'Level'},{key:'age-rated',label:'Age-rated'}],r.premEscType||'fixed',REF+'.premEscType=this.value;document.getElementById(\'benefitsWrap\').innerHTML=renderBenefitRows()'));
-      html+=cell(isAR?'Assumed %':'Prem Esc %',inp(r.premEsc,isAR?'assumed':'e.g. 5',REF+'.premEsc=this.value',isAR?';border-color:#e97316':''),isAR);
-      html+=cell('Taxable',sel([{key:'No',label:'No'},{key:'Yes',label:'Yes'}],r.taxable||'No',REF+'.taxable=this.value'));
-      html+=cell('Lump sum opt?',sel([{key:'No',label:'No'},{key:'Yes',label:'Yes'}],r.convert||'No',REF+'.convert=this.value'));
-      html+='</div>';
-      // FNA preview
-      var capYrs=r.termType==='to-age'?Math.max(0,N(r.termTargetAge)-N(r.termDepAge)):N(r.termYears);
-      if(N(r.amount)>0&&capYrs>0){
-        var capEsc=N(r.coverEsc)||0, dr=4;
-        var capVal=capEsc>0?Math.round(N(r.amount)*((Math.pow(1+capEsc/100,capYrs)-1)/((capEsc/100+dr/100)*(1+capEsc/100)))):Math.round(N(r.amount)*capYrs*12/(1+dr/100));
-        html+='<div style="font-size:10px;color:#0e413a;background:#f0fdf4;border-radius:4px;padding:4px 8px;margin-top:6px">📐 FNA: '+capYrs+' years · Capitalised ≈ <strong>R '+Math.round(capVal).toLocaleString('en-ZA')+'</strong></div>';
-      }
-    } else {
-      // IP / Other income
-      var isIP=r.category==='ip';
-      var waitOpts=['7 days','2 weeks','1 month','3 months','6 months','1 year','2 years'];
-      var termOpts=['1 year','2 years','5 years','To age 55','To age 60','To age 65','To age 70','Whole of Life'];
-      html+='<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:6px;margin-bottom:6px">';
-      html+=cell('Monthly Benefit',inp(r.amount,'R/pm',REF+'.amount=this.value'));
-      html+=isIP?cell('Waiting Period',sel(waitOpts,r.waiting||'1 month',REF+'.waiting=this.value')):cell('Period',inp(r.term||'','e.g. 24 months',REF+'.term=this.value'));
-      html+=isIP?cell('Benefit Period',sel(termOpts,r.term||'To age 65',REF+'.term=this.value')):cell('','<div></div>');
-      html+=cell('Cover Esc %',inp(r.coverEsc,'e.g. 5',REF+'.coverEsc=this.value'));
-      html+='</div>';
-      html+='<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr 1fr;gap:6px">';
-      html+=cell('Premium /pm',inp(r.premPortion,'R/pm',REF+'.premPortion=this.value'));
-      html+=cell('Premium Increases',sel([{key:'fixed',label:'Fixed %'},{key:'level',label:'Level'},{key:'age-rated',label:'Age-rated'}],r.premEscType||'fixed',REF+'.premEscType=this.value;document.getElementById(\'benefitsWrap\').innerHTML=renderBenefitRows()'));
-      html+=cell(isAR?'Assumed %':'Prem Esc %',inp(r.premEsc,isAR?'assumed':'e.g. 5',REF+'.premEsc=this.value',isAR?';border-color:#e97316':''),isAR);
-      html+=cell('Taxable',sel([{key:'No',label:'No'},{key:'Yes',label:'Yes'}],r.taxable||'No',REF+'.taxable=this.value'));
-      html+=cell('Lump sum opt?',sel([{key:'No',label:'No'},{key:'Yes',label:'Yes'}],r.convert||'No',REF+'.convert=this.value'));
-      html+='</div>';
-    }
-
-    html+='</div>';
-    return html;
+function renderIncomeRows(){
+  if(POL_INCOME_ROWS.length===0) return '<div style="font-size:12px;color:#aaa;padding:8px 0">No income benefits added yet.</div>';
+  var waitOpts=['7 days','2 weeks','1 month','3 months','6 months','1 year','2 years'];
+  var termOpts=['1 year','2 years','5 years','To age 55','To age 60','To age 65','To age 70','Whole of Life'];
+  var typeOpts=['Temporary IP','Income Protection','Death Income','Sickness Benefit','Hospital Income','Other'];
+  return POL_INCOME_ROWS.map(function(r,i){
+    return '<div style="background:var(--smoke);border-radius:8px;padding:10px 12px;margin-bottom:8px">'+
+      '<div style="display:flex;gap:6px;align-items:center;margin-bottom:8px">'+
+      '<select onchange="POL_INCOME_ROWS['+i+'].type=this.value" style="border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px;flex:1">'+
+      typeOpts.map(function(o){return '<option'+(r.type===o?' selected':'')+'>'+o+'</option>';}).join('')+
+      '</select>'+
+      '<input type="text" value="'+(r.label||'')+'" placeholder="Benefit label e.g. Income Protection Plus" onchange="POL_INCOME_ROWS['+i+'].label=this.value" style="flex:2;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px">'+
+      '<button type="button" onclick="POL_INCOME_ROWS.splice('+i+',1);document.getElementById(\'incomeRowsWrap\').innerHTML=renderIncomeRows()" style="background:var(--rose);color:#fff;border:none;border-radius:6px;padding:5px 9px;cursor:pointer;font-size:11px;font-weight:700">✕</button>'+
+      '</div>'+
+      '<div style="display:grid;grid-template-columns:repeat(6,1fr);gap:6px">'+
+      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Monthly Amount</div><input type="text" value="'+(r.amount||'')+'" placeholder="R" onchange="POL_INCOME_ROWS['+i+'].amount=this.value" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
+      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Waiting Period</div><select onchange="POL_INCOME_ROWS['+i+'].waiting=this.value" style="width:100%;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px">'+waitOpts.map(function(o){return '<option'+(r.waiting===o?' selected':'')+'>'+o+'</option>';}).join('')+'</select></div>'+
+      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Benefit Period</div><select onchange="POL_INCOME_ROWS['+i+'].term=this.value" style="width:100%;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px">'+termOpts.map(function(o){return '<option'+(r.term===o?' selected':'')+'>'+o+'</option>';}).join('')+'</select></div>'+
+      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Escalation %</div><input type="text" value="'+(r.esc||'')+'" placeholder="%" onchange="POL_INCOME_ROWS['+i+'].esc=this.value" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
+      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Taxable</div><select onchange="POL_INCOME_ROWS['+i+'].taxable=this.value" style="width:100%;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"><option'+(r.taxable==='Yes'?' selected':'')+'>Yes</option><option'+(r.taxable!=='Yes'?' selected':'')+'>No</option></select></div>'+
+      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Lump Sum opt?</div><select onchange="POL_INCOME_ROWS['+i+'].convert=this.value" style="width:100%;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"><option'+(r.convert==='Yes'?' selected':'')+'>Yes</option><option'+(r.convert!=='Yes'?' selected':'')+'>No</option></select></div>'+
+      '</div></div>';
   }).join('');
 }
 
-function updateInvProjection(){
-  var fvEl=document.getElementById('pb_fv');
-  var mvEl=document.getElementById('pb_matval');
-  var pmEl=document.getElementById('ppm');
-  var yrsEl=document.getElementById('pb_projyrs');
-  var rateEl=document.getElementById('pb_projrate');
-  var escEl=document.getElementById('pb_projpremesc');
-  var resEl=document.getElementById('invProjResult');
-  if(!resEl||!yrsEl||!rateEl) return;
-  var fv=parseFloat((fvEl&&fvEl.value||'0').replace(/[^0-9.]/g,''))||0;
-  var prem=parseFloat((pmEl&&pmEl.value||'0').replace(/[^0-9.]/g,''))||0;
-  var yrs=parseFloat(yrsEl.value)||0;
-  var rate=parseFloat(rateEl.value)||0;
-  var premEsc=parseFloat((escEl&&escEl.value||'0'))||0;
-  if(yrs<=0||rate<=0){ resEl.innerHTML='Enter years and rate to see projection.'; return; }
-  var r=rate/100;
-  // Grow existing fund value
-  var fvFuture=fv>0?Math.round(fv*Math.pow(1+r,yrs)):0;
-  // Grow monthly premium contributions (future value of growing annuity)
-  var premFuture=0;
-  if(prem>0){
-    if(premEsc>0){
-      var g=premEsc/100;
-      // FV of growing annuity: PMT * 12 * ((1+r)^n - (1+g)^n) / (r - g)
-      if(Math.abs(r-g)<0.0001) premFuture=Math.round(prem*12*yrs*Math.pow(1+r,yrs));
-      else premFuture=Math.round(prem*12*((Math.pow(1+r,yrs)-Math.pow(1+g,yrs))/(r-g)));
-    } else {
-      // FV of flat annuity: PMT * 12 * ((1+r)^n - 1) / r
-      premFuture=Math.round(prem*12*((Math.pow(1+r,yrs)-1)/r));
-    }
-  }
-  var total=fvFuture+premFuture;
-  var parts=[];
-  if(fvFuture>0) parts.push('Fund: <strong>R\u00a0'+fvFuture.toLocaleString('en-ZA')+'</strong>');
-  if(premFuture>0) parts.push('Contributions: <strong>R\u00a0'+premFuture.toLocaleString('en-ZA')+'</strong>');
-  resEl.innerHTML='\uD83D\uDCB0 Projected value after '+yrs+' yrs at '+rate+'%: <strong style="font-size:15px">R\u00a0'+total.toLocaleString('en-ZA')+'</strong>'+(parts.length>1?' &nbsp;('+parts.join(' + ')+')':'');
+function addIncomeRow(){
+  POL_INCOME_ROWS.push({type:'Temporary IP',label:'',amount:'',waiting:'1 month',term:'To age 65',esc:'',taxable:'No',convert:'No'});
+  document.getElementById('incomeRowsWrap').innerHTML=renderIncomeRows();
 }
-
-function updatePremRecon(){
-  var N=function(v){return parseFloat(String(v||'').replace(/[^0-9.\-]/g,''))||0;};
-  var totalPrem=N(document.getElementById('ppm')&&document.getElementById('ppm').value);
-  var portionSum=POL_BENEFITS.reduce(function(a,r){return a+N(r.premPortion);},0);
-  // Include ALL benefits with a portion and an esc% — age-rated uses assumed %, still counts
-  var allEscBens=POL_BENEFITS.filter(function(r){return N(r.premEsc)>0&&N(r.premPortion)>0;});
-  var weightedEsc=0;
-  if(allEscBens.length>0){
-    var wSum=allEscBens.reduce(function(a,r){return a+N(r.premPortion);},0);
-    weightedEsc=wSum>0?allEscBens.reduce(function(a,r){return a+N(r.premEsc)*N(r.premPortion);},0)/wSum:0;
-  }
-  var ageRatedNoEsc=POL_BENEFITS.filter(function(r){return r.premEscType==='age-rated'&&!N(r.premEsc)&&N(r.premPortion)>0;});
-  var ageRatedWithEsc=POL_BENEFITS.filter(function(r){return r.premEscType==='age-rated'&&N(r.premEsc)>0&&N(r.premPortion)>0;});
-  var el=document.getElementById('premRecon');
-  if(!el) return;
-  if(portionSum===0){el.innerHTML='Enter premium portions on each benefit to reconcile against total premium.';el.style.background='#f8f9fc';el.style.borderColor='var(--mist)';return;}
-  var diff=totalPrem>0?portionSum-totalPrem:0;
-  var ok=totalPrem>0&&Math.abs(diff)<1;
-  var html='<strong>Premium reconciliation:</strong> Portions sum to <strong>R '+Math.round(portionSum).toLocaleString('en-ZA')+'</strong>';
-  if(totalPrem>0) html+=' vs total <strong>R '+Math.round(totalPrem).toLocaleString('en-ZA')+'</strong>';
-  if(ok) html+=' \u2713';
-  else if(totalPrem>0) html+=' \u2014 <span style="color:'+(diff>0?'#dc2626':'#d97706')+'">'+(diff>0?'over by':'under by')+' R'+Math.abs(Math.round(diff)).toLocaleString('en-ZA')+'</span>';
-  if(allEscBens.length>0) html+='<br><strong>Weighted avg premium escalation:</strong> '+weightedEsc.toFixed(1)+'% (includes assumed rates for age-rated benefits)';
-  if(ageRatedWithEsc.length>0) html+='<br><span style="color:#e97316">\u26a0 '+ageRatedWithEsc.length+' age-rated benefit'+(ageRatedWithEsc.length>1?'s':'')+'\u2014 assumed % used in avg</span>';
-  if(ageRatedNoEsc.length>0) html+='<br><span style="color:#dc2626">\u26a0 '+ageRatedNoEsc.length+' age-rated benefit'+(ageRatedNoEsc.length>1?'s have':' has')+' no assumed % entered \u2014 excluded from avg. Please enter an assumed %.</span>';
-  el.innerHTML=html;
-  el.style.background=ok?'#f0fdf4':totalPrem>0?'#fef9ee':'#f8f9fc';
-  el.style.borderColor=ok?'#bbf7d0':totalPrem>0?'var(--gold2)':'var(--mist)';
-}
-function addBenefitRow(){
-  var CATS=[
-    {key:'death',label:'Death / Life Cover'},
-    {key:'disability',label:'Capital Disability'},
-    {key:'dread',label:'Dread Disease'},
-    {key:'ip',label:'Income Protection'},
-    {key:'death-income',label:'Death Income'},
-    {key:'other-income',label:'Other Income'}
-  ];
-  var wrap=document.getElementById('benefitsWrap');
-  var picker=document.createElement('div');
-  picker.style.cssText='background:#fff;border:2px solid var(--gold);border-radius:8px;padding:10px 12px;margin-bottom:8px';
-  var title=document.createElement('div');
-  title.style.cssText='font-size:11px;font-weight:700;color:var(--navy);margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px';
-  title.textContent='Select benefit type:';
-  picker.appendChild(title);
-  var btns=document.createElement('div');
-  btns.style.cssText='display:flex;gap:6px;flex-wrap:wrap';
-  CATS.forEach(function(c){
-    var btn=document.createElement('button');
-    btn.type='button';
-    btn.textContent=c.label;
-    btn.style.cssText='background:var(--navy);color:#fff;border:none;border-radius:5px;padding:5px 10px;cursor:pointer;font-size:11px;font-weight:600';
-    btn.addEventListener('click',function(){
-      var defRet=(c.key==='death'||c.key==='disability'||c.key==='dread')?'yes':'no';
-      POL_BENEFITS.push({category:c.key,label:'',cover:'',amount:'',coverEsc:'',premPortion:'',
-        premEscType:'fixed',premEsc:'',termType:'fixed',termYears:'',termTargetAge:'',termDepAge:'',
-        waiting:'1 month',term:'To age 65',taxable:'No',convert:'No',dreadType:'Lump Sum',dreadNotes:'',
-        paidAtRetirement:defRet});
-      document.getElementById('benefitsWrap').innerHTML=renderBenefitRows();
-      updatePremRecon();
-    });
-    btns.appendChild(btn);
-  });
-  picker.appendChild(btns);
-  picker.className='add-picker';
-  var old=wrap.querySelector('.add-picker');
-  if(old) old.parentNode.removeChild(old);
-  wrap.appendChild(picker);
-  // Scroll picker into view
-  picker.scrollIntoView({behavior:'smooth',block:'nearest'});
-}
-
 
 // ── Living Annuity two-way calculation ───────────────────────
 function _laFV(){
@@ -3638,76 +2725,31 @@ function laShowSust(){
 
 function collectPolicyForm(){
   function getR(name){ var el=document.querySelector('input[name="'+name+'"]:checked'); return el?el.value:''; }
-  function pn(v){return parseFloat(String(v||'').replace(/[^0-9.\-]/g,''))||0;}
   // Sync all date pickers to their hidden inputs before reading
   ['psd','pb_matdate'].forEach(function(id){ if(document.getElementById(id+'_d')) fdpSync(id); });
-
-  // Compute backward-compat totals from POL_BENEFITS
-  var benDeath=0, benDis=0, benDD='', benIPRows=[];
-  var premEscVals=[], benefitEscVals=[];
-  POL_BENEFITS.forEach(function(r){
-    if(r.category==='death')      benDeath+=pn(r.cover);
-    if(r.category==='disability') benDis+=pn(r.cover);
-    if(r.category==='dread'&&pn(r.cover)>0) benDD=benDD?String(pn(benDD)+pn(r.cover)):r.cover;
-    if(r.category==='ip'||r.category==='death-income'||r.category==='other-income'){
-      benIPRows.push({type:r.category==='ip'?'Income Protection':r.category==='death-income'?'Death Income':'Other',
-        label:r.label,amount:r.amount,esc:r.coverEsc,waiting:r.waiting,term:r.term,
-        termType:r.termType,termYears:r.termYears,termTargetAge:r.termTargetAge,termDepAge:r.termDepAge,
-        taxable:r.taxable,convert:r.convert,premPortion:r.premPortion,premEsc:r.premEsc,premEscType:r.premEscType,
-        coverEsc:r.coverEsc});
-    }
-    if(pn(r.premEsc)>0||r.premEscType==='age-rated'){
-      var escEntry={pn:pn(r.premPortion)||1, esc:r.premEscType==='age-rated'?'age-rated':pn(r.premEsc)};
-      premEscVals.push(escEntry);
-    }
-    if(pn(r.coverEsc)>0) benefitEscVals.push(pn(r.coverEsc));
-  });
-  // Weighted average premium escalation — weighted by premPortion if available, else simple avg
-  var fixedOnly=premEscVals.filter(function(x){return x.esc!=='age-rated';});
-  var wPremEsc='';
-  if(fixedOnly.length>0){
-    var wSum=fixedOnly.reduce(function(a,x){return a+x.pn;},0);
-    if(wSum>0) wPremEsc=(fixedOnly.reduce(function(a,x){return a+x.esc*x.pn;},0)/wSum).toFixed(1);
-  }
-  if(premEscVals.some(function(x){return x.esc==='age-rated';})) wPremEsc=(wPremEsc?wPremEsc+' (+ age-rated)':'age-rated');
-  var avgBenEsc=benefitEscVals.length>0?(benefitEscVals.reduce(function(a,v){return a+v;},0)/benefitEscVals.length).toFixed(1):'';
-
-  var raTypesForEstate=['Retirement Annuity','Pension Fund','Provident Fund','Pension Preservation','Provident Preservation'];
-  var collectedType=g('pt')||'';
-  // RA/pension/provident are section 37C assets — never estate dutiable regardless of beneficiary
-  var collectedEstateDutiable = raTypesForEstate.indexOf(collectedType)>=0 ? 'No' : (getR('pestate')||'No');
-
   return {
     Insurer:g('pi'),Product:g('pp'),PolicyNo:g('pn'),Type:g('pt'),
-    StartDate:g('psd'),ClientIsOwner:getR('pisowner'),Owner:g('pown'),Status:g('pst'),EstateDutiable:collectedEstateDutiable,
-    BizType:g('pbiztype'),LifeAssuredType:(document.getElementById('plifeassured_type')?document.getElementById('plifeassured_type').value:''),LifeAssured:g('plifeassured'),LoanAmount:g('ploanamt'),
-    Premium:g('ppm'),Frequency:g('pfreq'),
-    // Backward-compat totals (computed from benefits)
-    BenDeath:      benDeath>0?String(Math.round(benDeath)):'',
-    BenDisability: benDis>0?String(Math.round(benDis)):'',
-    BenDreadDisease:benDD?String(Math.round(pn(benDD))):'',
-    // Weighted averages for display
-    PremEscalation:wPremEsc,
-    BenEscalation: avgBenEsc,
-    // New unified benefits array
-    // Note: Benefits field omitted from save payload — IncomeBenefits v2 envelope contains the full array
-    // This reduces URL payload size significantly
-    // Store full benefits array inside IncomeBenefits using v2 envelope
-    // Apps Script reliably saves IncomeBenefits — Benefits column may not be in its field list
-    IncomeBenefits: JSON.stringify({v2: POL_BENEFITS, ip: benIPRows}),
+    StartDate:g('psd'),ClientIsOwner:getR('pisowner'),Owner:g('pown'),Status:g('pst'),EstateDutiable:getR('pestate'),
+    BizType:g('pbiztype'),LifeAssuredType:(document.getElementById('plifeassured_type')?document.getElementById('plifeassured_type').value:''),LifeAssured:g('plifeassured'),LoanAmount:g('ploanamt'),KeyPosition:g('pkeypos'),
+    Premium:g('ppm'),Frequency:g('pfreq'),PremEscalation:g('pprem_pct'),BenEscalation:g('pben_pct'),
+    BenDeath:g('pb_death'),BenDisability:g('pb_dis'),
+    BenDreadDisease:g('pb_dd'),
+    DreadDiseaseType:(document.getElementById('pb_ddtype')?document.getElementById('pb_ddtype').value:''),
+    DreadDiseaseNotes:g('pb_ddnotes'),
     BenSurrenderValue:g('pb_surr')||g('pb_surr2'),
     BenFundValue:g('pb_fv'),BenMaturityValue:g('pb_matval'),
     MaturityDate:g('pb_matdate'),RetirementAge:g('pb_retage'),
     VestedValue:g('pb_vested'),NonVestedValue:g('pb_nonvested'),
     RetirementComponent:g('pb_retcomp'),SavingsComponent:g('pb_savcomp'),
-    IllustrativeRate:g('pb_illrate')||g('pb_projrate'),PremGrowthRate:g('pb_growrate')||g('pb_projpremesc'),ProjYears:g('pb_projyrs'),
+    IllustrativeRate:g('pb_illrate'),PremGrowthRate:g('pb_growrate'),
     WithdrawSavingsPot:getR('p3pot'),IncludeInRetirement:getR('pinret'),
     MedPlan:g('pmedplan'),MedLives:g('pmedlives'),
     BenLAIncome:g('pb_la_income'),DrawdownRate:g('pb_la_drawdown'),
     LAIncomeTaxable:(function(){var el=document.querySelector('input[name="platax"]:checked');return el?el.value:'Yes';})(),
     Insured:g('pins'),Payer:g('ppay'),
     Notes:g('pnt'),
-    Beneficiaries:JSON.stringify(POL_BENS)
+    Beneficiaries:JSON.stringify(POL_BENS),
+    IncomeBenefits:JSON.stringify(POL_INCOME_ROWS)
   };
 }
 
@@ -3955,14 +2997,6 @@ function snapshotPolicy(pol){
 }
 
 function savePolicy(){
-  // Flush any focused input so values are captured before we collect
-  if(document.activeElement && document.activeElement.blur) document.activeElement.blur();
-  // Also force all benefit inputs to fire their oninput by reading current values
-  var bw=document.getElementById('benefitsWrap');
-  if(bw) bw.querySelectorAll('input[type="text"]').forEach(function(inp){
-    // Trigger oninput manually to ensure POL_BENEFITS is up to date
-    var ev=new Event('input',{bubbles:true}); inp.dispatchEvent(ev);
-  });
   if(!g('pi')){toast('Insurer required','err');return;}
   var now=new Date().toISOString().slice(0,10);
   var existing=polsFor(EPC);
@@ -3981,24 +3015,7 @@ function savePolicy(){
   if(EPI!==null&&oldPol){var gi=DB.policies.indexOf(oldPol);if(gi>=0)DB.policies[gi]=pol;}
   else DB.policies.push(pol);
   closeAll();render();
-  // Set a timeout — if no sheet confirmation within 15s, show persistent failure banner
-  // Check payload size before sending
-  var payloadSize = encodeURIComponent(JSON.stringify({action:'savePolicy',policy:pol})).length;
-  console.log('savePolicy payload size:', payloadSize, 'chars | IncomeBenefits:', (pol.IncomeBenefits||'').length, 'chars | Notes:', (pol.Notes||'').length, 'chars');
-  var saveTimer=setTimeout(function(){
-    showSaveFail('Policy for '+(pol.Insurer||'unknown insurer')+' ('+pol.Type+') — no confirmation received from Google Sheet within 90 seconds. The policy MAY still have saved — please check your Google Sheet before re-entering.');
-  },90000);
-  post({action:'savePolicy',policy:pol},function(res){
-    clearTimeout(saveTimer);
-    if(!res || res.ok!==1 || res.error){
-      var errMsg = (res&&res.error) ? res.error : 'No confirmation received from Apps Script.';
-      showSaveFail('Policy for '+(pol.Insurer||'unknown insurer')+' — '+errMsg+' Please try saving again.');
-    } else {
-      clearSaveFail(); // clears banner even if timeout already fired
-      toast('Policy saved to sheet \u2713','ok');
-      console.log('POLICY SAVED OK:', pol.ID, pol.Insurer, pol.Type, pol.ClientID, new Date().toISOString());
-    }
-  });
+  post({action:'savePolicy',policy:pol},function(){toast('Policy saved','ok');});
 }
 
 function logAnnualReview(){
@@ -4123,17 +3140,12 @@ function openTaskModal(clientName){
     '<input type="checkbox" id="tccwife" style="width:16px;height:16px;cursor:pointer;accent-color:var(--navy)">'+
     '👁 CC Wife</label>'+
     '</div>'+
-    '<div class="fld" style="position:relative"><label>Client</label>'+
-    '<input type="hidden" id="tcl" value="'+TC+'">'+
-    '<div style="display:flex;gap:6px;align-items:center;border:1.5px solid var(--mist);border-radius:7px;padding:7px 10px;background:#fff" onclick="document.getElementById(\'tclSrch\').focus()">'+
-    '<span style="font-size:13px;color:#aaa">🔍</span>'+
-    '<input type="text" id="tclSrch" placeholder="Search client name…" autocomplete="off"'+
-    ' value="'+TC+'"'+
-    ' style="border:none;outline:none;font-size:13px;font-family:inherit;flex:1;background:transparent;color:var(--ink)">'+
-    (TC?'<button type="button" id="tclClear" onclick="document.getElementById(\'tcl\').value=\'\';document.getElementById(\'tclSrch\').value=\'\';document.getElementById(\'tclDrop\').innerHTML=\'\';document.getElementById(\'tclClear\').style.display=\'none\';" style="background:none;border:none;cursor:pointer;color:#aaa;font-size:14px;padding:0;line-height:1">✕</button>':'<button type="button" id="tclClear" style="display:none;background:none;border:none;cursor:pointer;color:#aaa;font-size:14px;padding:0;line-height:1">✕</button>')+
-    '</div>'+
-    '<div id="tclDrop" style="position:absolute;top:100%;left:0;right:0;background:#fff;border:1.5px solid var(--mist);border-top:none;border-radius:0 0 7px 7px;max-height:200px;overflow-y:auto;z-index:500;display:none"></div>'+
-    '</div>'+
+    '<div class="fld"><label>Client</label><select id="tcl">'+
+    '<option value="">— No client —</option>'+
+    DB.clients.map(function(c){
+      return '<option value="'+c.Name+'"'+(TC===c.Name?' selected':'')+'>'+c.Name+'</option>';
+    }).join('')+
+    '</select></div>'+
     '<div class="fld"><label>Initial Note</label>'+
     '<textarea id="tn" placeholder="Describe the task..." style="min-height:80px"></textarea></div>';
   document.getElementById('tMod').classList.add('open');
@@ -4378,7 +3390,6 @@ document.addEventListener('click', function(e){
         case 'edit-client':    openClientModal(id); break;
         case 'open-new-client':openClientModal(); break;
         case 'open-new-lead':  openClientModal(null, true); break;
-        case 'open-new-company':openClientModal(null, false, true); break;
         case 'convert-lead':   convertLead(id); break;
         case 'client-list-filter': window.CLIENT_LIST_FILTER=el.getAttribute('data-filter'); render(); break;
         case 'go-clients':     goPage('clients'); break;
@@ -4395,17 +3406,6 @@ document.addEventListener('click', function(e){
         case 'replace-policy': replacePolicy(cid,parseInt(idx)); break;
         case 'open-roa':       openROAModal(cid); break;
         case 'open-task':      openTaskModal(el.getAttribute('data-client')||''); break;
-        case 'pick-task-client':
-          var _name = el.getAttribute('data-name')||'';
-          var _h = document.getElementById('tcl');
-          var _s = document.getElementById('tclSrch');
-          var _d = document.getElementById('tclDrop');
-          var _cb = document.getElementById('tclClear');
-          if(_h) _h.value = _name;
-          if(_s) _s.value = _name;
-          if(_d){ _d.style.display='none'; _d.innerHTML=''; }
-          if(_cb) _cb.style.display='inline';
-          break;
         case 'toggle-task':    toggleTask(id, el.getAttribute('data-done')==='true'); break;
         case 'open-task-log':  openTaskLogModal(id); break;
         case 'task-filter':    TASK_FILTER=el.getAttribute('data-filter'); render(); break;
@@ -4423,10 +3423,8 @@ document.addEventListener('click', function(e){
         case 'add-child-row':  addChildRow(); break;
         case 'remove-child':   removeChild(id); break;
         case 'add-child':      openFamModal(id,'Child'); break;
-        case 'add-director':   openFamModal(id,'Director'); break;
-        case 'add-shareholder':openFamModal(id,'Shareholder'); break;
         case 'upgrade-client':      upgradeToClient(id); break;
-        case 'link-existing':       openLinkExistModal(id, el.getAttribute('data-type')||'Spouse'); break;
+        case 'link-existing':       openLinkExistModal(id, 'Spouse'); break;
         case 'confirm-exist-link':  confirmExistLink(id); break;
         case 'tab':            CTAB=el.getAttribute('data-tab'); render(); break;
         case 'fna':
@@ -4481,20 +3479,23 @@ function openPolicySchedule(cid){
   // Premium totals — personal and business ALWAYS kept separate
   function isNonMonthly(p){var f=p.Frequency||'Monthly';return f==='Once Off'||f==='Lump Sum'||f==='Annually'||f==='Quarterly';}
   var nonMonthly=[];
-  var tRiskM=0, tRAM=0, tInvM=0, tMedM=0, tOtherM=0, tBizM=0;
-  var tPersAll=0, tBizAll=0;
+  var tPersM=0, tBizM=0, tPersAll=0, tBizAll=0;
 
-  // Calculate each group separately — never combine into a single tPersM
-  groups.personal.pols.forEach(function(p){ var n=N(p.Premium); tPersAll+=n; if(isNonMonthly(p)) nonMonthly.push(p); else tRiskM+=n; });
-  groups.ra.pols.forEach(function(p){       var n=N(p.Premium); tPersAll+=n; if(isNonMonthly(p)) nonMonthly.push(p); else tRAM+=n; });
-  groups.invest.pols.forEach(function(p){   var n=N(p.Premium); tPersAll+=n; if(isNonMonthly(p)) nonMonthly.push(p); else tInvM+=n; });
-  groups.medical.pols.forEach(function(p){  var n=N(p.Premium); tPersAll+=n; if(isNonMonthly(p)) nonMonthly.push(p); else tMedM+=n; });
-  groups.other.pols.forEach(function(p){    var n=N(p.Premium); tPersAll+=n; if(isNonMonthly(p)) nonMonthly.push(p); else tOtherM+=n; });
-  groups.business.pols.forEach(function(p){ var n=N(p.Premium); tBizAll+=n; if(isNonMonthly(p)) nonMonthly.push(p); else tBizM+=n; });
-
-  // tPersM used by section totals footer — risk + ra + inv + med + other (excludes biz)
-  var tPersM = tRiskM + tRAM + tInvM + tMedM + tOtherM;
-  var personalGroups = [groups.personal, groups.ra, groups.invest, groups.medical, groups.other];
+  var personalGroups=[groups.personal,groups.ra,groups.invest,groups.medical,groups.other];
+  personalGroups.forEach(function(g){
+    g.pols.forEach(function(p){
+      var n=N(p.Premium);
+      tPersAll+=n;
+      if(isNonMonthly(p)) nonMonthly.push(p);
+      else tPersM+=n;
+    });
+  });
+  groups.business.pols.forEach(function(p){
+    var n=N(p.Premium);
+    tBizAll+=n;
+    if(isNonMonthly(p)) nonMonthly.push(p);
+    else tBizM+=n;
+  });
 
   var annualPols=nonMonthly.filter(function(p){return p.Frequency==='Annually';});
   var oncePols  =nonMonthly.filter(function(p){return p.Frequency!=='Annually';});
@@ -4502,32 +3503,11 @@ function openPolicySchedule(cid){
   var totOnce   =oncePols.reduce(function(s,p){return s+N(p.Premium);},0);
 
   // Cover totals (personal only)
-  var covDeath=0,covDis=0,covDD=0,covIP=0,covDeathIncome=0;
+  var covDeath=0,covDis=0,covDD=0,covIP=0;
   personalGroups.forEach(function(g){
     g.pols.forEach(function(p){
-      try{
-        var _sch=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):null;
-        var _schBens=(_sch&&_sch.v2&&_sch.v2.length>0)?_sch.v2:null;
-        if(_schBens){
-          _schBens.forEach(function(b){
-            if(b.category==='death')      covDeath+=N(b.cover);
-            if(b.category==='disability') covDis+=N(b.cover);
-            if(b.category==='dread')      covDD+=N(b.cover);
-            if(b.category==='ip')         covIP+=N(b.amount);
-            if(b.category==='death-income'&&N(b.amount)>0){
-              var capYrs=b.termType==='to-age'?Math.max(0,N(b.termTargetAge)-N(b.termDepAge)):N(b.termYears);
-              if(capYrs>0){
-                var capEsc=N(b.coverEsc)||0, dr=4;
-                covDeathIncome+=capEsc>0?Math.round(N(b.amount)*((Math.pow(1+capEsc/100,capYrs)-1)/((capEsc/100+dr/100)*(1+capEsc/100)))):Math.round(N(b.amount)*capYrs*12/(1+dr/100));
-              }
-            }
-          });
-        } else {
-          covDeath+=N(p.BenDeath); covDis+=N(p.BenDisability); covDD+=N(p.BenDreadDisease);
-          var _ibOld=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):[];
-          if(Array.isArray(_ibOld)) _ibOld.forEach(function(r){covIP+=N(r.amount);});
-        }
-      }catch(e){ covDeath+=N(p.BenDeath); covDis+=N(p.BenDisability); covDD+=N(p.BenDreadDisease); }
+      covDeath+=N(p.BenDeath); covDis+=N(p.BenDisability); covDD+=N(p.BenDreadDisease);
+      try{var ib=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):[];ib.forEach(function(r){covIP+=N(r.amount);});}catch(e){}
     });
   });
 
@@ -4539,7 +3519,7 @@ function openPolicySchedule(cid){
     bizGroups[bt]+=N(p.LoanAmount||0)+N(p.BenDeath||0);
   });
 
-  function R2(n){return n>0?'R\u00a0'+Math.round(n).toLocaleString('en-ZA'):'—';}
+  function R2(n){return n>0?'R\u00a0'+Math.round(n).toLocaleString('en-ZA'):null;}
 
   function summaryBlock(title,color,rows){
     var s='<div style="flex:1;min-width:200px;border:1px solid #e8e4d8;border-radius:8px;overflow:hidden">';
@@ -4603,16 +3583,8 @@ function openPolicySchedule(cid){
     grp.pols.forEach(function(p,idx){
       var bens=[];
       try{bens=p.Beneficiaries?JSON.parse(p.Beneficiaries):[];}catch(e){}
-      // Read benefits — v2 envelope or fallback
-      var _schib=null; try{_schib=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):null;}catch(e){}
-      var _schnewbens=(_schib&&_schib.v2&&_schib.v2.length>0)?_schib.v2:null;
       var incBens=[];
-      if(_schnewbens){
-        // New format — show each benefit row on the schedule
-        incBens=_schnewbens;
-      } else {
-        try{var _tmp=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):[]; if(Array.isArray(_tmp)) incBens=_tmp;}catch(e){}
-      }
+      try{incBens=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):[];}catch(e){}
       var rowBg = idx%2===0?'#ffffff':'#fafaf8';
       var freq  = p.Frequency&&p.Frequency!=='Monthly'?' /'+p.Frequency.toLowerCase().charAt(0):' /pm';
 
@@ -4637,7 +3609,7 @@ function openPolicySchedule(cid){
       s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-size:12px">'+Rpct(p.PremEscalation)+'</td>';
       s+='</tr>';
 
-      // Detail row — beneficiaries, owner, payer, notes
+      // Detail row — beneficiaries, income benefits, notes, owner
       var details=[];
       if(bens.length) details.push('<span style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.3px">Beneficiary: </span>'+benDisplay(bens));
       if(p.Payer&&p.Payer!==c.Name) details.push('<span style="font-size:11px;color:#888">Payer: </span><span style="font-size:12px">'+p.Payer+'</span>');
@@ -4647,55 +3619,20 @@ function openPolicySchedule(cid){
       if(isBiz&&p.LoanAmount) details.push('<span style="font-size:11px;color:#888">Loan/Cover: </span><span style="font-size:12px;font-weight:600">'+R(p.LoanAmount)+'</span>');
       if(p.MaturityDate) details.push('<span style="font-size:11px;color:#888">Maturity: </span><span style="font-size:12px">'+FD(p.MaturityDate)+'</span>');
       if(p.RetirementDate) details.push('<span style="font-size:11px;color:#888">Retirement: </span><span style="font-size:12px">'+FD(p.RetirementDate)+'</span>');
-      if(!_schnewbens&&incBens.length){
-        var ipStr=incBens.map(function(r){return (r.label||r.type||'IP')+' '+R(r.amount)+'/pm'+(r.waiting?' (wait '+r.waiting+')':'');}).join(' \u00b7 ');
+
+      // Income benefits summary
+      if(incBens.length){
+        var ipStr=incBens.map(function(r){return (r.label||r.type||'IP')+' '+R(r.amount)+'/pm'+(r.waiting?' (wait '+r.waiting+')':'');}).join(' · ');
         details.push('<span style="font-size:11px;color:#888">Income Benefit: </span><span style="font-size:12px">'+ipStr+'</span>');
       }
+
       if(p.Notes) details.push('<span style="font-size:11px;color:#888;font-style:italic">'+p.Notes+'</span>');
+
       if(details.length){
         s+='<tr style="background:'+rowBg+'">';
-        s+='<td colspan="9" style="padding:5px 10px 8px 10px;border-bottom:'+(_schnewbens&&_schnewbens.length?'none':'2px solid #e8e4d8')+';font-size:12px;line-height:1.8;color:#444">';
-        s+=details.join(' \u00a0\u00a0|\u00a0\u00a0 ');
+        s+='<td colspan="9" style="padding:5px 10px 10px 10px;border-bottom:2px solid #e8e4d8;font-size:12px;line-height:1.8;color:#444">';
+        s+=details.join(' &nbsp;&nbsp;|&nbsp;&nbsp; ');
         s+='</td></tr>';
-      }
-      // New-format: one sub-row per benefit
-      if(_schnewbens&&_schnewbens.length){
-        var CATCOL2={'death':'#0e413a','disability':'#1d4ed8','dread':'#7c3aed','ip':'#b45309','death-income':'#a8b938','other-income':'#6b7280'};
-        var CATLBL2={'death':'Life Cover','disability':'Capital Disability','dread':'Dread Disease','ip':'Income Protection','death-income':'Death Income','other-income':'Other Income'};
-        _schnewbens.forEach(function(b,bi){
-          var bCol=CATCOL2[b.category]||'#555';
-          var bLbl=b.label||(CATLBL2[b.category]||b.category);
-          var isLump2=b.category==='death'||b.category==='disability'||b.category==='dread';
-          var isDI2=b.category==='death-income';
-          var isLast2=(bi===_schnewbens.length-1);
-          var bdrBot=isLast2?'2px solid #e8e4d8':'1px solid #f0f0ea';
-          s+='<tr style="background:'+rowBg+';font-size:12px">';
-          s+='<td colspan="3" style="padding:4px 10px 4px 28px;border-bottom:'+bdrBot+'">';
-          s+='<span style="display:inline-block;background:'+bCol+';color:#fff;border-radius:3px;padding:1px 7px;font-size:10px;font-weight:700;margin-right:6px;letter-spacing:.3px">'+bLbl+'</span>';
-          if(b.label&&b.label!==(CATLBL2[b.category]||b.category)) s+='<span style="color:#666;font-size:11px">'+b.label+'</span>';
-          s+='</td>';
-          if(isLump2){
-            var covEscD=b.coverEsc?'<span style="font-size:10px;color:#888"> \u00b7 '+b.coverEsc+'% esc</span>':'';
-            s+='<td style="padding:4px 10px;text-align:right;border-bottom:'+bdrBot+';font-weight:600">'+R(b.cover)+covEscD+'</td>';
-            var disCol=b.category==='disability'?'':'';
-            s+='<td style="padding:4px 10px;text-align:right;border-bottom:'+bdrBot+'">\u2014</td>';
-            var ddCell='\u2014';
-            if(b.category==='dread'&&b.dreadNotes) ddCell='<span style="font-size:10px;color:#888">'+b.dreadNotes+'</span>';
-            s+='<td style="padding:4px 10px;text-align:right;border-bottom:'+bdrBot+'">'+ddCell+'</td>';
-          } else if(isDI2){
-            var termD2=b.termType==='to-age'?'To age '+b.termTargetAge:(b.termYears?b.termYears+' yrs':'\u2014');
-            var escD2=b.coverEsc?b.coverEsc+'% esc':'0% esc';
-            s+='<td colspan="3" style="padding:4px 10px;border-bottom:'+bdrBot+'"><span style="font-weight:600">'+R(b.amount)+'/pm</span><span style="font-size:11px;color:#888"> \u00b7 '+escD2+' \u00b7 Term: '+termD2+'</span></td>';
-          } else {
-            var waitD=b.waiting||'\u2014'; var termD3=b.term||'\u2014';
-            s+='<td colspan="3" style="padding:4px 10px;border-bottom:'+bdrBot+'"><span style="font-weight:600">'+R(b.amount)+'/pm</span><span style="font-size:11px;color:#888"> \u00b7 Wait: '+waitD+' \u00b7 Term: '+termD3+'</span></td>';
-          }
-          var premD=b.premPortion?R(b.premPortion)+'/pm':'\u2014';
-          var escPD=b.premEscType==='age-rated'?'age-rated'+(b.premEsc?' ~'+b.premEsc+'%':''):(b.premEsc?b.premEsc+'%':'\u2014');
-          s+='<td style="padding:4px 10px;text-align:right;border-bottom:'+bdrBot+'">'+premD+'</td>';
-          s+='<td style="padding:4px 10px;text-align:right;font-size:11px;border-bottom:'+bdrBot+'">'+escPD+'</td>';
-          s+='</tr>';
-        });
       }
     });
 
@@ -4704,7 +3641,7 @@ function openPolicySchedule(cid){
     grp.pols.forEach(function(p){var n=N(p.Premium);sectTotal+=n;if(!isNonMonthly(p))sectM+=n;});
     s+='<tr style="background:#f0efe9;font-weight:700;font-size:13px">';
     s+='<td colspan="7" style="padding:9px 10px;border-bottom:2px solid #ddd;color:'+col+'">Section Total</td>';
-    s+='<td style="padding:9px 10px;border-bottom:2px solid #ddd;text-align:right;color:'+col+'">'+( sectM>0?R2(sectM)+' /pm':'—')+'</td>';
+    s+='<td style="padding:9px 10px;border-bottom:2px solid #ddd;text-align:right;color:'+col+'">'+R2(sectM)+' /pm</td>';
     s+='<td style="padding:9px 10px;border-bottom:2px solid #ddd"></td>';
     s+='</tr>';
     s+='<tr><td colspan="9" style="padding:8px"></td></tr>';
@@ -4726,99 +3663,28 @@ function openPolicySchedule(cid){
 
   // ── PORTFOLIO SUMMARY ──
   doc+='<div style="border:2px solid #a8b938;border-radius:10px;margin-bottom:24px;overflow:hidden">';
-  var covDeathIncomeRaw=0;
-  personalGroups.forEach(function(g){
-    g.pols.forEach(function(p){
-      try{
-        var _ib=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):null;
-        var _bens=(_ib&&_ib.v2)?_ib.v2:(Array.isArray(_ib)?_ib:[]);
-        _bens.forEach(function(b){ if(b.category==='death-income') covDeathIncomeRaw+=N(b.amount); });
-      }catch(e){}
-    });
-  });
-  // Calculate asset totals from RA and investment groups
-  var totFundRA=0, totFundInv=0, totFundLivAnn=0, totFundProv=0, totFundPen=0;
-  groups.ra.pols.forEach(function(p){
-    var t=p.Type||'';
-    var fv=N(p.BenFundValue)||N(p.BenRetirementValue)||0;
-    if(t==='Living Annuity')           totFundLivAnn+=fv;
-    else if(t==='Provident Fund'||t==='Provident Preservation') totFundProv+=fv;
-    else if(t==='Pension Fund'||t==='Pension Preservation')     totFundPen+=fv;
-    else                               totFundRA+=fv;
-  });
-  groups.invest.pols.forEach(function(p){
-    totFundInv+=N(p.BenFundValue)||N(p.BenMaturityValue)||0;
-  });
-
-  // ── THREE-BOX SUMMARY ──
-  function sRow(lbl,val){
-    return '<div style="display:flex;justify-content:space-between;align-items:center;padding:7px 14px;border-bottom:1px solid #f0f0ec">'+
-      '<span style="font-size:12px;color:#667">'+lbl+'</span>'+
-      '<span style="font-size:13px;font-weight:500;color:#0e413a">'+val+'</span>'+
-      '</div>';
-  }
-  function sRowBiz(lbl,val){
-    return '<div style="display:flex;justify-content:space-between;align-items:center;padding:7px 14px;border-bottom:1px solid #f0f0ec">'+
-      '<span style="font-size:12px;color:#667">'+lbl+'</span>'+
-      '<span style="font-size:13px;font-weight:500;color:#92400e">'+val+'</span>'+
-      '</div>';
-  }
-  function sBox(title,color,rows){
-    if(!rows.length) return '';
-    return '<div style="flex:1;min-width:180px;border:1px solid #e8e4d8;border-radius:8px;overflow:hidden">'+
-      '<div style="background:'+color+';color:#fff;padding:8px 14px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px">'+title+'</div>'+
-      rows.join('')+
-      '</div>';
-  }
-  function sTotal(lbl,val,color){
-    return '<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 14px">'+
-      '<span style="font-size:12px;font-weight:700;color:'+color+'">'+lbl+'</span>'+
-      '<span style="font-size:14px;font-weight:700;color:'+color+'">'+val+'</span>'+
-      '</div>';
-  }
-
   doc+='<div style="background:#a8b938;color:#fff;padding:9px 16px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.8px">Portfolio Summary</div>';
   doc+='<div style="padding:14px;display:flex;flex-wrap:wrap;gap:12px">';
 
-  // Box 1 — Cost
-  var costRows=[];
-  if(tRiskM>0)  costRows.push(sRow('Personal /pm', R2(tRiskM)));
-  if(tRAM>0)    costRows.push(sRow('Retirement /pm', R2(tRAM)));
-  if(tMedM>0)   costRows.push(sRow('Medical aid /pm', R2(tMedM)));
-  if(tInvM>0)   costRows.push(sRow('Investments /pm', R2(tInvM)));
-  if(tBizM>0)   costRows.push(sRowBiz('Business /pm', R2(tBizM)));
-  var tGrandTotal=tRiskM+tRAM+tInvM+tMedM+tOtherM+tBizM;
-  if(tGrandTotal>0) costRows.push(sTotal('Total /pm', R2(tGrandTotal),'#0e413a'));
-  doc+=sBox('Cost','#0e413a',costRows);
+  // Cost block — personal and business SEPARATED
+  var premRows=[];
+  if(tPersM>0)    premRows.push({lbl:'Personal monthly',  val:R2(tPersM)});
+  if(tBizM>0)     premRows.push({lbl:'Business monthly',  val:R2(tBizM)});
+  if(totAnnual>0) premRows.push({lbl:'Annual premiums',   val:R2(totAnnual)});
+  if(totOnce>0)   premRows.push({lbl:'Once-off / Lump sum',val:R2(totOnce)});
+  if(premRows.length) doc+=summaryBlock('Cost','#0e413a',premRows);
 
-  // Box 2 — Personal Cover
+  // Personal cover block
   var covRows=[];
-  if(covDeath>0)           covRows.push(sRow('Life cover', R2(covDeath)));
-  if(covDeathIncomeRaw>0)  covRows.push(sRow('Death income /pm', R2(covDeathIncomeRaw)+'/pm'));
-  if(covDis>0)             covRows.push(sRow('Capital disability', R2(covDis)));
-  if(covDD>0)              covRows.push(sRow('Dread disease', R2(covDD)));
-  if(covIP>0)              covRows.push(sRow('Income protection /pm', R2(covIP)+'/pm'));
-  doc+=sBox('Personal Cover','#2e7d5a',covRows);
+  if(covDeath>0) covRows.push({lbl:'Life cover',           val:R2(covDeath)});
+  if(covDis>0)   covRows.push({lbl:'Capital disability',   val:R2(covDis)});
+  if(covDD>0)    covRows.push({lbl:'Dread disease',        val:R2(covDD)});
+  if(covIP>0)    covRows.push({lbl:'Income protection /pm',val:R2(covIP)});
+  if(covRows.length) doc+=summaryBlock('Personal Cover','#2e7d5a',covRows);
 
-  // Box 3 — Assets & Fund Values
-  var assetRows=[];
-  if(totFundRA>0)     assetRows.push(sRow('Retirement annuity', R2(totFundRA)));
-  if(totFundPen>0)    assetRows.push(sRow('Pension fund', R2(totFundPen)));
-  if(totFundProv>0)   assetRows.push(sRow('Provident fund', R2(totFundProv)));
-  if(totFundLivAnn>0) assetRows.push(sRow('Living annuity', R2(totFundLivAnn)));
-  if(totFundInv>0)    assetRows.push(sRow('Investments', R2(totFundInv)));
-  var totAllFunds=totFundRA+totFundPen+totFundProv+totFundLivAnn+totFundInv;
-  if(totAllFunds>0)   assetRows.push(sTotal('Total assets', R2(totAllFunds),'#2563ab'));
-  doc+=sBox('Assets & Fund Values','#2563ab',assetRows);
-
-  // Business cover boxes — one per BizType
+  // Business blocks
   Object.keys(bizGroups).forEach(function(bt){
-    if(bizGroups[bt]>0){
-      doc+=sBox('Business — '+bt,'#92400e',[
-        sRowBiz('Cover amount', R2(bizGroups[bt])),
-        sRowBiz('Premium /pm', tBizM>0?R2(tBizM):'—')
-      ]);
-    }
+    if(bizGroups[bt]>0) doc+=summaryBlock('Business — '+bt,'#92400e',[{lbl:'Cover amount',val:R2(bizGroups[bt])}]);
   });
 
   doc+='</div></div>';
@@ -4874,56 +3740,14 @@ document.addEventListener('input', function(e){
     if(hdr) hdr.textContent='Clients ('+list.length+')';
   }
   if(e.target.id==='linkExistSrch'){ searchLinkExist(e.target.value); }
-  if(e.target.id==='fspname'){
-    var spMRow2 = document.getElementById('spmaiden-row');
-    if(spMRow2) spMRow2.style.display = e.target.value.trim() ? '' : 'none';
-  }
-  if(e.target.id==='tclSrch'){
-    var q2 = e.target.value.trim().toLowerCase();
-    var drop = document.getElementById('tclDrop');
-    var hiddenTcl = document.getElementById('tcl');
-    var clearBtn = document.getElementById('tclClear');
-    if(!drop) return;
-    if(!q2){
-      drop.style.display='none';
-      drop.innerHTML='';
-      if(hiddenTcl) hiddenTcl.value='';
-      if(clearBtn) clearBtn.style.display='none';
-      return;
-    }
-    var matches = DB.clients.filter(function(c){
-      return (c.Name||'').toLowerCase().indexOf(q2)>=0 ||
-             (c.Cell||'').indexOf(q2)>=0;
-    }).slice(0,10);
-    if(!matches.length){
-      drop.innerHTML='<div style="padding:10px 12px;font-size:13px;color:#aaa">No clients found</div>';
-      drop.style.display='block';
-      return;
-    }
-    drop.innerHTML = matches.map(function(c){
-      return '<div style="display:flex;align-items:center;gap:10px;padding:9px 12px;cursor:pointer;border-bottom:1px solid var(--smoke)" data-act="pick-task-client" data-name="'+c.Name+'">'+
-        '<div style="width:28px;height:28px;border-radius:50%;background:'+(c.ClientType==='Company'?'var(--sky)':'var(--navy)')+';display:flex;align-items:center;justify-content:center;font-size:'+(c.ClientType==='Company'?'13px':'10px')+';font-weight:700;color:#fff;flex-shrink:0">'+(c.ClientType==='Company'?'🏢':ini(c.Name))+'</div>'+
-        '<div><div style="font-weight:600;font-size:13px">'+c.Name+'</div>'+
-        '<div style="font-size:11px;color:#889">'+(c.Cell||c.Email||'')+'</div></div>'+
-        '</div>';
-    }).join('');
-    drop.style.display='block';
-  }
   if(e.target.getAttribute('data-autdob')){
     var dob=dobFromID(e.target.value);
     if(dob){
       var dobFieldId=e.target.getAttribute('data-dobfield');
-      var targetId=dobFieldId||'fd';
-      // Try fdp-style date picker first (Year/Month/Day dropdowns)
-      var yEl=document.getElementById(targetId+'_y');
-      if(yEl){
-        // Only auto-fill if not already set
-        if(!yEl.value) fdpSetFromISO(targetId, dob);
-      } else {
-        // Fallback: plain date input
-        var fd2=document.getElementById(targetId)||document.getElementById('fam_dob');
-        if(fd2&&!fd2.value) fd2.value=dob;
-      }
+      var fd=dobFieldId?document.getElementById(dobFieldId):null;
+      if(!fd)fd=document.getElementById('fd');
+      if(!fd)fd=document.getElementById('fam_dob');
+      if(fd&&!fd.value)fd.value=dob;
     }
   }
 });
@@ -5031,11 +3855,6 @@ function bootApp(){
       render();
     }
   } catch(e){}
-  // Show persistent warning if a previous save failed
-  try{
-    var unsynced=localStorage.getItem('du_unsaved_warning');
-    if(unsynced) showSaveFail('A policy save from your previous session may not have reached the Google Sheet. Please check the Policies tab in your Google Sheet and re-enter if missing.');
-  }catch(e){}
   // Then sync from sheet in background
   syncNow();
   // Attach persistent search listener
