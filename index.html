@@ -309,6 +309,19 @@ function syncNow() {
       });
     });
     DB.policies = d.policies || [];
+    // Re-apply any locally-saved policies that haven't been confirmed by server yet.
+    // This protects against a sync that fires between Save click and server confirmation
+    // (including an F5 page refresh before server responds).
+    try{
+      var _ldb=JSON.parse(localStorage.getItem('du_db')||'{}');
+      (_ldb.policies||[]).forEach(function(lp){
+        if(lp._pendingSave){
+          var _pi=DB.policies.findIndex(function(sp){return String(sp.ID)===String(lp.ID);});
+          if(_pi>=0) DB.policies[_pi]=lp;
+          else DB.policies.push(lp);
+        }
+      });
+    }catch(e){}
     DB.tasks    = d.tasks    || [];
     DB.roas     = d.roas     || [];
     DB.links    = d.links    || [];
@@ -2399,8 +2412,8 @@ function buildPolicyForm(p){
   // PREMIUM
   html+=sec('Premium');
   html+='<div class="g2">'+fld('ppm','Premium / Contribution',p.Premium)+fs('pfreq','Frequency',['Monthly','Quarterly','Annually','Once Off'],p.Frequency||'Monthly')+'</div>';
-  if(!isLA && !isLifeAnn){
-    html+='<div class="g2">'+fld('pprem_pct','Premium Escalation %',p.PremEscalation)+(isRA?'<div></div>':fld('pben_pct','Benefit Escalation %',p.BenEscalation))+'</div>';
+  if(!isLA){
+    html+='<div class="g2">'+fld('pprem_pct','Premium Escalation %',p.PremEscalation)+fld('pben_pct','Benefit Escalation %',p.BenEscalation)+'</div>';
   }
 
   // RISK COVER
@@ -2427,7 +2440,7 @@ function buildPolicyForm(p){
     if(isRA){
       html+='<div class="g2">'+fld('pb_vested','Vested Component (Pot 1)',p.VestedValue)+fld('pb_nonvested','Non-Vested Component',p.NonVestedValue)+'</div>';
       html+='<div class="g2">'+fld('pb_retcomp','Retirement Component (Pot 2)',p.RetirementComponent)+fld('pb_savcomp','Savings Component (Pot 3)',p.SavingsComponent)+'</div>';
-      html+='<div class="g2">'+fld('pb_retage','Retirement Age',p.RetirementAge||'65','text','oninput="raCalcMaturity()"')+fdp('pb_matdate','Maturity Date',p.MaturityDate||'')+'</div>';
+      html+='<div class="g2">'+fld('pb_retage','Retirement Age',p.RetirementAge||'65')+fdp('pb_matdate','Maturity Date',p.MaturityDate||'')+'</div>';
       html+='<div class="g2">'+fld('pb_illrate','Illustrative Rate %',p.IllustrativeRate||'9')+fld('pb_growrate','Premium Growth Rate %',p.PremGrowthRate||'10')+'</div>';
       html+='<div class="fld"><label>Will client withdraw Savings Pot (Pot 3) before retirement?</label><div style="display:flex;gap:12px;margin-top:8px">';
       html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="p3pot" value="Yes"'+(p.WithdrawSavingsPot==='Yes'?' checked':'')+'>Yes</label>';
@@ -2623,42 +2636,6 @@ function renderIncomeRows(){
 function addIncomeRow(){
   POL_INCOME_ROWS.push({type:'Temporary IP',label:'',amount:'',waiting:'1 month',term:'To age 65',esc:'',taxable:'No',convert:'No'});
   document.getElementById('incomeRowsWrap').innerHTML=renderIncomeRows();
-}
-
-// ── RA maturity date auto-calculation ────────────────────────
-// When retirement age is entered, calculate the maturity date from
-// the client's DOB: same month and day as birthday, in the year they
-// reach the entered retirement age.
-function raCalcMaturity(){
-  var ageEl = document.getElementById('pb_retage');
-  if(!ageEl) return;
-  var age = parseInt(ageEl.value);
-  if(isNaN(age) || age < 40 || age > 85) return;
-  // Get client DOB from DB using EPC
-  var c = DB.clients.find(function(x){ return String(x.ID)===String(EPC); });
-  if(!c || !clean(c.DOB)) return;
-  var dob = new Date(c.DOB);
-  if(isNaN(dob)) return;
-  // Maturity = birthday in the year they turn [age]
-  var matYear = dob.getFullYear() + age;
-  var matMon  = String(dob.getMonth()+1); if(matMon.length===1) matMon='0'+matMon;
-  var matDay  = String(dob.getDate());    if(matDay.length===1) matDay='0'+matDay;
-  var matDate = matYear+'-'+matMon+'-'+matDay;
-  // Set the hidden input and rebuild the visible dropdowns
-  var hid = document.getElementById('pb_matdate');
-  if(hid){ hid.value = matDate; }
-  // Update the three visible selects
-  var yEl = document.getElementById('pb_matdate_y');
-  var mEl = document.getElementById('pb_matdate_m');
-  var dEl = document.getElementById('pb_matdate_d');
-  if(yEl) yEl.value = String(matYear);
-  if(mEl) mEl.value = matMon;
-  if(dEl){
-    dEl.innerHTML = fdpDayOpts(String(matYear), matMon, matDay);
-    dEl.value = matDay;
-  }
-  // Update the day label
-  fdpUpdateDay('pb_matdate');
 }
 
 // ── Living Annuity two-way calculation ───────────────────────
@@ -3040,10 +3017,24 @@ function savePolicy(){
   if(!oldPol&&window.REPLACING_POL_ID){window.REPLACING_POL_ID=null;window.REPLACING_POL_NO=null;}
   // Keep existing history, don't overwrite
   pol.ReviewHistory=oldPol?(oldPol.ReviewHistory||''):'';
+  // Mark as pending so syncNow won't overwrite before server confirms
+  pol._pendingSave = true;
   if(EPI!==null&&oldPol){var gi=DB.policies.indexOf(oldPol);if(gi>=0)DB.policies[gi]=pol;}
   else DB.policies.push(pol);
+  // Write to localStorage IMMEDIATELY — before server confirms.
+  // This means an F5 refresh before the server responds still shows the correct values.
+  try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
   closeAll();render();
-  post({action:'savePolicy',policy:pol},function(){toast('Policy saved','ok');});
+  // Send to server — on confirm, clear the pending flag and re-save localStorage
+  var _polForServer = JSON.parse(JSON.stringify(pol));
+  delete _polForServer._pendingSave;
+  post({action:'savePolicy',policy:_polForServer},function(){
+    // Server confirmed — clear pending flag in DB and localStorage
+    var _ci=DB.policies.findIndex(function(x){return x.ID===pol.ID;});
+    if(_ci>=0){ DB.policies[_ci]=_polForServer; }
+    try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
+    toast('Policy saved ✓','ok');
+  });
 }
 
 function logAnnualReview(){
