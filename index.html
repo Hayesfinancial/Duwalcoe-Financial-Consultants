@@ -302,9 +302,24 @@ function syncNow() {
     function fixIDField(v){
       if(!v && v!==0) return v;
       var s = String(v).trim();
-      // Catches scientific notation (8.21e+15) AND oversized integers (821000000000000000)
-      if(s.match(/e[\+\-]/i) || (s.match(/^\d+$/) && s.length > 13)) {
-        return Number(v).toFixed(0);
+      // Remove trailing dot (e.g. stored as float with no decimal digits)
+      if(s.slice(-1) === '.') s = s.slice(0,-1);
+      // If already all digits — return as-is, never convert through Number()
+      // Number() loses precision on 13+ digit integers (JS float limit)
+      if(s.match(/^\d+$/)) return s;
+      // Convert scientific notation (e.g. 8.21e+15) to plain integer string
+      if(s.match(/e[\+\-]/i)){
+        // Use BigInt if available for exact conversion, else string manipulation
+        try{
+          var parts = s.toLowerCase().split('e');
+          var base = parts[0].replace('.','');
+          var exp = parseInt(parts[1]);
+          var dotPos = parts[0].indexOf('.');
+          var digitsAfterDot = dotPos >= 0 ? parts[0].length - dotPos - 1 : 0;
+          var shift = exp - digitsAfterDot;
+          if(shift >= 0){ return base + '0'.repeat(shift); }
+          else { return base.slice(0, base.length+shift); }
+        }catch(e2){ return String(Math.round(Number(s))); }
       }
       return s;
     }
