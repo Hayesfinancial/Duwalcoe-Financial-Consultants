@@ -155,6 +155,7 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--cream);c
     <div class="mb" id="pModB"></div>
     <div class="mf">
       <button class="btn b-gh sm" data-close="1">Cancel</button>
+      <button class="btn b-rd sm" id="delPolBtn" style="display:none" onclick="deletePolicy()">🗑 Delete</button>
       <button class="btn b-sk sm" onclick="logAnnualReview()">📋 Log Review</button>
       <button class="btn b-gd sm" data-save="policy">💾 Save Policy</button>
     </div>
@@ -467,7 +468,8 @@ function post(data, cb){
     patch('familylinks', data.id, {IsClient:'Yes', ClientID:data.clientId}, cb);
   }
   else if(action==='deleteRow'){
-    var tbl = data.sheet==='Tasks'?'tasks':data.sheet==='ROA'?'roas':data.sheet.toLowerCase()+'s';
+    var _sheetMap = {Tasks:'tasks',ROA:'roas',policies:'policies',clients:'clients',familylinks:'familylinks'};
+    var tbl = _sheetMap[data.sheet] || data.sheet.toLowerCase();
     del(tbl, data.id, cb);
   }
   else if(action==='toggleTask'){
@@ -2468,6 +2470,9 @@ function openPolicyModal(cid,idx){
   // JSON round-trip ensures no reference sharing with DB.policies array
   window.POL_ORIGINAL_SNAP = (idx!==undefined&&pols[idx]) ? snapshotPolicy(JSON.parse(JSON.stringify(pols[idx]))) : null;
   document.getElementById('pModT').textContent=(idx!==undefined?'Edit Policy':'Add Policy');
+  // Show delete button only when editing an existing policy
+  var _delBtn = document.getElementById('delPolBtn');
+  if(_delBtn) _delBtn.style.display = (idx!==undefined) ? '' : 'none';
   buildPolicyForm(p);
   document.getElementById('pMod').classList.add('open');
 }
@@ -3230,6 +3235,23 @@ function savePolicy(){
     if(_ci>=0){ DB.policies[_ci]=_polForServer; }
     try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
     toast('Policy saved ✓','ok');
+  });
+}
+
+function deletePolicy(){
+  var existing = polsFor(EPC);
+  var oldPol = (EPI!==null && existing[EPI]) ? existing[EPI] : null;
+  if(!oldPol){ toast('Cannot find policy to delete','err'); return; }
+  var label = (oldPol.Insurer||'') + (oldPol.Product?' — '+oldPol.Product:'') + (oldPol.PolicyNo?' ('+oldPol.PolicyNo+')':'');
+  if(!confirm('Permanently delete this policy?\n\n' + label + '\n\nThis cannot be undone.')) return;
+  // Remove from DB in memory
+  var gi = DB.policies.indexOf(oldPol);
+  if(gi >= 0) DB.policies.splice(gi, 1);
+  try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
+  closeAll(); render();
+  // Delete from Supabase
+  post({action:'deleteRow', sheet:'policies', id:oldPol.ID}, function(){
+    toast('Policy deleted','ok');
   });
 }
 
