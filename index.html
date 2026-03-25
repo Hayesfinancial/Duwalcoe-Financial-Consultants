@@ -320,11 +320,18 @@ function syncNow() {
     done++;
     if(done < needed.length) return;
 
-    // Clients
-    DB.clients = (loaded.clients||[]).map(function(c){
-      // No more scientific notation corruption — Supabase stores text as text
-      return c;
-    });
+    // Clients — load from server then re-apply any locally pending client saves
+    DB.clients = (loaded.clients||[]).map(function(c){ return c; });
+    try{
+      var _ldb2=JSON.parse(localStorage.getItem('du_db')||'{}');
+      (_ldb2.clients||[]).forEach(function(lc){
+        if(lc._pendingSave){
+          var _ci=DB.clients.findIndex(function(sc){return String(sc.ID)===String(lc.ID);});
+          if(_ci>=0) DB.clients[_ci]=lc;
+          else DB.clients.push(lc);
+        }
+      });
+    }catch(e){}
 
     // Policies
     DB.policies = (loaded.policies||[]).map(function(p){
@@ -2439,9 +2446,12 @@ function saveClient(openFNA){
   var savedId = c.ID;
   var savedIsLead = c.IsLead==='Yes';
   EC=null; closeAll();
+  // Write to localStorage immediately so a refresh before server responds keeps the data
+  try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
   // Open the client/lead profile immediately after save
   openClient(savedId);
   post({action:'saveClient',client:c},function(){
+    try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
     toast((savedIsLead?'Lead':'Client')+' saved','ok');
     if(openFNA){
       var fnaUrl = buildFnaUrl(c);
@@ -3183,10 +3193,22 @@ function savePolicy(){
   if(!oldPol&&window.REPLACING_POL_ID){window.REPLACING_POL_ID=null;window.REPLACING_POL_NO=null;}
   // Keep existing history, don't overwrite
   pol.ReviewHistory=oldPol?(oldPol.ReviewHistory||''):'';
+  // Mark pending so a refresh before server confirms doesn't lose the policy
+  pol._pendingSave = true;
   if(EPI!==null&&oldPol){var gi=DB.policies.indexOf(oldPol);if(gi>=0)DB.policies[gi]=pol;}
   else DB.policies.push(pol);
+  // Write to localStorage immediately — survives a refresh before server responds
+  try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
   closeAll();render();
-  post({action:'savePolicy',policy:pol},function(){toast('Policy saved','ok');});
+  var _polForServer = JSON.parse(JSON.stringify(pol));
+  delete _polForServer._pendingSave;
+  post({action:'savePolicy',policy:_polForServer},function(){
+    // Server confirmed — clear pending flag
+    var _ci=DB.policies.findIndex(function(x){return x.ID===pol.ID;});
+    if(_ci>=0){ DB.policies[_ci]=_polForServer; }
+    try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
+    toast('Policy saved ✓','ok');
+  });
 }
 
 function logAnnualReview(){
