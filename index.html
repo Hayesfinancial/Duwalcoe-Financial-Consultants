@@ -288,7 +288,22 @@ var TC = '';    // task client name
 // ══ NETWORK (Supabase) ═══════════════════════════════════════
 
 // Core Supabase REST helper — fetch wrapper used by all operations
-function sbFetch(method, path, body, cb){
+function sbReauth(onDone){
+  fetch(SB_URL+'/auth/v1/token?grant_type=password', {
+    method:'POST',
+    headers:{'apikey':SB_KEY,'Content-Type':'application/json'},
+    body:JSON.stringify({email:'clinton@duwalcoe.co.za',password:'Irrlmwvm1*2'})
+  }).then(function(r){return r.json();}).then(function(d){
+    if(d.access_token){
+      window._sbAuthed=true;
+      window._sbToken=d.access_token;
+      sessionStorage.setItem('sb_token',d.access_token);
+    }
+    if(onDone) onDone();
+  }).catch(function(){ if(onDone) onDone(); });
+}
+
+function sbFetch(method, path, body, cb, _isRetry){
   // Use session token if available (required when RLS is enabled)
   var token = sessionStorage.getItem('sb_token') || SB_KEY;
   var opts = {
@@ -303,6 +318,13 @@ function sbFetch(method, path, body, cb){
   if(body) opts.body = JSON.stringify(body);
   fetch(SB_URL + path, opts)
     .then(function(r){
+      if(r.status === 401 && !_isRetry){
+        // Token expired — re-authenticate and retry once
+        sbReauth(function(){
+          sbFetch(method, path, body, cb, true);
+        });
+        return;
+      }
       if(!r.ok){ r.text().then(function(t){ console.error('Supabase error:', r.status, t); if(cb) cb(null, t); }); return; }
       var ct = r.headers.get('content-type')||'';
       if(ct.indexOf('json')>=0) r.json().then(function(d){ if(cb) cb(d); });
@@ -4119,6 +4141,9 @@ function selectUser(name){
   if(sel) sel.value=name;
   // Sign in to Supabase silently — required for RLS
   // Wait for token before booting so RLS doesn't block the initial data load
+  // Clear any stale/expired token first
+  sessionStorage.removeItem('sb_token');
+  window._sbAuthed = false;
   if(!window._sbAuthed){
     fetch(SB_URL+'/auth/v1/token?grant_type=password', {
       method:'POST',
