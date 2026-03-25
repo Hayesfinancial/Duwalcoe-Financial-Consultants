@@ -1345,10 +1345,12 @@ function searchLinkExist(q) {
 function confirmExistLink(linkedClientId) {
   var rel = document.getElementById('linkExistRel').value;
   var linked = DB.clients.find(function(x){ return String(x.ID)===String(linkedClientId); });
-  if(!linked) return;
-  var memId = 'fam_' + Date.now();
-  var link = {
-    ID: memId,
+  var principal = DB.clients.find(function(x){ return String(x.ID)===String(LINK_EXIST_CLIENT); });
+  if(!linked || !principal) return;
+
+  // Link A -> B (principal's family card shows the linked client)
+  var linkAB = {
+    ID: 'fam_' + Date.now(),
     PrincipalID: LINK_EXIST_CLIENT,
     Name: linked.Name,
     IDNumber: linked.IDNumber||'',
@@ -1359,10 +1361,37 @@ function confirmExistLink(linkedClientId) {
     IsClient: 'Yes',
     ClientID: linkedClientId
   };
-  DB.links.push(link);
+
+  // Link B -> A (linked client's family card shows the principal)
+  var linkBA = {
+    ID: 'fam_' + (Date.now()+1),
+    PrincipalID: linkedClientId,
+    Name: principal.Name,
+    IDNumber: principal.IDNumber||'',
+    DOB: principal.DOB||'',
+    Cell: principal.Cell||'',
+    Email: principal.Email||'',
+    Type: rel,
+    IsClient: 'Yes',
+    ClientID: LINK_EXIST_CLIENT
+  };
+
+  // Check if reverse link already exists to avoid duplicates
+  var reverseExists = DB.links.find(function(l){
+    return String(l.PrincipalID)===String(linkedClientId) &&
+           String(l.ClientID)===String(LINK_EXIST_CLIENT);
+  });
+
+  DB.links.push(linkAB);
+  if(!reverseExists) DB.links.push(linkBA);
   closeAll();
   render();
-  post({action:'saveFamMember', member:link}, function(){ toast(linked.Name + ' linked as ' + rel,'ok'); });
+  post({action:'saveFamMember', member:linkAB}, function(){
+    toast(linked.Name + ' linked as ' + rel,'ok');
+  });
+  if(!reverseExists){
+    post({action:'saveFamMember', member:linkBA}, function(){});
+  }
 }
 
 function renderOverview(c,pols,roas,ctasks){
