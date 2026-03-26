@@ -722,7 +722,11 @@ var S = JSON.parse(JSON.stringify(DEFAULTS));
       S.importedPols.forEach(function(p){
         var k1 = p.PolicyNo;
         var k2 = p.Insurer+'|'+p.Product+'|'+p.Type;
-        if((k1 && retIncludes[k1]) || retIncludes[k2]) p._retInclude = true;
+        var _ri = retIncludes[k1] || retIncludes[k2];
+        if(_ri){
+          if(typeof _ri === 'object'){ p._retInclude = _ri.include||false; p._retRows = _ri.rows||[]; }
+          else { p._retInclude = true; p._retRows = []; } // legacy boolean
+        }
       });
     }
     // If server retAssets is missing RA policies that are now in importedPols, reset so
@@ -847,9 +851,9 @@ function saveToServer(silent) {
   // so they survive the CRM policy refresh on next load
   var retIncludes = {};
   (S.importedPols||[]).forEach(function(p){
-    if(p._retInclude){
+    if(p._retInclude || (p._retRows && p._retRows.length)){
       var key2 = p.PolicyNo || (p.Insurer+'|'+p.Product+'|'+p.Type);
-      if(key2) retIncludes[key2] = true;
+      if(key2) retIncludes[key2] = {include:p._retInclude||false, rows:p._retRows||[]};
     }
   });
   saveData.retIncludes = retIncludes;
@@ -2838,41 +2842,69 @@ function buildPolicies() {
         s.appendChild(afford2);
       }
 
-      // ── Capital needed to fund ticked policies in retirement
-      var tickedPols = _riskTypes.filter(function(p){ return p._retInclude; });
-      if(tickedPols.length > 0){
-        s.appendChild(stitle('Capital Needed to Fund Selected Policies in Retirement'));
+      // ── Capital needed to fund ticked benefit rows in retirement
+      // Collect ticked items: either whole-policy tick (_retInclude) or per-benefit row ticks (_retRows)
+      var tickedItems = [];
+      _riskTypes.forEach(function(pol){
+        var lumpRows=[];
+        try{lumpRows=pol.LumpBenefits?JSON.parse(pol.LumpBenefits):[];}catch(e){}
+        if(lumpRows.length > 0){
+          // Per-benefit ticks
+          var retRows = pol._retRows || [];
+          retRows.forEach(function(ri){
+            var r = lumpRows[ri];
+            if(!r) return;
+            tickedItems.push({
+              label:(pol.Insurer||'')+(pol.Product?' — '+pol.Product:'')+' — '+r.type+(r.label?' ('+r.label+')':''),
+              prem: parseFloat(r.prem||0)||0,
+              esc:  parseFloat(r.premEsc||0)||0,
+              pol:  pol,
+              _retReturn: pol._retReturn
+            });
+          });
+        } else if(pol._retInclude){
+          // Legacy whole-policy tick
+          var escRawL=String(pol.PremEscalation!=null&&pol.PremEscalation!==''?pol.PremEscalation:(pol.premEsc!=null&&pol.premEsc!==''?pol.premEsc:'')).replace(/,/g,'.').replace(/[^0-9.]/g,'');
+          tickedItems.push({
+            label:(pol.Insurer||'')+(pol.Product?' — '+pol.Product:''),
+            prem: N(pol.Premium),
+            esc:  parseFloat(escRawL)||0,
+            pol:  pol,
+            _retReturn: pol._retReturn
+          });
+        }
+      });
+
+      if(tickedItems.length > 0){
+        s.appendChild(stitle('Capital Needed to Fund Selected Benefits in Retirement'));
         var polCapInf=div('info');
-        polCapInf.innerHTML='Capital required to fund each selected policy premium for retirement. '
-          +'Uses the premium at retirement, escalated in retirement at the policy rate, capitalised over '+yrsInRet+' years.';
+        polCapInf.innerHTML='Capital required to fund each selected benefit in retirement. '
+          +'Uses the premium at retirement, escalated in retirement at the benefit rate, capitalised over '+yrsInRet+' years.';
         s.appendChild(polCapInf);
 
         var polCapTbl=document.createElement('table');
-        polCapTbl.innerHTML='<thead><tr><th>Policy</th><th>Premium today</th><th>Esc %</th><th>Premium at ret.</th><th>Return in ret %</th><th>Capital required</th></tr></thead>';
+        polCapTbl.innerHTML='<thead><tr><th>Benefit</th><th>Premium today</th><th>Esc %</th><th>Premium at ret.</th><th>Return in ret %</th><th>Capital required</th></tr></thead>';
         var polCapTb=document.createElement('tbody');
         var totalPolCap=0;
 
-        tickedPols.forEach(function(pol){
-          var escRaw2=String(pol.PremEscalation!=null&&pol.PremEscalation!==''?pol.PremEscalation:(pol.premEsc!=null&&pol.premEsc!==''?pol.premEsc:'')).replace(/,/g,'.').replace(/[^0-9.]/g,'');
-          var esc2=parseFloat(escRaw2)||0;
-          var premAtRet=esc2>0?Math.round(N(pol.Premium)*Math.pow(1+esc2/100,yrsToRet2)):N(pol.Premium);
-          // Return rate in retirement — use assumption, editable per policy
-          var retRet=N(pol._retReturn)>0?N(pol._retReturn):N(S.assump.retReturn)||8;
-          // Capital = PV of premium stream in retirement at return rate
+        tickedItems.forEach(function(item){
+          var esc2=item.esc;
+          var premAtRet=esc2>0?Math.round(item.prem*Math.pow(1+esc2/100,yrsToRet2)):item.prem;
+          var retRet=N(item._retReturn)>0?N(item._retReturn):N(S.assump.retReturn)||8;
           var polCap=capitalise(premAtRet, yrsInRet, esc2||N(S.assump.cpi)||6, retRet);
           totalPolCap+=polCap;
-          var idx3=pols.indexOf(pol);
+          var idx3=pols.indexOf(item.pol);
           var tr3=document.createElement('tr');
 
           // Editable return rate cell
           var retRetInp=document.createElement('input'); retRetInp.type='text'; retRetInp.inputMode='numeric';
-          retRetInp.value=pol._retReturn||''; retRetInp.placeholder=String(N(S.assump.retReturn)||8);
+          retRetInp.value=item._retReturn||''; retRetInp.placeholder=String(N(S.assump.retReturn)||8);
           retRetInp.style.cssText='width:46px;padding:3px 5px;border:1.5px solid var(--mist);border-radius:4px;font-size:11px;text-align:right';
-          retRetInp.addEventListener('blur',function(e){S.importedPols[idx3]._retReturn=e.target.value;render();});
-          retRetInp.addEventListener('input',function(e){S.importedPols[idx3]._retReturn=e.target.value;});
+          retRetInp.addEventListener('blur',function(e){if(idx3>=0)S.importedPols[idx3]._retReturn=e.target.value;render();});
+          retRetInp.addEventListener('input',function(e){if(idx3>=0)S.importedPols[idx3]._retReturn=e.target.value;});
 
-          tr3.innerHTML='<td><strong>'+(pol.Insurer||'—')+'</strong>'+(pol.Product?' — '+pol.Product:'')+'</td>'+
-            '<td>'+Rfmt(pol.Premium)+'/pm</td>'+
+          tr3.innerHTML='<td><strong>'+item.label+'</strong></td>'+
+            '<td>'+Rfmt(item.prem)+'/pm</td>'+
             '<td>'+(esc2||'—')+'%</td>'+
             '<td>'+Rfmt(premAtRet)+'/pm</td>';
           var tdRet=document.createElement('td');
@@ -2947,16 +2979,30 @@ function buildPolicies() {
     bSend.className = 'btn btn-navy';
     bSend.textContent = '→ Send ticked premiums to Retirement tab';
     bSend.addEventListener('click', function() {
-      var toSend = (S.importedPols||[]).filter(function(p){
-        return p._retInclude && (p.Frequency||'Monthly')==='Monthly' && N(p.Premium)>0
-          && p.Type !== 'Business Assurance';
+      // Collect ticked items — per-benefit rows or legacy whole-policy ticks
+      var toSendItems=[];
+      (S.importedPols||[]).forEach(function(pol){
+        if(pol.Type==='Business Assurance') return;
+        var lumpRows=[];
+        try{lumpRows=pol.LumpBenefits?JSON.parse(pol.LumpBenefits):[];}catch(e){}
+        if(lumpRows.length>0){
+          var retRows=pol._retRows||[];
+          retRows.forEach(function(ri){
+            var r=lumpRows[ri];
+            if(!r||!r.prem) return;
+            var escR=String(r.premEsc||'').replace(/,/g,'.').replace(/[^0-9.]/g,'');
+            toSendItems.push({desc:(pol.Insurer||'')+(pol.Product?' — '+pol.Product:'')+' — '+r.type,amt:String(Math.round(parseFloat(r.prem)||0)),esc:escR});
+          });
+        } else if(pol._retInclude&&(pol.Frequency||'Monthly')==='Monthly'&&N(pol.Premium)>0){
+          var escRaw3=String(pol.PremEscalation!=null&&pol.PremEscalation!==''?pol.PremEscalation:(pol.premEsc!=null&&pol.premEsc!==''?pol.premEsc:'')).replace(/,/g,'.').replace(/[^0-9.]/g,'');
+          toSendItems.push({desc:(pol.Insurer||'')+(pol.Product?' — '+pol.Product:'')+' premium',amt:String(Math.round(N(pol.Premium))),esc:escRaw3});
+        }
       });
-      if (!toSend.length) { alert('Tick the checkbox on the policies in the affordability table above.'); return; }
+      if (!toSendItems.length) { alert('Tick the checkboxes on the benefit rows you want to keep in retirement.'); return; }
       if (!S.retNeeds) S.retNeeds = [];
       S.retNeeds = S.retNeeds.filter(function(r){ return !r._isPremRow; });
-      toSend.forEach(function(p){
-        var escRaw3=String(p.PremEscalation!=null&&p.PremEscalation!==''?p.PremEscalation:(p.premEsc!=null&&p.premEsc!==''?p.premEsc:'')).replace(/,/g,'.').replace(/[^0-9.]/g,'');
-        S.retNeeds.push({ desc:(p.Insurer||'')+(p.Product?' — '+p.Product:'')+' premium', amtToday:String(Math.round(N(p.Premium))), esc:escRaw3, _isPremRow:true });
+      toSendItems.forEach(function(item){
+        S.retNeeds.push({ desc:item.desc, amtToday:item.amt, esc:item.esc, _isPremRow:true });
       });
       persist(); saveToServer(true); go(6); // go to Retirement tab (index 6 after tab reorder)
     });
@@ -3112,7 +3158,7 @@ function buildPolCard(p, i) {
       lumpTbl.style.cssText = 'width:100%;border-collapse:collapse;font-size:12px';
       // Header
       var lhdr = document.createElement('tr');
-      ['Type / Label','Cover','Premium','Prem Esc %','Ben Esc %'].forEach(function(h){
+      ['Type / Label','Cover','Premium','Prem Esc %','Ben Esc %','Pay in ret.'].forEach(function(h){
         var th = document.createElement('th');
         th.textContent = h;
         th.style.cssText = 'text-align:left;font-size:10px;color:var(--sub);font-weight:700;padding:3px 6px;border-bottom:1px solid var(--mist)';
@@ -3167,6 +3213,25 @@ function buildPolCard(p, i) {
           try{var rows=JSON.parse(S.importedPols[i].LumpBenefits||'[]');rows[ri].benEsc=e.target.value;S.importedPols[i].LumpBenefits=JSON.stringify(rows);}catch(ex){}
         });
         t5.appendChild(beI); tr.appendChild(t5);
+        // Per-benefit retirement tick
+        var t6 = document.createElement('td'); t6.style.padding='4px 8px;text-align:center';
+        var retChk = document.createElement('input'); retChk.type='checkbox';
+        retChk.style.cssText='accent-color:var(--gold);width:14px;height:14px;cursor:pointer';
+        // _retRows is an array of ticked row indices on the policy
+        if(!p._retRows) p._retRows=[];
+        retChk.checked = p._retRows.indexOf(ri) >= 0;
+        retChk.addEventListener('change',function(e){
+          try{
+            var rows=JSON.parse(S.importedPols[i].LumpBenefits||'[]');
+            if(!S.importedPols[i]._retRows) S.importedPols[i]._retRows=[];
+            if(e.target.checked){
+              if(S.importedPols[i]._retRows.indexOf(ri)<0) S.importedPols[i]._retRows.push(ri);
+            } else {
+              S.importedPols[i]._retRows=S.importedPols[i]._retRows.filter(function(x){return x!==ri;});
+            }
+          }catch(ex){}
+        });
+        t6.appendChild(retChk); tr.appendChild(t6);
 
         ltbody.appendChild(tr);
       });
