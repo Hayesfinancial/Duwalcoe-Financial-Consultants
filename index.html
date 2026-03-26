@@ -2515,6 +2515,7 @@ function openPolicyModal(cid,idx){
 }
 
 var POL_INCOME_ROWS=[];
+var POL_LUMP_ROWS=[];
 var POL_BENS=[];
 
 function sec(title){
@@ -2525,6 +2526,7 @@ function buildPolicyForm(p){
   p=p||{};
   var type=p.Type||'Life / Income Protector';
   try{ POL_INCOME_ROWS=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):[]; }catch(e){ POL_INCOME_ROWS=[]; }
+  try{ POL_LUMP_ROWS=p.LumpBenefits?JSON.parse(p.LumpBenefits):[]; }catch(e){ POL_LUMP_ROWS=[]; }
   try{ POL_BENS=p.Beneficiaries?JSON.parse(p.Beneficiaries):[]; }catch(e){ POL_BENS=[]; }
 
   var isRisk=(type==='Life / Income Protector'||type==='');
@@ -2598,14 +2600,16 @@ function buildPolicyForm(p){
 
   // RISK COVER
   if(isRisk){
+    // Seed POL_LUMP_ROWS from legacy single fields if rows are empty
+    if(POL_LUMP_ROWS.length===0){
+      if(p.BenDeath) POL_LUMP_ROWS.push({type:'Life Cover',label:'',cover:p.BenDeath,prem:'',premEsc:'',benEsc:''});
+      if(p.BenDisability) POL_LUMP_ROWS.push({type:'Capital Disability',label:'',cover:p.BenDisability,prem:'',premEsc:'',benEsc:''});
+      if(p.BenDreadDisease) POL_LUMP_ROWS.push({type:'Dread Disease / Severe Illness',label:p.DreadDiseaseNotes||'',cover:p.BenDreadDisease,prem:'',premEsc:'',benEsc:''});
+    }
     html+=sec('Risk Cover — Lump Sums');
-    html+='<div class="g2">'+fld('pb_death','Death Benefit',p.BenDeath)+fld('pb_dis','Capital Disability',p.BenDisability)+'</div>';
-    html+='<div class="g2">';
-    html+='<div class="fld"><label>Dread Disease / Severe Illness — Cover Amount</label><input id="pb_dd" type="text" value="'+(p.BenDreadDisease||'')+'" placeholder="e.g. 500000" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px"></div>';
-    html+='<div class="fld"><label>Dread Disease Type</label><select id="pb_ddtype" style="width:100%;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px"><option'+(p.DreadDiseaseType==='Monthly Income'?'':' selected')+'>Lump Sum</option><option'+(p.DreadDiseaseType==='Monthly Income'?' selected':'')+'>Monthly Income</option></select></div>';
-    html+='</div>';
-    html+='<div class="fld"><label>Dread Disease Notes</label><input id="pb_ddnotes" type="text" value="'+(p.DreadDiseaseNotes||'')+'" placeholder="e.g. Comprehensive, Cancer only..." style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:7px 10px;font-family:inherit;font-size:13px"></div>';
-
+    html+='<div style="font-size:11px;color:#889;margin-bottom:8px">One row per benefit. Each benefit can have its own cover, premium and escalation.</div>';
+    html+='<div id="lumpRowsWrap">'+renderLumpRows()+'</div>';
+    html+='<button type="button" class="btn b-gh sm" style="margin-top:6px" onclick="addLumpRow()">+ Add Lump Sum Benefit</button>';
 
     html+=sec('Income Benefits');
     html+='<div style="font-size:11px;color:#889;margin-bottom:8px">Death income, income protection, sickness benefits — one row per benefit stream.</div>';
@@ -2805,6 +2809,37 @@ function addPolBen(){
   document.getElementById('polBensWrap').innerHTML=renderPolBens();
 }
 
+function renderLumpRows(){
+  if(POL_LUMP_ROWS.length===0) return '<div style="font-size:12px;color:#aaa;padding:8px 0">No lump sum benefits added yet — click + Add Lump Sum Benefit.</div>';
+  var typeOpts=['Life Cover','Capital Disability','Dread Disease / Severe Illness','Other Lump Sum'];
+  return POL_LUMP_ROWS.map(function(r,i){
+    return '<div style="background:var(--smoke);border-radius:8px;padding:10px 12px;margin-bottom:8px">'+
+      '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">'+
+      '<select onchange="POL_LUMP_ROWS['+i+'].type=this.value" style="border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px;flex:1.5">'+
+        typeOpts.map(function(o){return '<option'+(r.type===o?' selected':'')+'>'+o+'</option>';}).join('')+
+      '</select>'+
+      '<input type="text" value="'+(r.label||'')+'" placeholder="Benefit label / notes" onchange="POL_LUMP_ROWS['+i+'].label=this.value" style="flex:2;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px">'+
+      '<button type="button" onclick="lumpRowDelete('+i+')" style="background:var(--rose);color:#fff;border:none;border-radius:6px;padding:5px 9px;cursor:pointer;font-size:11px;font-weight:700">✕</button>'+
+      '</div>'+
+      '<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px">'+
+      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Cover Amount</div><input type="text" value="'+(r.cover||'')+'" placeholder="R" onchange="POL_LUMP_ROWS['+i+'].cover=this.value" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
+      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Premium</div><input type="text" value="'+(r.prem||'')+'" placeholder="R" onchange="POL_LUMP_ROWS['+i+'].prem=this.value" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
+      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Premium Esc %</div><input type="text" value="'+(r.premEsc||'')+'" placeholder="%" onchange="POL_LUMP_ROWS['+i+'].premEsc=this.value" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
+      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Benefit Esc %</div><input type="text" value="'+(r.benEsc||'')+'" placeholder="%" onchange="POL_LUMP_ROWS['+i+'].benEsc=this.value" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
+      '</div>'+
+      '</div>';
+  }).join('');
+}
+
+function lumpRowDelete(i){
+  POL_LUMP_ROWS.splice(i,1);
+  document.getElementById('lumpRowsWrap').innerHTML=renderLumpRows();
+}
+function addLumpRow(){
+  POL_LUMP_ROWS.push({type:'Life Cover',label:'',cover:'',prem:'',premEsc:'',benEsc:''});
+  document.getElementById('lumpRowsWrap').innerHTML=renderLumpRows();
+}
+
 function renderIncomeRows(){
   if(POL_INCOME_ROWS.length===0) return '<div style="font-size:12px;color:#aaa;padding:8px 0">No income benefits added yet.</div>';
   var waitOpts=['7 days','2 weeks','1 month','3 months','6 months','1 year','2 years'];
@@ -2978,10 +3013,13 @@ function collectPolicyForm(){
     StartDate:g('psd'),ClientIsOwner:getR('pisowner'),Owner:g('pown'),Status:g('pst'),EstateDutiable:getR('pestate'),
     BizType:g('pbiztype'),LifeAssuredType:(document.getElementById('plifeassured_type')?document.getElementById('plifeassured_type').value:''),LifeAssured:g('plifeassured'),LoanAmount:g('ploanamt'),KeyPosition:g('pkeypos'),
     Premium:g('ppm'),Frequency:g('pfreq'),PremEscalation:g('pprem_pct'),BenEscalation:g('pben_pct'),
-    BenDeath:g('pb_death'),BenDisability:g('pb_dis'),
-    BenDreadDisease:g('pb_dd'),
-    DreadDiseaseType:(document.getElementById('pb_ddtype')?document.getElementById('pb_ddtype').value:''),
-    DreadDiseaseNotes:g('pb_ddnotes'),
+    // Legacy single fields — populated from first matching row for FNA compatibility
+    BenDeath:(function(){ var r=POL_LUMP_ROWS.find(function(x){return x.type==='Life Cover';}); return r?r.cover:''; })(),
+    BenDisability:(function(){ var r=POL_LUMP_ROWS.find(function(x){return x.type==='Capital Disability';}); return r?r.cover:''; })(),
+    BenDreadDisease:(function(){ var r=POL_LUMP_ROWS.find(function(x){return x.type==='Dread Disease / Severe Illness';}); return r?r.cover:''; })(),
+    DreadDiseaseType:'Lump Sum',
+    DreadDiseaseNotes:(function(){ var r=POL_LUMP_ROWS.find(function(x){return x.type==='Dread Disease / Severe Illness';}); return r?r.label:''; })(),
+    LumpBenefits:JSON.stringify(POL_LUMP_ROWS),
     BenSurrenderValue:g('pb_surr')||g('pb_surr2'),
     BenFundValue:g('pb_fv'),BenMaturityValue:g('pb_matval'),
     MaturityDate:g('pb_matdate'),RetirementAge:g('pb_retage'),

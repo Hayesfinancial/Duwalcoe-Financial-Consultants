@@ -823,9 +823,7 @@ function deepMerge(base, over) {
 // ═══════════════════════════════════════════════════════════
 // SAVE / LOAD / NEW
 // ═══════════════════════════════════════════════════════════
-var SB_URL = 'https://ayyexuwxaghzljykslxr.supabase.co';  // e.g. https://xxxxxxxxxxxx.supabase.co
-var SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImF5eWV4dXd4YWdoemxqeWtzbHhyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQzMTUyMTcsImV4cCI6MjA4OTg5MTIxN30.hp2cQ64FjKnThsLh2qfdqRKdiy39_900JfH6C0KKIx4';   // eyJ...
-var APPS_SCRIPT_URL = SB_URL; // legacy alias
+var APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbw_I8Md3snxG36VJb00gIIgbag_2-k0zUkkmzS15kDzpCO37RJSS16hTdhhpS_v5onr/exec';
 
 function persist() {
   var json = JSON.stringify(S);
@@ -856,25 +854,25 @@ function saveToServer(silent) {
   });
   saveData.retIncludes = retIncludes;
 
+  var payload = JSON.stringify({ action: 'saveFNA', clientId: clientId, jsonData: JSON.stringify(saveData) });
   var indicator = document.getElementById('syncIndicator');
   if(indicator) { indicator.textContent = '↑ Saving...'; indicator.style.color = '#a8b938'; }
-  var _now = new Date().toISOString().slice(0,16).replace('T',' ');
-  var _row = {ClientID: clientId, Data: JSON.stringify(saveData), LastSaved: _now, SavedBy: 'Clinton Hayes'};
-  fetch(SB_URL + '/rest/v1/fnadata', {
+
+  fetch(APPS_SCRIPT_URL, {
     method: 'POST',
-    headers: {
-      'apikey': SB_KEY,
-      'Authorization': 'Bearer ' + SB_KEY,
-      'Content-Type': 'application/json',
-      'Prefer': 'resolution=merge-duplicates'
-    },
-    body: JSON.stringify([_row])
+    headers: { 'Content-Type': 'text/plain' },
+    body: payload
   })
-  .then(function(r){
-    if(!r.ok) throw new Error('HTTP ' + r.status);
-    var t = new Date().toLocaleTimeString('en-ZA',{hour:'2-digit',minute:'2-digit'});
-    if(indicator){ indicator.textContent = '✓ Synced ' + t; indicator.style.color = '#86efac'; }
-    if(!silent) status('✓ Saved to server at ' + t);
+  .then(function(r){ return r.json(); })
+  .then(function(res){
+    if(res.ok){
+      var t = new Date().toLocaleTimeString('en-ZA',{hour:'2-digit',minute:'2-digit'});
+      if(indicator){ indicator.textContent = '✓ Synced ' + t; indicator.style.color = '#86efac'; }
+      if(!silent) status('✓ Saved to server at ' + t);
+    } else {
+      if(indicator){ indicator.textContent = '⚠ Sync failed'; indicator.style.color = '#f87171'; }
+      if(!silent) status('⚠ Server save failed: ' + (res.error||'unknown'));
+    }
   })
   .catch(function(err){
     if(indicator){ indicator.textContent = '⚠ Offline'; indicator.style.color = '#f87171'; }
@@ -885,21 +883,21 @@ function saveToServer(silent) {
 // Load FNA state from Google Sheets
 function loadFromServer(clientId, onDone) {
   if(!clientId){ if(onDone) onDone(null); return; }
-  fetch(SB_URL + '/rest/v1/fnadata?ClientID=eq.' + encodeURIComponent(clientId) + '&select=*', {
-    headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
-  })
-  .then(function(r){ return r.json(); })
-  .then(function(rows){
-    if(rows && rows.length && rows[0].Data){
-      try{
-        var serverState = JSON.parse(rows[0].Data);
-        if(onDone) onDone(serverState, rows[0].LastSaved||'');
-      }catch(e){ if(onDone) onDone(null); }
+  var url = APPS_SCRIPT_URL + '?action=loadFNA&clientId=' + encodeURIComponent(clientId) + '&callback=_fnaServerCb';
+  window._fnaServerCb = function(res){
+    delete window._fnaServerCb;
+    if(res && res.ok && res.data){
+      try {
+        var serverState = JSON.parse(res.data);
+        if(onDone) onDone(serverState, res.saved||'');
+      } catch(e){ if(onDone) onDone(null); }
     } else {
       if(onDone) onDone(null);
     }
-  })
-  .catch(function(){ if(onDone) onDone(null); });
+  };
+  var s = document.createElement('script'); s.src = url;
+  s.onerror = function(){ if(onDone) onDone(null); };
+  document.head.appendChild(s);
 }
 
 function autoSave() {
@@ -3101,11 +3099,99 @@ function buildPolCard(p, i) {
     bst.style.marginTop = '10px';
     card.appendChild(bst);
 
-    var rb1 = g3();
-    rb1.appendChild(rfld('Death / Life Cover',    p, 'BenDeath'));
-    rb1.appendChild(rfld('Capital Disability',    p, 'BenDisability'));
-    rb1.appendChild(rfld('Dread Disease Cover',   p, 'BenDreadDisease'));
-    card.appendChild(rb1);
+    // Lump sum benefits — use LumpBenefits rows if present, else legacy single fields
+    var lumpRows = [];
+    try { lumpRows = p.LumpBenefits ? JSON.parse(p.LumpBenefits) : []; } catch(e) { lumpRows = []; }
+
+    if(lumpRows.length > 0){
+      var lumpSt = el('div','','Lump Sum Benefits');
+      lumpSt.style.cssText = 'font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--sub);display:block;margin-bottom:4px;margin-top:8px';
+      card.appendChild(lumpSt);
+
+      var lumpTbl = document.createElement('table');
+      lumpTbl.style.cssText = 'width:100%;border-collapse:collapse;font-size:12px';
+      // Header
+      var lhdr = document.createElement('tr');
+      ['Type / Label','Cover','Premium','Prem Esc %','Ben Esc %'].forEach(function(h){
+        var th = document.createElement('th');
+        th.textContent = h;
+        th.style.cssText = 'text-align:left;font-size:10px;color:var(--sub);font-weight:700;padding:3px 6px;border-bottom:1px solid var(--mist)';
+        lhdr.appendChild(th);
+      });
+      lumpTbl.appendChild(lhdr);
+
+      var ltbody = document.createElement('tbody');
+      lumpRows.forEach(function(r, ri){
+        var tr = document.createElement('tr');
+        // Type + label
+        var t1 = document.createElement('td'); t1.style.padding='4px 6px';
+        var lbl = document.createElement('div');
+        lbl.style.cssText = 'font-weight:600;font-size:12px;color:var(--text)';
+        lbl.textContent = r.type + (r.label?' — '+r.label:'');
+        t1.appendChild(lbl); tr.appendChild(t1);
+        // Cover
+        var t2 = document.createElement('td'); t2.style.padding='4px 6px';
+        var cRw=div('td-r'); cRw.appendChild(el('span','rp','R'));
+        var cInp=document.createElement('input'); cInp.type='text'; cInp.inputMode='numeric';
+        cInp.value=r.cover||''; cInp.placeholder='0';
+        cInp.style.cssText='width:90px;padding:4px 5px 4px 18px;border:1.5px solid var(--mist);border-radius:4px;font-size:12px';
+        cInp.addEventListener('input',function(e){
+          try{var rows=JSON.parse(S.importedPols[i].LumpBenefits||'[]');rows[ri].cover=e.target.value;S.importedPols[i].LumpBenefits=JSON.stringify(rows);}catch(ex){}
+        });
+        cRw.appendChild(cInp); t2.appendChild(cRw); tr.appendChild(t2);
+        // Premium
+        var t3 = document.createElement('td'); t3.style.padding='4px 6px';
+        var pRw=div('td-r'); pRw.appendChild(el('span','rp','R'));
+        var pInp=document.createElement('input'); pInp.type='text'; pInp.inputMode='numeric';
+        pInp.value=r.prem||''; pInp.placeholder='0';
+        pInp.style.cssText='width:80px;padding:4px 5px 4px 18px;border:1.5px solid var(--mist);border-radius:4px;font-size:12px';
+        pInp.addEventListener('input',function(e){
+          try{var rows=JSON.parse(S.importedPols[i].LumpBenefits||'[]');rows[ri].prem=e.target.value;S.importedPols[i].LumpBenefits=JSON.stringify(rows);}catch(ex){}
+        });
+        pRw.appendChild(pInp); t3.appendChild(pRw); tr.appendChild(t3);
+        // Prem Esc
+        var t4 = document.createElement('td'); t4.style.padding='4px 6px';
+        var peI=document.createElement('input'); peI.type='text'; peI.inputMode='numeric';
+        peI.value=r.premEsc||''; peI.placeholder='%';
+        peI.style.cssText='width:50px;padding:4px 5px;border:1.5px solid var(--mist);border-radius:4px;font-size:12px';
+        peI.addEventListener('input',function(e){
+          try{var rows=JSON.parse(S.importedPols[i].LumpBenefits||'[]');rows[ri].premEsc=e.target.value;S.importedPols[i].LumpBenefits=JSON.stringify(rows);}catch(ex){}
+        });
+        t4.appendChild(peI); tr.appendChild(t4);
+        // Ben Esc
+        var t5 = document.createElement('td'); t5.style.padding='4px 6px';
+        var beI=document.createElement('input'); beI.type='text'; beI.inputMode='numeric';
+        beI.value=r.benEsc||''; beI.placeholder='%';
+        beI.style.cssText='width:50px;padding:4px 5px;border:1.5px solid var(--mist);border-radius:4px;font-size:12px';
+        beI.addEventListener('input',function(e){
+          try{var rows=JSON.parse(S.importedPols[i].LumpBenefits||'[]');rows[ri].benEsc=e.target.value;S.importedPols[i].LumpBenefits=JSON.stringify(rows);}catch(ex){}
+        });
+        t5.appendChild(beI); tr.appendChild(t5);
+
+        ltbody.appendChild(tr);
+      });
+      lumpTbl.appendChild(ltbody);
+      card.appendChild(lumpTbl);
+
+      // Sync totals to legacy fields for calculations
+      var totDeath=0, totDis=0, totDD=0;
+      lumpRows.forEach(function(r){
+        if(r.type==='Life Cover') totDeath+=parseFloat(r.cover||0)||0;
+        else if(r.type==='Capital Disability') totDis+=parseFloat(r.cover||0)||0;
+        else if(r.type==='Dread Disease / Severe Illness') totDD+=parseFloat(r.cover||0)||0;
+      });
+      if(totDeath) p.BenDeath=String(Math.round(totDeath));
+      if(totDis) p.BenDisability=String(Math.round(totDis));
+      if(totDD) p.BenDreadDisease=String(Math.round(totDD));
+
+    } else {
+      // Legacy: single fields
+      var rb1 = g3();
+      rb1.appendChild(rfld('Death / Life Cover',    p, 'BenDeath'));
+      rb1.appendChild(rfld('Capital Disability',    p, 'BenDisability'));
+      rb1.appendChild(rfld('Dread Disease Cover',   p, 'BenDreadDisease'));
+      card.appendChild(rb1);
+    }
 
     // Income benefits (simplified — monthly amount)
     var ipWrap = div();
