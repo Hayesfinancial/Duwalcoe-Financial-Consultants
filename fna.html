@@ -3013,6 +3013,51 @@ function buildPolicies() {
   return s;
 }
 
+// ── IRR calculation for FNA
+function calcPolicyIRR_fna(startDateStr, premium, frequency, premEsc, fundValue){
+  if(!startDateStr || !fundValue || N(fundValue)===0) return null;
+  var fv = N(fundValue);
+  if(fv === 0) return null;
+  var sp = String(startDateStr).split(/[T ]/)[0].split(/[-\/]/);
+  if(sp.length < 3) return null;
+  var start = new Date(+sp[0], +sp[1]-1, +sp[2]);
+  var today = new Date();
+  var yrs = (today - start) / (365.25 * 24 * 60 * 60 * 1000);
+  if(yrs < 0.1) return null;
+  var freq = frequency || 'Monthly';
+  var isOnce = freq === 'Once Off' || freq === 'Paid Up' || freq === 'Lump Sum';
+  var prem = N(premium);
+  if(isOnce || prem === 0){
+    if(prem === 0) return null;
+    var r = Math.pow(fv / prem, 1 / yrs) - 1;
+    return Math.round(r * 1000) / 10;
+  }
+  var esc = N(premEsc) / 100;
+  var months = Math.round(yrs * 12);
+  if(months < 2) return null;
+  function npv(monthlyRate){
+    var pv = 0; var p = prem; var annualCount = 0;
+    for(var m = 0; m < months; m++){
+      if(m > 0 && m % 12 === 0){ annualCount++; p = prem * Math.pow(1 + esc, annualCount); }
+      pv -= p / Math.pow(1 + monthlyRate, m + 1);
+    }
+    pv += fv / Math.pow(1 + monthlyRate, months);
+    return pv;
+  }
+  var r = 0.007;
+  for(var i = 0; i < 50; i++){
+    var f = npv(r); var delta = 0.00001;
+    var df = (npv(r + delta) - f) / delta;
+    if(Math.abs(df) < 1e-10) break;
+    var rNew = r - f / df;
+    if(Math.abs(rNew - r) < 1e-7){ r = rNew; break; }
+    r = rNew;
+    if(r < -0.5 || r > 2) return null;
+  }
+  var annualIRR = Math.pow(1 + r, 12) - 1;
+  return Math.round(annualIRR * 1000) / 10;
+}
+
 function buildPolCard(p, i) {
   var t = p.Type || 'Life / Income Protector';
   var isRA      = POL_RA_TYPES.indexOf(t) > -1;
@@ -3364,6 +3409,17 @@ function buildPolCard(p, i) {
     bst2.style.marginTop = '10px';
     card.appendChild(bst2);
 
+    // IRR badge
+    var _irr2 = calcPolicyIRR_fna(p.StartDate, p.Premium, p.Frequency, p.PremEscalation, p.BenFundValue);
+    if(_irr2 !== null){
+      var irrBdg = div();
+      var irrCol = _irr2 >= 10 ? '#166534' : _irr2 >= 6 ? '#1e40af' : _irr2 >= 0 ? '#92400e' : '#991b1b';
+      var irrBg  = _irr2 >= 10 ? '#f0fdf4' : _irr2 >= 6 ? '#eff6ff' : _irr2 >= 0 ? '#fffbeb' : '#fef2f2';
+      irrBdg.style.cssText = 'padding:6px 10px;background:'+irrBg+';border-radius:6px;font-size:12px;color:'+irrCol+';font-weight:700;margin-bottom:6px';
+      irrBdg.textContent = '📈 Actual IRR since inception: '+_irr2+'% p.a.';
+      card.appendChild(irrBdg);
+    }
+
     var rb2 = g3();
     rb2.appendChild(rfld('Current Fund Value', p, 'BenFundValue', {onblur:function(){render();}}));
 
@@ -3437,6 +3493,17 @@ function buildPolCard(p, i) {
       tfsNote.textContent='✓ Tax Free Savings — explicitly CGT exempt. No CGT on death.';
       card.appendChild(tfsNote);
     } else if(isLA){
+      // IRR badge for Living Annuity
+      var _irrLA = calcPolicyIRR_fna(p.StartDate, p.Premium, p.Frequency, p.PremEscalation, p.BenFundValue);
+      if(_irrLA !== null){
+        var laIrrBdg = div();
+        var laIrrCol = _irrLA >= 10 ? '#166534' : _irrLA >= 6 ? '#1e40af' : _irrLA >= 0 ? '#92400e' : '#991b1b';
+        var laIrrBg  = _irrLA >= 10 ? '#f0fdf4' : _irrLA >= 6 ? '#eff6ff' : _irrLA >= 0 ? '#fffbeb' : '#fef2f2';
+        laIrrBdg.style.cssText = 'padding:6px 10px;background:'+laIrrBg+';border-radius:6px;font-size:12px;color:'+laIrrCol+';font-weight:700;margin-bottom:6px';
+        laIrrBdg.textContent = '📈 Actual IRR since inception: '+_irrLA+'% p.a.';
+        card.appendChild(laIrrBdg);
+      }
+
       var laNote=div(); laNote.style.cssText='font-size:11px;padding:6px 10px;margin-top:4px;border-radius:6px;background:#eff6ff;border:1px solid #bfdbfe;color:#1e40af';
       laNote.innerHTML='<strong>Living Annuity:</strong> No CGT on death. No estate duty if a beneficiary is nominated. '+
         'Beneficiaries may take a cash lump sum (retirement tax tables apply in their hands) or continue the annuity. '+

@@ -2642,6 +2642,11 @@ function buildPolicyForm(p){
   if(isRA||isInv){
     html+=sec(isRA?'Fund & Retirement Values':'Investment Values');
     html+='<div class="g2">'+fld('pb_fv','Current Fund Value',p.BenFundValue,'text',isInv?'oninput="invCalcMaturity()"':'')+fld('pb_surr2','Nett Surrender Value',p.BenSurrenderValue)+'</div>';
+    // IRR badge — calculated from inception date, premium, frequency and current fund value
+    (function(){
+      var irr = calcPolicyIRR(p.StartDate, p.Premium, p.Frequency, p.PremEscalation, p.BenFundValue);
+      html += irrBadge(irr);
+    })();
     if(isRA){
       html+='<div class="g2">'+fld('pb_vested','Vested Component (Pot 1)',p.VestedValue,'text','oninput="raAutoSum()"')+fld('pb_nonvested','Non-Vested Component',p.NonVestedValue,'text','oninput="raAutoSum()"')+'</div>';
       html+='<div class="g2">'+fld('pb_retcomp','Retirement Component (Pot 2)',p.RetirementComponent,'text','oninput="raAutoSum()"')+fld('pb_savcomp','Savings Component (Pot 3)',p.SavingsComponent,'text','oninput="raAutoSum()"')+'</div>';
@@ -2668,6 +2673,11 @@ function buildPolicyForm(p){
   if(isLA){
     var fvNum=parseFloat(p.BenFundValue||'0')||0;
     html+=sec('Living Annuity — Fund & Income Drawing');
+    // IRR badge for Living Annuity
+    (function(){
+      var irr = calcPolicyIRR(p.StartDate, p.Premium, p.Frequency, p.PremEscalation, p.BenFundValue);
+      html += irrBadge(irr);
+    })();
     html+='<div class="g2">'+fld('pb_fv','Current Fund Value',p.BenFundValue,'text','oninput="laFVChanged()"')+'<div class="fld"><label>Growth Rate % (projection)</label><div style="position:relative"><input id="pb_growrate" type="text" value="'+(p.PremGrowthRate||'')+'" placeholder="e.g. 9" oninput="laShowSust()" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 28px 8px 10px;font-family:inherit;font-size:13px"><span style="position:absolute;right:10px;top:50%;transform:translateY(-50%);color:#889;font-size:11px;pointer-events:none">%</span></div></div></div>';
 
     // Two-way calculation — income ↔ drawdown rate, driven by fund value
@@ -2926,6 +2936,74 @@ function renderIncomeRows(){
 function addIncomeRow(){
   POL_INCOME_ROWS.push({type:'Temporary IP',label:'',amount:'',prem:'',waiting:'1 month',term:'To age 65',esc:'',taxable:'No',convert:'No'});
   document.getElementById('incomeRowsWrap').innerHTML=renderIncomeRows();
+}
+
+// ── IRR calculation — shared utility
+// For lump sum: simple compound return
+// For recurring: approximate XIRR via Newton-Raphson
+function calcPolicyIRR(startDateStr, premium, frequency, premEsc, fundValue){
+  if(!startDateStr || !fundValue || N(fundValue)===0) return null;
+  var fv = N(fundValue);
+  if(fv === 0) return null;
+  var sp = String(startDateStr).split(/[T ]/)[0].split(/[-\/]/);
+  if(sp.length < 3) return null;
+  var start = new Date(+sp[0], +sp[1]-1, +sp[2]);
+  var today = new Date();
+  var yrs = (today - start) / (365.25 * 24 * 60 * 60 * 1000);
+  if(yrs < 0.1) return null;
+
+  var freq = frequency || 'Monthly';
+  var isOnce = freq === 'Once Off' || freq === 'Paid Up' || freq === 'Lump Sum';
+  var prem = N(premium);
+
+  if(isOnce || prem === 0){
+    // Simple compound return
+    if(prem === 0) return null;
+    var r = Math.pow(fv / prem, 1 / yrs) - 1;
+    return Math.round(r * 1000) / 10; // return as % with 1 decimal
+  }
+
+  // Recurring — approximate XIRR
+  // Build cash flows: negative outflows each month, positive inflow (fund value) at end
+  var esc = N(premEsc) / 100;
+  var months = Math.round(yrs * 12);
+  if(months < 2) return null;
+
+  // Newton-Raphson on monthly rate
+  function npv(monthlyRate){
+    var pv = 0;
+    var p = prem;
+    var annualCount = 0;
+    for(var m = 0; m < months; m++){
+      if(m > 0 && m % 12 === 0){ annualCount++; p = prem * Math.pow(1 + esc, annualCount); }
+      pv -= p / Math.pow(1 + monthlyRate, m + 1);
+    }
+    pv += fv / Math.pow(1 + monthlyRate, months);
+    return pv;
+  }
+
+  var r = 0.007; // initial guess ~8.4% p.a.
+  for(var i = 0; i < 50; i++){
+    var f = npv(r);
+    var delta = 0.00001;
+    var df = (npv(r + delta) - f) / delta;
+    if(Math.abs(df) < 1e-10) break;
+    var rNew = r - f / df;
+    if(Math.abs(rNew - r) < 1e-7) { r = rNew; break; }
+    r = rNew;
+    if(r < -0.5 || r > 2) return null; // diverged
+  }
+  var annualIRR = Math.pow(1 + r, 12) - 1;
+  return Math.round(annualIRR * 1000) / 10;
+}
+
+function N(v){var n=parseFloat(String(v||'0').replace(/[^0-9.-]/g,''));return isNaN(n)?0:n;}
+
+function irrBadge(irr){
+  if(irr === null || irr === undefined) return '';
+  var col = irr >= 10 ? '#166534' : irr >= 6 ? '#1e40af' : irr >= 0 ? '#92400e' : '#991b1b';
+  var bg  = irr >= 10 ? '#f0fdf4' : irr >= 6 ? '#eff6ff' : irr >= 0 ? '#fffbeb' : '#fef2f2';
+  return '<div style="margin-top:6px;padding:6px 10px;background:'+bg+';border-radius:6px;font-size:12px;color:'+col+';font-weight:700">📈 Actual IRR since inception: '+irr+'% p.a.</div>';
 }
 
 // ── Investment maturity value auto-calculation
@@ -4058,6 +4136,10 @@ function openPolicySchedule(cid){
       if(isBiz&&p.BizType) details.push('<span style="font-size:11px;color:#888">Type: </span><span style="font-size:12px;font-weight:600;color:#92400e">'+p.BizType+'</span>');
       if(isBiz&&p.LoanAmount) details.push('<span style="font-size:11px;color:#888">Loan/Cover: </span><span style="font-size:12px;font-weight:600">'+R(p.LoanAmount)+'</span>');
       if(p.MaturityDate) details.push('<span style="font-size:11px;color:#888">Maturity: </span><span style="font-size:12px">'+FD(p.MaturityDate)+'</span>');
+      if(isRA||isInv){
+        var _irr = calcPolicyIRR(p.StartDate, p.Premium, p.Frequency, p.PremEscalation, p.BenFundValue);
+        if(_irr !== null) details.push('<span style="font-size:11px;color:#1e40af;font-weight:700">📈 IRR: '+_irr+'% p.a.</span>');
+      }
       if(p.RetirementDate) details.push('<span style="font-size:11px;color:#888">Retirement: </span><span style="font-size:12px">'+FD(p.RetirementDate)+'</span>');
 
       // Income benefits summary
