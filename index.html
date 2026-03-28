@@ -2640,7 +2640,7 @@ function buildPolicyForm(p){
   // RA / INVESTMENT
   if(isRA||isInv){
     html+=sec(isRA?'Fund & Retirement Values':'Investment Values');
-    html+='<div class="g2">'+fld('pb_fv','Current Fund Value',p.BenFundValue)+fld('pb_surr2','Nett Surrender Value',p.BenSurrenderValue)+'</div>';
+    html+='<div class="g2">'+fld('pb_fv','Current Fund Value',p.BenFundValue,'text',isInv?'oninput="invCalcMaturity()"':'')+fld('pb_surr2','Nett Surrender Value',p.BenSurrenderValue)+'</div>';
     if(isRA){
       html+='<div class="g2">'+fld('pb_vested','Vested Component (Pot 1)',p.VestedValue,'text','oninput="raAutoSum()"')+fld('pb_nonvested','Non-Vested Component',p.NonVestedValue,'text','oninput="raAutoSum()"')+'</div>';
       html+='<div class="g2">'+fld('pb_retcomp','Retirement Component (Pot 2)',p.RetirementComponent,'text','oninput="raAutoSum()"')+fld('pb_savcomp','Savings Component (Pot 3)',p.SavingsComponent,'text','oninput="raAutoSum()"')+'</div>';
@@ -2652,8 +2652,8 @@ function buildPolicyForm(p){
       html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="p3pot" value="Undecided"'+((!p.WithdrawSavingsPot||p.WithdrawSavingsPot==='Undecided')?' checked':'')+'>Undecided</label>';
       html+='</div></div>';
     } else {
-      html+='<div class="g2">'+fld('pb_matval','Maturity Value',p.BenMaturityValue)+fdp('pb_matdate','Maturity Date',p.MaturityDate||'')+'</div>';
-      html+='<div class="g2">'+fld('pb_illrate','Illustrative Rate %',p.IllustrativeRate||'9')+fld('pb_growrate','Premium Growth Rate %',p.PremGrowthRate||'10')+'</div>';
+      html+='<div class="g2">'+fld('pb_matval','Maturity Value',p.BenMaturityValue,'text','oninput=""')+fdp('pb_matdate','Maturity Date',p.MaturityDate||'')+'</div>';
+      html+='<div class="g2">'+fld('pb_illrate','Illustrative Rate %',p.IllustrativeRate||'9','text','oninput="invCalcMaturity()"')+(_isOnceOff?'<div></div>':fld('pb_growrate','Premium Growth Rate %',p.PremGrowthRate||'10'))+'</div>';
       if(type==='Endowment'||type==='Offshore Endowment'){
         html+='<div class="fld"><label>Include in Retirement Planning?</label><div style="display:flex;gap:12px;margin-top:8px">';
         html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="pinret" value="Yes"'+(p.IncludeInRetirement==='Yes'?' checked':'')+'>Yes</label>';
@@ -2755,6 +2755,18 @@ function buildPolicyForm(p){
   // p.RetirementAge may be '' for new policies but the form defaults to 65
   if(isRA && !p.MaturityDate){
     setTimeout(raCalcMaturity, 0);
+  }
+
+  // Auto-calculate maturity value for investment types
+  if(isInv){
+    setTimeout(function(){
+      invCalcMaturity();
+      // Hook date picker dropdowns to recalculate on change
+      ['pb_matdate_y','pb_matdate_m','pb_matdate_d'].forEach(function(id){
+        var el=document.getElementById(id);
+        if(el) el.addEventListener('change',function(){ fdpSync('pb_matdate'); setTimeout(invCalcMaturity,0); });
+      });
+    }, 0);
   }
 
   // RA frequency is user-selected and must not be overridden (lump sum once-off RAs are valid)
@@ -2913,6 +2925,45 @@ function renderIncomeRows(){
 function addIncomeRow(){
   POL_INCOME_ROWS.push({type:'Temporary IP',label:'',amount:'',prem:'',waiting:'1 month',term:'To age 65',esc:'',taxable:'No',convert:'No'});
   document.getElementById('incomeRowsWrap').innerHTML=renderIncomeRows();
+}
+
+// ── Investment maturity value auto-calculation
+// Projects current fund value at illustrative rate to maturity date
+function invCalcMaturity(){
+  var fv = parseFloat((document.getElementById('pb_fv')||{value:''}).value.replace(/[^0-9.]/g,'')||0)||0;
+  var prem = parseFloat((document.getElementById('ppm')||{value:''}).value.replace(/[^0-9.]/g,'')||0)||0;
+  var rate = parseFloat((document.getElementById('pb_illrate')||{value:''}).value||0)||0;
+  // Get maturity date
+  var matEl = document.getElementById('pb_matdate');
+  if(!matEl||!matEl.value) return;
+  var matParts = matEl.value.split('-');
+  if(matParts.length < 3) return;
+  var matDate = new Date(+matParts[0], +matParts[1]-1, +matParts[2]);
+  if(isNaN(matDate)) return;
+  var today = new Date();
+  var yrs = (matDate - today) / (365.25 * 24 * 60 * 60 * 1000);
+  if(yrs <= 0) return;
+  var r = rate / 100;
+  // Project existing fund value
+  var projected = fv * Math.pow(1 + r, yrs);
+  // For once-off: no ongoing premium contributions
+  // For recurring: add premium contributions (monthly, growing at premium growth rate)
+  var freqEl = document.getElementById('pfreq');
+  var freq = freqEl ? freqEl.value : 'Monthly';
+  if(prem > 0 && freq !== 'Once Off' && freq !== 'Paid Up' && r > 0){
+    var growEl = document.getElementById('pb_growrate');
+    var growRate = parseFloat((growEl||{value:'0'}).value||0)||0;
+    var g = growRate / 100;
+    var n = Math.floor(yrs * 12);
+    // FV of growing annuity
+    if(Math.abs(r/12 - g/12) > 0.0001){
+      projected += prem * (Math.pow(1+r/12, n) - Math.pow(1+g/12, n)) / (r/12 - g/12);
+    } else {
+      projected += prem * n * Math.pow(1+r/12, n);
+    }
+  }
+  var matValEl = document.getElementById('pb_matval');
+  if(matValEl) matValEl.value = Math.round(projected);
 }
 
 // ── RA maturity date auto-calculation
