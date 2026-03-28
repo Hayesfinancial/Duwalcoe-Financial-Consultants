@@ -2674,7 +2674,18 @@ function buildPolicyForm(p){
   if(isLA){
     var fvNum=parseFloat(p.BenFundValue||'0')||0;
     html+=sec('Living Annuity — Fund & Income Drawing');
-    html+='<div class="g2">'+fld('pb_fv','Current Fund Value',p.BenFundValue,'text','oninput="laFVChanged()"')+'<div class="fld"><label>Growth Rate % (projection)</label><div style="position:relative"><input id="pb_growrate" type="text" value="'+(p.PremGrowthRate||'')+'" placeholder="e.g. 9" oninput="laShowSust()" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 28px 8px 10px;font-family:inherit;font-size:13px"><span style="position:absolute;right:10px;top:50%;transform:translateY(-50%);color:#889;font-size:11px;pointer-events:none">%</span></div></div></div>';
+    html+='<div class="g2">'+fld('pb_fv','Current Fund Value',p.BenFundValue,'text','oninput="laFVChanged()"')+'<div class="fld"><label>Growth Rate % (net — after costs)</label><div style="position:relative"><input id="pb_growrate" type="text" value="'+(p.PremGrowthRate||'')+'" placeholder="e.g. 9" oninput="laShowSust();laCalcGrossGrowth()" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 28px 8px 10px;font-family:inherit;font-size:13px"><span style="position:absolute;right:10px;top:50%;transform:translateY(-50%);color:#889;font-size:11px;pointer-events:none">%</span></div></div></div>';
+    // EAC + gross growth display
+    html+='<div class="g2">';
+    html+='<div class="fld"><label>EAC % <span style="font-size:10px;color:#889;font-weight:400">(Effective Annual Cost — total fee drag)</span></label>';
+    html+='<div style="position:relative"><input id="pb_eac" type="text" value="'+(p.BenEscalation||'')+'" placeholder="e.g. 2.85" oninput="laCalcGrossGrowth()" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 28px 8px 10px;font-family:inherit;font-size:13px"><span style="position:absolute;right:10px;top:50%;transform:translateY(-50%);color:#889;font-size:11px;pointer-events:none">%</span></div></div>';
+    html+='<div class="fld"><label>Gross Growth % <span style="font-size:10px;color:#889;font-weight:400">(before costs = net + EAC)</span></label>';
+    html+='<div style="padding:8px 11px;background:var(--smoke);border:1.5px solid var(--mist);border-radius:7px;font-size:13px;color:var(--navy);font-weight:700" id="la_gross_growth_display">';
+    var _net=parseFloat(p.PremGrowthRate||0)||0;
+    var _eac=parseFloat(p.BenEscalation||0)||0;
+    html+=(_net+_eac>0?Math.round((_net+_eac)*10)/10+'%':'—');
+    html+='</div></div>';
+    html+='</div>';
 
     // Two-way calculation — income ↔ drawdown rate, driven by fund value
     html+='<div style="background:var(--smoke);border-radius:8px;padding:12px 14px;margin-bottom:8px">';
@@ -2725,7 +2736,7 @@ function buildPolicyForm(p){
     html+='<div class="g2" style="margin-top:8px">';
     html+='<div class="fld"><label>Stated IRR % <span style="font-size:10px;color:#889;font-weight:400">(from insurer statement — e.g. Discovery 7.20%)</span></label>';
     html+='<div style="position:relative">';
-    html+='<input id="pb_illrate" type="text" value="'+(p.IllustrativeRate||'')+'" placeholder="e.g. 7.20" oninput="var g=document.getElementById(\'pb_growrate\');if(g)g.value=this.value;laShowSust()" ';
+    html+='<input id="pb_illrate" type="text" value="'+(p.IllustrativeRate||'')+'" placeholder="e.g. 7.20" oninput="var g=document.getElementById(\'pb_growrate\');if(g)g.value=this.value;laShowSust();laCalcGrossGrowth()" ';
     html+='style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 28px 8px 10px;font-family:inherit;font-size:13px">';
     html+='<span style="position:absolute;right:10px;top:50%;transform:translateY(-50%);color:#889;font-size:11px;pointer-events:none">%</span>';
     html+='</div>';
@@ -2801,8 +2812,9 @@ function buildPolicyForm(p){
   if(isLA && p.IllustrativeRate){
     setTimeout(function(){
       var g=document.getElementById('pb_growrate');
-      if(g && !g.value) g.value=p.IllustrativeRate;
+      if(g) g.value=p.IllustrativeRate; // always sync
       laShowSust();
+      laCalcGrossGrowth();
     },0);
   }
   // Auto-calculate maturity value for investment types
@@ -3144,6 +3156,16 @@ function _laFV(){
   var el=document.getElementById('pb_fv');
   return el?parseFloat(el.value.replace(/[^0-9.]/g,''))||0:0;
 }
+function laCalcGrossGrowth(){
+  var net = parseFloat((document.getElementById('pb_growrate')||{value:''}).value)||0;
+  var eac = parseFloat((document.getElementById('pb_eac')||{value:''}).value)||0;
+  var el = document.getElementById('la_gross_growth_display');
+  if(el){
+    var gross = Math.round((net+eac)*10)/10;
+    el.textContent = gross > 0 ? gross+'%' : '—';
+  }
+}
+
 function laCalcGross(){
   var base = parseFloat((document.getElementById('pb_la_income')||{value:'0'}).value)||0;
   var bonus = parseFloat((document.getElementById('pb_la_bonus')||{value:'0'}).value)||0;
@@ -3282,6 +3304,7 @@ function collectPolicyForm(){
     WithdrawSavingsPot:getR('p3pot'),IncludeInRetirement:getR('pinret'),
     MedPlan:g('pmedplan'),MedLives:g('pmedlives'),
     BenLAIncome:g('pb_la_income'),DrawdownRate:g('pb_la_drawdown'),LABonus:g('pb_la_bonus'),
+    BenEscalation:g('pb_eac')||g('pben_pct'),
     LAIncomeTaxable:(function(){var el=document.querySelector('input[name="platax"]:checked');return el?el.value:'Yes';})(),
     Insured:g('pins'),Payer:g('ppay'),
     Notes:g('pnt'),
