@@ -63,6 +63,10 @@ body{font-family:'DM Sans',sans-serif;background:var(--cream);color:var(--ink);m
 .type-rev{background:#fef9ee;color:#92400e}
 .type-block{background:var(--smoke);color:#666}
 .type-teams{background:#ede9fe;color:#6d28d9}
+.type-sale{background:#f0fdf4;color:#166534;font-weight:800}
+.type-prospect{background:#fef3c7;color:#92400e}
+.active-sale{background:#f0fdf4;color:#166534;border-color:#166534!important}
+.active-prospect{background:#fef3c7;color:#92400e;border-color:#92400e!important}
 .slot-actions{display:flex;gap:4px}
 .slot-btn{background:none;border:none;cursor:pointer;font-size:13px;padding:4px;border-radius:5px;transition:background .15s}
 .slot-btn:hover{background:var(--smoke)}
@@ -347,18 +351,30 @@ function renderNav(){
   document.getElementById('weekDisplay').textContent=
     'Week '+getWeekKey().split('-W')[1]+' · '+fmtShort(monDate)+' – '+fmtShort(friDate)+' '+friDate.getFullYear();
 
-  // Day tabs
+  // Day tabs — Plan tab + Mon-Fri
   var tabs=document.getElementById('dayTabs');
-  var DAY_NAMES=['Mon','Tue','Wed','Thu','Fri'];
+  var DAY_NAMES=['Plan','Mon','Tue','Wed','Thu','Fri'];
   tabs.innerHTML=DAY_NAMES.map(function(n,i){
     var cls='day-tab';
-    if(i===currentDay) cls+=' active';
-    else if(isToday(i)) cls+=' today';
-    return '<button class="'+cls+'" onclick="selectDay('+i+')">'+n+' '+dayDate(i).getDate()+'</button>';
+    if(i===0&&currentDay===-1) cls+=' active';
+    else if(i>0&&(i-1)===currentDay) cls+=' active';
+    else if(i>0&&isToday(i-1)) cls+=' today';
+    var lbl=i===0?'📋 Plan':n+' '+dayDate(i-1).getDate();
+    return '<button class="'+cls+'" onclick="'+(i===0?'selectPlan()':'selectDay('+(i-1)+')')+'">'+lbl+'</button>';
   }).join('');
 
   // Date display
-  document.getElementById('dateDisplay').textContent=fmtDate(dayDate(currentDay));
+  if(currentDay===-1){
+    document.getElementById('dateDisplay').textContent='Weekly Plan — Week '+getWeekKey().split('-W')[1];
+  } else {
+    document.getElementById('dateDisplay').textContent=fmtDate(dayDate(currentDay));
+  }
+}
+
+function selectPlan(){
+  currentDay=-1;
+  openSlot=null;
+  render();
 }
 
 function selectDay(i){
@@ -369,6 +385,28 @@ function selectDay(i){
 
 function renderDiary(){
   var col=document.getElementById('diaryCol');
+
+  // Weekly plan page
+  if(currentDay===-1){
+    var planKey=getWeekKey()+'_plan';
+    var plan={}; try{plan=JSON.parse(localStorage.getItem('du_plan_'+currentUser+'_'+planKey)||'{}');}catch(e){}
+    var html='<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">';
+    function planBlock(id,title,icon,ph){
+      return '<div style="background:#fff;border:1.5px solid var(--mist);border-radius:10px;overflow:hidden">'+
+        '<div style="background:var(--navy);color:#fff;padding:10px 14px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px">'+icon+' '+title+'</div>'+
+        '<textarea id="pb_'+id+'" onchange="savePlan()" oninput="savePlan()" placeholder="'+ph+'" '+
+        'style="width:100%;min-height:150px;padding:12px;border:none;outline:none;font-family:inherit;font-size:13px;resize:vertical;background:#fff;color:var(--ink)">'+
+        esc(plan[id]||'')+'</textarea></div>';
+    }
+    html+=planBlock('prospects','Prospects to call','📞','Who do I want to call this week? Referrals? Follow ups?');
+    html+=planBlock('personal','Personal / Family','🏠','Birthdays, appointments, errands...');
+    html+=planBlock('goals','Goals & Focus','🎯','What must I achieve this week? My focus?');
+    html+=planBlock('notes','General Notes','📝','Ideas, reminders, things to sort out...');
+    html+='</div><div style="margin-top:10px;font-size:11px;color:#aaa;font-style:italic">Saves automatically. Resets each new week.</div>';
+    col.innerHTML=html;
+    return;
+  }
+
   var html='';
   var slots=getSlots(currentUser,currentDay);
 
@@ -402,7 +440,7 @@ function renderDiary(){
     html+='<input id="fs_client_'+i+'" type="text" value="'+esc(s.client||s.label||'')+'" placeholder="e.g. Johan Smith or Gym or Admin">';
     html+='<label>Type</label>';
     html+='<div class="type-row">';
-    ['NB','FU','REV','Teams','Block'].forEach(function(tp){
+    ['NB','FU','REV','Sale','Prospect','Teams','Block'].forEach(function(tp){
       var active=(s.type||'NB')===tp;
       html+='<button class="type-btn'+(active?' active-'+tp.toLowerCase():'')+'" onclick="setFreeType('+i+',\''+tp+'\')">'+tp+'</button>';
     });
@@ -411,6 +449,10 @@ function renderDiary(){
     html+='<input id="fs_teams_'+i+'" type="text" value="'+esc(s.teams||'')+'" placeholder="https://teams.microsoft.com/...">';
     html+='<label>Outcome / Notes</label>';
     html+='<textarea id="fs_notes_'+i+'" placeholder="What happened? Next step?">'+(s.notes||'')+'</textarea>';
+    if(s.type==='Sale'){
+      html+='<label style="color:#166534;font-weight:700">💰 Estimated Commission (R)</label>';
+      html+='<input id="fs_comm_'+i+'" type="number" value="'+(s.commission||'')+'" placeholder="e.g. 4500" style="border:2px solid #166534;border-radius:7px;padding:8px 10px;font-family:inherit;font-size:14px;font-weight:700;width:100%">';
+    }
     if(s.teams) html+='<a class="teams-link" href="'+esc(s.teams)+'" target="_blank">📹 Join Teams Meeting</a>';
     html+='<div class="save-row">';
     html+='<button class="btn b-sage" style="font-size:11px" onclick="saveFreeSlot('+i+')">Save</button>';
@@ -473,43 +515,42 @@ function renderDaySlots(slots,user,dayIdx,isFree){
 
 function renderScoreboard(){
   var sb=document.getElementById('scoreboard');
-  // Count this week's client appointments (NB, FU, REV) across all days
-  var nb=0,fu=0,rev=0;
+  var nb=0,fu=0,rev=0,sales=0,prospect=0,commission=0;
   for(var d=0;d<5;d++){
     var slots=getSlots(currentUser,d);
-    // Standard slots
-    if(!isAdminDay(d)){
-      ['10:30','12:00','13:30','15:00'].forEach(function(t){
-        var found=slots.find(function(s){return s.time===t;});
-        if(found&&found.client){
-          if(found.type==='NB') nb++;
-          else if(found.type==='FU') fu++;
-          else if(found.type==='REV') rev++;
-        }
-      });
-    }
-    // Free slots
     slots.forEach(function(s){
-      if(s.client){
-        if(s.type==='NB') nb++;
-        else if(s.type==='FU') fu++;
-        else if(s.type==='REV') rev++;
-      }
+      if(!s.client) return;
+      if(s.type==='NB') nb++;
+      else if(s.type==='FU') fu++;
+      else if(s.type==='REV') rev++;
+      else if(s.type==='Sale'){ sales++; commission+=parseFloat(s.commission)||0; }
+      else if(s.type==='Prospect') prospect++;
     });
   }
   var total=nb+fu+rev;
-  var pct=Math.min(100,Math.round(total/8*100));
-
-  sb.innerHTML='<div class="sb-title">This Week\'s Appointments</div>'+
+  var apptPct=Math.min(100,Math.round(total/8*100));
+  var commPct=Math.min(100,Math.round(commission/75000*100));
+  var commCol=commission>=75000?'#86efac':commission>=50000?'var(--gold)':'#93c5fd';
+  sb.innerHTML=
+    '<div class="sb-title">Appointments this week</div>'+
     '<div class="sb-count">'+total+'<span style="font-size:18px;color:rgba(255,255,255,.5)">/8</span></div>'+
-    '<div class="sb-target">Target: 8 minimum — non-negotiable</div>'+
-    '<div class="sb-bar"><div class="sb-fill" style="width:'+pct+'%"></div></div>'+
-    '<div class="sb-breakdown">'+
+    '<div class="sb-bar" style="margin-bottom:10px"><div class="sb-fill" style="width:'+apptPct+'%"></div></div>'+
+    '<div class="sb-breakdown" style="grid-template-columns:1fr 1fr 1fr 1fr 1fr;margin-bottom:14px">'+
     '<div class="sb-item"><div class="n" style="color:#86efac">'+nb+'</div><div class="l">NB</div></div>'+
     '<div class="sb-item"><div class="n" style="color:#93c5fd">'+fu+'</div><div class="l">FU</div></div>'+
     '<div class="sb-item"><div class="n" style="color:var(--gold)">'+rev+'</div><div class="l">REV</div></div>'+
+    '<div class="sb-item"><div class="n" style="color:#86efac">'+sales+'</div><div class="l">Sales</div></div>'+
+    '<div class="sb-item"><div class="n" style="color:#fde68a">'+prospect+'</div><div class="l">Prosp</div></div>'+
+    '</div>'+
+    '<div style="border-top:1px solid rgba(255,255,255,.15);padding-top:12px">'+
+    '<div class="sb-title">Commission target</div>'+
+    '<div style="font-size:30px;font-weight:700;color:'+commCol+';margin:4px 0">R '+Math.round(commission).toLocaleString('en-ZA')+'</div>'+
+    '<div style="font-size:11px;opacity:.5;margin-bottom:6px">of R\u00a075\u202f000 weekly target</div>'+
+    '<div class="sb-bar"><div class="sb-fill" style="width:'+commPct+'%;background:'+commCol+'"></div></div>'+
+    '<div style="font-size:11px;opacity:.5;margin-top:4px">'+commPct+'% of target</div>'+
     '</div>';
 }
+
 
 function renderOtherUsers(){
   var container=document.getElementById('otherUsers');
@@ -629,10 +670,12 @@ function saveFreeSlot(i){
   var slots=getSlots(currentUser,currentDay);
   var s=slots[i];
   if(!s) return;
-  s.time=(document.getElementById('ft_'+i)||{value:s.time}).value;
-  s.client=(document.getElementById('fc_'+i)||{value:''}).value.trim();
-  s.teams=(document.getElementById('ftm_'+i)||{value:''}).value.trim();
-  s.notes=(document.getElementById('fn_'+i)||{value:''}).value.trim();
+  s.time=(document.getElementById('ft_'+i)||document.getElementById('fs_time_'+i)||{value:s.time}).value;
+  s.client=(document.getElementById('fc_'+i)||document.getElementById('fs_client_'+i)||{value:''}).value.trim();
+  s.teams=(document.getElementById('ftm_'+i)||document.getElementById('fs_teams_'+i)||{value:''}).value.trim();
+  s.notes=(document.getElementById('fn_'+i)||document.getElementById('fs_notes_'+i)||{value:''}).value.trim();
+  var commEl=document.getElementById('fs_comm_'+i);
+  s.commission=commEl?parseFloat(commEl.value)||0:s.commission||0;
   setSlots(currentUser,currentDay,slots);
   openSlot=null;
   saveCurrentUser();
@@ -658,6 +701,16 @@ function deleteFreeSlot(e,i){
   openSlot=null;
   saveCurrentUser();
   render();
+}
+
+function savePlan(){
+  var planKey=getWeekKey()+'_plan';
+  var plan={};
+  ['prospects','personal','goals','notes'].forEach(function(id){
+    var el=document.getElementById('pb_'+id);
+    if(el) plan[id]=el.value;
+  });
+  localStorage.setItem('du_plan_'+currentUser+'_'+planKey, JSON.stringify(plan));
 }
 
 function showToast(msg){
