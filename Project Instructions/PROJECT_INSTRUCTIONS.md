@@ -1,0 +1,213 @@
+# Duwalcoe Financial Consultants — Project Instructions
+
+## What this project is
+A single-file HTML financial planning system for **Duwalcoe Financial Consultants CC** (FSP 9978, adviser Clinton Hayes). No framework, no build step, no server — everything runs in the browser. Files are hosted on GitHub Pages and data persists via **Supabase PostgreSQL**.
+
+---
+
+## Files
+
+| File | Purpose |
+|---|---|
+| `index.html` | CRM — client management, policies, tasks, dashboard |
+| `fna.html` | Financial Needs Analysis tool |
+| `compliance.html` | Compliance documents (FAIS, mandates) |
+| `forms.html` | Forms library (Risk Profile, Broker Auth, etc.) |
+
+**GitHub repo:** `https://github.com/hayesfinancial/Duwalcoe-Financial-Consultants`  
+**GitHub Pages base URL:** `https://hayesfinancial.github.io/Duwalcoe-Financial-Consultants/`
+
+---
+
+## Backend — Supabase PostgreSQL
+
+**Google Apps Script is no longer used. All data is stored in Supabase.**
+
+```
+SB_URL = 'https://ayyexuwxaghzljykslxr.supabase.co'
+SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImF5eWV4dXd4YWdoemxqeWtzbHhyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQzMTUyMTcsImV4cCI6MjA4OTg5MTIxN30.hp2cQ64FjKnThsLh2qfdqRKdiy39_900JfH6C0KKIx4'
+```
+
+**Auth:** `clinton@duwalcoe.co.za` / `Irrlmwvm1*2` (Supabase email/password auth)  
+The app signs in silently on PIN entry via `/auth/v1/token`. RLS is enabled on all tables with `anon_all` policy (`for all using (true)`).
+
+### Supabase tables
+| Table | Purpose |
+|---|---|
+| `clients` | All client and lead records |
+| `policies` | All policies per client |
+| `tasks` | Tasks for all staff |
+| `roas` | Record of Advice history |
+| `familylinks` | Family member links between clients |
+| `fnadata` | FNA saved state per client |
+| `notes` | Client notes |
+| `settings` | App settings (discussion board etc.) |
+| `appts` | Weekly appointment grids per user |
+
+### Data flow
+- `sbFetch()` in index.html handles all REST API calls using the permanent anon JWT key
+- `syncNow()` loads all tables in parallel on boot
+- Every save writes to localStorage immediately, then to Supabase async
+- `importedPols` in fna.html is NEVER saved to server — always sourced from CRM URL params
+
+### Key policy fields added during Supabase migration
+- `LumpBenefits` — JSON array of per-benefit lump sum rows (type, cover, prem, premEsc, benEsc)
+- `LABonus` — insurer income boost for Living Annuities (e.g. Discovery Invest Income Boost)
+- `Priority` — task priority field
+
+---
+
+## Brand & CSS Variables
+
+```css
+--navy:  #0e413a   /* primary dark teal */
+--gold:  #a8b938   /* lime gold */
+--gold2: #ccd660   /* lighter lime */
+--text:  #1a2a2e
+--rose:  red variant
+--sage:  green variant
+--sky:   blue variant
+```
+
+**Logo:** stored as base64 in `logo_b64.txt` in the working directory. Embedded directly into printed documents.
+
+**Adviser details:** Clinton Hayes · FSP No: 9978 · clinton@duwalcoe.co.za · 083 608 5617
+
+---
+
+## Authentication / PIN
+
+The app has a PIN screen (`6551`) that silently authenticates with Supabase on entry via `selectUser()`. Three users: Clinton, Wife, Daughter. Session token stored in `sessionStorage`. On logout, token is cleared and fresh auth happens on next PIN entry.
+
+---
+
+## FNA Architecture (fna.html)
+
+### State object `S`
+All FNA data lives in a single global object `S`, initialised from `DEFAULTS`. Persisted to:
+1. A hidden `<div id="saved-data">` element (survives page refresh)
+2. `localStorage` keyed as `du_fna_<clientId>`
+3. Supabase `fnadata` table via `saveToServer()` / `loadFromServer()`
+
+### Tab order (TABS array, index 0–10)
+```
+0:Client  1:Scope  2:Income  3:Assets  4:Needs  5:Policies
+6:Retirement  7:Estate  8:Summary  9:Overview  10:ROA
+```
+Builders array matches exactly: `[buildClient, buildScope, buildIncome, buildAssets, buildNeeds, buildPolicies, buildRetirement, buildEstate, buildSummary, buildOverview, buildROATab]`
+
+### Key architectural rules
+- **`importedPols`** — always sourced fresh from the CRM URL params, NEVER saved to server. The `saveToServer()` function explicitly skips it.
+- **`_retInclude` flags** — saved separately as a `retIncludes` map (PolicyNo → {include, rows}) in the server payload, restored onto fresh CRM policies on load.
+- **`_retRows`** — array of ticked lump benefit row indices per policy for per-benefit retirement selection.
+- **`retAssets`** — seeded from `importedPols` when empty. On server load, if a new RA policy has appeared in the CRM that isn't in `retAssets`, the array is reset so `buildRetirement` re-seeds it. `contribEsc` and `growthRate` auto-sync from the matching policy's `PremEscalation` / `GrowthRate` fields on every render of `buildRetirement`.
+- **Income from URL** — after server state loads, URL income is always reapplied to `S.incRows[0].pm` and `S.cli.grossPM` so it's never lost.
+- **`_isPremRow`** in `retNeeds` — premium rows sent from the Policies tab. Cleared and rebuilt from ticked policies on "Send" button click. Saved to server via `saveToServer(true)` immediately when sent.
+
+### SA tax constants (fna.html)
+```javascript
+ABATEMENT  = 3500000     // Primary abatement
+DUTY_THRESH= 30000000    // 20% up to R30m, 25% above
+DUTY_RATE1 = 0.20
+DUTY_RATE2 = 0.25
+EXEC_RATE  = 0.04025     // Executor fees (3.5% + 15% VAT)
+CGT_INCLUSION = 0.40     // CGT inclusion rate
+```
+
+### Policy type arrays
+```javascript
+POL_RA_TYPES  = ['Retirement Annuity','Pension Fund','Provident Fund','Preservation Fund','Living Annuity']
+POL_INV_TYPES = ['Tax Free Savings','Investment','Endowment','Unit Trust']
+POL_MED_TYPES = ['Medical Aid']
+```
+
+### Estate duty — calculated in 3 places (must stay in sync)
+1. `buildEstate()` — full detailed calculation with apportionment
+2. `buildNeeds()` — auto-liabilities on the death tab
+3. `buildSummary()` — pre-calc block at top of function
+
+### Number formatting
+- Locale: `en-ZA` (space thousands separator, comma decimal in display)
+- All stored values are whole Rands — no cents
+- Input parser: `N(v)` strips non-numeric except `.` and `-`
+- `Rfmt(v)` formats for display
+- `laEscRate(p)` = `max(0, GrowthRate − DrawdownRate)` for Living Annuity escalation
+
+### Print functions
+- `printFNA()` — opens a new window with a complete A4 formatted FNA (7 pages)
+- `printAandL()` — Assets & Liabilities statement
+- `printBrokerAuth()` / `printClientConsent()` — in index.html
+
+---
+
+## CRM Architecture (index.html)
+
+### Global state
+- `DB` — `{clients:[], policies:[], tasks:[], roas:[], links:[]}`
+- `PAGE` — current page (`'dash'`, `'clients'`, `'leads'`, `'tasks'`)
+- `CTAB` — current client sub-tab (`'overview'`, `'policies'`, `'banking'`, `'roa'`)
+- `EC` — currently editing client ID
+- `EDIT_BANKS` / `EDIT_DOCS` — working copies of bank/doctor arrays in the edit modal
+
+### Client sub-tabs
+Overview · Policies · Banking · ROA History
+
+### Bank & Doctor editing
+Bank accounts and doctors are edited **inline inside the Edit Client modal** (not via sub-modals). `renderEditBanks()` and `renderEditDocs()` render editable rows into `#editBankSec` and `#editDocSec` divs appended to the modal. Collected in `saveClient()` and stored as JSON strings in `c.BankDetails` and `c.Doctors`.
+
+### Reminder done state
+Stored in localStorage keyed as `du_rem_<year>_<n>_<type>`. Resets automatically each calendar year. Uses `data-rname` / `data-rtype` attributes on checkboxes (not inline JS) to avoid HTML quote conflicts.
+
+### Task log modal
+"Close" button is "Save & Close" — calls `saveTaskLogAndClose()` which saves due date, reassignment, priority, CC Wife, and any typed note before closing. The **📝 Add Entry** button stays in the modal after saving (for continued logging).
+
+### Modal backdrop drag fix
+`_mousedownInsideModal` flag prevents the modal closing when the user clicks inside and drags out to the backdrop. Applied in both `index.html` and `fna.html`.
+
+### FNA URL building
+`buildFnaUrl(c)` in index.html constructs the URL with all client and policy params. Policies are JSON-encoded in the `pols` param. The FNA reads `window._crmParams` to access these.
+
+### Policy form — Lump Sum Benefits (Risk policies)
+Risk policies use `POL_LUMP_ROWS` — each row has: type, label, cover, prem, premEsc, benEsc. Stored as `LumpBenefits` JSON. Policy-level premium is auto-summed from all rows. Legacy single fields (BenDeath, BenDisability, BenDreadDisease) are kept populated from the first matching row for FNA compatibility.
+
+### Living Annuity fields
+- `BenLAIncome` — base monthly income (drives drawdown rate calculation)
+- `LABonus` — insurer boost/bonus (e.g. Discovery Invest Income Boost) — separate from base
+- `DrawdownRate` — annual drawdown %
+- `IllustrativeRate` — Stated IRR from insurer statement (auto-syncs to growth rate field)
+- `BenEscalation` — EAC (Effective Annual Cost) for LA policies
+- `PremGrowthRate` — net growth rate (auto-synced from IllustrativeRate for LA)
+
+### IRR calculation
+- `calcPolicyIRR()` — shared utility. Lump sum: simple compound return. Recurring: Newton-Raphson XIRR approximation.
+- For Living Annuities: use stated IRR (`IllustrativeRate`) only — calculated IRR is inaccurate because it ignores income drawn.
+- For RA/Investment: use calculated IRR — no income drawn so calculation is accurate.
+
+---
+
+## Development rules (strictly observed)
+
+1. **Never guess.** Read the relevant code before making any change.
+2. **Syntax check before delivering.** Every JS change must pass `node --check` on the extracted script.
+3. **Small targeted changes.** Never rewrite large sections unless explicitly asked. Change the minimum lines necessary.
+4. **One change at a time.** Fix, check, deliver. Don't bundle unrelated fixes.
+5. **No shortcuts.** If something needs reading first, read it. The cost of a bad fix is always higher than the cost of reading.
+6. **Always copy to `/mnt/user-data/outputs/`** and call `present_files` at the end of every session.
+7. **Estate duty is calculated in 3 places** — always check all three stay in sync when touching estate logic.
+8. **`importedPols` is never saved to server** — do not add it to the save payload.
+9. **Always upload the latest index.html at the start of each session** — never work from memory of a previous version.
+
+---
+
+## Pending / open items
+- Summary/Overview/Estate tab structure — user chose to use the system for a while before restructuring
+- Print function (printFNA) pages 6–7 — liquidity and summary sections may need further refinement after real client use
+- Dead code: old bank/doctor sub-modals (`bankMod`, `doctorMod`) still exist in HTML — can be cleaned up later
+- `forms.html` — forms library, standalone, no changes needed currently
+
+---
+
+## Working files location
+When Claude works on this project, files should be read from and written to `/home/claude/`. Final outputs go to `/mnt/user-data/outputs/`.
+
+The user uploads the latest `index.html` at the start of each session. Always read the uploaded file before making any changes — never work from memory of a previous session's version.
