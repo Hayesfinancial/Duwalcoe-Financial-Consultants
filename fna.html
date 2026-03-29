@@ -175,12 +175,12 @@ table input:focus, table select:focus { outline: none; border-color: var(--gold)
     <button class="btn btn-gold btn-sm" onclick="nextTab()">Next →</button>
     <button class="btn btn-navy btn-sm" onclick="generateROA()">📄 ROA</button>
   </div>
-</div>
+</div>>
 
 <!-- Persisted data -->
 <div id="saved-data" style="display:none">null</div>
 
-<script>
+<script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script><script>
 'use strict';
 
 // ═══════════════════════════════════════════════════════════
@@ -227,31 +227,24 @@ function yrsToRet(dob, retAge) {
   return Math.max(0, N(retAge) - a);
 }
 
-// ── TAX TABLES 2026/2027 ──────────────────────────────────
+// ── TAX TABLES 2025/2026 ──────────────────────────────────
 // Returns gross monthly amount needed to yield nettPM nett
 // Uses iterative approach: start with gross = nett / (1 - est rate), refine
 var TAX_BRACKETS = [
-  { limit: 245100,  base: 0,       rate: 0.18 },
-  { limit: 383100,  base: 44118,   rate: 0.26 },
-  { limit: 530200,  base: 79998,   rate: 0.31 },
-  { limit: 695800,  base: 125599,  rate: 0.36 },
-  { limit: 887000,  base: 185215,  rate: 0.39 },
-  { limit: 1878600, base: 259783,  rate: 0.41 },
-  { limit: Infinity,base: 666339,  rate: 0.45 }
+  { limit: 237100,  base: 0,       rate: 0.18 },
+  { limit: 370500,  base: 42678,   rate: 0.26 },
+  { limit: 512800,  base: 77362,   rate: 0.31 },
+  { limit: 673000,  base: 121475,  rate: 0.36 },
+  { limit: 857900,  base: 179147,  rate: 0.39 },
+  { limit: 1817000, base: 251258,  rate: 0.41 },
+  { limit: Infinity,base: 643601,  rate: 0.45 }
 ];
-var PRIMARY_REBATE = 17820;
-var SECONDARY_REBATE = 9765; // 65+: total 27585 less primary
-var TERTIARY_REBATE = 3249;  // 75+: total 30834 less primary+secondary
+var PRIMARY_REBATE = 17235;
+var SECONDARY_REBATE = 9444; // 65+
 var UIF_RATE = 0.01;
-var UIF_MAX_ANNUAL = 2125;   // R17 712 ceiling × 1% × 12
+var UIF_MAX_ANNUAL = 1776;
 
-function rebateForAge(age) {
-  if (age >= 75) return PRIMARY_REBATE + SECONDARY_REBATE + TERTIARY_REBATE;
-  if (age >= 65) return PRIMARY_REBATE + SECONDARY_REBATE;
-  return PRIMARY_REBATE;
-}
-
-function calcTaxPA(grossPA, age) {
+function calcTaxPA(grossPA) {
   var g = N(grossPA);
   var prevLimit = 0;
   var tax = 0;
@@ -263,8 +256,7 @@ function calcTaxPA(grossPA, age) {
     }
     prevLimit = b.limit;
   }
-  var rebate = (age !== undefined && age !== null) ? rebateForAge(age) : PRIMARY_REBATE;
-  return Math.max(0, tax - rebate);
+  return Math.max(0, tax - PRIMARY_REBATE);
 }
 
 function calcMarginalRate(grossPA) {
@@ -276,13 +268,13 @@ function calcMarginalRate(grossPA) {
 }
 
 // Full breakdown: salary (subject to UIF) + other taxable income (rental etc — PAYE but no UIF)
-function taxBreakdownFull(salaryGrossPM, otherTaxablePM, age) {
+function taxBreakdownFull(salaryGrossPM, otherTaxablePM) {
   var sal   = N(salaryGrossPM);
   var other = N(otherTaxablePM);
   var totalGrossPM = sal + other;
   if (totalGrossPM <= 0) return null;
   var totalGrossPA = totalGrossPM * 12;
-  var taxPA = calcTaxPA(totalGrossPA, age);
+  var taxPA = calcTaxPA(totalGrossPA);
   var uifPA = Math.min(sal * 12 * UIF_RATE, UIF_MAX_ANNUAL); // UIF on salary portion only
   var taxPM = Math.round(taxPA / 12);
   var uifPM = Math.round(uifPA / 12);
@@ -298,18 +290,18 @@ function taxBreakdownFull(salaryGrossPM, otherTaxablePM, age) {
 }
 
 // Legacy single-arg wrapper for callers that only have salary gross
-function taxBreakdown(grossPM, age) {
-  return taxBreakdownFull(N(grossPM), 0, age);
+function taxBreakdown(grossPM) {
+  return taxBreakdownFull(N(grossPM), 0);
 }
 
-function grossFromNett(nettPM, age) {
+function grossFromNett(nettPM) {
   // Find gross monthly that yields nettPM after PAYE and UIF
   // Iterate: guess gross, compute nett, adjust
   var nett = N(nettPM);
   if (nett <= 0) return 0;
   var gross = nett / 0.72; // initial guess
   for (var i = 0; i < 20; i++) {
-    var taxPA = calcTaxPA(gross * 12, age);
+    var taxPA = calcTaxPA(gross * 12);
     var uifPA = Math.min(gross * 12 * UIF_RATE, UIF_MAX_ANNUAL);
     var nettCalc = gross - taxPA / 12 - uifPA / 12;
     var diff = nett - nettCalc;
@@ -397,16 +389,16 @@ function retirementCapitalNeeded(monthlyIncomeToday, yearsToRet, yearsInRet, cpi
 // ── CGT ON DEATH (SA Eighth Schedule) ────────────────────
 // SA rules: deemed disposal at market value on death
 // Inclusion rate: 40% for individuals
-// Year-of-death annual exclusion: R440,000
-// Primary residence exclusion: first R3,000,000 of gain
+// Year-of-death annual exclusion: R300,000
+// Primary residence exclusion: first R2,000,000 of gain
 // Spouse beneficiary: rollover — no CGT on death
 // Returns { gain, includedGain, cgt } for a single asset
 // marginalRate: client's marginal income tax rate (decimal)
-// primaryResidence: boolean — apply R3m exclusion
-// Applied against shared R440k annual exclusion externally
+// primaryResidence: boolean — apply R2m exclusion
+// Applied against shared R300k annual exclusion externally
 var CGT_INCLUSION   = 0.40;
-var CGT_ANNUAL_EXCL = 440000;  // year of death (2013: R300 000)
-var CGT_PRIMARY_RES = 3000000; // primary residence gain exclusion (2027: R3m)
+var CGT_ANNUAL_EXCL = 300000;  // year of death
+var CGT_PRIMARY_RES = 2000000; // primary residence gain exclusion
 
 function calcCGTAsset(marketVal, baseCost, primaryResidence) {
   var mv   = N(marketVal);
@@ -474,7 +466,7 @@ function calcTotalCGT(marginalRate) {
     }
   });
 
-  // Apply shared annual exclusion (R440k in year of death)
+  // Apply shared annual exclusion (R300k in year of death)
   var netGain     = Math.max(0, totalGainAfterPR - CGT_ANNUAL_EXCL);
   var includedGain= Math.round(netGain * CGT_INCLUSION);
   var mr          = N(marginalRate) > 0 ? N(marginalRate) / 100 : 0.45; // default max if unknown
@@ -730,7 +722,11 @@ var S = JSON.parse(JSON.stringify(DEFAULTS));
       S.importedPols.forEach(function(p){
         var k1 = p.PolicyNo;
         var k2 = p.Insurer+'|'+p.Product+'|'+p.Type;
-        if((k1 && retIncludes[k1]) || retIncludes[k2]) p._retInclude = true;
+        var _ri = retIncludes[k1] || retIncludes[k2];
+        if(_ri){
+          if(typeof _ri === 'object'){ p._retInclude = _ri.include||false; p._retRows = _ri.rows||[]; }
+          else { p._retInclude = true; p._retRows = []; } // legacy boolean
+        }
       });
     }
     // If server retAssets is missing RA policies that are now in importedPols, reset so
@@ -855,9 +851,9 @@ function saveToServer(silent) {
   // so they survive the CRM policy refresh on next load
   var retIncludes = {};
   (S.importedPols||[]).forEach(function(p){
-    if(p._retInclude){
+    if(p._retInclude || (p._retRows && p._retRows.length)){
       var key2 = p.PolicyNo || (p.Insurer+'|'+p.Product+'|'+p.Type);
-      if(key2) retIncludes[key2] = true;
+      if(key2) retIncludes[key2] = {include:p._retInclude||false, rows:p._retRows||[]};
     }
   });
   saveData.retIncludes = retIncludes;
@@ -1346,7 +1342,7 @@ function buildIncome() {
   }, 0);
 
   if (salaryGross > 0 || otherTaxable > 0) {
-    var t = taxBreakdownFull(salaryGross, otherTaxable, ageFrom(S.cli.dob));
+    var t = taxBreakdownFull(salaryGross, otherTaxable);
     if (t) {
       S.cli.grossPM = String(salaryGross);
       S.cli.nettPM  = String(t.nettPM);
@@ -1566,10 +1562,10 @@ function buildAssets() {
       var cgtEst=Math.round(cgtR.gainAfterExcl*CGT_INCLUSION*mr);
       var cgtBox=div(); cgtBox.style.cssText='margin-top:8px;padding:8px 12px;border-radius:6px;background:#fef9ee;border:1px solid var(--gold2);font-size:11px';
       cgtBox.innerHTML='<strong>CGT estimate on death:</strong> Gain: '+Rfmt(cgtR.gain)+
-        (p.primaryResidence&&N(p.baseCost)>0?' (less R3m primary residence exclusion = '+Rfmt(cgtR.gainAfterExcl)+')':'')+
+        (p.primaryResidence&&N(p.baseCost)>0?' (less R2m primary residence exclusion = '+Rfmt(cgtR.gainAfterExcl)+')':'')+
         ' · Included gain (40%): '+Rfmt(Math.round(cgtR.gainAfterExcl*CGT_INCLUSION))+
         ' · Est. CGT @ '+Math.round(mr*100)+'% marginal: <strong>'+Rfmt(cgtEst)+'</strong>'+
-        ' <span style="color:var(--sub)">(before R440k annual exclusion shared across all assets)</span>';
+        ' <span style="color:var(--sub)">(before R300k annual exclusion shared across all assets)</span>';
       card.appendChild(cgtBox);
     } else if((p.deathBenType||'Estate')==='Spouse'){
       var rollBox=div(); rollBox.style.cssText='margin-top:8px;padding:6px 10px;border-radius:6px;background:#f0fdf4;border:1px solid #86efac;font-size:11px;color:#166534';
@@ -1880,7 +1876,7 @@ function buildAssets() {
     var cgtInf=div('info');
     cgtInf.innerHTML='On death, SARS deems a disposal of all assets at market value (Eighth Schedule). '+
       'Assets going to <strong>spouse are excluded</strong> (rollover applies). '+
-      'Year-of-death annual exclusion: <strong>R440,000</strong>. Primary residence exclusion: <strong>R3,000,000</strong> of gain. '+
+      'Year-of-death annual exclusion: <strong>R300,000</strong>. Primary residence exclusion: <strong>R2,000,000</strong> of gain. '+
       'Inclusion rate: <strong>40%</strong> of net gain included in taxable income, taxed at marginal rate.';
     s.appendChild(cgtInf);
     var cgtBox=div(); cgtBox.style.cssText='background:var(--navy);color:#fff;border-radius:9px;padding:16px 18px;margin-bottom:14px';
@@ -2494,7 +2490,7 @@ function buildRetirement() {
     var laTb=document.createElement('tbody');
 
     laIncPols.forEach(function(p){
-      var incToday=N(p.BenLAIncome);
+      var incToday=N(p.BenLAIncome)+N(p.LABonus||0);
       var escRate=(function(r){return r>0?r:N(S.assump.cpi)||6;})(laEscRate(p));
       var incAtRet=yrsToRet?Math.round(incToday*Math.pow(1+escRate/100,yrsToRet)):incToday;
       var isTax=p.LAIncomeTaxable!==false;
@@ -2846,41 +2842,69 @@ function buildPolicies() {
         s.appendChild(afford2);
       }
 
-      // ── Capital needed to fund ticked policies in retirement
-      var tickedPols = _riskTypes.filter(function(p){ return p._retInclude; });
-      if(tickedPols.length > 0){
-        s.appendChild(stitle('Capital Needed to Fund Selected Policies in Retirement'));
+      // ── Capital needed to fund ticked benefit rows in retirement
+      // Collect ticked items: either whole-policy tick (_retInclude) or per-benefit row ticks (_retRows)
+      var tickedItems = [];
+      _riskTypes.forEach(function(pol){
+        var lumpRows=[];
+        try{lumpRows=pol.LumpBenefits?JSON.parse(pol.LumpBenefits):[];}catch(e){}
+        if(lumpRows.length > 0){
+          // Per-benefit ticks
+          var retRows = pol._retRows || [];
+          retRows.forEach(function(ri){
+            var r = lumpRows[ri];
+            if(!r) return;
+            tickedItems.push({
+              label:(pol.Insurer||'')+(pol.Product?' — '+pol.Product:'')+' — '+r.type+(r.label?' ('+r.label+')':''),
+              prem: parseFloat(r.prem||0)||0,
+              esc:  parseFloat(r.premEsc||r.esc||0)||0,
+              pol:  pol,
+              _retReturn: pol._retReturn
+            });
+          });
+        } else if(pol._retInclude){
+          // Legacy whole-policy tick
+          var escRawL=String(pol.PremEscalation!=null&&pol.PremEscalation!==''?pol.PremEscalation:(pol.premEsc!=null&&pol.premEsc!==''?pol.premEsc:'')).replace(/,/g,'.').replace(/[^0-9.]/g,'');
+          tickedItems.push({
+            label:(pol.Insurer||'')+(pol.Product?' — '+pol.Product:''),
+            prem: N(pol.Premium),
+            esc:  parseFloat(escRawL)||0,
+            pol:  pol,
+            _retReturn: pol._retReturn
+          });
+        }
+      });
+
+      if(tickedItems.length > 0){
+        s.appendChild(stitle('Capital Needed to Fund Selected Benefits in Retirement'));
         var polCapInf=div('info');
-        polCapInf.innerHTML='Capital required to fund each selected policy premium for retirement. '
-          +'Uses the premium at retirement, escalated in retirement at the policy rate, capitalised over '+yrsInRet+' years.';
+        polCapInf.innerHTML='Capital required to fund each selected benefit in retirement. '
+          +'Uses the premium at retirement, escalated in retirement at the benefit rate, capitalised over '+yrsInRet+' years.';
         s.appendChild(polCapInf);
 
         var polCapTbl=document.createElement('table');
-        polCapTbl.innerHTML='<thead><tr><th>Policy</th><th>Premium today</th><th>Esc %</th><th>Premium at ret.</th><th>Return in ret %</th><th>Capital required</th></tr></thead>';
+        polCapTbl.innerHTML='<thead><tr><th>Benefit</th><th>Premium today</th><th>Esc %</th><th>Premium at ret.</th><th>Return in ret %</th><th>Capital required</th></tr></thead>';
         var polCapTb=document.createElement('tbody');
         var totalPolCap=0;
 
-        tickedPols.forEach(function(pol){
-          var escRaw2=String(pol.PremEscalation!=null&&pol.PremEscalation!==''?pol.PremEscalation:(pol.premEsc!=null&&pol.premEsc!==''?pol.premEsc:'')).replace(/,/g,'.').replace(/[^0-9.]/g,'');
-          var esc2=parseFloat(escRaw2)||0;
-          var premAtRet=esc2>0?Math.round(N(pol.Premium)*Math.pow(1+esc2/100,yrsToRet2)):N(pol.Premium);
-          // Return rate in retirement — use assumption, editable per policy
-          var retRet=N(pol._retReturn)>0?N(pol._retReturn):N(S.assump.retReturn)||8;
-          // Capital = PV of premium stream in retirement at return rate
+        tickedItems.forEach(function(item){
+          var esc2=item.esc;
+          var premAtRet=esc2>0?Math.round(item.prem*Math.pow(1+esc2/100,yrsToRet2)):item.prem;
+          var retRet=N(item._retReturn)>0?N(item._retReturn):N(S.assump.retReturn)||8;
           var polCap=capitalise(premAtRet, yrsInRet, esc2||N(S.assump.cpi)||6, retRet);
           totalPolCap+=polCap;
-          var idx3=pols.indexOf(pol);
+          var idx3=pols.indexOf(item.pol);
           var tr3=document.createElement('tr');
 
           // Editable return rate cell
           var retRetInp=document.createElement('input'); retRetInp.type='text'; retRetInp.inputMode='numeric';
-          retRetInp.value=pol._retReturn||''; retRetInp.placeholder=String(N(S.assump.retReturn)||8);
+          retRetInp.value=item._retReturn||''; retRetInp.placeholder=String(N(S.assump.retReturn)||8);
           retRetInp.style.cssText='width:46px;padding:3px 5px;border:1.5px solid var(--mist);border-radius:4px;font-size:11px;text-align:right';
-          retRetInp.addEventListener('blur',function(e){S.importedPols[idx3]._retReturn=e.target.value;render();});
-          retRetInp.addEventListener('input',function(e){S.importedPols[idx3]._retReturn=e.target.value;});
+          retRetInp.addEventListener('blur',function(e){if(idx3>=0)S.importedPols[idx3]._retReturn=e.target.value;render();});
+          retRetInp.addEventListener('input',function(e){if(idx3>=0)S.importedPols[idx3]._retReturn=e.target.value;});
 
-          tr3.innerHTML='<td><strong>'+(pol.Insurer||'—')+'</strong>'+(pol.Product?' — '+pol.Product:'')+'</td>'+
-            '<td>'+Rfmt(pol.Premium)+'/pm</td>'+
+          tr3.innerHTML='<td><strong>'+item.label+'</strong></td>'+
+            '<td>'+Rfmt(item.prem)+'/pm</td>'+
             '<td>'+(esc2||'—')+'%</td>'+
             '<td>'+Rfmt(premAtRet)+'/pm</td>';
           var tdRet=document.createElement('td');
@@ -2955,16 +2979,30 @@ function buildPolicies() {
     bSend.className = 'btn btn-navy';
     bSend.textContent = '→ Send ticked premiums to Retirement tab';
     bSend.addEventListener('click', function() {
-      var toSend = (S.importedPols||[]).filter(function(p){
-        return p._retInclude && (p.Frequency||'Monthly')==='Monthly' && N(p.Premium)>0
-          && p.Type !== 'Business Assurance';
+      // Collect ticked items — per-benefit rows or legacy whole-policy ticks
+      var toSendItems=[];
+      (S.importedPols||[]).forEach(function(pol){
+        if(pol.Type==='Business Assurance') return;
+        var lumpRows=[];
+        try{lumpRows=pol.LumpBenefits?JSON.parse(pol.LumpBenefits):[];}catch(e){}
+        if(lumpRows.length>0){
+          var retRows=pol._retRows||[];
+          retRows.forEach(function(ri){
+            var r=lumpRows[ri];
+            if(!r||!r.prem) return;
+            var escR=String(r.premEsc||r.esc||'').replace(/,/g,'.').replace(/[^0-9.]/g,'');
+            toSendItems.push({desc:(pol.Insurer||'')+(pol.Product?' — '+pol.Product:'')+' — '+r.type,amt:String(Math.round(parseFloat(r.prem)||0)),esc:escR});
+          });
+        } else if(pol._retInclude&&(pol.Frequency||'Monthly')==='Monthly'&&N(pol.Premium)>0){
+          var escRaw3=String(pol.PremEscalation!=null&&pol.PremEscalation!==''?pol.PremEscalation:(pol.premEsc!=null&&pol.premEsc!==''?pol.premEsc:'')).replace(/,/g,'.').replace(/[^0-9.]/g,'');
+          toSendItems.push({desc:(pol.Insurer||'')+(pol.Product?' — '+pol.Product:'')+' premium',amt:String(Math.round(N(pol.Premium))),esc:escRaw3});
+        }
       });
-      if (!toSend.length) { alert('Tick the checkbox on the policies in the affordability table above.'); return; }
+      if (!toSendItems.length) { alert('Tick the checkboxes on the benefit rows you want to keep in retirement.'); return; }
       if (!S.retNeeds) S.retNeeds = [];
       S.retNeeds = S.retNeeds.filter(function(r){ return !r._isPremRow; });
-      toSend.forEach(function(p){
-        var escRaw3=String(p.PremEscalation!=null&&p.PremEscalation!==''?p.PremEscalation:(p.premEsc!=null&&p.premEsc!==''?p.premEsc:'')).replace(/,/g,'.').replace(/[^0-9.]/g,'');
-        S.retNeeds.push({ desc:(p.Insurer||'')+(p.Product?' — '+p.Product:'')+' premium', amtToday:String(Math.round(N(p.Premium))), esc:escRaw3, _isPremRow:true });
+      toSendItems.forEach(function(item){
+        S.retNeeds.push({ desc:item.desc, amtToday:item.amt, esc:item.esc, _isPremRow:true });
       });
       persist(); saveToServer(true); go(6); // go to Retirement tab (index 6 after tab reorder)
     });
@@ -2973,6 +3011,51 @@ function buildPolicies() {
   }
 
   return s;
+}
+
+// ── IRR calculation for FNA
+function calcPolicyIRR_fna(startDateStr, premium, frequency, premEsc, fundValue){
+  if(!startDateStr || !fundValue || N(fundValue)===0) return null;
+  var fv = N(fundValue);
+  if(fv === 0) return null;
+  var sp = String(startDateStr).split(/[T ]/)[0].split(/[-\/]/);
+  if(sp.length < 3) return null;
+  var start = new Date(+sp[0], +sp[1]-1, +sp[2]);
+  var today = new Date();
+  var yrs = (today - start) / (365.25 * 24 * 60 * 60 * 1000);
+  if(yrs < 0.1) return null;
+  var freq = frequency || 'Monthly';
+  var isOnce = freq === 'Once Off' || freq === 'Paid Up' || freq === 'Lump Sum';
+  var prem = N(premium);
+  if(isOnce || prem === 0){
+    if(prem === 0) return null;
+    var r = Math.pow(fv / prem, 1 / yrs) - 1;
+    return Math.round(r * 1000) / 10;
+  }
+  var esc = N(premEsc) / 100;
+  var months = Math.round(yrs * 12);
+  if(months < 2) return null;
+  function npv(monthlyRate){
+    var pv = 0; var p = prem; var annualCount = 0;
+    for(var m = 0; m < months; m++){
+      if(m > 0 && m % 12 === 0){ annualCount++; p = prem * Math.pow(1 + esc, annualCount); }
+      pv -= p / Math.pow(1 + monthlyRate, m + 1);
+    }
+    pv += fv / Math.pow(1 + monthlyRate, months);
+    return pv;
+  }
+  var r = 0.007;
+  for(var i = 0; i < 50; i++){
+    var f = npv(r); var delta = 0.00001;
+    var df = (npv(r + delta) - f) / delta;
+    if(Math.abs(df) < 1e-10) break;
+    var rNew = r - f / df;
+    if(Math.abs(rNew - r) < 1e-7){ r = rNew; break; }
+    r = rNew;
+    if(r < -0.5 || r > 2) return null;
+  }
+  var annualIRR = Math.pow(1 + r, 12) - 1;
+  return Math.round(annualIRR * 1000) / 10;
 }
 
 function buildPolCard(p, i) {
@@ -3060,7 +3143,7 @@ function buildPolCard(p, i) {
 
     // Premium escalation
     var peWrap=div('f'); peWrap.style.minWidth='160px';
-    peWrap.appendChild(el('label','','Premium escalation'));
+    peWrap.appendChild(el('label','','Annual Premium Escalation'));
     var peInp=document.createElement('input'); peInp.type='text';
     peInp.value=String(p.PremEscalation!=null&&p.PremEscalation!==''?p.PremEscalation:(p.premEsc!=null&&p.premEsc!==''?p.premEsc:'')); peInp.placeholder='e.g. 6 or Age rated or CPI';
     peInp.style.cssText='border:1.5px solid var(--mist);border-radius:6px;padding:7px 10px;font-size:13px;font-family:inherit;width:100%';
@@ -3072,15 +3155,20 @@ function buildPolCard(p, i) {
     peWrap.appendChild(peInp);
     escRow.appendChild(peWrap);
 
-    // Benefit escalation
-    var beWrap=div('f'); beWrap.style.minWidth='160px';
-    beWrap.appendChild(el('label','','Benefit escalation'));
-    var beInp=document.createElement('input'); beInp.type='text';
-    beInp.value=String(p.BenEscalation||''); beInp.placeholder='e.g. 5 or CPI or Age rated';
-    beInp.style.cssText='border:1.5px solid var(--mist);border-radius:6px;padding:7px 10px;font-size:13px;font-family:inherit;width:100%';
-    beInp.addEventListener('input',function(e){ S.importedPols[i].BenEscalation=e.target.value; });
-    beWrap.appendChild(beInp);
-    escRow.appendChild(beWrap);
+    // Annual Cover Increase — only shown when policy has lump sum benefits
+    // For pure IP policies the in-claim escalation on each row handles this
+    var _hasLump=false; try{_hasLump=(p.LumpBenefits&&JSON.parse(p.LumpBenefits).length>0);}catch(e){}
+    var _hasLegacyLump=N(p.BenDeath)>0||N(p.BenDisability)>0||N(p.BenDreadDisease)>0;
+    if(_hasLump||_hasLegacyLump){
+      var beWrap=div('f'); beWrap.style.minWidth='160px';
+      beWrap.appendChild(el('label','','Annual Cover Increase'));
+      var beInp=document.createElement('input'); beInp.type='text';
+      beInp.value=String(p.BenEscalation||''); beInp.placeholder='e.g. 5 or CPI or Age rated';
+      beInp.style.cssText='border:1.5px solid var(--mist);border-radius:6px;padding:7px 10px;font-size:13px;font-family:inherit;width:100%';
+      beInp.addEventListener('input',function(e){ S.importedPols[i].BenEscalation=e.target.value; });
+      beWrap.appendChild(beInp);
+      escRow.appendChild(beWrap);
+    }
 
     card.appendChild(escRow);
 
@@ -3107,11 +3195,138 @@ function buildPolCard(p, i) {
     bst.style.marginTop = '10px';
     card.appendChild(bst);
 
-    var rb1 = g3();
-    rb1.appendChild(rfld('Death / Life Cover',    p, 'BenDeath'));
-    rb1.appendChild(rfld('Capital Disability',    p, 'BenDisability'));
-    rb1.appendChild(rfld('Dread Disease Cover',   p, 'BenDreadDisease'));
-    card.appendChild(rb1);
+    // Lump sum benefits — use LumpBenefits rows if present, else legacy single fields
+    var lumpRows = [];
+    try { lumpRows = p.LumpBenefits ? JSON.parse(p.LumpBenefits) : []; } catch(e) { lumpRows = []; }
+
+    if(lumpRows.length > 0){
+      var lumpSt = el('div','','Lump Sum Benefits');
+      lumpSt.style.cssText = 'font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--sub);display:block;margin-bottom:4px;margin-top:8px';
+      card.appendChild(lumpSt);
+
+      var lumpTbl = document.createElement('table');
+      lumpTbl.style.cssText = 'width:100%;border-collapse:collapse;font-size:12px';
+      // Header
+      var lhdr = document.createElement('tr');
+      ['Type / Label','Cover','Premium','Prem Esc %','Ben Esc %','Pay in ret.'].forEach(function(h){
+        var th = document.createElement('th');
+        th.textContent = h;
+        th.style.cssText = 'text-align:left;font-size:10px;color:var(--sub);font-weight:700;padding:3px 6px;border-bottom:1px solid var(--mist)';
+        lhdr.appendChild(th);
+      });
+      lumpTbl.appendChild(lhdr);
+
+      var ltbody = document.createElement('tbody');
+      lumpRows.forEach(function(r, ri){
+        var tr = document.createElement('tr');
+        // Type + label
+        var t1 = document.createElement('td'); t1.style.padding='4px 6px';
+        var lbl = document.createElement('div');
+        lbl.style.cssText = 'font-weight:600;font-size:12px;color:var(--text)';
+        lbl.textContent = r.type + (r.label?' — '+r.label:'');
+        t1.appendChild(lbl); tr.appendChild(t1);
+        // Cover
+        var t2 = document.createElement('td'); t2.style.padding='4px 6px';
+        var cRw=div('td-r'); cRw.appendChild(el('span','rp','R'));
+        var cInp=document.createElement('input'); cInp.type='text'; cInp.inputMode='numeric';
+        cInp.value=r.cover||''; cInp.placeholder='0';
+        cInp.style.cssText='width:90px;padding:4px 5px 4px 18px;border:1.5px solid var(--mist);border-radius:4px;font-size:12px';
+        cInp.addEventListener('input',function(e){
+          try{var rows=JSON.parse(S.importedPols[i].LumpBenefits||'[]');rows[ri].cover=e.target.value;S.importedPols[i].LumpBenefits=JSON.stringify(rows);}catch(ex){}
+        });
+        cRw.appendChild(cInp); t2.appendChild(cRw); tr.appendChild(t2);
+        // Premium
+        var t3 = document.createElement('td'); t3.style.padding='4px 6px';
+        var pRw=div('td-r'); pRw.appendChild(el('span','rp','R'));
+        var pInp=document.createElement('input'); pInp.type='text'; pInp.inputMode='numeric';
+        pInp.value=r.prem||''; pInp.placeholder='0';
+        pInp.style.cssText='width:80px;padding:4px 5px 4px 18px;border:1.5px solid var(--mist);border-radius:4px;font-size:12px';
+        pInp.addEventListener('input',function(e){
+          try{var rows=JSON.parse(S.importedPols[i].LumpBenefits||'[]');rows[ri].prem=e.target.value;S.importedPols[i].LumpBenefits=JSON.stringify(rows);}catch(ex){}
+        });
+        pRw.appendChild(pInp); t3.appendChild(pRw); tr.appendChild(t3);
+        // Prem Esc
+        var t4 = document.createElement('td'); t4.style.padding='4px 6px';
+        var peI=document.createElement('input'); peI.type='text'; peI.inputMode='numeric';
+        peI.value=r.premEsc||''; peI.placeholder='%';
+        peI.style.cssText='width:50px;padding:4px 5px;border:1.5px solid var(--mist);border-radius:4px;font-size:12px';
+        peI.addEventListener('input',function(e){
+          try{var rows=JSON.parse(S.importedPols[i].LumpBenefits||'[]');rows[ri].premEsc=e.target.value;S.importedPols[i].LumpBenefits=JSON.stringify(rows);}catch(ex){}
+        });
+        t4.appendChild(peI); tr.appendChild(t4);
+        // Ben Esc
+        var t5 = document.createElement('td'); t5.style.padding='4px 6px';
+        var beI=document.createElement('input'); beI.type='text'; beI.inputMode='numeric';
+        beI.value=r.benEsc||''; beI.placeholder='%';
+        beI.style.cssText='width:50px;padding:4px 5px;border:1.5px solid var(--mist);border-radius:4px;font-size:12px';
+        beI.addEventListener('input',function(e){
+          try{var rows=JSON.parse(S.importedPols[i].LumpBenefits||'[]');rows[ri].benEsc=e.target.value;S.importedPols[i].LumpBenefits=JSON.stringify(rows);}catch(ex){}
+        });
+        t5.appendChild(beI); tr.appendChild(t5);
+        // Per-benefit retirement tick
+        var t6 = document.createElement('td'); t6.style.padding='4px 8px;text-align:center';
+        var retChk = document.createElement('input'); retChk.type='checkbox';
+        retChk.style.cssText='accent-color:var(--gold);width:14px;height:14px;cursor:pointer';
+        // _retRows is an array of ticked row indices on the policy
+        if(!p._retRows) p._retRows=[];
+        retChk.checked = p._retRows.indexOf(ri) >= 0;
+        retChk.addEventListener('change',function(e){
+          try{
+            var rows=JSON.parse(S.importedPols[i].LumpBenefits||'[]');
+            if(!S.importedPols[i]._retRows) S.importedPols[i]._retRows=[];
+            if(e.target.checked){
+              if(S.importedPols[i]._retRows.indexOf(ri)<0) S.importedPols[i]._retRows.push(ri);
+            } else {
+              S.importedPols[i]._retRows=S.importedPols[i]._retRows.filter(function(x){return x!==ri;});
+            }
+          }catch(ex){}
+        });
+        t6.appendChild(retChk); tr.appendChild(t6);
+
+        ltbody.appendChild(tr);
+      });
+      lumpTbl.appendChild(ltbody);
+      card.appendChild(lumpTbl);
+
+      // Weighted average premium increase display
+      var wgtRows = lumpRows.filter(function(r){ return parseFloat(r.prem||0)>0; });
+      if(wgtRows.length > 0){
+        var totP=0, wtdEsc=0, hasAR=false;
+        wgtRows.forEach(function(r){
+          var prem=parseFloat(r.prem||0)||0;
+          var escR=String(r.premEsc||r.esc||'').trim().toLowerCase();
+          if(escR==='age rated'||escR==='age-rated'||escR==='age') hasAR=true;
+          else{ totP+=prem; wtdEsc+=prem*(parseFloat(escR)||0); }
+        });
+        if(totP>0){
+          var avg=Math.round(wtdEsc/totP*10)/10;
+          var wgtDiv=div();
+          wgtDiv.style.cssText='margin-top:6px;padding:7px 10px;background:#f0f7e6;border:1px solid #c7e0a0;border-radius:6px;font-size:12px;color:var(--navy)';
+          wgtDiv.innerHTML='<strong>Weighted avg. annual premium increase: '+avg+'%</strong>'
+            +(hasAR?' <span style="font-size:10px;color:#b45309">· Age-rated benefits excluded</span>':'');
+          card.appendChild(wgtDiv);
+        }
+      }
+
+      // Sync totals to legacy fields for calculations
+      var totDeath=0, totDis=0, totDD=0;
+      lumpRows.forEach(function(r){
+        if(r.type==='Life Cover') totDeath+=parseFloat(r.cover||0)||0;
+        else if(r.type==='Capital Disability') totDis+=parseFloat(r.cover||0)||0;
+        else if(r.type==='Dread Disease / Severe Illness') totDD+=parseFloat(r.cover||0)||0;
+      });
+      if(totDeath) p.BenDeath=String(Math.round(totDeath));
+      if(totDis) p.BenDisability=String(Math.round(totDis));
+      if(totDD) p.BenDreadDisease=String(Math.round(totDD));
+
+    } else {
+      // Legacy: single fields
+      var rb1 = g3();
+      rb1.appendChild(rfld('Death / Life Cover',    p, 'BenDeath'));
+      rb1.appendChild(rfld('Capital Disability',    p, 'BenDisability'));
+      rb1.appendChild(rfld('Dread Disease Cover',   p, 'BenDreadDisease'));
+      card.appendChild(rb1);
+    }
 
     // Income benefits (simplified — monthly amount)
     var ipWrap = div();
@@ -3150,17 +3365,27 @@ function buildPolCard(p, i) {
         try { var rows = JSON.parse(S.importedPols[i].IncomeBenefits||'[]'); rows[ri].amount = e.target.value; S.importedPols[i].IncomeBenefits = JSON.stringify(rows); } catch(ex) {}
       });
       rw.appendChild(aInp); t2.appendChild(rw); tr.appendChild(t2);
-      // In-claim escalation
-      var t4 = document.createElement('td'); t4.style.paddingLeft='6px';
-      var escWr=div(); escWr.style.cssText='display:flex;align-items:center;gap:4px';
-      var escLb=el('span','','Esc%'); escLb.style.cssText='font-size:10px;color:var(--sub);white-space:nowrap';
-      var escIp=document.createElement('input'); escIp.type='text'; escIp.inputMode='numeric';
-      escIp.value=r.esc||''; escIp.placeholder='0';
-      escIp.style.cssText='width:44px;padding:4px 5px;border:1.5px solid var(--mist);border-radius:4px;font-size:11px';
-      escIp.addEventListener('input',function(e){
-        try { var rows=JSON.parse(S.importedPols[i].IncomeBenefits||'[]'); rows[ri].esc=e.target.value; S.importedPols[i].IncomeBenefits=JSON.stringify(rows); } catch(ex){}
-      });
-      escWr.appendChild(escLb); escWr.appendChild(escIp); t4.appendChild(escWr); tr.appendChild(t4);
+      // Escalation fields - Annual Prem Inc, Annual Benefit Inc, In-Claim Inc
+      var t4 = document.createElement('td'); t4.style.cssText='padding-left:6px;min-width:240px';
+      var escGrid=div(); escGrid.style.cssText='display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px';
+      function makeEscField(label, fieldKey, currentVal){
+        var wrap=div(); wrap.style.cssText='display:flex;flex-direction:column;gap:2px';
+        var lb=el('span','',label); lb.style.cssText='font-size:9px;color:var(--sub);white-space:nowrap';
+        var inp=document.createElement('input'); inp.type='text'; inp.inputMode='numeric';
+        inp.value=currentVal||''; inp.placeholder='0%';
+        inp.style.cssText='width:100%;padding:4px 5px;border:1.5px solid var(--mist);border-radius:4px;font-size:11px;box-sizing:border-box';
+        inp.addEventListener('input',(function(fk){ return function(e){
+          try { var rows=JSON.parse(S.importedPols[i].IncomeBenefits||'[]');
+            rows[ri][fk]=e.target.value;
+            if(fk==='premEsc') rows[ri].esc=e.target.value; // keep backward compat
+            S.importedPols[i].IncomeBenefits=JSON.stringify(rows); } catch(ex){}
+        };})(fieldKey));
+        wrap.appendChild(lb); wrap.appendChild(inp); return wrap;
+      }
+      escGrid.appendChild(makeEscField('Prem Inc%','premEsc',r.premEsc||r.esc));
+      escGrid.appendChild(makeEscField('Ben Inc%','benEsc',r.benEsc));
+      escGrid.appendChild(makeEscField('Claim Inc%','claimEsc',r.claimEsc));
+      t4.appendChild(escGrid); tr.appendChild(t4);
       // Delete
       var t3 = document.createElement('td');
       t3.appendChild(delBtn(function() {
@@ -3174,7 +3399,7 @@ function buildPolCard(p, i) {
     ipWrap.appendChild(addBtn('+ Add IP Benefit Row', function() {
       try {
         var rows = JSON.parse(S.importedPols[i].IncomeBenefits||'[]');
-        rows.push({type:'Income Protection', amount:''});
+        rows.push({type:'Income Protection', amount:'', premEsc:'', benEsc:'', claimEsc:'', esc:''});
         S.importedPols[i].IncomeBenefits = JSON.stringify(rows);
         render();
       } catch(ex) { render(); }
@@ -3193,6 +3418,32 @@ function buildPolCard(p, i) {
     var bst2 = el('div','stitle', isCGTInv ? 'Fund Value & CGT' : 'Fund Value');
     bst2.style.marginTop = '10px';
     card.appendChild(bst2);
+
+    // IRR badge — stated for investments, calculated for RA
+    var _irrDisplay = (isInv && parseFloat(p.IllustrativeRate||0)>0) ? parseFloat(p.IllustrativeRate) : calcPolicyIRR_fna(p.StartDate, p.Premium, p.Frequency, p.PremEscalation, p.BenFundValue);
+    if(_irrDisplay !== null && _irrDisplay !== 0){
+      var irrBdg = div();
+      var irrCol = _irrDisplay >= 10 ? '#166534' : _irrDisplay >= 6 ? '#1e40af' : _irrDisplay >= 0 ? '#92400e' : '#991b1b';
+      var irrBg  = _irrDisplay >= 10 ? '#f0fdf4' : _irrDisplay >= 6 ? '#eff6ff' : _irrDisplay >= 0 ? '#fffbeb' : '#fef2f2';
+      irrBdg.style.cssText = 'padding:6px 10px;background:'+irrBg+';border-radius:6px;font-size:12px;color:'+irrCol+';font-weight:700;margin-bottom:6px';
+      irrBdg.textContent = '📈 '+(isInv&&parseFloat(p.IllustrativeRate||0)>0?'Stated ':'')+'IRR: '+_irrDisplay+'% p.a.';
+      card.appendChild(irrBdg);
+    }
+    // Total invested / gain for investment policies
+    if(isInv && N(p.TotalInvested)>0){
+      var _ti=N(p.TotalInvested), _tw=N(p.TotalWithdrawn||0), _fv3=N(p.BenFundValue||0);
+      var _net=_ti-_tw, _gain=_fv3-_net, _pct=_net>0?Math.round(_gain/_net*1000)/10:0;
+      var invRow=div(); invRow.style.cssText='display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px';
+      function invMetric(lbl,val,col,bg){
+        var d=div(); d.style.cssText='padding:5px 10px;background:'+(bg||'#f5f5f2')+';border-radius:6px;font-size:12px;color:'+(col||'var(--navy)')+';font-weight:700;flex:1;min-width:130px';
+        d.textContent=lbl+': '+val; return d;
+      }
+      invRow.appendChild(invMetric('Total invested',Rfmt(_ti)));
+      if(_tw>0) invRow.appendChild(invMetric('Withdrawn',Rfmt(_tw)));
+      invRow.appendChild(invMetric('Net invested',Rfmt(_net)));
+      invRow.appendChild(invMetric('Gain',Rfmt(_gain)+' ('+_pct+'%)',_gain>=0?'#166534':'#991b1b',_gain>=0?'#f0fdf4':'#fef2f2'));
+      card.appendChild(invRow);
+    }
 
     var rb2 = g3();
     rb2.appendChild(rfld('Current Fund Value', p, 'BenFundValue', {onblur:function(){render();}}));
@@ -3250,7 +3501,7 @@ function buildPolCard(p, i) {
           invCgtBox.innerHTML='<strong>CGT on death:</strong> Gain: '+Rfmt(invGain)+
             ' · Included (40%): '+Rfmt(Math.round(invGain*CGT_INCLUSION))+
             ' · Est. CGT @ '+Math.round(invMR*100)+'%: <strong>'+Rfmt(invCGT)+'</strong>'+
-            ' <span style="color:var(--sub)">(before shared R440k annual exclusion)</span>';
+            ' <span style="color:var(--sub)">(before shared R300k annual exclusion)</span>';
           card.appendChild(invCgtBox);
         }
       } else if(N(p.BenFundValue)>0 && !polBaseCost2){
@@ -3267,6 +3518,36 @@ function buildPolCard(p, i) {
       tfsNote.textContent='✓ Tax Free Savings — explicitly CGT exempt. No CGT on death.';
       card.appendChild(tfsNote);
     } else if(isLA){
+      // Stated IRR + EAC display
+      var _statedIRR = parseFloat(p.IllustrativeRate||0)||0;
+      var _eac = parseFloat(p.BenEscalation||0)||0;
+      if(_statedIRR > 0 || _eac > 0){
+        var laMetrics = div();
+        laMetrics.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px';
+        if(_statedIRR > 0){
+          var laIrrCol = _statedIRR >= 10 ? '#166534' : _statedIRR >= 6 ? '#1e40af' : _statedIRR >= 0 ? '#92400e' : '#991b1b';
+          var laIrrBg  = _statedIRR >= 10 ? '#f0fdf4' : _statedIRR >= 6 ? '#eff6ff' : _statedIRR >= 0 ? '#fffbeb' : '#fef2f2';
+          var laIrrBdg = div();
+          laIrrBdg.style.cssText = 'padding:6px 10px;background:'+laIrrBg+';border-radius:6px;font-size:12px;color:'+laIrrCol+';font-weight:700;flex:1;min-width:160px';
+          laIrrBdg.textContent = '📈 IRR (net): '+_statedIRR+'% p.a.';
+          laMetrics.appendChild(laIrrBdg);
+        }
+        if(_eac > 0){
+          var laEacBdg = div();
+          laEacBdg.style.cssText = 'padding:6px 10px;background:#fef9ee;border:1px solid #fde68a;border-radius:6px;font-size:12px;color:#92400e;font-weight:700;flex:1;min-width:160px';
+          laEacBdg.textContent = '💸 EAC: '+_eac+'%';
+          laMetrics.appendChild(laEacBdg);
+        }
+        if(_statedIRR > 0 && _eac > 0){
+          var gross = Math.round((_statedIRR+_eac)*10)/10;
+          var laGrossBdg = div();
+          laGrossBdg.style.cssText = 'padding:6px 10px;background:#f0f7e6;border:1px solid #c7e0a0;border-radius:6px;font-size:12px;color:var(--navy);font-weight:700;flex:1;min-width:160px';
+          laGrossBdg.textContent = '📊 Gross growth: '+gross+'% p.a.';
+          laMetrics.appendChild(laGrossBdg);
+        }
+        card.appendChild(laMetrics);
+      }
+
       var laNote=div(); laNote.style.cssText='font-size:11px;padding:6px 10px;margin-top:4px;border-radius:6px;background:#eff6ff;border:1px solid #bfdbfe;color:#1e40af';
       laNote.innerHTML='<strong>Living Annuity:</strong> No CGT on death. No estate duty if a beneficiary is nominated. '+
         'Beneficiaries may take a cash lump sum (retirement tax tables apply in their hands) or continue the annuity. '+
@@ -3280,6 +3561,19 @@ function buildPolCard(p, i) {
 
       var laIncRow=g3();
       laIncRow.appendChild(rfld('Monthly Income Drawn', p, 'BenLAIncome', {onblur:function(){render();}}));
+      // Show bonus if present
+      if(N(p.LABonus)>0){
+        var bonDiv=div('f');
+        var bonLbl=el('label','','Insurer Bonus'); bonLbl.style.cssText='font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--sub);display:block;margin-bottom:3px';
+        var bonVal=div(); bonVal.style.cssText='padding:7px 10px;background:#f0fdf4;border:1.5px solid #86efac;border-radius:6px;font-size:13px;font-weight:700;color:#166534';
+        bonVal.textContent='R '+Math.round(N(p.LABonus)).toLocaleString('en-ZA')+' /pm';
+        bonDiv.appendChild(bonLbl); bonDiv.appendChild(bonVal); laIncRow.appendChild(bonDiv);
+        var grossDiv=div('f');
+        var grossLbl=el('label','','Gross Income'); grossLbl.style.cssText='font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--sub);display:block;margin-bottom:3px';
+        var grossVal=div(); grossVal.style.cssText='padding:7px 10px;background:#eff6ff;border:1.5px solid #bfdbfe;border-radius:6px;font-size:13px;font-weight:700;color:#1e40af';
+        grossVal.textContent='R '+Math.round(N(p.BenLAIncome)+N(p.LABonus)).toLocaleString('en-ZA')+' /pm';
+        grossDiv.appendChild(grossLbl); grossDiv.appendChild(grossVal); laIncRow.appendChild(grossDiv);
+      }
       laIncRow.appendChild(pfld('Annual Drawdown Rate %', p, 'DrawdownRate', {onblur:function(){render();}}));
       laIncRow.appendChild(div()); // spacer — escalation is calculated, not entered
       card.appendChild(laIncRow);
@@ -3793,7 +4087,7 @@ function buildEstate() {
   if(physLiab>0){ b1.row('Less: Liabilities (bonds, finance, loans)', '('+Rfmt(physLiab)+')', true); }
   if(cgtLiability>0){
     b1.row('Less: CGT on death (s.4(a) — deemed income tax)', '('+Rfmt(cgtLiability)+')', true);
-    b1.sub('Inclusion rate 40% · Marginal rate '+Math.round(_estMR*100)+'% · Annual exclusion R440,000 applied', '');
+    b1.sub('Inclusion rate 40% · Marginal rate '+Math.round(_estMR*100)+'% · Annual exclusion R300,000 applied', '');
   }
   b1.row('Net estate', Rfmt(netEstate), false, false, true);
   if(accrualDed>0){
@@ -5068,7 +5362,7 @@ function printFNA() {
   var laIncPolsP=(pols||[]).filter(function(p){return p.Type==='Living Annuity'&&N(p.BenLAIncome)>0;});
   laIncPolsP.forEach(function(p){
     var esc=(function(r){return r>0?r:N(S.assump.cpi)||6;})(laEscRate(p));
-    laIncAtRetP+=yrsToRet?Math.round(N(p.BenLAIncome)*Math.pow(1+esc/100,yrsToRet)):N(p.BenLAIncome);
+    laIncAtRetP+=yrsToRet?Math.round((N(p.BenLAIncome)+N(p.LABonus||0))*Math.pow(1+esc/100,yrsToRet)):(N(p.BenLAIncome)+N(p.LABonus||0));
   });
   var lifeAnnPolsP=(pols||[]).filter(function(p){return p.Type==='Life Annuity'&&N(p.BenLifeAnnuityIncome)>0;});
   lifeAnnPolsP.forEach(function(p){
@@ -5223,7 +5517,7 @@ function printFNA() {
     _cgtResult.items.forEach(function(item){
       h+='<tr>'+td(e(item.desc))+td(r(item.gainAfterPR),true)+'</tr>';
     });
-    h+='<tr style="font-weight:700;background:#fff3cd"><td style="padding:4px 7px">Total CGT @ '+Math.round(_emr*100)+'% marginal (40% inclusion, R440k annual excl)</td>'
+    h+='<tr style="font-weight:700;background:#fff3cd"><td style="padding:4px 7px">Total CGT @ '+Math.round(_emr*100)+'% marginal (40% inclusion, R300k annual excl)</td>'
       +'<td style="text-align:right;padding:4px 7px;font-weight:700">'+r(_cgtTotal)+'</td></tr>';
     h+='</tbody></table>';
   }
@@ -5388,7 +5682,7 @@ function printFNA() {
       h+=sec('Annuity Income Drawings');
       h+=tblHead(['Policy','Type','Drawing today /pm','Inc esc %','At retirement /pm','Tax treatment']);
       laIncPolsP.forEach(function(p){
-        var incToday=N(p.BenLAIncome);
+        var incToday=N(p.BenLAIncome)+N(p.LABonus||0);
         var esc=(function(r){return r>0?r:N(S.assump.cpi)||6;})(laEscRate(p));
         var incAtRet=yrsToRet?Math.round(incToday*Math.pow(1+esc/100,yrsToRet)):incToday;
         var taxTreat=(p.LAIncomeTaxable!==false)?'Taxable \u2014 marginal rate':'Partially/non-taxable \u2014 disallowed contributions';
