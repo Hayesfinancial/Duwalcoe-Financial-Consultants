@@ -312,7 +312,10 @@ function sbUpsert(user,weekKey,data){
     method:'POST',
     headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json','Prefer':'resolution=merge-duplicates'},
     body:JSON.stringify([{User:user,WeekKey:weekKey,Data:data}])
-  }).catch(function(){});
+  }).then(function(r){
+    if(!r.ok) r.text().then(function(t){ showToast('⚠️ Supabase save failed — '+r.status); console.error('SB error:',t); });
+    else showToast('Saved ✓');
+  }).catch(function(e){ showToast('⚠️ No connection — saved locally'); });
 }
 
 function loadWeek(){
@@ -457,7 +460,8 @@ function renderDiary(){
         html+='<span class="ab-name">'+(s.client?esc(s.client):'<span style="color:#bbb;font-style:italic">tap to fill</span>')+'</span>';
         if(s.type) html+='<span style="font-size:10px;padding:1px 7px;border-radius:8px;background:rgba(0,0,0,.06)">'+s.type+'</span>';
         if(s.sold) html+='<span style="color:#166534;font-weight:700;font-size:12px">💰</span>';
-        if(s.teams) html+='<span style="font-size:10px;background:#ede9fe;color:#6d28d9;padding:1px 7px;border-radius:8px">Teams</span>';
+        if(s.how==='Teams') html+='<span style="font-size:10px;background:#ede9fe;color:#6d28d9;padding:1px 7px;border-radius:8px">Teams</span>';
+        else if(s.how==='Phone') html+='<span style="font-size:10px;background:#fef3c7;color:#92400e;padding:1px 7px;border-radius:8px">📞</span>';
         html+='<button class="slot-btn" style="margin-left:auto;font-size:12px" onclick="event.stopPropagation();deleteFreeSlot(event,'+i+')">🗑</button>';
         html+='</div>';
         if(isOpen){
@@ -470,15 +474,24 @@ function renderDiary(){
           html+='<input id="fs_client_'+i+'" type="text" value="'+esc(s.client||s.label||'')+'" placeholder="Johan Smith / Admin / Gym" style="width:100%;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px;margin-bottom:8px">';
           html+='<label style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:#888;display:block;margin-bottom:4px">Type</label>';
           html+='<div class="type-row" style="margin-bottom:8px">';
-          ['NB','FU','REV','Prospect','Teams','Block'].forEach(function(tp){
+          ['NB','FU','REV','Prospect','Block'].forEach(function(tp){
             var act=(s.type||'NB')===tp;
             html+='<button class="type-btn'+(act?' active-'+tp.toLowerCase():'')+'" onclick="setFreeType('+i+',\''+tp+'\')">'+tp+'</button>';
           });
           html+='</div>';
-          html+='<label style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:#888;display:block;margin-bottom:4px">Teams Link</label>';
-          html+='<input id="fs_teams_'+i+'" type="text" value="'+esc(s.teams||'')+'" placeholder="https://teams.microsoft.com/..." style="width:100%;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px;margin-bottom:8px">';
+          html+='<label style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:#888;display:block;margin-bottom:4px">How / Where</label>';
+          html+='<div class="type-row" style="margin-bottom:8px">';
+          ['Address','Teams','Phone'].forEach(function(hw){
+            var act=(s.how||'Address')===hw;
+            html+='<button class="type-btn'+(act?' active-nb':'')+' " onclick="setSlotHow('+i+',\''+hw+'\')" style="font-size:12px">'+hw+'</button>';
+          });
+          html+='</div>';
+          if((s.how||'Address')==='Teams'){
+            html+='<label style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:#888;display:block;margin-bottom:4px">Teams Link</label>';
+            html+='<input id="fs_teams_'+i+'" type="text" value="'+esc(s.teams||'')+'" placeholder="https://teams.microsoft.com/..." style="width:100%;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px;margin-bottom:8px">';
+          }
           html+='<label style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:#888;display:block;margin-bottom:4px">Notes</label>';
-          html+='<textarea id="fs_notes_'+i+'" placeholder="What happened? Next step?" style="width:100%;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px;resize:vertical;min-height:56px;margin-bottom:8px">'+(s.notes||'')+'</textarea>';
+          html+='<textarea id="fs_notes_'+i+'" placeholder="What happened? Next step?" style="width:100%;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px;resize:vertical;min-height:100px;margin-bottom:8px">'+(s.notes||'')+'</textarea>';
           html+='<label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:8px;font-size:13px">';
           html+='<input type="checkbox" id="fs_sold_'+i+'" '+(s.sold?'checked':'')+' onchange="setSold('+i+',this.checked)" style="width:16px;height:16px;accent-color:#166534">';
           html+='<span style="font-weight:700;color:#166534">Sale closed 💰</span></label>';
@@ -629,7 +642,6 @@ function saveStdSlot(time){
   setSlots(currentUser,currentDay,slots);
   openSlot=null;
   saveCurrentUser();
-  showToast('Saved ✓');
   render();
 }
 
@@ -667,6 +679,7 @@ function saveFreeSlot(i){
   s.time=(document.getElementById('ft_'+i)||document.getElementById('fs_time_'+i)||{value:s.time}).value;
   s.client=(document.getElementById('fc_'+i)||document.getElementById('fs_client_'+i)||{value:''}).value.trim();
   s.teams=(document.getElementById('ftm_'+i)||document.getElementById('fs_teams_'+i)||{value:''}).value.trim();
+  // how is saved immediately via setSlotHow, keep existing value
   s.notes=(document.getElementById('fn_'+i)||document.getElementById('fs_notes_'+i)||{value:''}).value.trim();
   var commEl=document.getElementById('fs_comm_'+i);
   s.commission=commEl?parseFloat(commEl.value)||0:s.commission||0;
@@ -676,6 +689,13 @@ function saveFreeSlot(i){
   openSlot=null;
   saveCurrentUser();
   showToast('Saved ✓');
+  render();
+}
+
+function setSlotHow(i,how){
+  var slots=getSlots(currentUser,currentDay);
+  if(slots[i]){ slots[i].how=how; setSlots(currentUser,currentDay,slots); }
+  openSlot='fs'+i;
   render();
 }
 
