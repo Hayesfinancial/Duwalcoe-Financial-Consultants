@@ -97,7 +97,7 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--cream);c
   <div class="topbar">
     <div>
       <div class="logo">Duwalcoe <em>Practice Manager</em></div>
-      <div class="fsp">FSP No: 9978 &nbsp;·&nbsp; <span style="color:var(--gold);font-weight:700">v3</span></div>
+      <div class="fsp">FSP No: 9978 &nbsp;·&nbsp; <span style="color:var(--gold);font-weight:700">v1.1</span> <span style="color:#556688;font-size:10px">built 29 Mar 2026</span></div>
     </div>
     <div class="tright">
       <span id="todayLbl" style="font-size:12px;color:#8899bb"></span>
@@ -109,7 +109,7 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--cream);c
           autocomplete="off">
       </div>
       <span id="syncSt" class="ss ss-ld">⏳ Loading…</span>
-      <button class="btn b-gh" style="color:#fff;border-color:#334466;font-size:11px;padding:4px 10px" data-act="logout">🔓 Log out</button><div class="upill">👤
+      <button class="btn b-gh" style="color:#fff;border-color:#334466;font-size:11px;padding:4px 10px" onclick="window.open('diary.html','_blank','width=1200,height=900')">📅 Diary</button><button class="btn b-gh" style="color:#fff;border-color:#334466;font-size:11px;padding:4px 10px" onclick="window.open('planner_ref.html','_blank','width=1200,height=800')">📋 Planner</button><button class="btn b-gh" style="color:#fff;border-color:#334466;font-size:11px;padding:4px 10px" data-act="logout">🔓 Log out</button><div class="upill">👤
         <select id="userSel">
           <option>Clinton</option>
           <option>Wife</option>
@@ -155,6 +155,7 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--cream);c
     <div class="mb" id="pModB"></div>
     <div class="mf">
       <button class="btn b-gh sm" data-close="1">Cancel</button>
+      <button class="btn b-rd sm" id="delPolBtn" style="display:none" onclick="deletePolicy()">🗑 Delete</button>
       <button class="btn b-sk sm" onclick="logAnnualReview()">📋 Log Review</button>
       <button class="btn b-gd sm" data-save="policy">💾 Save Policy</button>
     </div>
@@ -268,7 +269,9 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--cream);c
 
 <script>
 // ══ CONFIG ═══════════════════════════════════════════════════
-var SURL = 'https://script.google.com/macros/s/AKfycbw_I8Md3snxG36VJb00gIIgbag_2-k0zUkkmzS15kDzpCO37RJSS16hTdhhpS_v5onr/exec';
+var SB_URL = 'https://ayyexuwxaghzljykslxr.supabase.co';   // e.g. https://xxxxxxxxxxxx.supabase.co
+var SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImF5eWV4dXd4YWdoemxqeWtzbHhyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQzMTUyMTcsImV4cCI6MjA4OTg5MTIxN30.hp2cQ64FjKnThsLh2qfdqRKdiy39_900JfH6C0KKIx4';       // eyJ...
+var SURL = SB_URL; // legacy alias — not used for JSONP any more
 
 // ══ STATE ════════════════════════════════════════════════════
 var DB = {clients:[], policies:[], tasks:[], roas:[], links:[]};
@@ -282,144 +285,233 @@ var EPI = null; // edit policy index
 var RC = null;  // roa client id
 var TC = '';    // task client name
 
-// ══ NETWORK ══════════════════════════════════════════════════
+// ══ NETWORK (Supabase) ═══════════════════════════════════════
+
+// Core Supabase REST helper — fetch wrapper used by all operations
+function sbFetch(method, path, body, cb){
+  var opts = {
+    method: method,
+    headers: {
+      'apikey': SB_KEY,
+      'Authorization': 'Bearer ' + SB_KEY,
+      'Content-Type': 'application/json',
+      'Prefer': method === 'POST' ? 'resolution=merge-duplicates' : ''
+    }
+  };
+  if(body) opts.body = JSON.stringify(body);
+  fetch(SB_URL + path, opts)
+    .then(function(r){
+      if(!r.ok){ r.text().then(function(t){ console.error('Supabase error:', r.status, t); if(cb) cb(null, t); }); return; }
+      var ct = r.headers.get('content-type')||'';
+      if(ct.indexOf('json')>=0) r.json().then(function(d){ if(cb) cb(d); });
+      else r.text().then(function(){ if(cb) cb({}); });
+    })
+    .catch(function(e){ console.error('Supabase fetch error:', e); if(cb) cb(null, e.message); });
+}
+
 function syncNow() {
   setSS('ld');
-  window.__duSync = function(d){
-    // Preserve LastAccessed timestamps before overwriting with fresh sheet data
-    var lastAccessed = {};
-    try {
-      var oldStr = localStorage.getItem('du_db');
-      if(oldStr){ var oldDB=JSON.parse(oldStr); (oldDB.clients||[]).forEach(function(c){ if(c.LastAccessed) lastAccessed[String(c.ID)]=c.LastAccessed; }); }
-    } catch(e){}
-    if(d.clients&&d.clients[0]) console.log('DATE DEBUG - first client StartDate sample from policies:', d.policies&&d.policies[0]?d.policies[0].StartDate:'no policies');
-    function fixIDField(v){
-      if(!v && v!==0) return v;
-      var s = String(v).trim();
-      // Catches scientific notation (8.21e+15) AND oversized integers (821000000000000000)
-      if(s.match(/e[\+\-]/i) || (s.match(/^\d+$/) && s.length > 13)) {
-        return Number(v).toFixed(0);
-      }
-      return s;
-    }
-    DB.clients  = d.clients  || [];
-    DB.clients.forEach(function(c){
-      ['IDNumber','SpouseIDNumber','Cell','TaxNo'].forEach(function(f){
-        c[f] = fixIDField(c[f]);
+
+  // Load all core tables in parallel
+  var loaded = {};
+  var needed = ['clients','policies','tasks','roas','familylinks','settings','notes'];
+  var done = 0;
+
+  function checkDone(){
+    done++;
+    if(done < needed.length) return;
+
+    // Clients — load from server then re-apply any locally pending client saves
+    DB.clients = (loaded.clients||[]).map(function(c){ return c; });
+    try{
+      var _ldb2=JSON.parse(localStorage.getItem('du_db')||'{}');
+      (_ldb2.clients||[]).forEach(function(lc){
+        if(lc._pendingSave){
+          var _ci=DB.clients.findIndex(function(sc){return String(sc.ID)===String(lc.ID);});
+          if(_ci>=0) DB.clients[_ci]=lc;
+          else DB.clients.push(lc);
+        }
       });
+    }catch(e){}
+
+    // Policies
+    DB.policies = (loaded.policies||[]).map(function(p){
+      // Remap sheet typo NonVestedVaue -> NonVestedValue
+      if(p.NonVestedVaue !== undefined && !p.NonVestedValue){ p.NonVestedValue = p.NonVestedVaue; }
+      return p;
     });
-    DB.policies = d.policies || [];
-    DB.tasks    = d.tasks    || [];
-    DB.roas     = d.roas     || [];
-    DB.links    = d.links    || [];
-    DB.links.forEach(function(l){
-      l.IDNumber = fixIDField(l.IDNumber);
-      l.Cell     = fixIDField(l.Cell);
+    // Re-apply any locally pending saves (in case sync fires mid-save)
+    try{
+      var _ldb=JSON.parse(localStorage.getItem('du_db')||'{}');
+      (_ldb.policies||[]).forEach(function(lp){
+        if(lp._pendingSave){
+          var _pi=DB.policies.findIndex(function(sp){return String(sp.ID)===String(lp.ID);});
+          if(_pi>=0) DB.policies[_pi]=lp;
+          else DB.policies.push(lp);
+        }
+      });
+    }catch(e){}
+
+    DB.tasks  = loaded.tasks||[];
+    DB.roas   = loaded.roas||[];
+    DB.links  = loaded.familylinks||[];
+
+    // Notes — convert array to object keyed by ClientID
+    window._sharedNotes = {};
+    (loaded.notes||[]).forEach(function(n){
+      if(n.ClientID) window._sharedNotes[String(n.ClientID)] = {text:n.Text||'',by:n.By||'',date:n.LastUpdated||''};
     });
-    // Restore LastAccessed ONLY from dedicated per-user recent store — never from sheet data
-    DB.clients.forEach(function(c){ c.LastAccessed=null; }); // wipe any stale sheet values
+
+    // Settings — discuss board
+    var settingsRows = loaded.settings||[];
+    var discussRow = settingsRows.find(function(r){ return r.Key==='discuss'; });
+    if(discussRow && discussRow.Value){
+      try{
+        var serverPosts = JSON.parse(discussRow.Value);
+        var localPosts = [];
+        try{ localPosts = JSON.parse(localStorage.getItem('du_discuss')||'[]'); }catch(e){}
+        if(serverPosts.length >= localPosts.length){
+          localStorage.setItem('du_discuss', discussRow.Value);
+        }
+      }catch(e){}
+    }
+
+    // Restore LastAccessed from local store
+    DB.clients.forEach(function(c){ c.LastAccessed=null; });
     try{
       var ra=JSON.parse(localStorage.getItem(recentKey())||'{}');
       DB.clients.forEach(function(c){ if(ra[String(c.ID)]) c.LastAccessed=ra[String(c.ID)]; });
     }catch(e){}
-    try { localStorage.setItem('du_db', JSON.stringify(DB)); } catch(e){}
-    // Pull shared discussion board from server — only update if server has newer data
-    if(d.discuss && d.discuss !== ''){
-      try{
-        var serverPosts = JSON.parse(d.discuss);
-        var localPosts = [];
-        try{ localPosts = JSON.parse(localStorage.getItem('du_discuss')||'[]'); }catch(e){}
-        // Use server version only if it has posts and matches or exceeds local count
-        // This prevents a slow-saving delete from being undone by sync
-        if(serverPosts.length >= localPosts.length){
-          localStorage.setItem('du_discuss', d.discuss);
-        }
-      }catch(e){
-        // if invalid JSON, ignore and keep local copy
-      }
-    }
-    // Load appts from server
-    if(d.appts){
-      try{
-        var serverAppts = JSON.parse(d.appts);
-        Object.keys(serverAppts).forEach(function(k){
-          localStorage.setItem('du_appts_srv_'+k, serverAppts[k]);
-        });
-      }catch(e){}
-    }
-    // Load shared notes from server
-    if(d.notes){
-      try{
-        window._sharedNotes = typeof d.notes === "string" ? JSON.parse(d.notes) : d.notes;
-      }catch(e){ window._sharedNotes = {}; }
-    }
+
+    try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
     setSS('ok');
     render();
     toast('Synced — ' + DB.clients.length + ' clients','ok');
     if(!window._discussTimer) startDiscussAutoRefresh();
-  };
-  var old = document.getElementById('__duScript');
-  if(old) old.parentNode.removeChild(old);
-  var s = document.createElement('script');
-  s.id = '__duScript';
-  s.src = SURL + '?action=getAll&callback=__duSync&t=' + Date.now();
-  s.onerror = function(){
-    setSS('err');
-    try {
-      var c = localStorage.getItem('du_db');
-      if(c){ DB = JSON.parse(c); render(); toast('Offline — showing cached data','err'); }
-      else { render(); toast('Sync failed','err'); }
-    } catch(e){ render(); }
-  };
-  document.head.appendChild(s);
+  }
+
+  needed.forEach(function(table){
+    sbFetch('GET', '/rest/v1/'+table+'?select=*&limit=10000', null, function(data){
+      loaded[table] = data||[];
+      checkDone();
+    });
+  });
 }
 
 function startDiscussAutoRefresh(){
   if(window._discussTimer) clearInterval(window._discussTimer);
   window._discussTimer = setInterval(function(){
-    // Silent background fetch of discuss only — no toast, no full render flicker
-    var cbName = '__duDiscuss_' + Date.now();
-    var s = document.createElement('script');
-    window[cbName] = function(d){
-      delete window[cbName];
-      try{ document.head.removeChild(s); }catch(e){}
-      if(d && d.discuss && d.discuss !== ''){
-        try{
-          var serverPosts = JSON.parse(d.discuss);
-          var localPosts = [];
-          try{ localPosts = JSON.parse(localStorage.getItem('du_discuss')||'[]'); }catch(e){}
-          var current = localStorage.getItem('du_discuss')||'[]';
-          if(d.discuss !== current && serverPosts.length >= localPosts.length){
-            localStorage.setItem('du_discuss', d.discuss);
-            if(PAGE==='dash') render();
-          }
-        }catch(e){}
-      }
-    };
-    s.src = SURL + '?action=getAll&callback=' + cbName + '&t=' + Date.now();
-    s.onerror = function(){ delete window[cbName]; try{document.head.removeChild(s);}catch(e){}; };
-    document.head.appendChild(s);
-  }, 5 * 60 * 1000); // every 5 minutes
+    sbFetch('GET', '/rest/v1/settings?select=*&Key=eq.discuss', null, function(rows){
+      if(!rows||!rows.length) return;
+      var val = rows[0].Value||'';
+      if(!val) return;
+      try{
+        var serverPosts = JSON.parse(val);
+        var localPosts = [];
+        try{ localPosts=JSON.parse(localStorage.getItem('du_discuss')||'[]'); }catch(e){}
+        var current = localStorage.getItem('du_discuss')||'[]';
+        if(val !== current && serverPosts.length >= localPosts.length){
+          localStorage.setItem('du_discuss', val);
+          if(PAGE==='dash') render();
+        }
+      }catch(e){}
+    });
+  }, 5 * 60 * 1000);
 }
 
-function post(data, cb) {
-  var cbName = '__duPost_' + Date.now();
-  var s = document.createElement('script');
-  window[cbName] = function(d){
-    delete window[cbName];
-    document.body.removeChild(s);
-    try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
-    if(cb)cb(d);
-  };
-  var payload = encodeURIComponent(JSON.stringify(data));
-  s.src = SURL + '?method=POST&payload=' + payload + '&callback=' + cbName + '&t=' + Date.now();
-  s.onerror = function(){
-    delete window[cbName];
-    try{document.body.removeChild(s);}catch(e){}
-    toast('Save failed','err');
-    if(cb)cb({ok:0});
-  };
-  document.body.appendChild(s);
+// post() — maps every legacy action to a direct Supabase call
+function post(data, cb){
+  var action = data.action;
+
+  // upsert a single row into a table
+  function upsert(table, row, callback){
+    sbFetch('POST', '/rest/v1/'+table, [row], function(res, err){
+      try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
+      if(callback) callback(err?{ok:0}:{ok:1});
+    });
+  }
+
+  // delete a row by ID
+  function del(table, id, callback){
+    sbFetch('DELETE', '/rest/v1/'+table+'?ID=eq.'+encodeURIComponent(id), null, function(res, err){
+      try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
+      if(callback) callback(err?{ok:0}:{ok:1});
+    });
+  }
+
+  // partial update — patch specific columns
+  function patch(table, id, fields, callback){
+    sbFetch('PATCH', '/rest/v1/'+table+'?ID=eq.'+encodeURIComponent(id), fields, function(res, err){
+      try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
+      if(callback) callback(err?{ok:0}:{ok:1});
+    });
+  }
+
+  if(action==='saveClient'){
+    upsert('clients', data.client, cb);
+  }
+  else if(action==='savePolicy'){
+    var p = Object.assign({}, data.policy);
+    delete p._pendingSave;
+    upsert('policies', p, cb);
+  }
+  else if(action==='saveTask'){
+    upsert('tasks', data.task, cb);
+  }
+  else if(action==='saveROA'){
+    upsert('roas', data.roa, cb);
+  }
+  else if(action==='saveFamMember'){
+    upsert('familylinks', data.member, cb);
+  }
+  else if(action==='upgradeFamMember'){
+    patch('familylinks', data.id, {IsClient:'Yes', ClientID:data.clientId}, cb);
+  }
+  else if(action==='deleteRow'){
+    var _sheetMap = {Tasks:'tasks',ROA:'roas',policies:'policies',clients:'clients',familylinks:'familylinks'};
+    var tbl = _sheetMap[data.sheet] || data.sheet.toLowerCase();
+    del(tbl, data.id, cb);
+  }
+  else if(action==='toggleTask'){
+    patch('tasks', data.id, {Done: data.done?'true':'false'}, cb);
+  }
+  else if(action==='updateTaskNotes'){
+    patch('tasks', data.id, {Notes: data.notes}, cb);
+  }
+  else if(action==='updateDueDate'){
+    var fields2 = {};
+    if(data.assignee) fields2.Assignee = data.assignee;
+    if(data.dueDate)  fields2.DueDate  = data.dueDate;
+    patch('tasks', data.id, fields2, cb);
+  }
+  else if(action==='saveDiscuss'){
+    sbFetch('POST', '/rest/v1/settings', [{Key:'discuss', Value:data.posts}], function(res, err){
+      try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
+      if(cb) cb(err?{ok:0}:{ok:1, posts:data.posts});
+    });
+  }
+  else if(action==='saveAppts'){
+    sbFetch('POST', '/rest/v1/appts', [{User:data.user, WeekKey:data.weekKey, Appts:data.appts}], function(res, err){
+      if(cb) cb(err?{ok:0}:{ok:1});
+    });
+  }
+  else if(action==='saveNote'){
+    upsert('notes', {ClientID:data.clientId, Text:data.text, By:data.by, LastUpdated:new Date().toISOString().slice(0,10)}, cb);
+  }
+  else if(action==='saveFNA'){
+    var now = new Date().toISOString().slice(0,16).replace('T',' ');
+    upsert('fnadata', {ClientID:data.clientId, Data:data.jsonData, LastSaved:now, SavedBy:'Clinton Hayes'}, cb);
+  }
+  else if(action==='loadFNA'){
+    sbFetch('GET', '/rest/v1/fnadata?ClientID=eq.'+encodeURIComponent(data.clientId)+'&select=*', null, function(rows){
+      if(rows&&rows.length){ if(cb) cb({ok:1, data:rows[0].Data||'', saved:rows[0].LastSaved||''}); }
+      else { if(cb) cb({ok:1, data:null}); }
+    });
+  }
+  else {
+    console.warn('post(): unknown action:', action);
+    if(cb) cb({ok:0, error:'unknown action'});
+  }
 }
 
 function setSS(s) {
@@ -574,8 +666,34 @@ function renderDash(){
 
   // Birthdays and manual review dates
   DB.clients.forEach(function(c){
-    if(clean(c.DOB)){var d=daysTo(c.DOB);if(d!==null&&d<=60)up.push({name:c.Name,id:c.ID,cell:c.Cell||'',type:'🎂 Birthday',days:d,col:'var(--gold)'});}
-    if(clean(c.ReviewDate)){var d2=daysTo(c.ReviewDate);if(d2!==null&&d2<=60)up.push({name:c.Name,id:c.ID,cell:c.Cell||'',type:'📋 Review Due',days:d2,col:'var(--sky)'});}
+    if(clean(c.DOB)){
+      var d=daysTo(c.DOB);
+      if(d!==null&&d<=60){
+        var _dobP=String(c.DOB).split(/[T ]/)[0].split(/[-\/]/);
+        var _dob=_dobP.length>=3?new Date(+_dobP[0],+_dobP[1]-1,+_dobP[2]):new Date(c.DOB);
+        var _nextBdayYear=today.getFullYear();
+        var _bdayThisYear=new Date(_nextBdayYear, _dob.getMonth(), _dob.getDate());
+        if(_bdayThisYear<today) _nextBdayYear++;
+        var _turningAge=_nextBdayYear-_dob.getFullYear();
+        up.push({name:c.Name,id:c.ID,cell:c.Cell||'',type:'🎂 Birthday',days:d,col:'var(--gold)',age:_turningAge});
+      }
+    }
+    if(clean(c.ReviewDate)){
+      var d2=daysTo(c.ReviewDate);
+      if(d2!==null&&d2<=60)up.push({name:c.Name,id:c.ID,cell:c.Cell||'',type:'📋 Review Due',days:d2,col:'var(--sky)',reviewDate:c.ReviewDate});
+    }
+    if(clean(c.Anniversary)){
+      var d3=daysTo(c.Anniversary);
+      if(d3!==null&&d3<=60){
+        var _annP=String(c.Anniversary).split(/[T ]/)[0].split(/[-\/]/);
+        var _ann=_annP.length>=3?new Date(+_annP[0],+_annP[1]-1,+_annP[2]):new Date(c.Anniversary);
+        var _annYear=today.getFullYear();
+        var _annThisYear=new Date(_annYear,_ann.getMonth(),_ann.getDate());
+        if(_annThisYear<today) _annYear++;
+        var _annYears=_annYear-_ann.getFullYear();
+        up.push({name:c.Name,id:c.ID,cell:c.Cell||'',type:'💍 Wedding Anniversary',days:d3,col:'var(--rose)',age:_annYears});
+      }
+    }
   });
 
   // Policy anniversaries — add to reminders
@@ -583,15 +701,18 @@ function renderDash(){
     if(!clean(p.StartDate)) return;
     var client = DB.clients.find(function(x){ return String(x.ID)===String(p.ClientID); });
     if(!client) return;
-    // Find next anniversary of start date
-    var start = new Date(p.StartDate);
-    var ann = new Date(start);
-    ann.setFullYear(today.getFullYear());
+    // Find next anniversary of start date — parse safely to avoid UTC timezone shift
+    var _sp = String(p.StartDate).split(/[T ]/)[0].split(/[-\/]/);
+    if(_sp.length < 3) return;
+    var start = new Date(+_sp[0], +_sp[1]-1, +_sp[2]);
+    if(isNaN(start)) return;
+    var ann = new Date(today.getFullYear(), start.getMonth(), start.getDate());
     if(ann < today) ann.setFullYear(today.getFullYear()+1);
-    var diff = Math.round((ann - today)/(1000*60*60*24));
+    var diff = Math.round((ann - today)/86400000);
     if(diff <= 60){
       var label = p.Insurer ? p.Insurer+(p.PolicyType?' — '+p.PolicyType:'') : (p.PolicyType||'Policy');
-      up.push({name:client.Name,id:client.ID,cell:client.Cell||'',type:'📄 '+label+' anniversary',days:diff,col:'var(--sage)'});
+      var _polYears = ann.getFullYear() - start.getFullYear();
+      up.push({name:client.Name,id:client.ID,cell:client.Cell||'',type:'📄 '+label+' anniversary',days:diff,col:'var(--sage)',policyNo:p.PolicyNo||'',years:_polYears});
     }
   });
 
@@ -767,7 +888,28 @@ function renderDash(){
         '<div class="rdot" style="background:'+u.col+';flex-shrink:0"></div>'+
         '<div style="flex:1;cursor:pointer;'+(done?'text-decoration:line-through;color:#aaa;':'')+'" data-act="open-client" data-id="'+u.id+'">'+
         '<div style="font-weight:600;font-size:12px">'+u.name+'</div>'+
-        '<div style="font-size:11px;color:#889">'+u.type+'</div></div>'+
+        '<div style="font-size:11px;color:#666">'+u.type+'</div>'+
+        (function(){
+          var detail='';
+          if(u.age!==undefined){
+            var _isWedding = u.type.indexOf('Wedding') >= 0;
+            var _ageLabel = _isWedding ? (u.age?' '+u.age+' years':'') : (u.age?'Turns '+u.age:'');
+            detail=_ageLabel+(u.cell?'  ·  '+u.cell:'');
+          } else if(u.policyNo!==undefined){
+            var parts=[];
+            if(u.years) parts.push('Year '+u.years);
+            if(u.policyNo) parts.push(u.policyNo);
+            if(u.cell) parts.push(u.cell);
+            detail=parts.join('  ·  ');
+          } else if(u.reviewDate!==undefined){
+            var parts2=[];
+            if(u.reviewDate) parts2.push(fdate(u.reviewDate));
+            if(u.cell) parts2.push(u.cell);
+            detail=parts2.join('  ·  ');
+          } else if(u.cell){ detail=u.cell; }
+          return detail?'<div style="font-size:11px;color:#889;margin-top:1px">'+detail+'</div>':'';
+        })()+
+        '</div>'+
         '<div style="font-weight:700;font-size:11px;color:'+(done?'#ccc':col)+'">'+(u.days===0?'Today':u.days===1?'Tmrw':''+u.days+'d')+'</div></div>';
     }).join(''))+
     '</div></div>'+
@@ -1042,12 +1184,10 @@ function renderProfile(){
       '<button class="btn b-sg sm" data-act="convert-lead" data-id="'+c.ID+'">✅ Convert to Client</button> <button class="btn b-gd sm" data-act="fna">📊 Open FNA</button>'
       :btn('btn b-gd sm','fna','📊 Open FNA'))+
     '<button class="btn b-gh sm" style="color:#fff;border-color:#334466" data-act="edit-client" data-id="'+c.ID+'">✏️ Edit</button>'+
-    (c.IsLead==='Yes'?'':("<a href='"+buildComplianceUrl(c)+"' target='_blank' style='text-decoration:none'><button class='btn b-sk sm' style='background:#0e413a;color:#d4af5a;border-color:#2a3a5e'>📋 Compliance Docs</button></a>"))+
-    (c.IsLead==='Yes'?'':("<a href='"+buildFormsUrl(c)+"' target='_blank' style='text-decoration:none'><button class='btn b-sk sm' style='background:#0e413a;color:#ccd660;border-color:#2a3a5e'>📝 Forms</button></a>"))+
-    (c.IsLead==='Yes'?'':(
-      '<button class="btn b-sk sm" style="background:#0e413a;color:#d4af5a;border-color:#2a3a5e" onclick="printBrokerAuth(\''+c.ID+'\')">📄 Broker Auth</button>'+
-      '<button class="btn b-sk sm" style="background:#0e413a;color:#d4af5a;border-color:#2a3a5e" onclick="printClientConsent(\''+c.ID+'\')">📄 Policy Consent</button>'
-    ))+
+    "<a href='"+buildComplianceUrl(c)+"' target='_blank' style='text-decoration:none'><button class='btn b-sk sm' style='background:#0e413a;color:#d4af5a;border-color:#2a3a5e'>📋 Compliance Docs</button></a>"+
+    "<a href='"+buildFormsUrl(c)+"' target='_blank' style='text-decoration:none'><button class='btn b-sk sm' style='background:#0e413a;color:#ccd660;border-color:#2a3a5e'>📝 Forms</button></a>"+
+    '<button class="btn b-sk sm" style="background:#0e413a;color:#d4af5a;border-color:#2a3a5e" onclick="printBrokerAuth(\''+c.ID+'\')">📄 Broker Auth</button>'+
+    '<button class="btn b-sk sm" style="background:#0e413a;color:#d4af5a;border-color:#2a3a5e" onclick="printClientConsent(\''+c.ID+'\')">📄 Policy Consent</button>'+
     '<a href="https://drive.google.com/drive/search?q='+encodeURIComponent(c.Name)+'" target="_blank" style="text-decoration:none"><button class="btn b-gh sm" style="color:#fff;border-color:#334466">📁 Drive</button></a>'+
     '</div></div>'+
     '<div class="tabs">'+
@@ -1201,10 +1341,12 @@ function searchLinkExist(q) {
 function confirmExistLink(linkedClientId) {
   var rel = document.getElementById('linkExistRel').value;
   var linked = DB.clients.find(function(x){ return String(x.ID)===String(linkedClientId); });
-  if(!linked) return;
-  var memId = 'fam_' + Date.now();
-  var link = {
-    ID: memId,
+  var principal = DB.clients.find(function(x){ return String(x.ID)===String(LINK_EXIST_CLIENT); });
+  if(!linked || !principal) return;
+
+  // Link A -> B (principal's family card shows the linked client)
+  var linkAB = {
+    ID: 'fam_' + Date.now(),
     PrincipalID: LINK_EXIST_CLIENT,
     Name: linked.Name,
     IDNumber: linked.IDNumber||'',
@@ -1215,10 +1357,37 @@ function confirmExistLink(linkedClientId) {
     IsClient: 'Yes',
     ClientID: linkedClientId
   };
-  DB.links.push(link);
+
+  // Link B -> A (linked client's family card shows the principal)
+  var linkBA = {
+    ID: 'fam_' + (Date.now()+1),
+    PrincipalID: linkedClientId,
+    Name: principal.Name,
+    IDNumber: principal.IDNumber||'',
+    DOB: principal.DOB||'',
+    Cell: principal.Cell||'',
+    Email: principal.Email||'',
+    Type: rel,
+    IsClient: 'Yes',
+    ClientID: LINK_EXIST_CLIENT
+  };
+
+  // Check if reverse link already exists to avoid duplicates
+  var reverseExists = DB.links.find(function(l){
+    return String(l.PrincipalID)===String(linkedClientId) &&
+           String(l.ClientID)===String(LINK_EXIST_CLIENT);
+  });
+
+  DB.links.push(linkAB);
+  if(!reverseExists) DB.links.push(linkBA);
   closeAll();
   render();
-  post({action:'saveFamMember', member:link}, function(){ toast(linked.Name + ' linked as ' + rel,'ok'); });
+  post({action:'saveFamMember', member:linkAB}, function(){
+    toast(linked.Name + ' linked as ' + rel,'ok');
+  });
+  if(!reverseExists){
+    post({action:'saveFamMember', member:linkBA}, function(){});
+  }
 }
 
 function renderOverview(c,pols,roas,ctasks){
@@ -1928,6 +2097,7 @@ function buildFnaUrl(c){
       Product:          p.Product||'',
       GrowthRate:       p.PremGrowthRate||'',
       BenLAIncome:      p.BenLAIncome||'',
+      LABonus:           p.LABonus||'',
       DrawdownRate:     p.DrawdownRate||'',
       LAIncomeTaxable:  p.LAIncomeTaxable||''
     };
@@ -2287,14 +2457,18 @@ function saveClient(openFNA){
 
   // Sync Anniversary, MaritalStatus, Address to linked spouse client
   if(EC){
-    var spouseLink = DB.links.find(function(l){
-      return (String(l.PrincipalID)===String(c.ID) || String(l.PrincipalID)===String(c.ID)) && l.Type==='Spouse' && l.IsClient==='Yes' && l.ClientID;
+    // Find the linked spouse in either direction
+    var _spLink = DB.links.find(function(l){
+      return l.Type==='Spouse' && l.IsClient==='Yes' && l.ClientID && (
+        (String(l.PrincipalID)===String(c.ID)) ||  // This client is the principal
+        (String(l.ClientID)===String(c.ID))          // This client is the linked spouse
+      );
     });
-    // Also check if THIS client is a spouse of someone else
-    var asSpouseLink = DB.links.find(function(l){ return String(l.ClientID)===String(c.ID) && l.Type==='Spouse'; });
-    var linkedPrincipalId = asSpouseLink ? String(asSpouseLink.PrincipalID) : null;
-    var linkedSpouseClientId = spouseLink ? String(spouseLink.ClientID) : null;
-    var linkedId = linkedSpouseClientId || linkedPrincipalId;
+    var linkedId = null;
+    if(_spLink){
+      // If this client is the principal, linked ID is ClientID; otherwise it's PrincipalID
+      linkedId = String(_spLink.PrincipalID)===String(c.ID) ? String(_spLink.ClientID) : String(_spLink.PrincipalID);
+    }
     if(linkedId){
       var linked = DB.clients.find(function(x){ return String(x.ID)===linkedId; });
       if(linked){
@@ -2310,9 +2484,12 @@ function saveClient(openFNA){
   var savedId = c.ID;
   var savedIsLead = c.IsLead==='Yes';
   EC=null; closeAll();
+  // Write to localStorage immediately so a refresh before server responds keeps the data
+  try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
   // Open the client/lead profile immediately after save
   openClient(savedId);
   post({action:'saveClient',client:c},function(){
+    try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
     toast((savedIsLead?'Lead':'Client')+' saved','ok');
     if(openFNA){
       var fnaUrl = buildFnaUrl(c);
@@ -2329,11 +2506,15 @@ function openPolicyModal(cid,idx){
   // JSON round-trip ensures no reference sharing with DB.policies array
   window.POL_ORIGINAL_SNAP = (idx!==undefined&&pols[idx]) ? snapshotPolicy(JSON.parse(JSON.stringify(pols[idx]))) : null;
   document.getElementById('pModT').textContent=(idx!==undefined?'Edit Policy':'Add Policy');
+  // Show delete button only when editing an existing policy
+  var _delBtn = document.getElementById('delPolBtn');
+  if(_delBtn) _delBtn.style.display = (idx!==undefined) ? '' : 'none';
   buildPolicyForm(p);
   document.getElementById('pMod').classList.add('open');
 }
 
 var POL_INCOME_ROWS=[];
+var POL_LUMP_ROWS=[];
 var POL_BENS=[];
 
 function sec(title){
@@ -2344,16 +2525,21 @@ function buildPolicyForm(p){
   p=p||{};
   var type=p.Type||'Life / Income Protector';
   try{ POL_INCOME_ROWS=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):[]; }catch(e){ POL_INCOME_ROWS=[]; }
+  try{ POL_LUMP_ROWS=p.LumpBenefits?JSON.parse(p.LumpBenefits):[]; }catch(e){ POL_LUMP_ROWS=[]; }
   try{ POL_BENS=p.Beneficiaries?JSON.parse(p.Beneficiaries):[]; }catch(e){ POL_BENS=[]; }
 
   var isRisk=(type==='Life / Income Protector'||type==='');
   var isRA=['Retirement Annuity','Pension Fund','Provident Fund','Pension Preservation','Provident Preservation'].indexOf(type)>=0;
   var isInv=['Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment','Unit Trust','Tax Free Savings'].indexOf(type)>=0;
   var isLA=(type==='Living Annuity');
+  var isLifeAnn=(type==='Life Annuity');
   var isMed=type==='Medical Aid';
   var isBiz=type==='Business Assurance';
+  // _isOnceOff defined here so it's available in ALL sections below
+  var _freq=p.Frequency||'Monthly';
+  var _isOnceOff=_freq==='Once Off'||_freq==='Paid Up';
 
-  var typeOpts=['Life / Income Protector','Business Assurance','Retirement Annuity','Pension Fund','Provident Fund','Pension Preservation','Provident Preservation','Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment','Unit Trust','Tax Free Savings','Living Annuity','Medical Aid','Other'];
+  var typeOpts=['Life / Income Protector','Business Assurance','Retirement Annuity','Pension Fund','Provident Fund','Pension Preservation','Provident Preservation','Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment','Unit Trust','Tax Free Savings','Living Annuity','Life Annuity','Medical Aid','Other'];
 
   var html='<div style="display:flex;flex-direction:column;gap:0">';
 
@@ -2398,22 +2584,54 @@ function buildPolicyForm(p){
 
   // PREMIUM
   html+=sec('Premium');
-  html+='<div class="g2">'+fld('ppm','Premium / Contribution',p.Premium)+fs('pfreq','Frequency',['Monthly','Quarterly','Annually','Once Off'],p.Frequency||'Monthly')+'</div>';
-  if(!isLA){
-    html+='<div class="g2">'+fld('pprem_pct','Premium Escalation %',p.PremEscalation)+fld('pben_pct','Benefit Escalation %',p.BenEscalation)+'</div>';
+  if(isRisk){
+    // Risk policies: premium is auto-summed from benefit rows — show read-only total
+    // Hidden input keeps the value for collectPolicyForm
+    html+='<div class="g2">'+
+      '<div class="fld"><label>Total Premium (auto-summed from benefit rows)</label>'+
+      '<div style="padding:8px 11px;background:var(--smoke);border:1.5px solid var(--mist);border-radius:7px;font-size:13px;color:var(--navy);font-weight:700" id="ppm_display">'+
+        (p.Premium?'R '+parseFloat(p.Premium).toLocaleString('en-ZA'):'Will calculate from rows below')+
+      '</div>'+
+      '<input type="hidden" id="ppm" value="'+(p.Premium||'')+'">'+
+      '</div>'+
+      (function(){
+        var _fOpts=['Monthly','Quarterly','Annually','Once Off','Paid Up'];
+        var _fv=p.Frequency||'Monthly';
+        return '<div class="fld"><label>Frequency</label><select id="pfreq" onchange="freqChanged(this)" style="border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px;width:100%">'+
+          _fOpts.map(function(o){return '<option value="'+o+'"'+(_fv===o?' selected':'')+'>'+o+'</option>';}).join('')+
+          '</select></div>';
+      })()+
+    '</div>';
+    // No policy-level escalation fields for risk — each benefit row has its own
+  } else {
+    html+='<div class="g2">'+fld('ppm',isLifeAnn?'Purchase Price (Lump Sum)':'Premium / Contribution',p.Premium)+(function(){
+      var _fOpts=['Monthly','Quarterly','Annually','Once Off','Paid Up'];
+      var _fv=p.Frequency||'Monthly';
+      return '<div class="fld"><label>Frequency</label><select id="pfreq" onchange="freqChanged(this)" style="border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px;width:100%">'+
+        _fOpts.map(function(o){return '<option value="'+o+'"'+(_fv===o?' selected':'')+'>'+o+'</option>';}).join('')+
+        '</select></div>';
+    })()+'</div>';
+    if(!isLA && !isLifeAnn){
+      html+='<div id="pEscRow" class="g2"'+(_isOnceOff?' style="display:none"':'')+'>'
+        +fld('pprem_pct','Premium Escalation %',p.PremEscalation)
+        +(isRA?'<div></div>':fld('pben_pct','Benefit Escalation %',p.BenEscalation))
+        +'</div>';
+    }
   }
-  html+='<div class="g2">'+fld('padminfee','Admin Fee /pm',p.AdminFee)+'<div></div></div>';
 
   // RISK COVER
   if(isRisk){
+    // Seed POL_LUMP_ROWS from legacy single fields if rows are empty
+    if(POL_LUMP_ROWS.length===0){
+      if(p.BenDeath) POL_LUMP_ROWS.push({type:'Life Cover',label:'',cover:p.BenDeath,prem:'',premEsc:'',benEsc:''});
+      if(p.BenDisability) POL_LUMP_ROWS.push({type:'Capital Disability',label:'',cover:p.BenDisability,prem:'',premEsc:'',benEsc:''});
+      if(p.BenDreadDisease) POL_LUMP_ROWS.push({type:'Dread Disease / Severe Illness',label:p.DreadDiseaseNotes||'',cover:p.BenDreadDisease,prem:'',premEsc:'',benEsc:''});
+    }
     html+=sec('Risk Cover — Lump Sums');
-    html+='<div class="g2">'+fld('pb_death','Death Benefit',p.BenDeath)+fld('pb_dis','Capital Disability',p.BenDisability)+'</div>';
-    html+='<div class="g2">';
-    html+='<div class="fld"><label>Dread Disease / Severe Illness — Cover Amount</label><input id="pb_dd" type="text" value="'+(p.BenDreadDisease||'')+'" placeholder="e.g. 500000" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px"></div>';
-    html+='<div class="fld"><label>Dread Disease Type</label><select id="pb_ddtype" style="width:100%;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px"><option'+(p.DreadDiseaseType==='Monthly Income'?'':' selected')+'>Lump Sum</option><option'+(p.DreadDiseaseType==='Monthly Income'?' selected':'')+'>Monthly Income</option></select></div>';
-    html+='</div>';
-    html+='<div class="fld"><label>Dread Disease Notes</label><input id="pb_ddnotes" type="text" value="'+(p.DreadDiseaseNotes||'')+'" placeholder="e.g. Comprehensive, Cancer only..." style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:7px 10px;font-family:inherit;font-size:13px"></div>';
-
+    html+='<div style="font-size:11px;color:#889;margin-bottom:8px">One row per benefit. Each benefit can have its own cover, premium and escalation.</div>';
+    html+='<div id="lumpRowsWrap">'+renderLumpRows()+'</div>';
+    html+='<div id="pWgtAvgEsc"></div>';
+    html+='<button type="button" class="btn b-gh sm" style="margin-top:6px" onclick="addLumpRow()">+ Add Lump Sum Benefit</button>';
 
     html+=sec('Income Benefits');
     html+='<div style="font-size:11px;color:#889;margin-bottom:8px">Death income, income protection, sickness benefits — one row per benefit stream.</div>';
@@ -2424,20 +2642,58 @@ function buildPolicyForm(p){
   // RA / INVESTMENT
   if(isRA||isInv){
     html+=sec(isRA?'Fund & Retirement Values':'Investment Values');
-    html+='<div class="g2">'+fld('pb_fv','Current Fund Value',p.BenFundValue)+fld('pb_surr2','Nett Surrender Value',p.BenSurrenderValue)+'</div>';
+    html+='<div class="g2">'+fld('pb_fv','Current Fund Value',p.BenFundValue,'text',isInv?'oninput="invCalcMaturity()"':'')+fld('pb_surr2','Nett Surrender Value',p.BenSurrenderValue)+'</div>';
+    // IRR — stated (from insurer statement) if entered, else calculated
+    (function(){
+      if(isInv && p.IllustrativeRate && parseFloat(p.IllustrativeRate)>0){
+        // Investment: use stated IRR from insurer statement
+        html += irrBadge(parseFloat(p.IllustrativeRate));
+      } else if(isRA){
+        // RA: calculate IRR (no withdrawals, calculation is accurate)
+        var irr = calcPolicyIRR(p.StartDate, p.Premium, p.Frequency, p.PremEscalation, p.BenFundValue);
+        html += irrBadge(irr);
+      }
+    })();
     if(isRA){
-      html+='<div class="g2">'+fld('pb_vested','Vested Component (Pot 1)',p.VestedValue)+fld('pb_nonvested','Non-Vested Component',p.NonVestedValue)+'</div>';
-      html+='<div class="g2">'+fld('pb_retcomp','Retirement Component (Pot 2)',p.RetirementComponent)+fld('pb_savcomp','Savings Component (Pot 3)',p.SavingsComponent)+'</div>';
-      html+='<div class="g2">'+fld('pb_retage','Retirement Age',p.RetirementAge||'65')+fdp('pb_matdate','Maturity Date',p.MaturityDate||'')+'</div>';
-      html+='<div class="g2">'+fld('pb_illrate','Illustrative Rate %',p.IllustrativeRate||'9')+fld('pb_growrate','Premium Growth Rate %',p.PremGrowthRate||'10')+'</div>';
+      html+='<div class="g2">'+fld('pb_vested','Vested Component (Pot 1)',p.VestedValue,'text','oninput="raAutoSum()"')+fld('pb_nonvested','Non-Vested Component',p.NonVestedValue,'text','oninput="raAutoSum()"')+'</div>';
+      html+='<div class="g2">'+fld('pb_retcomp','Retirement Component (Pot 2)',p.RetirementComponent,'text','oninput="raAutoSum()"')+fld('pb_savcomp','Savings Component (Pot 3)',p.SavingsComponent,'text','oninput="raAutoSum()"')+'</div>';
+      html+='<div class="g2">'+fld('pb_retage','Retirement Age',p.RetirementAge||'65','text','oninput="raCalcMaturity()"')+fdp('pb_matdate','Maturity Date',p.MaturityDate||'')+'</div>';
+      html+='<div class="g2">'+fld('pb_illrate','Illustrative Rate %',p.IllustrativeRate||'9')+(_isOnceOff?'<div></div>':fld('pb_growrate','Premium Growth Rate %',p.PremGrowthRate||'10'))+'</div>';
       html+='<div class="fld"><label>Will client withdraw Savings Pot (Pot 3) before retirement?</label><div style="display:flex;gap:12px;margin-top:8px">';
       html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="p3pot" value="Yes"'+(p.WithdrawSavingsPot==='Yes'?' checked':'')+'>Yes</label>';
       html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="p3pot" value="No"'+(p.WithdrawSavingsPot==='No'?' checked':'')+'>No</label>';
       html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="p3pot" value="Undecided"'+((!p.WithdrawSavingsPot||p.WithdrawSavingsPot==='Undecided')?' checked':'')+'>Undecided</label>';
       html+='</div></div>';
     } else {
-      html+='<div class="g2">'+fld('pb_matval','Maturity Value',p.BenMaturityValue)+fdp('pb_matdate','Maturity Date',p.MaturityDate||'')+'</div>';
-      html+='<div class="g2">'+fld('pb_illrate','Illustrative Rate %',p.IllustrativeRate||'9')+fld('pb_growrate','Premium Growth Rate %',p.PremGrowthRate||'10')+'</div>';
+      html+='<div class="g2">'+fld('pb_matval','Maturity Value',p.BenMaturityValue,'text','oninput=""')+fdp('pb_matdate','Maturity Date',p.MaturityDate||'')+'</div>';
+      // Stated IRR from insurer statement (replaces Illustrative Rate for investments)
+      html+='<div class="g2">';
+      html+='<div class="fld"><label>Stated IRR % <span style="font-size:10px;color:#889;font-weight:400">(from insurer statement)</span></label>';
+      html+='<div style="position:relative"><input id="pb_illrate" type="text" value="'+(p.IllustrativeRate||'')+'" placeholder="e.g. 8.28" oninput="invCalcGain();(function(){var v=parseFloat(this.value)||0;var el=document.getElementById(\'irr_badge_wrap\');if(el)el.innerHTML=v>0?irrBadge(v):\'\';}).call(this)" ';
+      html+='style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 28px 8px 10px;font-family:inherit;font-size:13px">';
+      html+='<span style="position:absolute;right:10px;top:50%;transform:translateY(-50%);color:#889;font-size:11px;pointer-events:none">%</span></div></div>';
+      html+=(_isOnceOff?'<div></div>':fld('pb_growrate','Growth Rate % (projection)',p.PremGrowthRate||''));
+      html+='</div>';
+      // Total invested / withdrawn / gain
+      html+='<div class="g2">';
+      html+=fld('pb_totalinv','Total Invested to Date',p.TotalInvested,'text','oninput="invCalcGain()"');
+      html+=fld('pb_totalwith','Total Withdrawn to Date',p.TotalWithdrawn,'text','oninput="invCalcGain()"');
+      html+='</div>';
+      // Net invested + actual gain (auto-calculated, read-only)
+      var _ti=parseFloat(p.TotalInvested||0)||0;
+      var _tw=parseFloat(p.TotalWithdrawn||0)||0;
+      var _fv=parseFloat(p.BenFundValue||0)||0;
+      var _net=_ti-_tw;
+      var _gain=_fv-_net;
+      var _gainPct=_net>0?Math.round(_gain/_net*1000)/10:0;
+      html+='<div class="g2">';
+      html+='<div class="fld"><label>Net Invested <span style="font-size:10px;color:#889;font-weight:400">(Total in − Total out)</span></label>';
+      html+='<div style="padding:8px 11px;background:var(--smoke);border:1.5px solid var(--mist);border-radius:7px;font-size:13px;font-weight:700;color:var(--navy)" id="inv_net_display">'+(_net>0?'R '+Math.round(_net).toLocaleString('en-ZA'):'—')+'</div></div>';
+      html+='<div class="fld"><label>Actual Gain <span style="font-size:10px;color:#889;font-weight:400">(total, not annualised — fund value − net invested)</span></label>';
+      var _gainCol=_gain>=0?'#166534':'#991b1b';
+      var _gainBg=_gain>=0?'#f0fdf4':'#fef2f2';
+      html+='<div style="padding:8px 11px;background:'+_gainBg+';border:1.5px solid var(--mist);border-radius:7px;font-size:13px;font-weight:700;color:'+_gainCol+'" id="inv_gain_display">'+(_net>0&&_fv>0?'R '+Math.round(_gain).toLocaleString('en-ZA')+' ('+_gainPct+'%)':'—')+'</div></div>';
+      html+='</div>';
       if(type==='Endowment'||type==='Offshore Endowment'){
         html+='<div class="fld"><label>Include in Retirement Planning?</label><div style="display:flex;gap:12px;margin-top:8px">';
         html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="pinret" value="Yes"'+(p.IncludeInRetirement==='Yes'?' checked':'')+'>Yes</label>';
@@ -2451,14 +2707,25 @@ function buildPolicyForm(p){
   if(isLA){
     var fvNum=parseFloat(p.BenFundValue||'0')||0;
     html+=sec('Living Annuity — Fund & Income Drawing');
-    html+='<div class="g2">'+fld('pb_fv','Current Fund Value',p.BenFundValue,'text','oninput="laFVChanged()"')+'<div class="fld"><label>Growth Rate % (projection)</label><div style="position:relative"><input id="pb_growrate" type="text" value="'+(p.PremGrowthRate||'')+'" placeholder="e.g. 9" oninput="laShowSust()" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 28px 8px 10px;font-family:inherit;font-size:13px"><span style="position:absolute;right:10px;top:50%;transform:translateY(-50%);color:#889;font-size:11px;pointer-events:none">%</span></div></div></div>';
+    html+='<div class="g2">'+fld('pb_fv','Current Fund Value',p.BenFundValue,'text','oninput="laFVChanged()"')+'<div class="fld"><label>Growth Rate % (net — after costs)</label><div style="position:relative"><input id="pb_growrate" type="text" value="'+(p.PremGrowthRate||'')+'" placeholder="e.g. 9" oninput="laShowSust();laCalcGrossGrowth()" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 28px 8px 10px;font-family:inherit;font-size:13px"><span style="position:absolute;right:10px;top:50%;transform:translateY(-50%);color:#889;font-size:11px;pointer-events:none">%</span></div></div></div>';
+    // EAC + gross growth display
+    html+='<div class="g2">';
+    html+='<div class="fld"><label>EAC % <span style="font-size:10px;color:#889;font-weight:400">(Effective Annual Cost — total fee drag)</span></label>';
+    html+='<div style="position:relative"><input id="pb_eac" type="text" value="'+(p.BenEscalation||'')+'" placeholder="e.g. 2.85" oninput="laCalcGrossGrowth()" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 28px 8px 10px;font-family:inherit;font-size:13px"><span style="position:absolute;right:10px;top:50%;transform:translateY(-50%);color:#889;font-size:11px;pointer-events:none">%</span></div></div>';
+    html+='<div class="fld"><label>Gross Growth % <span style="font-size:10px;color:#889;font-weight:400">(before costs = net + EAC)</span></label>';
+    html+='<div style="padding:8px 11px;background:var(--smoke);border:1.5px solid var(--mist);border-radius:7px;font-size:13px;color:var(--navy);font-weight:700" id="la_gross_growth_display">';
+    var _net=parseFloat(p.PremGrowthRate||0)||0;
+    var _eac=parseFloat(p.BenEscalation||0)||0;
+    html+=(_net+_eac>0?Math.round((_net+_eac)*10)/10+'%':'—');
+    html+='</div></div>';
+    html+='</div>';
 
     // Two-way calculation — income ↔ drawdown rate, driven by fund value
     html+='<div style="background:var(--smoke);border-radius:8px;padding:12px 14px;margin-bottom:8px">';
     html+='<div style="font-size:11px;color:#889;margin-bottom:8px">Enter either the monthly income drawn <strong>or</strong> the annual drawdown rate — the other will calculate automatically based on the fund value.</div>';
     html+='<div class="g2">';
-    // Monthly income field
-    html+='<div class="fld"><label>Monthly Income Drawn</label>';
+    // Monthly BASE income field — drives drawdown rate
+    html+='<div class="fld"><label>Monthly Base Income Drawn <span style="font-size:10px;color:#889;font-weight:400">(base drawdown — drives rate)</span></label>';
     html+='<div style="position:relative"><span style="position:absolute;left:10px;top:50%;transform:translateY(-50%);color:#889;font-size:11px;pointer-events:none">R</span>';
     html+='<input id="pb_la_income" type="text" value="'+(p.BenLAIncome||'')+'" placeholder="0" '
       +'style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px 8px 22px;font-family:inherit;font-size:13px" '
@@ -2476,10 +2743,43 @@ function buildPolicyForm(p){
 
     // Validation / confirmation box
     html+='<div id="la_rate_msg" style="margin-top:6px;font-size:12px"></div>';
+
+    // Insurer bonus field + gross income display
+    html+='<div class="g2" style="margin-top:8px">';
+    html+='<div class="fld"><label>Insurer Bonus / Boost <span style="font-size:10px;color:#889;font-weight:400">(e.g. Discovery Invest Income Boost)</span></label>';
+    html+='<div style="position:relative"><span style="position:absolute;left:10px;top:50%;transform:translateY(-50%);color:#889;font-size:11px;pointer-events:none">R</span>';
+    html+='<input id="pb_la_bonus" type="text" value="'+(p.LABonus||'')+'" placeholder="0 if none" '
+      +'style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px 8px 22px;font-family:inherit;font-size:13px" '
+      +'oninput="laCalcGross()">'
+      +'</div></div>';
+    html+='<div class="fld"><label>Gross Monthly Income Received <span style="font-size:10px;color:#889;font-weight:400">(base + bonus)</span></label>';
+    html+='<div style="padding:8px 11px;background:var(--smoke);border:1.5px solid var(--mist);border-radius:7px;font-size:13px;color:var(--navy);font-weight:700" id="la_gross_display">';
+    var _base=parseFloat(p.BenLAIncome||0)||0;
+    var _bonus=parseFloat(p.LABonus||0)||0;
+    html+=(_base+_bonus>0?'R '+Math.round(_base+_bonus).toLocaleString('en-ZA'):'—');
+    html+='</div></div>';
+    html+='</div>';
+
     html+='</div>'; // end smoke box
 
     // Sustainable income growth — informational, not editable
     html+='<div id="la_sust_msg" style="font-size:12px;margin-bottom:8px"></div>';
+
+    // Stated IRR from insurer statement
+    html+='<div class="g2" style="margin-top:8px">';
+    html+='<div class="fld"><label>Stated IRR % <span style="font-size:10px;color:#889;font-weight:400">(from insurer statement — e.g. Discovery 7.20%)</span></label>';
+    html+='<div style="position:relative">';
+    html+='<input id="pb_illrate" type="text" value="'+(p.IllustrativeRate||'')+'" placeholder="e.g. 7.20" oninput="var g=document.getElementById(\'pb_growrate\');if(g)g.value=this.value;laShowSust();laCalcGrossGrowth()" ';
+    html+='style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 28px 8px 10px;font-family:inherit;font-size:13px">';
+    html+='<span style="position:absolute;right:10px;top:50%;transform:translateY(-50%);color:#889;font-size:11px;pointer-events:none">%</span>';
+    html+='</div>';
+    html+='<div style="font-size:10px;color:#889;margin-top:4px">Enter the IRR from the latest insurer statement. This accounts for all income drawn and is more accurate than any calculated figure.</div>';
+    html+='</div><div></div></div>';
+    // Show IRR badge if stated IRR is available
+    if(p.IllustrativeRate){
+      var _statedIRR = parseFloat(p.IllustrativeRate)||0;
+      if(_statedIRR > 0) html += irrBadge(_statedIRR);
+    }
 
     // Taxable / non-taxable
     html+='<div class="fld" style="margin-top:4px"><label>Income Drawing — Tax Treatment</label>';
@@ -2490,6 +2790,15 @@ function buildPolicyForm(p){
     html+='<div style="font-size:11px;color:#889;margin-top:6px">Taxable: full drawing added to gross income at marginal rate. Non-taxable: SARS &quot;cost&quot; formula applies — document basis in ROA.</div>';
     html+='</div>';
     html+='<div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:7px;padding:8px 12px;font-size:12px;color:#1e40af;margin-top:10px">ℹ <strong>Living Annuity:</strong> No CGT on death. No estate duty if a beneficiary is nominated. Beneficiary may take cash (retirement tax tables in their hands) or continue the annuity.</div>';
+  }
+
+  // LIFE (GUARANTEED) ANNUITY
+  if(isLifeAnn){
+    html+=sec('Life Annuity — Guaranteed Income');
+    html+='<div style="font-size:11px;color:#889;margin-bottom:8px">A life (guaranteed) annuity pays a fixed income for life. No residual capital on death unless a guarantee period applies. Purchase price is a once-off lump sum.</div>';
+    html+='<div class="g2">'+fld('pb_lifann_inc','Guaranteed Monthly Income',p.BenLifeAnnuityIncome)+fld('pben_pct','Annual Income Escalation %',p.BenEscalation)+'</div>';
+    html+='<div class="g2">'+fld('pb_lifann_guaryrs','Guaranteed Term (years — 0 if none)',p.LifeAnnuityGuarYrs)+'<div></div>'+'</div>';
+    html+='<div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:7px;padding:8px 12px;font-size:12px;color:#1e40af;margin-top:6px">ℹ <strong>Life Annuity:</strong> No fund value and no CGT. No estate duty unless a guarantee period applies. Income is fully taxable (PAYE). Once-off purchase — not a recurring premium.</div>';
   }
 
   // MEDICAL
@@ -2523,6 +2832,37 @@ function buildPolicyForm(p){
   html+='</div>';
 
   document.getElementById('pModB').innerHTML=html;
+  // Calculate weighted average premium increase on load
+  setTimeout(calcWeightedAvgPremEsc, 0);
+
+  // Auto-calculate maturity date on form load for all RA types
+  // p.RetirementAge may be '' for new policies but the form defaults to 65
+  if(isRA && !p.MaturityDate){
+    setTimeout(raCalcMaturity, 0);
+  }
+
+  // For LA: seed growth rate from stated IRR on form load
+  if(isLA && p.IllustrativeRate){
+    setTimeout(function(){
+      var g=document.getElementById('pb_growrate');
+      if(g) g.value=p.IllustrativeRate; // always sync
+      laShowSust();
+      laCalcGrossGrowth();
+    },0);
+  }
+  // Auto-calculate maturity value for investment types
+  if(isInv){
+    setTimeout(function(){
+      invCalcMaturity();
+      // Hook date picker dropdowns to recalculate on change
+      ['pb_matdate_y','pb_matdate_m','pb_matdate_d'].forEach(function(id){
+        var el=document.getElementById(id);
+        if(el) el.addEventListener('change',function(){ fdpSync('pb_matdate'); setTimeout(invCalcMaturity,0); });
+      });
+    }, 0);
+  }
+
+  // RA frequency is user-selected and must not be overridden (lump sum once-off RAs are valid)
 }
 
 // Build list of known names for current client (spouse + family links)
@@ -2596,6 +2936,59 @@ function addPolBen(){
   document.getElementById('polBensWrap').innerHTML=renderPolBens();
 }
 
+function renderLumpRows(){
+  if(POL_LUMP_ROWS.length===0) return '<div style="font-size:12px;color:#aaa;padding:8px 0">No lump sum benefits added yet — click + Add Lump Sum Benefit.</div>';
+  var typeOpts=['Life Cover','Capital Disability','Dread Disease / Severe Illness','Other Lump Sum'];
+  return POL_LUMP_ROWS.map(function(r,i){
+    return '<div style="background:var(--smoke);border-radius:8px;padding:10px 12px;margin-bottom:8px">'+
+      '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">'+
+      '<select onchange="POL_LUMP_ROWS['+i+'].type=this.value" style="border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px;flex:1.5">'+
+        typeOpts.map(function(o){return '<option'+(r.type===o?' selected':'')+'>'+o+'</option>';}).join('')+
+      '</select>'+
+      '<input type="text" value="'+(r.label||'')+'" placeholder="Benefit label / notes" onchange="POL_LUMP_ROWS['+i+'].label=this.value" style="flex:2;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px">'+
+      '<button type="button" onclick="lumpRowDelete('+i+')" style="background:var(--rose);color:#fff;border:none;border-radius:6px;padding:5px 9px;cursor:pointer;font-size:11px;font-weight:700">✕</button>'+
+      '</div>'+
+      '<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px">'+
+      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Cover Amount</div><input type="text" value="'+(r.cover||'')+'" placeholder="R" onchange="POL_LUMP_ROWS['+i+'].cover=this.value" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
+      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Premium</div><input type="text" value="'+(r.prem||'')+'" placeholder="R" onchange="POL_LUMP_ROWS['+i+'].prem=this.value;riskPremAutoSum()" oninput="riskPremAutoSum()" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
+      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Premium Esc %</div><input type="text" value="'+(r.premEsc||'')+'" placeholder="% or Age Rated" onchange="POL_LUMP_ROWS['+i+'].premEsc=this.value;calcWeightedAvgPremEsc()" oninput="calcWeightedAvgPremEsc()" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
+      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Benefit Esc %</div><input type="text" value="'+(r.benEsc||'')+'" placeholder="%" onchange="POL_LUMP_ROWS['+i+'].benEsc=this.value" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
+      '</div>'+
+      '</div>';
+  }).join('');
+}
+
+function calcWeightedAvgPremEsc(){
+  var totalPrem=0, weightedEsc=0, hasAgeRated=false;
+  POL_LUMP_ROWS.forEach(function(r){
+    var prem=parseFloat(r.prem||0)||0;
+    var escRaw=String(r.premEsc||'').trim().toLowerCase();
+    if(escRaw==='age rated'||escRaw==='age-rated'||escRaw==='age') hasAgeRated=true;
+    else if(prem>0){ totalPrem+=prem; weightedEsc+=prem*(parseFloat(escRaw)||0); }
+    else if(prem>0) totalPrem+=prem;
+  });
+  POL_INCOME_ROWS.forEach(function(r){
+    var prem=parseFloat(r.prem||0)||0;
+    var escRaw=String(r.premEsc||'').trim().toLowerCase();
+    if(prem>0){ totalPrem+=prem; weightedEsc+=prem*(parseFloat(escRaw)||0); }
+  });
+  var el=document.getElementById('pWgtAvgEsc');
+  if(!el) return;
+  if(totalPrem===0){ el.innerHTML=''; return; }
+  var avg=Math.round(weightedEsc/totalPrem*10)/10;
+  var note=hasAgeRated?'<span style="font-size:10px;color:#b45309"> · Age-rated benefits excluded from average</span>':'';
+  el.innerHTML='<div style="margin-top:8px;padding:8px 12px;background:#f0f7e6;border:1px solid #c7e0a0;border-radius:6px;font-size:12px;color:var(--navy)"><strong>Weighted avg. annual premium increase: '+avg+'%</strong> across R'+Math.round(totalPrem).toLocaleString('en-ZA')+'/pm total premium'+note+'</div>';
+}
+
+function lumpRowDelete(i){
+  POL_LUMP_ROWS.splice(i,1);
+  document.getElementById('lumpRowsWrap').innerHTML=renderLumpRows();
+}
+function addLumpRow(){
+  POL_LUMP_ROWS.push({type:'Life Cover',label:'',cover:'',prem:'',premEsc:'',benEsc:''});
+  document.getElementById('lumpRowsWrap').innerHTML=renderLumpRows();
+}
+
 function renderIncomeRows(){
   if(POL_INCOME_ROWS.length===0) return '<div style="font-size:12px;color:#aaa;padding:8px 0">No income benefits added yet.</div>';
   var waitOpts=['7 days','2 weeks','1 month','3 months','6 months','1 year','2 years'];
@@ -2610,24 +3003,202 @@ function renderIncomeRows(){
       '<input type="text" value="'+(r.label||'')+'" placeholder="Benefit label e.g. Income Protection Plus" onchange="POL_INCOME_ROWS['+i+'].label=this.value" style="flex:2;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px">'+
       '<button type="button" onclick="POL_INCOME_ROWS.splice('+i+',1);document.getElementById(\'incomeRowsWrap\').innerHTML=renderIncomeRows()" style="background:var(--rose);color:#fff;border:none;border-radius:6px;padding:5px 9px;cursor:pointer;font-size:11px;font-weight:700">✕</button>'+
       '</div>'+
-      '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px">'+
-      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Monthly Amount</div><input type="text" value="'+(r.amount||'')+'" placeholder="R" onchange="POL_INCOME_ROWS['+i+'].amount=this.value" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
+      '<div style="display:grid;grid-template-columns:repeat(6,1fr);gap:6px">'+
+      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Monthly Benefit</div><input type="text" value="'+(r.amount||'')+'" placeholder="R" onchange="POL_INCOME_ROWS['+i+'].amount=this.value" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
+      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Premium</div><input type="text" value="'+(r.prem||'')+'" placeholder="R" onchange="POL_INCOME_ROWS['+i+'].prem=this.value;riskPremAutoSum()" oninput="riskPremAutoSum()" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
       '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Waiting Period</div><select onchange="POL_INCOME_ROWS['+i+'].waiting=this.value" style="width:100%;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px">'+waitOpts.map(function(o){return '<option'+(r.waiting===o?' selected':'')+'>'+o+'</option>';}).join('')+'</select></div>'+
       '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Benefit Period</div><select onchange="POL_INCOME_ROWS['+i+'].term=this.value" style="width:100%;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px">'+termOpts.map(function(o){return '<option'+(r.term===o?' selected':'')+'>'+o+'</option>';}).join('')+'</select></div>'+
+      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Escalation %</div><input type="text" value="'+(r.esc||'')+'" placeholder="%" onchange="POL_INCOME_ROWS['+i+'].esc=this.value" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
       '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Taxable</div><select onchange="POL_INCOME_ROWS['+i+'].taxable=this.value" style="width:100%;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"><option'+(r.taxable==='Yes'?' selected':'')+'>Yes</option><option'+(r.taxable!=='Yes'?' selected':'')+'>No</option></select></div>'+
-      '</div>'+
-      '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:6px">'+
-      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Benefit Esc %</div><input type="text" value="'+(r.esc||'')+'" placeholder="%" onchange="POL_INCOME_ROWS['+i+'].esc=this.value" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
-      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Premium Esc %</div><input type="text" value="'+(r.premEsc||'')+'" placeholder="%" onchange="POL_INCOME_ROWS['+i+'].premEsc=this.value" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
-      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Cover Esc %</div><input type="text" value="'+(r.coverEsc||'')+'" placeholder="%" onchange="POL_INCOME_ROWS['+i+'].coverEsc=this.value" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
       '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Lump Sum opt?</div><select onchange="POL_INCOME_ROWS['+i+'].convert=this.value" style="width:100%;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"><option'+(r.convert==='Yes'?' selected':'')+'>Yes</option><option'+(r.convert!=='Yes'?' selected':'')+'>No</option></select></div>'+
       '</div></div>';
   }).join('');
 }
 
 function addIncomeRow(){
-  POL_INCOME_ROWS.push({type:'Temporary IP',label:'',amount:'',waiting:'1 month',term:'To age 65',esc:'',taxable:'No',convert:'No'});
+  POL_INCOME_ROWS.push({type:'Temporary IP',label:'',amount:'',prem:'',waiting:'1 month',term:'To age 65',esc:'',taxable:'No',convert:'No'});
   document.getElementById('incomeRowsWrap').innerHTML=renderIncomeRows();
+}
+
+// ── IRR calculation — shared utility
+// For lump sum: simple compound return
+// For recurring: approximate XIRR via Newton-Raphson
+function calcPolicyIRR(startDateStr, premium, frequency, premEsc, fundValue){
+  if(!startDateStr || !fundValue || N(fundValue)===0) return null;
+  var fv = N(fundValue);
+  if(fv === 0) return null;
+  var sp = String(startDateStr).split(/[T ]/)[0].split(/[-\/]/);
+  if(sp.length < 3) return null;
+  var start = new Date(+sp[0], +sp[1]-1, +sp[2]);
+  var today = new Date();
+  var yrs = (today - start) / (365.25 * 24 * 60 * 60 * 1000);
+  if(yrs < 0.1) return null;
+
+  var freq = frequency || 'Monthly';
+  var isOnce = freq === 'Once Off' || freq === 'Paid Up' || freq === 'Lump Sum';
+  var prem = N(premium);
+
+  if(isOnce || prem === 0){
+    // Simple compound return
+    if(prem === 0) return null;
+    var r = Math.pow(fv / prem, 1 / yrs) - 1;
+    return Math.round(r * 1000) / 10; // return as % with 1 decimal
+  }
+
+  // Recurring — approximate XIRR
+  // Build cash flows: negative outflows each month, positive inflow (fund value) at end
+  var esc = N(premEsc) / 100;
+  var months = Math.round(yrs * 12);
+  if(months < 2) return null;
+
+  // Newton-Raphson on monthly rate
+  function npv(monthlyRate){
+    var pv = 0;
+    var p = prem;
+    var annualCount = 0;
+    for(var m = 0; m < months; m++){
+      if(m > 0 && m % 12 === 0){ annualCount++; p = prem * Math.pow(1 + esc, annualCount); }
+      pv -= p / Math.pow(1 + monthlyRate, m + 1);
+    }
+    pv += fv / Math.pow(1 + monthlyRate, months);
+    return pv;
+  }
+
+  var r = 0.007; // initial guess ~8.4% p.a.
+  for(var i = 0; i < 50; i++){
+    var f = npv(r);
+    var delta = 0.00001;
+    var df = (npv(r + delta) - f) / delta;
+    if(Math.abs(df) < 1e-10) break;
+    var rNew = r - f / df;
+    if(Math.abs(rNew - r) < 1e-7) { r = rNew; break; }
+    r = rNew;
+    if(r < -0.5 || r > 2) return null; // diverged
+  }
+  var annualIRR = Math.pow(1 + r, 12) - 1;
+  return Math.round(annualIRR * 1000) / 10;
+}
+
+function N(v){var n=parseFloat(String(v||'0').replace(/[^0-9.-]/g,''));return isNaN(n)?0:n;}
+
+function irrBadge(irr){
+  if(irr === null || irr === undefined) return '';
+  var col = irr >= 10 ? '#166534' : irr >= 6 ? '#1e40af' : irr >= 0 ? '#92400e' : '#991b1b';
+  var bg  = irr >= 10 ? '#f0fdf4' : irr >= 6 ? '#eff6ff' : irr >= 0 ? '#fffbeb' : '#fef2f2';
+  return '<div style="margin-top:6px;padding:6px 10px;background:'+bg+';border-radius:6px;font-size:12px;color:'+col+';font-weight:700">📈 Actual IRR since inception: '+irr+'% p.a.</div>';
+}
+
+// ── Investment maturity value auto-calculation
+// Projects current fund value at illustrative rate to maturity date
+function invCalcGain(){
+  var ti=parseFloat((document.getElementById('pb_totalinv')||{value:'0'}).value.replace(/[^0-9.]/g,'')||0)||0;
+  var tw=parseFloat((document.getElementById('pb_totalwith')||{value:'0'}).value.replace(/[^0-9.]/g,'')||0)||0;
+  var fv=parseFloat((document.getElementById('pb_fv')||{value:'0'}).value.replace(/[^0-9.]/g,'')||0)||0;
+  var net=ti-tw;
+  var gain=fv-net;
+  var gainPct=net>0?Math.round(gain/net*1000)/10:0;
+  var netEl=document.getElementById('inv_net_display');
+  var gainEl=document.getElementById('inv_gain_display');
+  if(netEl) netEl.textContent=net>0?'R '+Math.round(net).toLocaleString('en-ZA'):'—';
+  if(gainEl){
+    gainEl.textContent=net>0&&fv>0?'R '+Math.round(gain).toLocaleString('en-ZA')+' ('+gainPct+'% total)':'—';
+    gainEl.style.color=gain>=0?'#166534':'#991b1b';
+    gainEl.style.background=gain>=0?'#f0fdf4':'#fef2f2';
+  }
+}
+
+function invCalcMaturity(){
+  var fv = parseFloat((document.getElementById('pb_fv')||{value:''}).value.replace(/[^0-9.]/g,'')||0)||0;
+  var prem = parseFloat((document.getElementById('ppm')||{value:''}).value.replace(/[^0-9.]/g,'')||0)||0;
+  var rate = parseFloat((document.getElementById('pb_illrate')||{value:''}).value||0)||0;
+  // Get maturity date
+  var matEl = document.getElementById('pb_matdate');
+  if(!matEl||!matEl.value) return;
+  var matParts = matEl.value.split('-');
+  if(matParts.length < 3) return;
+  var matDate = new Date(+matParts[0], +matParts[1]-1, +matParts[2]);
+  if(isNaN(matDate)) return;
+  var today = new Date();
+  var yrs = (matDate - today) / (365.25 * 24 * 60 * 60 * 1000);
+  if(yrs <= 0) return;
+  var r = rate / 100;
+  // Project existing fund value
+  var projected = fv * Math.pow(1 + r, yrs);
+  // For once-off: no ongoing premium contributions
+  // For recurring: add premium contributions (monthly, growing at premium growth rate)
+  var freqEl = document.getElementById('pfreq');
+  var freq = freqEl ? freqEl.value : 'Monthly';
+  if(prem > 0 && freq !== 'Once Off' && freq !== 'Paid Up' && r > 0){
+    var growEl = document.getElementById('pb_growrate');
+    var growRate = parseFloat((growEl||{value:'0'}).value||0)||0;
+    var g = growRate / 100;
+    var n = Math.floor(yrs * 12);
+    // FV of growing annuity
+    if(Math.abs(r/12 - g/12) > 0.0001){
+      projected += prem * (Math.pow(1+r/12, n) - Math.pow(1+g/12, n)) / (r/12 - g/12);
+    } else {
+      projected += prem * n * Math.pow(1+r/12, n);
+    }
+  }
+  var matValEl = document.getElementById('pb_matval');
+  if(matValEl) matValEl.value = Math.round(projected);
+}
+
+// ── RA maturity date auto-calculation
+function raCalcMaturity(){
+  var ageEl = document.getElementById('pb_retage');
+  if(!ageEl) return;
+  var age = parseInt(ageEl.value);
+  if(isNaN(age) || age < 40 || age > 85) return;
+  var c = DB.clients.find(function(x){ return String(x.ID)===String(EPC); });
+  if(!c || !clean(c.DOB)) return;
+  // Parse date parts directly to avoid UTC timezone shifting the day
+  var _dp = String(c.DOB).split(/[-\/]/);
+  if(_dp.length < 3) return;
+  var dob = new Date(parseInt(_dp[0]), parseInt(_dp[1])-1, parseInt(_dp[2]));
+  if(isNaN(dob)) return;
+  var matYear = dob.getFullYear() + age;
+  var matMon  = String(dob.getMonth()+1); if(matMon.length===1) matMon='0'+matMon;
+  var matDay  = String(dob.getDate());    if(matDay.length===1) matDay='0'+matDay;
+  var matDate = matYear+'-'+matMon+'-'+matDay;
+  var hid = document.getElementById('pb_matdate');
+  if(hid){ hid.value = matDate; }
+  var yEl = document.getElementById('pb_matdate_y');
+  var mEl = document.getElementById('pb_matdate_m');
+  var dEl = document.getElementById('pb_matdate_d');
+  if(yEl) yEl.value = String(matYear);
+  if(mEl) mEl.value = matMon;
+  if(dEl){ dEl.innerHTML = fdpDayOpts(String(matYear), matMon, matDay); dEl.value = matDay; }
+  fdpUpdateDay('pb_matdate');
+}
+
+// ── Frequency change handler — toggles escalation row visibility
+function freqChanged(sel){
+  var f = sel.value;
+  var hide = (f==='Once Off' || f==='Paid Up');
+  var el = document.getElementById('pEscRow');
+  if(el) el.style.display = hide ? 'none' : '';
+}
+
+// ── RA component auto-sum
+function raAutoSum(){
+  var N=function(id){ var el=document.getElementById(id); return el?parseFloat(el.value.replace(/[^0-9.]/g,''))||0:0; };
+  var total = N('pb_vested') + N('pb_nonvested') + N('pb_retcomp') + N('pb_savcomp');
+  var fvEl = document.getElementById('pb_fv');
+  if(fvEl && total > 0) fvEl.value = Math.round(total);
+}
+
+// ── Risk premium auto-sum from lump + income rows
+function riskPremAutoSum(){
+  var total = 0;
+  // Sum lump sum row premiums
+  POL_LUMP_ROWS.forEach(function(r){ total += parseFloat(r.prem||0)||0; });
+  // Sum income row premiums (if present)
+  POL_INCOME_ROWS.forEach(function(r){ total += parseFloat(r.prem||0)||0; });
+  var hid = document.getElementById('ppm');
+  var disp = document.getElementById('ppm_display');
+  if(hid) hid.value = total > 0 ? String(Math.round(total*100)/100) : '';
+  if(disp) disp.textContent = total > 0 ? 'R '+Math.round(total*100/100).toLocaleString('en-ZA') : 'Will calculate from rows below';
 }
 
 // ── Living Annuity two-way calculation ───────────────────────
@@ -2635,6 +3206,26 @@ function _laFV(){
   var el=document.getElementById('pb_fv');
   return el?parseFloat(el.value.replace(/[^0-9.]/g,''))||0:0;
 }
+function laCalcGrossGrowth(){
+  var net = parseFloat((document.getElementById('pb_growrate')||{value:''}).value)||0;
+  var eac = parseFloat((document.getElementById('pb_eac')||{value:''}).value)||0;
+  var el = document.getElementById('la_gross_growth_display');
+  if(el){
+    var gross = Math.round((net+eac)*10)/10;
+    el.textContent = gross > 0 ? gross+'%' : '—';
+  }
+}
+
+function laCalcGross(){
+  var base = parseFloat((document.getElementById('pb_la_income')||{value:'0'}).value)||0;
+  var bonus = parseFloat((document.getElementById('pb_la_bonus')||{value:'0'}).value)||0;
+  var el = document.getElementById('la_gross_display');
+  if(el){
+    var gross = base + bonus;
+    el.textContent = gross > 0 ? 'R '+Math.round(gross).toLocaleString('en-ZA') : '—';
+  }
+}
+
 function laCalcFromIncome(){
   var fv=_laFV();
   var incEl=document.getElementById('pb_la_income');
@@ -2654,7 +3245,7 @@ function laCalcFromIncome(){
     rateEl.value='';
     msgEl.innerHTML='';
   }
-  laShowSust();
+  laShowSust(); laCalcGross();
 }
 function laCalcFromRate(){
   var fv=_laFV();
@@ -2703,17 +3294,22 @@ function laShowSust(){
   if(!sustEl) return;
   var growEl=document.getElementById('pb_growrate');
   var rateEl=document.getElementById('pb_la_drawdown');
-  if(!growEl||!rateEl) return;
-  var growth=parseFloat(growEl.value)||0;
+  var irrEl=document.getElementById('pb_illrate');
+  if(!rateEl) return;
+  var growth=parseFloat((growEl||{value:''}).value)||0;
+  // Fall back to stated IRR if growth rate not entered
+  if(!growth && irrEl) growth=parseFloat(irrEl.value)||0;
   var drawdown=parseFloat(rateEl.value)||0;
+  var usingIRR = !parseFloat((growEl||{value:''}).value) && growth>0;
   if(growth>0&&drawdown>0){
     var netGrowth=Math.round((growth-drawdown)*10)/10;
     var colour=netGrowth>=0?'#166534':'#991b1b';
     var bg=netGrowth>=0?'#f0fdf4':'#fef2f2';
     var border=netGrowth>=0?'#86efac':'#fca5a5';
+    var ref=usingIRR?'stated IRR':'growth rate';
     var msg=netGrowth>=0
-      ?'✓ At '+growth+'% growth and '+drawdown+'% drawdown, income will grow at approximately <strong>'+netGrowth+'% p.a.</strong> automatically — no manual escalation needed.'
-      :'⚠ Drawdown ('+drawdown+'%) exceeds growth ('+growth+'%) by '+Math.abs(netGrowth)+'% — the fund will <strong>deplete over time</strong>. Consider reducing the drawdown rate.';
+      ?'✓ At '+growth+'% '+ref+' and '+drawdown+'% drawdown, income will grow at approximately <strong>'+netGrowth+'% p.a.</strong> — fund is sustainable.'
+      :'⚠ Drawdown ('+drawdown+'%) exceeds '+ref+' ('+growth+'%) by '+Math.abs(netGrowth)+'% — the fund will <strong>deplete over time</strong>. Consider reducing the drawdown rate.';
     sustEl.innerHTML='<div style="background:'+bg+';border:1px solid '+border+';border-radius:6px;padding:7px 10px;color:'+colour+'">'+msg+'</div>';
   } else {
     sustEl.innerHTML='';
@@ -2728,20 +3324,38 @@ function collectPolicyForm(){
     Insurer:g('pi'),Product:g('pp'),PolicyNo:g('pn'),Type:g('pt'),
     StartDate:g('psd'),ClientIsOwner:getR('pisowner'),Owner:g('pown'),Status:g('pst'),EstateDutiable:getR('pestate'),
     BizType:g('pbiztype'),LifeAssuredType:(document.getElementById('plifeassured_type')?document.getElementById('plifeassured_type').value:''),LifeAssured:g('plifeassured'),LoanAmount:g('ploanamt'),KeyPosition:g('pkeypos'),
-    Premium:g('ppm'),Frequency:g('pfreq'),PremEscalation:g('pprem_pct'),BenEscalation:g('pben_pct'),AdminFee:g('padminfee'),
-    BenDeath:g('pb_death'),BenDisability:g('pb_dis'),
-    BenDreadDisease:g('pb_dd'),
-    DreadDiseaseType:(document.getElementById('pb_ddtype')?document.getElementById('pb_ddtype').value:''),
-    DreadDiseaseNotes:g('pb_ddnotes'),
+    Premium:g('ppm'),Frequency:g('pfreq'),
+    // For risk policies escalations live on rows; use first lump row for policy-level field
+    // For other types read the single escalation fields as before
+    PremEscalation:(function(){
+      var r=document.getElementById('pprem_pct');
+      if(r) return r.value.trim();
+      // Risk policy — use first lump row premEsc
+      return POL_LUMP_ROWS.length?String(POL_LUMP_ROWS[0].premEsc||''):'';
+    })(),
+    BenEscalation:(function(){
+      var r=document.getElementById('pben_pct');
+      if(r) return r.value.trim();
+      return POL_LUMP_ROWS.length?String(POL_LUMP_ROWS[0].benEsc||''):'';
+    })(),
+    // Legacy single fields — populated from first matching row for FNA compatibility
+    BenDeath:(function(){ var r=POL_LUMP_ROWS.find(function(x){return x.type==='Life Cover';}); return r?r.cover:''; })(),
+    BenDisability:(function(){ var r=POL_LUMP_ROWS.find(function(x){return x.type==='Capital Disability';}); return r?r.cover:''; })(),
+    BenDreadDisease:(function(){ var r=POL_LUMP_ROWS.find(function(x){return x.type==='Dread Disease / Severe Illness';}); return r?r.cover:''; })(),
+    DreadDiseaseType:'Lump Sum',
+    DreadDiseaseNotes:(function(){ var r=POL_LUMP_ROWS.find(function(x){return x.type==='Dread Disease / Severe Illness';}); return r?r.label:''; })(),
+    LumpBenefits:JSON.stringify(POL_LUMP_ROWS),
     BenSurrenderValue:g('pb_surr')||g('pb_surr2'),
     BenFundValue:g('pb_fv'),BenMaturityValue:g('pb_matval'),
     MaturityDate:g('pb_matdate'),RetirementAge:g('pb_retage'),
     VestedValue:g('pb_vested'),NonVestedValue:g('pb_nonvested'),
     RetirementComponent:g('pb_retcomp'),SavingsComponent:g('pb_savcomp'),
     IllustrativeRate:g('pb_illrate'),PremGrowthRate:g('pb_growrate'),
+    TotalInvested:g('pb_totalinv'),TotalWithdrawn:g('pb_totalwith'),
     WithdrawSavingsPot:getR('p3pot'),IncludeInRetirement:getR('pinret'),
     MedPlan:g('pmedplan'),MedLives:g('pmedlives'),
-    BenLAIncome:g('pb_la_income'),DrawdownRate:g('pb_la_drawdown'),
+    BenLAIncome:g('pb_la_income'),DrawdownRate:g('pb_la_drawdown'),LABonus:g('pb_la_bonus'),
+    BenEscalation:g('pb_eac')||g('pben_pct'),
     LAIncomeTaxable:(function(){var el=document.querySelector('input[name="platax"]:checked');return el?el.value:'Yes';})(),
     Insured:g('pins'),Payer:g('ppay'),
     Notes:g('pnt'),
@@ -2989,8 +3603,7 @@ function snapshotPolicy(pol){
     loanAmount: pol.LoanAmount||'',
     incomeBenefits: pol.IncomeBenefits||'',
     premEsc: pol.PremEscalation||'',
-    benEsc: pol.BenEscalation||'',
-    adminFee: pol.AdminFee||''
+    benEsc: pol.BenEscalation||''
   };
 }
 
@@ -3010,10 +3623,39 @@ function savePolicy(){
   if(!oldPol&&window.REPLACING_POL_ID){window.REPLACING_POL_ID=null;window.REPLACING_POL_NO=null;}
   // Keep existing history, don't overwrite
   pol.ReviewHistory=oldPol?(oldPol.ReviewHistory||''):'';
+  // Mark pending so a refresh before server confirms doesn't lose the policy
+  pol._pendingSave = true;
   if(EPI!==null&&oldPol){var gi=DB.policies.indexOf(oldPol);if(gi>=0)DB.policies[gi]=pol;}
   else DB.policies.push(pol);
+  // Write to localStorage immediately — survives a refresh before server responds
+  try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
   closeAll();render();
-  post({action:'savePolicy',policy:pol},function(){toast('Policy saved','ok');});
+  var _polForServer = JSON.parse(JSON.stringify(pol));
+  delete _polForServer._pendingSave;
+  post({action:'savePolicy',policy:_polForServer},function(){
+    // Server confirmed — clear pending flag
+    var _ci=DB.policies.findIndex(function(x){return x.ID===pol.ID;});
+    if(_ci>=0){ DB.policies[_ci]=_polForServer; }
+    try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
+    toast('Policy saved ✓','ok');
+  });
+}
+
+function deletePolicy(){
+  var existing = polsFor(EPC);
+  var oldPol = (EPI!==null && existing[EPI]) ? existing[EPI] : null;
+  if(!oldPol){ toast('Cannot find policy to delete','err'); return; }
+  var label = (oldPol.Insurer||'') + (oldPol.Product?' — '+oldPol.Product:'') + (oldPol.PolicyNo?' ('+oldPol.PolicyNo+')':'');
+  if(!confirm('Permanently delete this policy?\n\n' + label + '\n\nThis cannot be undone.')) return;
+  // Remove from DB in memory
+  var gi = DB.policies.indexOf(oldPol);
+  if(gi >= 0) DB.policies.splice(gi, 1);
+  try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
+  closeAll(); render();
+  // Delete from Supabase
+  post({action:'deleteRow', sheet:'policies', id:oldPol.ID}, function(){
+    toast('Policy deleted','ok');
+  });
 }
 
 function logAnnualReview(){
@@ -3222,8 +3864,12 @@ function saveTask(){
   var task={ID:id,Title:title,Assignee:g('tas'),DueDate:g('tdue'),Priority:g('tpri')||'Normal',
     CCWife:ccWife,ClientName:g('tcl'),Notes:log,Done:false,Timestamp:now,OpenedBy:cu(),OpenedDate:now};
   DB.tasks.push(task);
+  try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
   closeAll(); render();
-  post({action:'saveTask',task:task},function(){toast('Task saved','ok');});
+  post({action:'saveTask',task:task},function(){
+    try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
+    toast('Task saved ✓','ok');
+  });
 }
 
 function completeTaskFromLog(){
@@ -3616,6 +4262,62 @@ function openPolicySchedule(cid){
       if(isBiz&&p.BizType) details.push('<span style="font-size:11px;color:#888">Type: </span><span style="font-size:12px;font-weight:600;color:#92400e">'+p.BizType+'</span>');
       if(isBiz&&p.LoanAmount) details.push('<span style="font-size:11px;color:#888">Loan/Cover: </span><span style="font-size:12px;font-weight:600">'+R(p.LoanAmount)+'</span>');
       if(p.MaturityDate) details.push('<span style="font-size:11px;color:#888">Maturity: </span><span style="font-size:12px">'+FD(p.MaturityDate)+'</span>');
+      if(isRA||isInv){
+        // IRR — one figure only, clear priority:
+        // LA: stated IRR only (calculated is inaccurate due to income drawn)
+        // Investment: stated IRR if entered, else calculated
+        // RA: calculated only (accurate — no income drawn)
+        if(p.Type==='Living Annuity'){
+          if(p.IllustrativeRate && N(p.IllustrativeRate)>0)
+            details.push('<span style="font-size:11px;color:#1e40af;font-weight:700">📈 IRR: '+p.IllustrativeRate+'% p.a.</span>');
+        } else if(isInv){
+          if(p.IllustrativeRate && N(p.IllustrativeRate)>0){
+            details.push('<span style="font-size:11px;color:#1e40af;font-weight:700">📈 IRR: '+p.IllustrativeRate+'% p.a.</span>');
+          } else {
+            var _irr = calcPolicyIRR(p.StartDate, p.Premium, p.Frequency, p.PremEscalation, p.BenFundValue);
+            if(_irr !== null && _irr !== 0) details.push('<span style="font-size:11px;color:#1e40af;font-weight:700">📈 IRR: '+_irr+'% p.a.</span>');
+          }
+        } else if(isRA){
+          var _irr = calcPolicyIRR(p.StartDate, p.Premium, p.Frequency, p.PremEscalation, p.BenFundValue);
+          if(_irr !== null && _irr !== 0) details.push('<span style="font-size:11px;color:#1e40af;font-weight:700">📈 IRR: '+_irr+'% p.a.</span>');
+        }
+        // EAC
+        if(p.BenEscalation && N(p.BenEscalation)>0){
+          details.push('<span style="font-size:11px;color:#888">EAC: </span><span style="font-size:12px;font-weight:600;color:#92400e">'+p.BenEscalation+'%</span>');
+        }
+        // Total contributions (initial investment)
+        if(p.Premium && N(p.Premium)>0 && (p.Frequency==='Once Off'||p.Frequency==='Paid Up'||p.Frequency==='Lump Sum')){
+          details.push('<span style="font-size:11px;color:#888">Initial Investment: </span><span style="font-size:12px;font-weight:600">'+R(p.Premium)+'</span>');
+        }
+        // LA income
+        if(p.Type==='Living Annuity'){
+          var _base = N(p.BenLAIncome);
+          var _bonus = N(p.LABonus||0);
+          var _gross = _base + _bonus;
+          var _ddr = p.DrawdownRate ? p.DrawdownRate+'%' : '';
+          if(_base > 0){
+            var _incStr = R(_base)+'/pm base';
+            if(_bonus > 0) _incStr += ' + '+R(_bonus)+' boost = <strong>'+R(_gross)+'/pm gross</strong>';
+            if(_ddr) _incStr += ' ('+_ddr+' drawdown)';
+            details.push('<span style="font-size:11px;color:#888">Income: </span><span style="font-size:12px">'+_incStr+'</span>');
+          }
+          // Growth rate
+          if(p.PremGrowthRate) details.push('<span style="font-size:11px;color:#888">Growth rate: </span><span style="font-size:12px;font-weight:600">'+p.PremGrowthRate+'%</span>');
+        }
+        // Drawdown rate for other RA types
+        if(p.DrawdownRate && p.Type!=='Living Annuity'){
+          details.push('<span style="font-size:11px;color:#888">Drawdown: </span><span style="font-size:12px">'+p.DrawdownRate+'%</span>');
+        }
+        // Illustrative rate — already shown above in IRR block, skip here
+        if(p.TotalInvested && N(p.TotalInvested)>0){
+          var _ti2=N(p.TotalInvested), _tw2=N(p.TotalWithdrawn||0), _fv2=N(p.BenFundValue||0);
+          var _net2=_ti2-_tw2, _gain2=_fv2-_net2, _pct2=_net2>0?Math.round(_gain2/_net2*1000)/10:0;
+          details.push('<span style="font-size:11px;color:#888">Total invested: </span><span style="font-size:12px;font-weight:600">'+R(_ti2)+'</span>');
+          if(_tw2>0) details.push('<span style="font-size:11px;color:#888">Withdrawn: </span><span style="font-size:12px;font-weight:600">'+R(_tw2)+'</span>');
+          details.push('<span style="font-size:11px;color:#888">Net invested: </span><span style="font-size:12px;font-weight:600">'+R(_net2)+'</span>');
+          if(_fv2>0) details.push('<span style="font-size:11px;color:'+ (_gain2>=0?'#166534':'#991b1b')+';font-weight:700">Gain: '+R(_gain2)+' ('+_pct2+'% total)</span>');
+        }
+      }
       if(p.RetirementDate) details.push('<span style="font-size:11px;color:#888">Retirement: </span><span style="font-size:12px">'+FD(p.RetirementDate)+'</span>');
 
       // Income benefits summary
@@ -3635,11 +4337,21 @@ function openPolicySchedule(cid){
     });
 
     // Section total row
-    var sectM=0, sectTotal=0;
-    grp.pols.forEach(function(p){var n=N(p.Premium);sectTotal+=n;if(!isNonMonthly(p))sectM+=n;});
+    var sectM=0, sectTotal=0, sectFV=0;
+    grp.pols.forEach(function(p){
+      var n=N(p.Premium); sectTotal+=n;
+      if(!isNonMonthly(p)) sectM+=n;
+      sectFV+=N(p.BenFundValue);
+    });
     s+='<tr style="background:#f0efe9;font-weight:700;font-size:13px">';
     s+='<td colspan="7" style="padding:9px 10px;border-bottom:2px solid #ddd;color:'+col+'">Section Total</td>';
-    s+='<td style="padding:9px 10px;border-bottom:2px solid #ddd;text-align:right;color:'+col+'">'+R2(sectM)+' /pm</td>';
+    if(sectM>0){
+      s+='<td style="padding:9px 10px;border-bottom:2px solid #ddd;text-align:right;color:'+col+'">'+R2(sectM)+' /pm</td>';
+    } else if((isRA||isInv) && sectFV>0){
+      s+='<td style="padding:9px 10px;border-bottom:2px solid #ddd;text-align:right;color:'+col+'">Fund: '+R2(sectFV)+'</td>';
+    } else {
+      s+='<td style="padding:9px 10px;border-bottom:2px solid #ddd;text-align:right;color:#aaa">Once-off</td>';
+    }
     s+='<td style="padding:9px 10px;border-bottom:2px solid #ddd"></td>';
     s+='</tr>';
     s+='<tr><td colspan="9" style="padding:8px"></td></tr>';
@@ -3685,6 +4397,37 @@ function openPolicySchedule(cid){
     if(bizGroups[bt]>0) doc+=summaryBlock('Business — '+bt,'#92400e',[{lbl:'Cover amount',val:R2(bizGroups[bt])}]);
   });
 
+  // Investment & retirement performance summary block
+  var _raT=['Retirement Annuity','Pension Fund','Provident Fund','Pension Preservation','Provident Preservation','Living Annuity'];
+  var _invT=['Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment','Unit Trust','Tax Free Savings'];
+  var _invRaPols=allPols.filter(function(p){ return _raT.indexOf(p.Type||'')>=0||_invT.indexOf(p.Type||'')>=0; });
+  if(_invRaPols.length>0){
+    var invTotalInv=0,invTotalWith=0,invTotalFV=0,invIRRs=[],invHasData=false;
+    _invRaPols.forEach(function(p){
+      var ti=N(p.TotalInvested||'0'),tw=N(p.TotalWithdrawn||'0'),fv=N(p.BenFundValue||'0');
+      var irr=parseFloat(p.IllustrativeRate||'0')||0;
+      if(ti>0){invTotalInv+=ti;invTotalWith+=tw;invHasData=true;}
+      if(fv>0)invTotalFV+=fv;
+      if(irr>0)invIRRs.push(irr);
+    });
+    var invNetInv=invTotalInv-invTotalWith;
+    var invGain=invTotalFV-(invHasData?invNetInv:0);
+    var invGainPct=invNetInv>0?Math.round(invGain/invNetInv*1000)/10:0;
+    var avgIRR=invIRRs.length>0?Math.round(invIRRs.reduce(function(a,b){return a+b;},0)/invIRRs.length*10)/10:0;
+    var invRows=[];
+    if(invHasData){
+      invRows.push({lbl:'Total invested',val:'R '+Math.round(invTotalInv).toLocaleString('en-ZA')});
+      if(invTotalWith>0)invRows.push({lbl:'Total withdrawn',val:'R '+Math.round(invTotalWith).toLocaleString('en-ZA')});
+      invRows.push({lbl:'Net invested',val:'R '+Math.round(invNetInv).toLocaleString('en-ZA')});
+    }
+    if(invTotalFV>0)invRows.push({lbl:'Portfolio value',val:'R '+Math.round(invTotalFV).toLocaleString('en-ZA')});
+    if(invHasData&&invTotalFV>0){
+      var gainCol=invGain>=0?'#166534':'#991b1b';
+      invRows.push({lbl:'Total gain',val:'<span style="color:'+gainCol+';font-weight:700">R '+Math.round(invGain).toLocaleString('en-ZA')+' ('+invGainPct+'% total)</span>'});
+    }
+    if(avgIRR>0)invRows.push({lbl:'Average IRR',val:'<span style="color:#1e40af;font-weight:700">'+avgIRR+'% p.a.</span>'});
+    if(invRows.length>0)doc+=summaryBlock('Investment & Retirement Performance','#2563ab',invRows);
+  }
   doc+='</div></div>';
 
   // ── POLICY TABLE ──
@@ -3742,10 +4485,27 @@ document.addEventListener('input', function(e){
     var dob=dobFromID(e.target.value);
     if(dob){
       var dobFieldId=e.target.getAttribute('data-dobfield');
+      // Find the correct hidden date input
       var fd=dobFieldId?document.getElementById(dobFieldId):null;
       if(!fd)fd=document.getElementById('fd');
       if(!fd)fd=document.getElementById('fam_dob');
-      if(fd&&!fd.value)fd.value=dob;
+      // Only populate if blank
+      if(fd && !fd.value){
+        fd.value=dob;
+        // Also update the visible year/month/day dropdowns
+        var baseId=fd.id;
+        var parts=dob.split('-');
+        var yEl=document.getElementById(baseId+'_y');
+        var mEl=document.getElementById(baseId+'_m');
+        var dEl=document.getElementById(baseId+'_d');
+        if(yEl) yEl.value=parts[0];
+        if(mEl) mEl.value=parts[1];
+        if(dEl){
+          dEl.innerHTML=fdpDayOpts(parts[0],parts[1],parts[2]);
+          dEl.value=parts[2];
+        }
+        fdpUpdateDay(baseId);
+      }
     }
   }
 });
@@ -3821,7 +4581,30 @@ function selectUser(name){
   if(shell) shell.style.display='';
   var sel=document.getElementById('userSel');
   if(sel) sel.value=name;
-  bootApp();
+  // Sign in to Supabase silently — required for RLS
+  // Wait for token before booting so RLS doesn't block the initial data load
+  // Clear any stale/expired token first
+  sessionStorage.removeItem('sb_token');
+  window._sbAuthed = false;
+  if(!window._sbAuthed){
+    fetch(SB_URL+'/auth/v1/token?grant_type=password', {
+      method:'POST',
+      headers:{'apikey':SB_KEY,'Content-Type':'application/json'},
+      body:JSON.stringify({email:'clinton@duwalcoe.co.za',password:'Irrlmwvm1*2'})
+    }).then(function(r){return r.json();}).then(function(d){
+      if(d.access_token){
+        window._sbAuthed = true;
+        window._sbToken = d.access_token;
+        sessionStorage.setItem('sb_token', d.access_token);
+      }
+      bootApp(); // boot AFTER token is ready
+    }).catch(function(){
+      // If auth fails, boot anyway so cached data still shows
+      bootApp();
+    });
+  } else {
+    bootApp();
+  }
 }
 
 function bootApp(){
