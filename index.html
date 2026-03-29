@@ -2643,10 +2643,16 @@ function buildPolicyForm(p){
   if(isRA||isInv){
     html+=sec(isRA?'Fund & Retirement Values':'Investment Values');
     html+='<div class="g2">'+fld('pb_fv','Current Fund Value',p.BenFundValue,'text',isInv?'oninput="invCalcMaturity()"':'')+fld('pb_surr2','Nett Surrender Value',p.BenSurrenderValue)+'</div>';
-    // IRR badge — calculated from inception date, premium, frequency and current fund value
+    // IRR — stated (from insurer statement) if entered, else calculated
     (function(){
-      var irr = calcPolicyIRR(p.StartDate, p.Premium, p.Frequency, p.PremEscalation, p.BenFundValue);
-      html += irrBadge(irr);
+      if(isInv && p.IllustrativeRate && parseFloat(p.IllustrativeRate)>0){
+        // Investment: use stated IRR from insurer statement
+        html += irrBadge(parseFloat(p.IllustrativeRate));
+      } else if(isRA){
+        // RA: calculate IRR (no withdrawals, calculation is accurate)
+        var irr = calcPolicyIRR(p.StartDate, p.Premium, p.Frequency, p.PremEscalation, p.BenFundValue);
+        html += irrBadge(irr);
+      }
     })();
     if(isRA){
       html+='<div class="g2">'+fld('pb_vested','Vested Component (Pot 1)',p.VestedValue,'text','oninput="raAutoSum()"')+fld('pb_nonvested','Non-Vested Component',p.NonVestedValue,'text','oninput="raAutoSum()"')+'</div>';
@@ -2660,7 +2666,34 @@ function buildPolicyForm(p){
       html+='</div></div>';
     } else {
       html+='<div class="g2">'+fld('pb_matval','Maturity Value',p.BenMaturityValue,'text','oninput=""')+fdp('pb_matdate','Maturity Date',p.MaturityDate||'')+'</div>';
-      html+='<div class="g2">'+fld('pb_illrate','Illustrative Rate %',p.IllustrativeRate||'9','text','oninput="invCalcMaturity()"')+(_isOnceOff?'<div></div>':fld('pb_growrate','Premium Growth Rate %',p.PremGrowthRate||'10'))+'</div>';
+      // Stated IRR from insurer statement (replaces Illustrative Rate for investments)
+      html+='<div class="g2">';
+      html+='<div class="fld"><label>Stated IRR % <span style="font-size:10px;color:#889;font-weight:400">(from insurer statement)</span></label>';
+      html+='<div style="position:relative"><input id="pb_illrate" type="text" value="'+(p.IllustrativeRate||'')+'" placeholder="e.g. 8.28" oninput="invCalcGain()" ';
+      html+='style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 28px 8px 10px;font-family:inherit;font-size:13px">';
+      html+='<span style="position:absolute;right:10px;top:50%;transform:translateY(-50%);color:#889;font-size:11px;pointer-events:none">%</span></div></div>';
+      html+=(_isOnceOff?'<div></div>':fld('pb_growrate','Growth Rate % (projection)',p.PremGrowthRate||''));
+      html+='</div>';
+      // Total invested / withdrawn / gain
+      html+='<div class="g2">';
+      html+=fld('pb_totalinv','Total Invested to Date',p.TotalInvested,'text','oninput="invCalcGain()"');
+      html+=fld('pb_totalwith','Total Withdrawn to Date',p.TotalWithdrawn,'text','oninput="invCalcGain()"');
+      html+='</div>';
+      // Net invested + actual gain (auto-calculated, read-only)
+      var _ti=parseFloat(p.TotalInvested||0)||0;
+      var _tw=parseFloat(p.TotalWithdrawn||0)||0;
+      var _fv=parseFloat(p.BenFundValue||0)||0;
+      var _net=_ti-_tw;
+      var _gain=_fv-_net;
+      var _gainPct=_net>0?Math.round(_gain/_net*1000)/10:0;
+      html+='<div class="g2">';
+      html+='<div class="fld"><label>Net Invested <span style="font-size:10px;color:#889;font-weight:400">(Total in − Total out)</span></label>';
+      html+='<div style="padding:8px 11px;background:var(--smoke);border:1.5px solid var(--mist);border-radius:7px;font-size:13px;font-weight:700;color:var(--navy)" id="inv_net_display">'+(_net>0?'R '+Math.round(_net).toLocaleString('en-ZA'):'—')+'</div></div>';
+      html+='<div class="fld"><label>Actual Gain <span style="font-size:10px;color:#889;font-weight:400">(Fund value − Net invested)</span></label>';
+      var _gainCol=_gain>=0?'#166534':'#991b1b';
+      var _gainBg=_gain>=0?'#f0fdf4':'#fef2f2';
+      html+='<div style="padding:8px 11px;background:'+_gainBg+';border:1.5px solid var(--mist);border-radius:7px;font-size:13px;font-weight:700;color:'+_gainCol+'" id="inv_gain_display">'+(_net>0&&_fv>0?'R '+Math.round(_gain).toLocaleString('en-ZA')+' ('+_gainPct+'%)':'—')+'</div></div>';
+      html+='</div>';
       if(type==='Endowment'||type==='Offshore Endowment'){
         html+='<div class="fld"><label>Include in Retirement Planning?</label><div style="display:flex;gap:12px;margin-top:8px">';
         html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="pinret" value="Yes"'+(p.IncludeInRetirement==='Yes'?' checked':'')+'>Yes</label>';
@@ -3057,6 +3090,23 @@ function irrBadge(irr){
 
 // ── Investment maturity value auto-calculation
 // Projects current fund value at illustrative rate to maturity date
+function invCalcGain(){
+  var ti=parseFloat((document.getElementById('pb_totalinv')||{value:'0'}).value.replace(/[^0-9.]/g,'')||0)||0;
+  var tw=parseFloat((document.getElementById('pb_totalwith')||{value:'0'}).value.replace(/[^0-9.]/g,'')||0)||0;
+  var fv=parseFloat((document.getElementById('pb_fv')||{value:'0'}).value.replace(/[^0-9.]/g,'')||0)||0;
+  var net=ti-tw;
+  var gain=fv-net;
+  var gainPct=net>0?Math.round(gain/net*1000)/10:0;
+  var netEl=document.getElementById('inv_net_display');
+  var gainEl=document.getElementById('inv_gain_display');
+  if(netEl) netEl.textContent=net>0?'R '+Math.round(net).toLocaleString('en-ZA'):'—';
+  if(gainEl){
+    gainEl.textContent=net>0&&fv>0?'R '+Math.round(gain).toLocaleString('en-ZA')+' ('+gainPct+'%)':'—';
+    gainEl.style.color=gain>=0?'#166534':'#991b1b';
+    gainEl.style.background=gain>=0?'#f0fdf4':'#fef2f2';
+  }
+}
+
 function invCalcMaturity(){
   var fv = parseFloat((document.getElementById('pb_fv')||{value:''}).value.replace(/[^0-9.]/g,'')||0)||0;
   var prem = parseFloat((document.getElementById('ppm')||{value:''}).value.replace(/[^0-9.]/g,'')||0)||0;
@@ -3301,6 +3351,7 @@ function collectPolicyForm(){
     VestedValue:g('pb_vested'),NonVestedValue:g('pb_nonvested'),
     RetirementComponent:g('pb_retcomp'),SavingsComponent:g('pb_savcomp'),
     IllustrativeRate:g('pb_illrate'),PremGrowthRate:g('pb_growrate'),
+    TotalInvested:g('pb_totalinv'),TotalWithdrawn:g('pb_totalwith'),
     WithdrawSavingsPot:getR('p3pot'),IncludeInRetirement:getR('pinret'),
     MedPlan:g('pmedplan'),MedLives:g('pmedlives'),
     BenLAIncome:g('pb_la_income'),DrawdownRate:g('pb_la_drawdown'),LABonus:g('pb_la_bonus'),
@@ -4249,7 +4300,15 @@ function openPolicySchedule(cid){
         }
         // Illustrative rate for RA/Investment
         if(p.IllustrativeRate && p.Type!=='Living Annuity'){
-          details.push('<span style="font-size:11px;color:#888">Illustrative rate: </span><span style="font-size:12px">'+p.IllustrativeRate+'%</span>');
+          details.push('<span style="font-size:11px;color:#1e40af;font-weight:700">📈 IRR: '+p.IllustrativeRate+'% p.a.</span>');
+        }
+        if(p.TotalInvested && N(p.TotalInvested)>0){
+          var _ti2=N(p.TotalInvested), _tw2=N(p.TotalWithdrawn||0), _fv2=N(p.BenFundValue||0);
+          var _net2=_ti2-_tw2, _gain2=_fv2-_net2, _pct2=_net2>0?Math.round(_gain2/_net2*1000)/10:0;
+          details.push('<span style="font-size:11px;color:#888">Total invested: </span><span style="font-size:12px;font-weight:600">'+R(_ti2)+'</span>');
+          if(_tw2>0) details.push('<span style="font-size:11px;color:#888">Withdrawn: </span><span style="font-size:12px;font-weight:600">'+R(_tw2)+'</span>');
+          details.push('<span style="font-size:11px;color:#888">Net invested: </span><span style="font-size:12px;font-weight:600">'+R(_net2)+'</span>');
+          if(_fv2>0) details.push('<span style="font-size:11px;color:'+ (_gain2>=0?'#166534':'#991b1b')+';font-weight:700">Gain: '+R(_gain2)+' ('+_pct2+'%)</span>');
         }
       }
       if(p.RetirementDate) details.push('<span style="font-size:11px;color:#888">Retirement: </span><span style="font-size:12px">'+FD(p.RetirementDate)+'</span>');
