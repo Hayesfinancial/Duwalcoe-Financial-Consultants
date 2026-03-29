@@ -371,86 +371,57 @@ function renderDiary(){
   var col=document.getElementById('diaryCol');
   var html='';
   var slots=getSlots(currentUser,currentDay);
-  var isAdmin=isAdminDay(currentDay);
 
-  if(isAdmin){
-    // Admin/Prospecting day
-    html+='<div class="slot-section">';
-    html+='<div class="slot-section-title">📞 Prospecting & Admin Day</div>';
-    html+=renderDaySlots(slots,currentUser,currentDay);
-    html+='</div>';
-  } else {
-    // Appointment day — show standard slots first
-    html+='<div class="slot-section">';
-    html+='<div class="slot-section-title">🟢 Appointment Slots</div>';
+  // Single unified list sorted by time
+  slots.sort(function(a,b){ return (a.time||'').localeCompare(b.time||''); });
 
-    // Merge standard slots with saved data
-    var stdKeys=['10:30','12:00','13:30','15:00'];
-    var stdLabels=['Appointment 1','Appointment 2','Appointment 3','Appointment 4 (back-up)'];
-    var savedByTime={};
-    slots.forEach(function(s){ if(s.time) savedByTime[s.time]=s; });
-
-    stdKeys.forEach(function(t,i){
-      var saved=savedByTime[t];
-      var sid='slot_std_'+t.replace(':','_');
-      var isOpen=openSlot===sid;
-      var filled=saved&&saved.client;
-      var typeClass=saved?'filled-'+(saved.type||'nb').toLowerCase():'';
-
-      html+='<div class="slot '+(filled?typeClass:'')+'" id="'+sid+'">';
-      html+='<div class="slot-head" onclick="toggleSlot(\''+sid+'\')">';
-      html+='<div class="slot-time">'+t+'</div>';
-      if(filled){
-        html+='<div class="slot-name">'+esc(saved.client)+'</div>';
-        html+=typeTag(saved.type);
-        if(saved.teams) html+='<span style="font-size:11px;background:#ede9fe;color:#6d28d9;padding:2px 7px;border-radius:10px">Teams</span>';
-      } else {
-        html+='<div class="slot-name empty-slot">'+stdLabels[i]+' — tap to book</div>';
-      }
-      html+='<div class="slot-actions">';
-      if(filled) html+='<button class="slot-btn" title="Clear" onclick="clearStdSlot(event,\''+t+'\')">🗑</button>';
-      html+='<button class="slot-btn">'+( isOpen?'▲':'▼')+'</button>';
-      html+='</div>';
-      html+='</div>';
-
-      // Slot body
-      html+='<div class="slot-body'+(isOpen?' open':'')+'">';
-      html+='<label>Client / Contact Name</label>';
-      html+='<input id="si_client_'+t.replace(':','_')+'" type="text" value="'+(saved?esc(saved.client||''):'')+'" placeholder="e.g. Johan Smith">';
-      html+='<label>Appointment Type</label>';
-      html+='<div class="type-row">';
-      ['NB','FU','REV','Block','Teams'].forEach(function(tp){
-        var active=saved&&(saved.type||'NB')===tp;
-        html+='<button class="type-btn'+(active?' active-'+tp.toLowerCase():'')+'" onclick="setStdType(\''+t+'\',\''+tp+'\')">'+tp+'</button>';
-      });
-      html+='</div>';
-      html+='<label>Teams Meeting Link (optional)</label>';
-      html+='<input id="si_teams_'+t.replace(':','_')+'" type="text" value="'+(saved?esc(saved.teams||''):'')+'" placeholder="https://teams.microsoft.com/...">';
-      html+='<label>Outcome / Notes</label>';
-      html+='<textarea id="si_notes_'+t.replace(':','_')+'" placeholder="What happened? Next step?">'+(saved?esc(saved.notes||''):'')+'</textarea>';
-      if(saved&&saved.teams){
-        html+='<a class="teams-link" href="'+esc(saved.teams)+'" target="_blank">📹 Join Teams Meeting</a>';
-      }
-      html+='<div class="save-row">';
-      html+='<button class="btn b-sage" style="font-size:11px" onclick="saveStdSlot(\''+t+'\')">Save</button>';
-      html+='<button class="btn b-ghost" style="font-size:11px;color:var(--ink)" onclick="toggleSlot(\''+sid+'\')">Close</button>';
-      html+='</div></div></div>';
-    });
-    html+='</div>';
+  if(slots.length===0){
+    html+='<div style="color:#bbb;font-size:13px;font-style:italic;padding:20px 0 10px">Nothing booked yet.</div>';
   }
 
-  // Free/additional slots section
-  html+='<div class="slot-section">';
-  html+='<div class="slot-section-title">'+(isAdmin?'Additional Blocks':'Additional Slots / Notes')+'</div>';
-  html+=renderDaySlots(slots.filter(function(s){
-    if(!isAdmin) return !['10:30','12:00','13:30','15:00'].includes(s.time);
-    return true;
-  }),currentUser,currentDay,true);
-  html+='<button class="add-slot-btn" onclick="addFreeSlot()">+ Add Block / Appointment</button>';
-  html+='</div>';
+  slots.forEach(function(s,i){
+    var sid='fslot_'+i;
+    var isOpen=openSlot===sid;
+    var filled=s.client;
+    var typeClass=filled?'filled-'+(s.type||'nb').toLowerCase():'';
+    html+='<div class="slot '+(filled?typeClass:'')+'" id="'+sid+'">';
+    html+='<div class="slot-head" onclick="toggleSlot(\''+sid+'\')">';
+    html+='<div class="slot-time">'+(s.time||'--:--')+'</div>';
+    if(filled) html+='<div class="slot-name">'+esc(s.client)+'</div>';
+    else html+='<div class="slot-name empty-slot">'+(s.label||'Tap to fill in')+'</div>';
+    if(s.type&&filled) html+=typeTag(s.type);
+    if(s.teams) html+='<span style="font-size:11px;background:#ede9fe;color:#6d28d9;padding:2px 7px;border-radius:10px">Teams</span>';
+    html+='<div class="slot-actions">';
+    html+='<button class="slot-btn" onclick="deleteFreeSlot(event,'+i+')">🗑</button>';
+    html+='<button class="slot-btn">'+(isOpen?'▲':'▼')+'</button>';
+    html+='</div></div>';
+    html+='<div class="slot-body'+(isOpen?' open':'')+'">';
+    html+='<label>Time</label>';
+    html+='<input id="fs_time_'+i+'" type="time" value="'+(s.time||'09:00')+'">';
+    html+='<label>Client / Description</label>';
+    html+='<input id="fs_client_'+i+'" type="text" value="'+esc(s.client||s.label||'')+'" placeholder="e.g. Johan Smith or Gym or Admin">';
+    html+='<label>Type</label>';
+    html+='<div class="type-row">';
+    ['NB','FU','REV','Teams','Block'].forEach(function(tp){
+      var active=(s.type||'NB')===tp;
+      html+='<button class="type-btn'+(active?' active-'+tp.toLowerCase():'')+'" onclick="setFreeType('+i+',\''+tp+'\')">'+tp+'</button>';
+    });
+    html+='</div>';
+    html+='<label>Teams Link (optional)</label>';
+    html+='<input id="fs_teams_'+i+'" type="text" value="'+esc(s.teams||'')+'" placeholder="https://teams.microsoft.com/...">';
+    html+='<label>Outcome / Notes</label>';
+    html+='<textarea id="fs_notes_'+i+'" placeholder="What happened? Next step?">'+(s.notes||'')+'</textarea>';
+    if(s.teams) html+='<a class="teams-link" href="'+esc(s.teams)+'" target="_blank">📹 Join Teams Meeting</a>';
+    html+='<div class="save-row">';
+    html+='<button class="btn b-sage" style="font-size:11px" onclick="saveFreeSlot('+i+')">Save</button>';
+    html+='<button class="btn b-ghost" style="font-size:11px;color:var(--ink)" onclick="toggleSlot(\''+sid+'\')">'+'Close</button>';
+    html+='</div></div></div>';
+  });
 
+  html+='<button class="add-slot-btn" onclick="addFreeSlot()">+ Add appointment / block</button>';
   col.innerHTML=html;
 }
+
 
 function renderDaySlots(slots,user,dayIdx,isFree){
   if(!slots||!slots.length) return '';
@@ -658,10 +629,10 @@ function saveFreeSlot(i){
   var slots=getSlots(currentUser,currentDay);
   var s=slots[i];
   if(!s) return;
-  s.time=(document.getElementById('fs_time_'+i)||{value:s.time}).value;
-  s.client=(document.getElementById('fs_client_'+i)||{value:''}).value.trim();
-  s.teams=(document.getElementById('fs_teams_'+i)||{value:''}).value.trim();
-  s.notes=(document.getElementById('fs_notes_'+i)||{value:''}).value.trim();
+  s.time=(document.getElementById('ft_'+i)||{value:s.time}).value;
+  s.client=(document.getElementById('fc_'+i)||{value:''}).value.trim();
+  s.teams=(document.getElementById('ftm_'+i)||{value:''}).value.trim();
+  s.notes=(document.getElementById('fn_'+i)||{value:''}).value.trim();
   setSlots(currentUser,currentDay,slots);
   openSlot=null;
   saveCurrentUser();
