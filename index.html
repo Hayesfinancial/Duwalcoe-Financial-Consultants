@@ -606,6 +606,7 @@ function bx(cls,txt){ return H('span',{'class':'bx '+cls},txt); }
 
 // ══ RENDER ═══════════════════════════════════════════════════
 function goPage(p){
+  if(PAGE==='client'&&SEL) clearEditingLock(SEL);
   PAGE=p; SEL=null;
   // Before rendering dashboard, refresh LastAccessed from du_recent store
   if(p==='dash'){
@@ -618,12 +619,10 @@ function goPage(p){
 }
 function openClient(id){
   SEL=id; CTAB='overview'; PAGE='client'; window.CLIENT_TASK_FILTER='today';
-  // Track last accessed - write to dedicated key so it survives full DB resyncs
   var c=DB.clients.find(function(x){return String(x.ID)===String(id);});
   if(c){
     c.LastAccessed=Date.now();
     try{
-      // Store in dedicated recent-access store keyed by client ID
       var ra={};
       try{ ra=JSON.parse(localStorage.getItem(recentKey())||'{}'); }catch(e){}
       ra[String(id)]=Date.now();
@@ -631,9 +630,61 @@ function openClient(id){
       localStorage.setItem('du_db',JSON.stringify(DB));
     }catch(e){}
   }
-  render();
+  // Check if someone else is editing this client
+  checkEditing(id, function(lock){
+    if(lock){
+      // Show warning but still open - just warn
+      window.CONCURRENT_EDIT_WARNING = '⚠️ '+lock.user+' is also editing this client right now. Last save wins — coordinate before saving.';
+    } else {
+      window.CONCURRENT_EDIT_WARNING = null;
+    }
+    // Stamp ourselves as editing
+    stampEditing(id);
+    render();
+  });
 }
 function closeAll(){ document.querySelectorAll('.ov').forEach(function(o){o.classList.remove('open');}); }
+
+// ── Concurrent edit tracking ──────────────────────────────
+var EDITING_KEY='editing_locks';
+function stampEditing(clientId){
+  if(!clientId||!cu()) return;
+  sbFetch('GET','/rest/v1/settings?Key=eq.'+EDITING_KEY+'&select=*',null,function(rows){
+    var locks={};
+    try{ locks=JSON.parse((rows&&rows[0]&&rows[0].Value)||'{}'); }catch(e){}
+    // Clean stale locks older than 10 minutes
+    var now=Date.now();
+    Object.keys(locks).forEach(function(k){
+      if(now-(locks[k].ts||0)>600000) delete locks[k];
+    });
+    locks[String(clientId)]={user:cu(),ts:now};
+    sbFetch('POST','/rest/v1/settings',[{Key:EDITING_KEY,Value:JSON.stringify(locks)}],null);
+  });
+}
+function checkEditing(clientId, cb){
+  if(!clientId) return cb(null);
+  sbFetch('GET','/rest/v1/settings?Key=eq.'+EDITING_KEY+'&select=*',null,function(rows){
+    var locks={};
+    try{ locks=JSON.parse((rows&&rows[0]&&rows[0].Value)||'{}'); }catch(e){}
+    var lock=locks[String(clientId)];
+    var now=Date.now();
+    // Only warn if someone ELSE has it open in last 10 minutes
+    if(lock&&lock.user&&lock.user!==cu()&&(now-(lock.ts||0)<600000)){
+      cb(lock);
+    } else {
+      cb(null);
+    }
+  });
+}
+function clearEditingLock(clientId){
+  if(!clientId) return;
+  sbFetch('GET','/rest/v1/settings?Key=eq.'+EDITING_KEY+'&select=*',null,function(rows){
+    var locks={};
+    try{ locks=JSON.parse((rows&&rows[0]&&rows[0].Value)||'{}'); }catch(e){}
+    delete locks[String(clientId)];
+    sbFetch('POST','/rest/v1/settings',[{Key:EDITING_KEY,Value:JSON.stringify(locks)}],null);
+  });
+}
 
 function render(){
   updateBadge();
@@ -1163,6 +1214,7 @@ function renderProfile(){
     '<button class="btn b-gh sm" onclick="CTAB===\'overview\'?goPage(\'clients\'):( CTAB=\'overview\',render())">← Back</button>'+
     '<h1 style="font-family:\'DM Serif Display\',serif;font-size:20px;color:var(--navy)">'+c.Name+'</h1>'+
     '</div>'+
+    (window.CONCURRENT_EDIT_WARNING?'<div style="background:#fef3c7;border:1.5px solid #f59e0b;border-radius:8px;padding:10px 16px;margin-bottom:10px;font-size:13px;font-weight:600;color:#92400e">'+window.CONCURRENT_EDIT_WARNING+'</div>':'')+
     '<div class="phdr">'+
     '<div class="av">'+ini(c.Name)+'</div>'+
     '<div style="flex:1">'+
@@ -2508,6 +2560,7 @@ function saveClient(openFNA){
   // Open the client/lead profile immediately after save
   openClient(savedId);
   post({action:'saveClient',client:c},function(){
+    clearEditingLock(c.ID);
     try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
     toast((savedIsLead?'Lead':'Client')+' saved','ok');
     if(openFNA){
