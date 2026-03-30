@@ -180,7 +180,7 @@ table input:focus, table select:focus { outline: none; border-color: var(--gold)
 <!-- Persisted data -->
 <div id="saved-data" style="display:none">null</div>
 
-<script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script><script>
+<script>
 'use strict';
 
 // ═══════════════════════════════════════════════════════════
@@ -835,7 +835,18 @@ function deepMerge(base, over) {
 // ═══════════════════════════════════════════════════════════
 // SAVE / LOAD / NEW
 // ═══════════════════════════════════════════════════════════
-var APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbw_I8Md3snxG36VJb00gIIgbag_2-k0zUkkmzS15kDzpCO37RJSS16hTdhhpS_v5onr/exec';
+var SB_URL='https://ayyexuwxaghzljykslxr.supabase.co';
+var SB_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImF5eWV4dXd4YWdoemxqeWtzbHhyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQzMTUyMTcsImV4cCI6MjA4OTg5MTIxN30.hp2cQ64FjKnThsLh2qfdqRKdiy39_900JfH6C0KKIx4';
+function sbFetch(method,path,body,cb){
+  var opts={method:method,headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json','Prefer':method==='POST'?'resolution=merge-duplicates':''}};
+  if(body) opts.body=JSON.stringify(body);
+  fetch(SB_URL+path,opts)
+    .then(function(r){if(!r.ok){r.text().then(function(t){console.error('SB:',r.status,t);if(cb)cb(null,t);});return;}
+      var ct=r.headers.get('content-type')||'';
+      if(ct.indexOf('json')>=0)r.json().then(function(d){if(cb)cb(d);});
+      else r.text().then(function(){if(cb)cb({});});
+    }).catch(function(e){console.error('SB fetch:',e);if(cb)cb(null,e.message);});
+}
 
 function persist() {
   var json = JSON.stringify(S);
@@ -844,19 +855,16 @@ function persist() {
   try { localStorage.setItem(key, json); } catch(e) {}
 }
 
-// Save FNA state to Google Sheets (excludes importedPols — they come fresh from CRM)
+// Save FNA state to Supabase
 function saveToServer(silent) {
   var clientId = S.cli.id;
   if (!clientId) {
     if(!silent) status('⚠ No client ID — cannot sync to server');
     return;
   }
-  // Build save payload — everything except importedPols (CRM-sourced)
   var saveData = {};
   var skip = {importedPols: true};
   Object.keys(S).forEach(function(k){ if(!skip[k]) saveData[k] = S[k]; });
-  // Save _retInclude flags separately keyed by PolicyNo (or Insurer+Product)
-  // so they survive the CRM policy refresh on next load
   var retIncludes = {};
   (S.importedPols||[]).forEach(function(p){
     if(p._retInclude || (p._retRows && p._retRows.length)){
@@ -865,51 +873,34 @@ function saveToServer(silent) {
     }
   });
   saveData.retIncludes = retIncludes;
-
-  var payload = JSON.stringify({ action: 'saveFNA', clientId: clientId, jsonData: JSON.stringify(saveData) });
+  var now = new Date().toISOString().slice(0,16).replace('T',' ');
   var indicator = document.getElementById('syncIndicator');
-  if(indicator) { indicator.textContent = '↑ Saving...'; indicator.style.color = '#a8b938'; }
-
-  fetch(APPS_SCRIPT_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'text/plain' },
-    body: payload
-  })
-  .then(function(r){ return r.json(); })
-  .then(function(res){
-    if(res.ok){
-      var t = new Date().toLocaleTimeString('en-ZA',{hour:'2-digit',minute:'2-digit'});
-      if(indicator){ indicator.textContent = '✓ Synced ' + t; indicator.style.color = '#86efac'; }
-      if(!silent) status('✓ Saved to server at ' + t);
-    } else {
+  if(indicator){ indicator.textContent = '↑ Saving...'; indicator.style.color = '#a8b938'; }
+  sbFetch('POST','/rest/v1/fnadata',[{ClientID:clientId,Data:JSON.stringify(saveData),LastSaved:now,SavedBy:'Clinton Hayes'}],function(res,err){
+    if(err){
       if(indicator){ indicator.textContent = '⚠ Sync failed'; indicator.style.color = '#f87171'; }
-      if(!silent) status('⚠ Server save failed: ' + (res.error||'unknown'));
+      if(!silent) status('⚠ Save failed: '+err);
+    } else {
+      var t = new Date().toLocaleTimeString('en-ZA',{hour:'2-digit',minute:'2-digit'});
+      if(indicator){ indicator.textContent = '✓ Synced '+t; indicator.style.color = '#86efac'; }
+      if(!silent) status('✓ Saved at '+t);
     }
-  })
-  .catch(function(err){
-    if(indicator){ indicator.textContent = '⚠ Offline'; indicator.style.color = '#f87171'; }
-    if(!silent) status('⚠ Could not reach server — data saved locally only');
   });
 }
 
-// Load FNA state from Google Sheets
+// Load FNA state from Supabase
 function loadFromServer(clientId, onDone) {
   if(!clientId){ if(onDone) onDone(null); return; }
-  var url = APPS_SCRIPT_URL + '?action=loadFNA&clientId=' + encodeURIComponent(clientId) + '&callback=_fnaServerCb';
-  window._fnaServerCb = function(res){
-    delete window._fnaServerCb;
-    if(res && res.ok && res.data){
+  sbFetch('GET','/rest/v1/fnadata?ClientID=eq.'+encodeURIComponent(clientId)+'&select=*',null,function(rows,err){
+    if(rows && rows.length && rows[0].Data){
       try {
-        var serverState = JSON.parse(res.data);
-        if(onDone) onDone(serverState, res.saved||'');
+        var serverState = typeof rows[0].Data==='string' ? JSON.parse(rows[0].Data) : rows[0].Data;
+        if(onDone) onDone(serverState, rows[0].LastSaved||'');
       } catch(e){ if(onDone) onDone(null); }
     } else {
       if(onDone) onDone(null);
     }
-  };
-  var s = document.createElement('script'); s.src = url;
-  s.onerror = function(){ if(onDone) onDone(null); };
-  document.head.appendChild(s);
+  });
 }
 
 function autoSave() {
