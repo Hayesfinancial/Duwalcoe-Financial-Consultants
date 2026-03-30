@@ -774,27 +774,63 @@ function applyPolsFromCRM(pols) {
   S.importedPols = pols;
   if (!S.existingCover) S.existingCover = {death:'',disability:'',dread:'',ipPM:'',totalPrem:''};
   var totDeath=0,totDis=0,totDD=0,totIP=0,totPrem=0;
+
   pols.forEach(function(p){
     var n=function(v){return parseFloat(String(v||'').replace(/[^0-9.\-]/g,''))||0;};
-    if(p.Type!=='Business Assurance'){totDeath+=n(p.BenDeath);totDis+=n(p.BenDisability);totDD+=n(p.BenDreadDisease);}
-    try{var ib=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):[];ib.forEach(function(r){totIP+=n(r.amount);});}catch(e){}
+
+    // Normalise CRM → FNA field names so the FNA schedule mirrors the CRM schedule
+    if((p.GrowthRate==null || p.GrowthRate==='') && p.PremGrowthRate!=null && p.PremGrowthRate!=='') p.GrowthRate = p.PremGrowthRate;
+    if((p.GrowthRate==null || p.GrowthRate==='') && p.IllustrativeRate!=null && p.IllustrativeRate!=='') p.GrowthRate = p.IllustrativeRate;
+    if((p.PremGrowthRate==null || p.PremGrowthRate==='') && p.GrowthRate!=null && p.GrowthRate!=='') p.PremGrowthRate = p.GrowthRate;
+    if((p.premEsc==null || p.premEsc==='') && p.PremEscalation!=null && p.PremEscalation!=='') p.premEsc = p.PremEscalation;
+    if((p.PremEscalation==null || p.PremEscalation==='') && p.premEsc!=null && p.premEsc!=='') p.PremEscalation = p.premEsc;
+
+    if((p.maturityAge==null || p.maturityAge==='') && p.MaturityAge!=null && p.MaturityAge!=='') p.maturityAge = String(p.MaturityAge);
+    if((p.MaturityAge==null || p.MaturityAge==='') && p.maturityAge!=null && p.maturityAge!=='') p.MaturityAge = String(p.maturityAge);
+
+    // Derive maturityAge from MaturityDate + DOB only as fallback for older CRM records
+    if((p.maturityAge==null || p.maturityAge==='') && p.MaturityDate && S.cli && S.cli.dob){
+      var matYear=parseInt((p.MaturityDate||'').split('-')[0]||0,10);
+      var dobYear=0;
+      if((S.cli.dob||'').indexOf('/')>-1) dobYear=parseInt((S.cli.dob||'').split('/')[2]||0,10);
+      else dobYear=parseInt((S.cli.dob||'').split('-')[0]||0,10);
+      if(matYear>0 && dobYear>0){
+        p.maturityAge=String(matYear-dobYear);
+        p.MaturityAge=p.maturityAge;
+      }
+    }
+
+    // Beneficiary routing fallback from CRM Beneficiaries array
+    if((!p.Beneficiary || !p.BeneficiaryType || !p.EstateDutiable) && p.Beneficiaries){
+      try{
+        var bens = typeof p.Beneficiaries==='string' ? JSON.parse(p.Beneficiaries) : p.Beneficiaries;
+        if(bens && bens.length){
+          var b = bens[0] || {};
+          if(!p.Beneficiary && b.Name) p.Beneficiary = b.Name;
+          if(!p.BeneficiaryType && b.Type) p.BeneficiaryType = b.Type;
+          if(!p.EstateDutiable && b.EstateDutiable) p.EstateDutiable = b.EstateDutiable;
+        }
+      }catch(e){}
+    }
+
+    if(p.Type!=='Business Assurance'){
+      totDeath+=n(p.BenDeath);
+      totDis+=n(p.BenDisability);
+      totDD+=n(p.BenDreadDisease);
+    }
+    try{
+      var ib=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):[];
+      ib.forEach(function(r){totIP+=n(r.amount);});
+    }catch(e){}
     var f=p.Frequency||'Monthly';
     if(f==='Monthly'||f==='') totPrem+=n(p.Premium);
-    // Normalise CRM investment fields so the FNA schedule matches the CRM schedule
-    if(!p.GrowthRate) p.GrowthRate = p.PremGrowthRate || p.IllustrativeRate || '';
-    if(!p.maturityAge) p.maturityAge = p.MaturityAge || '';
-    // Backward compatibility: derive maturityAge from MaturityDate if older CRM records still use a date
-    if(!p.maturityAge && p.MaturityDate&&S.cli&&S.cli.dob){
-      var matYear=parseInt((p.MaturityDate||'').split('-')[0]||0);
-      var dobYear=parseInt((S.cli.dob||'').split('/')[2]||(S.cli.dob||'').split('-')[0]||0);
-      if(matYear>0&&dobYear>0) p.maturityAge=String(matYear-dobYear);
-    }
   });
-  if(totDeath>0) S.existingCover.death     =String(Math.round(totDeath));
-  if(totDis>0)   S.existingCover.disability=String(Math.round(totDis));
-  if(totDD>0)    S.existingCover.dread      =String(Math.round(totDD));
-  if(totIP>0)    S.existingCover.ipPM       =String(Math.round(totIP));
-  if(totPrem>0)  S.existingCover.totalPrem  =String(Math.round(totPrem));
+
+  if(totDeath>0) S.existingCover.death      = String(Math.round(totDeath));
+  if(totDis>0)   S.existingCover.disability = String(Math.round(totDis));
+  if(totDD>0)    S.existingCover.dread      = String(Math.round(totDD));
+  if(totIP>0)    S.existingCover.ipPM       = String(Math.round(totIP));
+  if(totPrem>0)  S.existingCover.totalPrem  = String(Math.round(totPrem));
 }
 
 // Called by the "Refresh from CRM" button — re-applies URL params over current state
@@ -3533,7 +3569,6 @@ function buildPolCard(p, i) {
       }
     }
 
-    if(!p.GrowthRate) p.GrowthRate = p.PremGrowthRate || p.IllustrativeRate || '';
     rb2.appendChild(pfld('Growth Rate %', p, 'GrowthRate', {onblur:function(){render();}}));
     card.appendChild(rb2);
 
@@ -3564,7 +3599,7 @@ function buildPolCard(p, i) {
       var maWrap=div('f');
       maWrap.appendChild(el('label','','Maturity Age'));
       var maInp=document.createElement('input'); maInp.type='text'; maInp.inputMode='numeric';
-      maInp.value=p.maturityAge||p.MaturityAge||''; maInp.placeholder='e.g. 65';
+      maInp.value=p.maturityAge||''; maInp.placeholder='e.g. 65';
       maInp.style.cssText='border:1.5px solid var(--mist);border-radius:6px;padding:7px 10px;font-size:13px;font-family:inherit;width:100%';
       maInp.addEventListener('input',function(e){ S.importedPols[i].maturityAge=e.target.value; });
       maInp.addEventListener('blur',function(){render();});
@@ -3580,6 +3615,7 @@ function buildPolCard(p, i) {
         var _escR2=parseFloat(String(p.PremEscalation!=null&&p.PremEscalation!==''?p.PremEscalation:(p.premEsc||'')).replace(/[^0-9.]/g,''))||0;
         _projMatVal2=projectFund(p.BenFundValue||0,_isMonthly2?p.Premium:0,_escR2,_gr2,_yrs2);
       }
+      if(!_projMatVal2 && N(p.BenMaturityValue)>0) _projMatVal2=N(p.BenMaturityValue);
       var pmWrap=div('f'); pmWrap.appendChild(el('label','','Projected Maturity Value'));
       var pmDisp=document.createElement('div');
       pmDisp.style.cssText='padding:8px 11px;background:'+(_projMatVal2?'#f0fdf4':'var(--smoke)')+';border:1.5px solid var(--mist);border-radius:7px;font-size:13px;font-weight:700;color:'+(_projMatVal2?'#166534':'var(--sub)');
