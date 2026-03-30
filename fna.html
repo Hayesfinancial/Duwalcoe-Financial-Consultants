@@ -2420,18 +2420,42 @@ function buildRetirement() {
     rg.appendChild(pfld('Growth rate %',r,'growthRate',{onblur:function(){render();}}));
     rg.appendChild(pfld('Contrib esc %',r,'contribEsc',{onblur:function(){render();}}));
     card.appendChild(rg);
-    // Show projected value
+    // Maturity / contributions end age
+    var mf=div('f'); mf.appendChild(el('label','','Contributions end at age (optional — e.g. endowment maturity)'));
+    var mi=document.createElement('input'); mi.type='text'; mi.inputMode='numeric';
+    mi.value=r.maturityAge||''; mi.placeholder='e.g. 50 (leave blank = contributions to retirement)';
+    mi.style.cssText='border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px;width:100%;box-sizing:border-box';
+    mi.addEventListener('input',function(e){S.retAssets[i].maturityAge=e.target.value;});
+    mi.addEventListener('blur',function(){render();});
+    mf.appendChild(mi); card.appendChild(mf);
+    // Show projected value — two-phase if maturity age set
     if(yrsToRet&&(N(r.currentVal)||N(r.monthlyContrib))){
       var gr=N(r.growthRate)>0?N(r.growthRate):N(S.assump.growth)||9;
       var esc2=N(r.contribEsc)>0?N(r.contribEsc):N(S.assump.incEsc)||6;
-      var proj=projectFund(r.currentVal,r.monthlyContrib,esc2,gr,yrsToRet);
-      var cr=div('calc-result');
-      cr.innerHTML='<div class="cr-row"><span>Projected at age '+retAge+'</span><span class="gold">'+Rfmt(proj)+'</span></div>';
-      card.appendChild(cr);
+      var clientAge=ageFrom(S.cli.dob);
+      var matAge=N(r.maturityAge);
+      var proj;
+      if(matAge>0 && clientAge && matAge<retAge){
+        // Phase 1: grow with contributions to maturity
+        var yrsToMat=Math.max(0,matAge-clientAge);
+        var matVal=projectFund(r.currentVal,r.monthlyContrib,esc2,gr,yrsToMat);
+        // Phase 2: grow maturity value to retirement with no contributions
+        var yrsMatToRet=retAge-matAge;
+        proj=Math.round(matVal*Math.pow(1+gr/100,yrsMatToRet));
+        var cr=div('calc-result');
+        cr.innerHTML='<div class="cr-row"><span>Projected at maturity (age '+matAge+')</span><span class="gold">'+Rfmt(matVal)+'</span></div>'+
+          '<div class="cr-row"><span>Projected at retirement (age '+retAge+')</span><span class="gold">'+Rfmt(proj)+'</span></div>';
+        card.appendChild(cr);
+      } else {
+        proj=projectFund(r.currentVal,r.monthlyContrib,esc2,gr,yrsToRet);
+        var cr=div('calc-result');
+        cr.innerHTML='<div class="cr-row"><span>Projected at age '+retAge+'</span><span class="gold">'+Rfmt(proj)+'</span></div>';
+        card.appendChild(cr);
+      }
     }
     s.appendChild(card);
   });
-  s.appendChild(addBtn('+ Add fund / RA',function(){S.retAssets.push({desc:'',currentVal:'',monthlyContrib:'',growthRate:'',contribEsc:''});render();}));
+  s.appendChild(addBtn('+ Add fund / RA',function(){S.retAssets.push({desc:'',currentVal:'',monthlyContrib:'',growthRate:'',contribEsc:'',maturityAge:''});render();}));
 
   // ── Other capital at retirement — auto-pulled from Properties
   s.appendChild(stitle('Other Capital / Income at Retirement'));
@@ -2598,10 +2622,18 @@ function buildRetirement() {
     var totalCapNeed = capNeed + lumpNeed;
 
     // Projected capital: RA/investment funds
+    var clientAgeNow=ageFrom(S.cli.dob)||0;
     var totalProj = S.retAssets.reduce(function(a,r){
       if(!N(r.currentVal)&&!N(r.monthlyContrib)) return a;
       var gr=N(r.growthRate)>0?N(r.growthRate):N(S.assump.growth)||9;
       var esc3=N(r.contribEsc)>0?N(r.contribEsc):N(S.assump.incEsc)||6;
+      var matAge=N(r.maturityAge);
+      if(matAge>0&&clientAgeNow&&matAge<retAge){
+        var yrsToMat=Math.max(0,matAge-clientAgeNow);
+        var matVal=projectFund(r.currentVal,r.monthlyContrib,esc3,gr,yrsToMat);
+        var yrsMatToRet=retAge-matAge;
+        return a+Math.round(matVal*Math.pow(1+gr/100,yrsMatToRet));
+      }
       return a+projectFund(r.currentVal,r.monthlyContrib,esc3,gr,yrsToRet);
     },0)+N(S.retOtherCapital);
 
