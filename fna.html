@@ -2586,36 +2586,14 @@ function buildRetirement() {
     });
     var netMonthlyGap = Math.max(0, monthlyAtRet - rentalAtRet - otherIncAtRet);
 
-    // Capital needed — capitalise each need individually then deduct rental/other income capital equivalent
-    var capNeed = 0;
-    (S.retNeeds||[]).forEach(function(r){
-      if(!N(r.amtToday)) return;
-      var escTo=N(r.esc)>0?N(r.esc):N(S.assump.cpi)||6;
-      var escIn=(r.escInRet!==''&&r.escInRet!==undefined&&r.escInRet!==null)?N(r.escInRet):escTo;
-      capNeed+=retirementCapitalNeeded(N(r.amtToday),yrsToRet,yrsInRet,escTo,S.assump.retReturn,escIn);
-    });
-    // Deduct rental income capital equivalent — rental offsets the capital needed
-    if(rentalAtRet>0){
-      // Use default assumptions for rental capitalisation (CPI esc, retReturn)
-      var defaultCpi=N(S.assump.cpi)||6;
-      var defaultRet=N(S.assump.retReturn)||8;
-      // Back-calculate today's rental value then capitalise at retirement
-      var rentalToday=(S.props||[]).reduce(function(a,p){
-        if(!N(p.rental)||p.soldAtRetirement) return a;
-        return a+N(p.rental);
-      },0);
-      if(rentalToday>0){
-        var rentalCapOffset=retirementCapitalNeeded(rentalToday,yrsToRet,yrsInRet,defaultCpi,defaultRet,defaultCpi);
-        capNeed=Math.max(0,capNeed-rentalCapOffset);
-      }
-    }
-    if(otherIncAtRet>0){
-      var otherToday=(S.otherIncome||[]).reduce(function(a,r){return a+N(r.pm);},0);
-      if(otherToday>0){
-        var otherCapOffset=retirementCapitalNeeded(otherToday,yrsToRet,yrsInRet,N(S.assump.cpi)||6,N(S.assump.retReturn)||8,N(S.assump.cpi)||6);
-        capNeed=Math.max(0,capNeed-otherCapOffset);
-      }
-    }
+    // Capital needed — capitalise the NET monthly gap directly
+    // netMonthlyGap is already the future value AT retirement, so just capitalise it in retirement
+    // Use CPI as in-retirement escalation for the net gap
+    var defaultCpi=N(S.assump.cpi)||6;
+    var defaultRet=N(S.assump.retReturn)||9;
+    var capNeed = netMonthlyGap > 0
+      ? capitalise(netMonthlyGap, yrsInRet, defaultCpi, defaultRet)
+      : 0;
     var lumpNeed = (S.retLumps||[]).reduce(function(a,r){return a+N(r.amt);},0);
     var totalCapNeed = capNeed + lumpNeed;
 
@@ -2660,20 +2638,16 @@ function buildRetirement() {
       r2.appendChild(l2); r2.appendChild(v2); calcBox.appendChild(r2);
     }
     rRow('Monthly needs at retirement (age '+retAge+')', Rfmt(monthlyAtRet)+' /pm');
-    // Per-need breakdown — show premium at retirement and capital needed as separate values
     (S.retNeeds||[]).forEach(function(r){
       if(!N(r.amtToday)) return;
       var escTo=N(r.esc)>0?N(r.esc):N(S.assump.cpi)||6;
-      var escIn=(r.escInRet!==''&&r.escInRet!==undefined&&r.escInRet!==null)?N(r.escInRet):escTo;
       var atRet=Math.round(N(r.amtToday)*Math.pow(1+escTo/100,yrsToRet));
-      var capThis=retirementCapitalNeeded(N(r.amtToday),yrsToRet,yrsInRet,escTo,S.assump.retReturn,escIn);
       rRow((r.desc||'Need'), Rfmt(atRet)+' /pm at retirement', true);
-      rRow('Capital to fund '+escIn+'% esc, '+yrsInRet+' yrs @ '+(N(S.assump.retReturn)||8)+'% return', Rfmt(capThis), true);
     });
     if(rentalAtRet>0) rRow('Less: rental income at retirement', '('+Rfmt(rentalAtRet)+'/pm)', true);
     if(otherIncAtRet>0) rRow('Less: farm/business income at retirement', '('+Rfmt(otherIncAtRet)+'/pm)', true);
     rRow('Net monthly gap at retirement', Rfmt(netMonthlyGap)+' /pm', false, true);
-    rRow('Capital needed to fund income', '('+Rfmt(capNeed)+')', false, true);
+    rRow('Capital needed to fund net gap ('+defaultCpi+'% esc, '+yrsInRet+' yrs @ '+defaultRet+'% return)', '('+Rfmt(capNeed)+')', false, true);
     if(lumpNeed>0) rRow('Lump sum needs', '('+Rfmt(lumpNeed)+')', true);
     rRow('Total capital required', '('+Rfmt(totalCapNeed)+')', false, true);
     rRow('Projected capital at retirement', Rfmt(totalProj), false, true);
