@@ -780,6 +780,12 @@ function applyPolsFromCRM(pols) {
     try{var ib=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):[];ib.forEach(function(r){totIP+=n(r.amount);});}catch(e){}
     var f=p.Frequency||'Monthly';
     if(f==='Monthly'||f==='') totPrem+=n(p.Premium);
+    // Derive maturityAge from MaturityDate + DOB
+    if(p.MaturityDate&&S.cli&&S.cli.dob){
+      var matYear=parseInt((p.MaturityDate||'').split('-')[0]||0);
+      var dobYear=parseInt((S.cli.dob||'').split('/')[2]||(S.cli.dob||'').split('-')[0]||0);
+      if(matYear>0&&dobYear>0) p.maturityAge=String(matYear-dobYear);
+    }
   });
   if(totDeath>0) S.existingCover.death     =String(Math.round(totDeath));
   if(totDis>0)   S.existingCover.disability=String(Math.round(totDis));
@@ -2377,19 +2383,13 @@ function buildRetirement() {
     S.importedPols.forEach(function(p){
       if(raPolTypes.indexOf(p.Type)>-1){
         var escRaw=String(p.PremEscalation!=null&&p.PremEscalation!==''?p.PremEscalation:(p.premEsc!=null&&p.premEsc!==''?p.premEsc:'')).replace(/,/g,'.').replace(/[^0-9.]/g,'');
-        var matAge='';
-        if((p.Type==='Endowment'||p.Type==='Offshore Endowment')&&p.MaturityDate&&S.cli.dob){
-          var matYear=parseInt((p.MaturityDate||'').split('-')[0]||0);
-          var dobYear=parseInt((S.cli.dob||'').split('/')[2]||(S.cli.dob||'').split('-')[0]||0);
-          if(matYear>0&&dobYear>0) matAge=String(matYear-dobYear);
-        }
         S.retAssets.push({
           desc:(p.Insurer?p.Insurer+' — ':'')+p.Product||p.Type||'Fund',
           currentVal: p.BenFundValue||'',
           growthRate: p.GrowthRate||'',
           monthlyContrib: p.Premium&&(p.Frequency==='Monthly'||!p.Frequency)?p.Premium:'',
           contribEsc: escRaw||'',
-          maturityAge: matAge
+          maturityAge: p.maturityAge||''
         });
       }
     });
@@ -2410,12 +2410,8 @@ function buildRetirement() {
         if(escRaw) ra.contribEsc=escRaw;
         if(match.GrowthRate) ra.growthRate=match.GrowthRate;
         if(match.BenFundValue) ra.currentVal=match.BenFundValue;
-        // Sync maturity age for endowments
-        if((match.Type==='Endowment'||match.Type==='Offshore Endowment')&&match.MaturityDate&&S.cli.dob&&!ra.maturityAge){
-          var matYear=parseInt((match.MaturityDate||'').split('-')[0]||0);
-          var dobYear=parseInt((S.cli.dob||'').split('/')[2]||(S.cli.dob||'').split('-')[0]||0);
-          if(matYear>0&&dobYear>0) ra.maturityAge=String(matYear-dobYear);
-        }
+        // Sync maturity age from policy
+        if(match.maturityAge&&!ra.maturityAge) ra.maturityAge=match.maturityAge;
       }
     });
   }
@@ -2696,7 +2692,25 @@ function buildRetirement() {
     if(lumpNeed>0) rRow('Lump sum needs', '('+Rfmt(lumpNeed)+')', true);
     rRow('Total capital required', '('+Rfmt(totalCapNeed)+')', false, true);
     rRow('Projected capital at retirement', Rfmt(totalProj), false, true);
-    if(propSoldTotal>0) rRow('Incl. property proceeds ('+propsSold.length+' propert'+(propsSold.length===1?'y':'ies')+')', Rfmt(propSoldTotal), true);
+    // Per-fund breakdown
+    S.retAssets.forEach(function(r){
+      if(!N(r.currentVal)&&!N(r.monthlyContrib)) return;
+      var gr=N(r.growthRate)>0?N(r.growthRate):N(S.assump.growth)||9;
+      var esc3=N(r.contribEsc)>0?N(r.contribEsc):N(S.assump.incEsc)||6;
+      var matAge=N(r.maturityAge);
+      var fundProj;
+      if(matAge>0 && clientAgeNow && matAge<retAge){
+        var yrsToMat=Math.max(0,matAge-clientAgeNow);
+        var matVal=projectFund(r.currentVal,r.monthlyContrib,esc3,gr,yrsToMat);
+        var yrsMatToRet=retAge-matAge;
+        fundProj=Math.round(matVal*Math.pow(1+gr/100,yrsMatToRet));
+      } else {
+        fundProj=projectFund(r.currentVal,r.monthlyContrib,esc3,gr,yrsToRet);
+      }
+      rRow((r.desc||'Fund')+' @ '+gr+'%', Rfmt(fundProj), true);
+    });
+    if(N(S.retOtherCapital)>0) rRow('Additional proceeds / manual', Rfmt(S.retOtherCapital), true);
+    if(propSoldTotal>0) rRow('Property proceeds ('+propsSold.length+' propert'+(propsSold.length===1?'y':'ies')+')', Rfmt(propSoldTotal), true);
     if(soldProceedsAtRet>0) rRow('Incl. other asset proceeds', Rfmt(soldProceedsAtRet), true);
     var gapRow=div(); gapRow.style.cssText='display:flex;justify-content:space-between;padding:8px 0;margin-top:8px;border-top:2px solid #445;font-size:14px;font-weight:700';
     var gl2=el('span','',retGap>=0?'Surplus':'Shortfall'); gl2.style.color='#ccd6f6';
@@ -3484,16 +3498,6 @@ function buildPolCard(p, i) {
     bst2.style.marginTop = '10px';
     card.appendChild(bst2);
 
-    // IRR badge — stated for investments, calculated for RA
-    var _irrDisplay = (isInv && parseFloat(p.IllustrativeRate||0)>0) ? parseFloat(p.IllustrativeRate) : calcPolicyIRR_fna(p.StartDate, p.Premium, p.Frequency, p.PremEscalation, p.BenFundValue);
-    if(_irrDisplay !== null && _irrDisplay !== 0){
-      var irrBdg = div();
-      var irrCol = _irrDisplay >= 10 ? '#166534' : _irrDisplay >= 6 ? '#1e40af' : _irrDisplay >= 0 ? '#92400e' : '#991b1b';
-      var irrBg  = _irrDisplay >= 10 ? '#f0fdf4' : _irrDisplay >= 6 ? '#eff6ff' : _irrDisplay >= 0 ? '#fffbeb' : '#fef2f2';
-      irrBdg.style.cssText = 'padding:6px 10px;background:'+irrBg+';border-radius:6px;font-size:12px;color:'+irrCol+';font-weight:700;margin-bottom:6px';
-      irrBdg.textContent = '📈 '+(isInv&&parseFloat(p.IllustrativeRate||0)>0?'Stated ':'')+'IRR: '+_irrDisplay+'% p.a.';
-      card.appendChild(irrBdg);
-    }
     // Total invested / gain for investment policies
     if(isInv && N(p.TotalInvested)>0){
       var _ti=N(p.TotalInvested), _tw=N(p.TotalWithdrawn||0), _fv3=N(p.BenFundValue||0);
@@ -3515,69 +3519,74 @@ function buildPolCard(p, i) {
 
     if(isCGTInv){
       var isOnceOff = (p.Frequency === 'Once Off');
-      var polBaseCost = isOnceOff ? N(p.Premium) : N(p.LumpSumPremium);
       if(isOnceOff){
-        // Once Off premium = base cost — show read-only field for clarity
         var bcReadWrap=div('f'); bcReadWrap.appendChild(el('label','','Once Off premium (base cost — auto)'));
         var bcReadRw=div('rw'); bcReadRw.appendChild(el('span','rp','R'));
         var bcReadInp=document.createElement('input'); bcReadInp.type='text'; bcReadInp.readOnly=true;
         bcReadInp.value=p.Premium||''; bcReadInp.style.cssText='background:#f9f9f6;border:1.5px solid var(--mist);border-radius:6px;padding:7px 10px 7px 22px;font-size:13px;font-family:inherit;width:100%';
         bcReadRw.appendChild(bcReadInp); bcReadWrap.appendChild(bcReadRw); rb2.appendChild(bcReadWrap);
       } else {
-        // Recurring premium — adviser must enter lump sum manually
         rb2.appendChild(rfld('Once Off premium paid (base cost)', p, 'LumpSumPremium', {onblur:function(){render();}}));
       }
     }
 
-    rb2.appendChild(pfld('Growth rate % (projection)', p, 'GrowthRate', {onblur:function(){render();}}));
-    // Annual premium increase — relevant for all investment & retirement policies with ongoing premiums
-    if(isPreRet || isLA || isInv){
-      var raEscWrap=div('f');
-      raEscWrap.appendChild(el('label','','Annual premium increase %'));
-      var raEscInp=document.createElement('input'); raEscInp.type='text'; raEscInp.inputMode='numeric';
-      raEscInp.value=String(p.PremEscalation!=null&&p.PremEscalation!==''?p.PremEscalation:(p.premEsc!=null&&p.premEsc!==''?p.premEsc:''));
-      raEscInp.placeholder='e.g. 6';
-      raEscInp.style.cssText='border:1.5px solid var(--mist);border-radius:6px;padding:7px 10px;font-size:13px;font-family:inherit;width:100%';
-      raEscInp.addEventListener('input',function(e){
+    rb2.appendChild(pfld('Growth Rate %', p, 'GrowthRate', {onblur:function(){render();}}));
+    card.appendChild(rb2);
+
+    // Row: Annual Premium Increase + Maturity Age + Projected Value
+    var _isMonthly2 = (p.Frequency==='Monthly'||!p.Frequency)&&N(p.Premium)>0;
+    var rb3 = g3();
+    // Annual premium increase
+    if(_isMonthly2){
+      var peWrap=div('f');
+      peWrap.appendChild(el('label','','Annual Premium Increase %'));
+      var peInp=document.createElement('input'); peInp.type='text'; peInp.inputMode='numeric';
+      peInp.value=String(p.PremEscalation!=null&&p.PremEscalation!==''?p.PremEscalation:(p.premEsc!=null&&p.premEsc!==''?p.premEsc:''));
+      peInp.placeholder='e.g. 6';
+      peInp.style.cssText='border:1.5px solid var(--mist);border-radius:6px;padding:7px 10px;font-size:13px;font-family:inherit;width:100%';
+      peInp.addEventListener('input',function(e){
         S.importedPols[i].PremEscalation=e.target.value;
         S.importedPols[i].premEsc=e.target.value;
       });
-      raEscInp.addEventListener('blur',function(){render();});
-      raEscWrap.appendChild(raEscInp);
-      rb2.appendChild(raEscWrap);
+      peInp.addEventListener('blur',function(){render();});
+      peWrap.appendChild(peInp);
+      rb3.appendChild(peWrap);
     } else {
-      rb2.appendChild(div()); // spacer for non-investment types
+      rb3.appendChild(div());
     }
-    card.appendChild(rb2);
+    // Maturity age
+    var maWrap=div('f');
+    maWrap.appendChild(el('label','','Maturity Age'));
+    var maInp=document.createElement('input'); maInp.type='text'; maInp.inputMode='numeric';
+    maInp.value=p.maturityAge||''; maInp.placeholder='e.g. 65';
+    maInp.style.cssText='border:1.5px solid var(--mist);border-radius:6px;padding:7px 10px;font-size:13px;font-family:inherit;width:100%';
+    maInp.addEventListener('input',function(e){ S.importedPols[i].maturityAge=e.target.value; });
+    maInp.addEventListener('blur',function(){render();});
+    maWrap.appendChild(maInp);
+    rb3.appendChild(maWrap);
+    // Projected maturity value — auto-calculated
+    var _projMatVal2='';
+    var _cliAge2=ageFrom(S.cli.dob);
+    var _matAge2=N(p.maturityAge);
+    var _gr2=N(p.GrowthRate);
+    if(_matAge2>0 && _cliAge2 && _matAge2>_cliAge2 && _gr2>0){
+      var _yrs2=Math.max(0,_matAge2-_cliAge2);
+      var _escR2=parseFloat(String(p.PremEscalation!=null&&p.PremEscalation!==''?p.PremEscalation:(p.premEsc||'')).replace(/[^0-9.]/g,''))||0;
+      _projMatVal2=projectFund(p.BenFundValue||0,_isMonthly2?p.Premium:0,_escR2,_gr2,_yrs2);
+    }
+    var pmWrap=div('f'); pmWrap.appendChild(el('label','','Projected Maturity Value'));
+    var pmDisp=document.createElement('div');
+    pmDisp.style.cssText='padding:8px 11px;background:'+(_projMatVal2?'#f0fdf4':'var(--smoke)')+';border:1.5px solid var(--mist);border-radius:7px;font-size:13px;font-weight:700;color:'+(_projMatVal2?'#166534':'var(--sub)');
+    pmDisp.textContent=_projMatVal2?Rfmt(_projMatVal2):'Enter growth rate + maturity age';
+    pmWrap.appendChild(pmDisp);
+    rb3.appendChild(pmWrap);
+    card.appendChild(rb3);
 
-    // Maturity value + maturity date — for endowment-type policies
-    var isEndowType = (t==='Endowment'||t==='Offshore Endowment'||t==='Flexible Investment'||t==='Offshore Flexible Investment');
-    if(isEndowType || isInv){
-      var matRow=g3();
-      matRow.appendChild(rfld('Maturity Value',p,'BenMaturityValue'));
-      // Maturity date
-      var mdWrap=div('f'); mdWrap.appendChild(el('label','','Maturity Date'));
-      var mdInp=document.createElement('input'); mdInp.type='text';
-      mdInp.value=p.MaturityDate||''; mdInp.placeholder='e.g. 2046-03-01';
-      mdInp.style.cssText='border:1.5px solid var(--mist);border-radius:6px;padding:7px 10px;font-size:13px;font-family:inherit;width:100%';
-      mdInp.addEventListener('input',function(e){ S.importedPols[i].MaturityDate=e.target.value; });
-      mdWrap.appendChild(mdInp);
-      matRow.appendChild(mdWrap);
-      // Stated IRR
-      var irrWrap=div('f'); irrWrap.appendChild(el('label','','Stated IRR % (from insurer)'));
-      var irrInp=document.createElement('input'); irrInp.type='text'; irrInp.inputMode='numeric';
-      irrInp.value=p.IllustrativeRate||''; irrInp.placeholder='e.g. 10';
-      irrInp.style.cssText='border:1.5px solid var(--mist);border-radius:6px;padding:7px 10px;font-size:13px;font-family:inherit;width:100%';
-      irrInp.addEventListener('input',function(e){ S.importedPols[i].IllustrativeRate=e.target.value; });
-      irrInp.addEventListener('blur',function(){render();});
-      irrWrap.appendChild(irrInp);
-      matRow.appendChild(irrWrap);
-      card.appendChild(matRow);
-
-      // Info note
-      var matInf=div('info');
-      matInf.innerHTML='Premium = monthly contribution. Growth rate used for retirement projection.';
-      card.appendChild(matInf);
+    // Projection info
+    if(_projMatVal2){
+      var projInf=div('info');
+      projInf.innerHTML='Projected at age '+_matAge2+' using '+_gr2+'% growth'+(_isMonthly2?' with R'+Math.round(N(p.Premium)).toLocaleString('en-ZA')+'/pm escalating at '+(parseFloat(String(p.PremEscalation!=null&&p.PremEscalation!==''?p.PremEscalation:(p.premEsc||'')).replace(/[^0-9.]/g,''))||0)+'%':'')+'.';
+      card.appendChild(projInf);
     }
 
     if(isCGTInv){
