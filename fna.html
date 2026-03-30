@@ -3530,8 +3530,8 @@ function buildPolCard(p, i) {
     }
 
     rb2.appendChild(pfld('Growth rate % (projection)', p, 'GrowthRate', {onblur:function(){render();}}));
-    // Annual premium increase — relevant for RA/retirement policies
-    if(isPreRet || isLA){
+    // Annual premium increase — relevant for all investment & retirement policies with ongoing premiums
+    if(isPreRet || isLA || isInv){
       var raEscWrap=div('f');
       raEscWrap.appendChild(el('label','','Annual premium increase %'));
       var raEscInp=document.createElement('input'); raEscInp.type='text'; raEscInp.inputMode='numeric';
@@ -3546,9 +3546,39 @@ function buildPolCard(p, i) {
       raEscWrap.appendChild(raEscInp);
       rb2.appendChild(raEscWrap);
     } else {
-      rb2.appendChild(div()); // spacer for non-RA investment types
+      rb2.appendChild(div()); // spacer for non-investment types
     }
     card.appendChild(rb2);
+
+    // Maturity value + maturity date — for endowment-type policies
+    var isEndowType = (t==='Endowment'||t==='Offshore Endowment'||t==='Flexible Investment'||t==='Offshore Flexible Investment');
+    if(isEndowType || isInv){
+      var matRow=g3();
+      matRow.appendChild(rfld('Maturity Value',p,'BenMaturityValue'));
+      // Maturity date
+      var mdWrap=div('f'); mdWrap.appendChild(el('label','','Maturity Date'));
+      var mdInp=document.createElement('input'); mdInp.type='text';
+      mdInp.value=p.MaturityDate||''; mdInp.placeholder='e.g. 2046-03-01';
+      mdInp.style.cssText='border:1.5px solid var(--mist);border-radius:6px;padding:7px 10px;font-size:13px;font-family:inherit;width:100%';
+      mdInp.addEventListener('input',function(e){ S.importedPols[i].MaturityDate=e.target.value; });
+      mdWrap.appendChild(mdInp);
+      matRow.appendChild(mdWrap);
+      // Stated IRR
+      var irrWrap=div('f'); irrWrap.appendChild(el('label','','Stated IRR % (from insurer)'));
+      var irrInp=document.createElement('input'); irrInp.type='text'; irrInp.inputMode='numeric';
+      irrInp.value=p.IllustrativeRate||''; irrInp.placeholder='e.g. 10';
+      irrInp.style.cssText='border:1.5px solid var(--mist);border-radius:6px;padding:7px 10px;font-size:13px;font-family:inherit;width:100%';
+      irrInp.addEventListener('input',function(e){ S.importedPols[i].IllustrativeRate=e.target.value; });
+      irrInp.addEventListener('blur',function(){render();});
+      irrWrap.appendChild(irrInp);
+      matRow.appendChild(irrWrap);
+      card.appendChild(matRow);
+
+      // Info note
+      var matInf=div('info');
+      matInf.innerHTML='Premium = monthly contribution. Growth rate used for retirement projection.';
+      card.appendChild(matInf);
+    }
 
     if(isCGTInv){
       var isOnceOff2 = (p.Frequency === 'Once Off');
@@ -4490,12 +4520,30 @@ function buildSummary() {
   var yrsInR=Math.max(1,85-retAge);
   var retNeed=0, retHave=0;
   if(S.scope.retirement&&yrsToR){
+    // Calculate net monthly gap at retirement — must match buildRetirement logic exactly
+    var _smMonthlyAtRet=0;
     (S.retNeeds||[]).forEach(function(r){
       if(!N(r.amtToday))return;
       var et=N(r.esc)>0?N(r.esc):N(S.assump.cpi)||6;
-      var ei=(r.escInRet!==''&&r.escInRet!==undefined&&r.escInRet!==null)?N(r.escInRet):et;
-      retNeed+=retirementCapitalNeeded(N(r.amtToday),yrsToR,yrsInR,et,S.assump.retReturn,ei);
+      _smMonthlyAtRet+=Math.round(N(r.amtToday)*Math.pow(1+et/100,yrsToR));
     });
+    var _smRentalAtRet=0;
+    (S.props||[]).forEach(function(p){
+      if(p.soldAtRetirement||!N(p.rental))return;
+      var escTo=N(p.rentalEsc)>0?N(p.rentalEsc):6;
+      _smRentalAtRet+=Math.round(N(p.rental)*Math.pow(1+escTo/100,yrsToR));
+    });
+    var _smOtherIncAtRet=0;
+    (S.otherAssets||[]).forEach(function(a){
+      if((a.retirementRole||'')!=='Generates income (farm/business)')return;
+      if(!N(a.retirementIncomePM))return;
+      var escTo=N(a.retirementIncEsc)>0?N(a.retirementIncEsc):N(S.assump.cpi)||6;
+      _smOtherIncAtRet+=Math.round(N(a.retirementIncomePM)*Math.pow(1+escTo/100,yrsToR));
+    });
+    var _smNetGap=Math.max(0, _smMonthlyAtRet - _smRentalAtRet - _smOtherIncAtRet);
+    var _smCpi=N(S.assump.cpi)||6;
+    var _smRetRet=N(S.assump.retReturn)||9;
+    retNeed = _smNetGap > 0 ? capitalise(_smNetGap, yrsInR, _smCpi, _smRetRet) : 0;
     retNeed+=(S.retLumps||[]).reduce(function(a,r){return a+N(r.amt);},0);
     retHave=S.retAssets.reduce(function(a,r){
       if(!N(r.currentVal)&&!N(r.monthlyContrib))return a;
@@ -4786,13 +4834,30 @@ function buildOverview() {
   var _yrsInRetO=Math.max(1,85-_retAgeO);
   var _retNeedO=0,_retHaveO=0,_retGapO=null;
   if(S.scope.retirement&&_yrsToRO&&_yrsInRetO>0){
-    var _capNeedO=0;
+    // Calculate net monthly gap at retirement — must match buildRetirement logic exactly
+    var _ovMonthlyAtRet=0;
     (S.retNeeds||[]).forEach(function(r){
       if(!N(r.amtToday))return;
       var et=N(r.esc)>0?N(r.esc):N(S.assump.cpi)||6;
-      var ei=(r.escInRet!==''&&r.escInRet!==undefined&&r.escInRet!==null)?N(r.escInRet):et;
-      _capNeedO+=retirementCapitalNeeded(N(r.amtToday),_yrsToRO,_yrsInRetO,et,S.assump.retReturn,ei);
+      _ovMonthlyAtRet+=Math.round(N(r.amtToday)*Math.pow(1+et/100,_yrsToRO));
     });
+    var _ovRentalAtRet=0;
+    (S.props||[]).forEach(function(p){
+      if(p.soldAtRetirement||!N(p.rental))return;
+      var escTo=N(p.rentalEsc)>0?N(p.rentalEsc):6;
+      _ovRentalAtRet+=Math.round(N(p.rental)*Math.pow(1+escTo/100,_yrsToRO));
+    });
+    var _ovOtherIncAtRet=0;
+    (S.otherAssets||[]).forEach(function(a){
+      if((a.retirementRole||'')!=='Generates income (farm/business)')return;
+      if(!N(a.retirementIncomePM))return;
+      var escTo=N(a.retirementIncEsc)>0?N(a.retirementIncEsc):N(S.assump.cpi)||6;
+      _ovOtherIncAtRet+=Math.round(N(a.retirementIncomePM)*Math.pow(1+escTo/100,_yrsToRO));
+    });
+    var _ovNetGap=Math.max(0, _ovMonthlyAtRet - _ovRentalAtRet - _ovOtherIncAtRet);
+    var _ovCpi=N(S.assump.cpi)||6;
+    var _ovRetRet=N(S.assump.retReturn)||9;
+    var _capNeedO = _ovNetGap > 0 ? capitalise(_ovNetGap, _yrsInRetO, _ovCpi, _ovRetRet) : 0;
     _retNeedO=_capNeedO+(S.retLumps||[]).reduce(function(a,r){return a+N(r.amt);},0);
     _retHaveO=S.retAssets.reduce(function(a,r){
       if(!N(r.currentVal)&&!N(r.monthlyContrib))return a;
@@ -5400,12 +5465,17 @@ function printFNA() {
     otherIncAtRetP+=Math.round(N(a.retirementIncomePM)*Math.pow(1+esc/100,yrsToRet));
   });
   var capNeedP=0;
+  // Calculate net monthly gap at retirement — must match buildRetirement logic
+  var _prMonthlyAtRet=0;
   (S.retNeeds||[]).forEach(function(rn){
     if(!N(rn.amtToday)) return;
     var escTo=N(rn.esc)>0?N(rn.esc):N(S.assump.cpi)||6;
-    var escIn=(rn.escInRet!==''&&rn.escInRet!==undefined&&rn.escInRet!==null)?N(rn.escInRet):escTo;
-    capNeedP+=retirementCapitalNeeded(N(rn.amtToday),yrsToRet||0,yrsInRet,escTo,S.assump.retReturn,escIn);
+    _prMonthlyAtRet+=Math.round(N(rn.amtToday)*Math.pow(1+escTo/100,yrsToRet||0));
   });
+  var _prNetGap=Math.max(0, _prMonthlyAtRet - rentalAtRetP - otherIncAtRetP);
+  var _prCpi=N(S.assump.cpi)||6;
+  var _prRetRet=N(S.assump.retReturn)||9;
+  capNeedP = _prNetGap > 0 ? capitalise(_prNetGap, yrsInRet, _prCpi, _prRetRet) : 0;
   var lumpNeedP=(S.retLumps||[]).reduce(function(a,rn){return a+N(rn.amt);},0);
   var totalCapNeedP=capNeedP+lumpNeedP;
   var totalProjP=S.retAssets.reduce(function(a,rn){
