@@ -2586,7 +2586,7 @@ function buildRetirement() {
     });
     var netMonthlyGap = Math.max(0, monthlyAtRet - rentalAtRet - otherIncAtRet);
 
-    // Capital needed — each need capitalised individually at its own escInRet
+    // Capital needed — capitalise each need individually then deduct rental/other income capital equivalent
     var capNeed = 0;
     (S.retNeeds||[]).forEach(function(r){
       if(!N(r.amtToday)) return;
@@ -2594,6 +2594,28 @@ function buildRetirement() {
       var escIn=(r.escInRet!==''&&r.escInRet!==undefined&&r.escInRet!==null)?N(r.escInRet):escTo;
       capNeed+=retirementCapitalNeeded(N(r.amtToday),yrsToRet,yrsInRet,escTo,S.assump.retReturn,escIn);
     });
+    // Deduct rental income capital equivalent — rental offsets the capital needed
+    if(rentalAtRet>0){
+      // Use default assumptions for rental capitalisation (CPI esc, retReturn)
+      var defaultCpi=N(S.assump.cpi)||6;
+      var defaultRet=N(S.assump.retReturn)||8;
+      // Back-calculate today's rental value then capitalise at retirement
+      var rentalToday=(S.props||[]).reduce(function(a,p){
+        if(!N(p.rental)||p.soldAtRetirement) return a;
+        return a+N(p.rental);
+      },0);
+      if(rentalToday>0){
+        var rentalCapOffset=retirementCapitalNeeded(rentalToday,yrsToRet,yrsInRet,defaultCpi,defaultRet,defaultCpi);
+        capNeed=Math.max(0,capNeed-rentalCapOffset);
+      }
+    }
+    if(otherIncAtRet>0){
+      var otherToday=(S.otherIncome||[]).reduce(function(a,r){return a+N(r.pm);},0);
+      if(otherToday>0){
+        var otherCapOffset=retirementCapitalNeeded(otherToday,yrsToRet,yrsInRet,N(S.assump.cpi)||6,N(S.assump.retReturn)||8,N(S.assump.cpi)||6);
+        capNeed=Math.max(0,capNeed-otherCapOffset);
+      }
+    }
     var lumpNeed = (S.retLumps||[]).reduce(function(a,r){return a+N(r.amt);},0);
     var totalCapNeed = capNeed + lumpNeed;
 
@@ -2671,7 +2693,7 @@ function buildRetirement() {
       var pmtNeeded2=mr3>0?Math.round(shortfall2*mr3/(Math.pow(1+mr3,nm3)-1)):Math.round(shortfall2/nm3);
       var pmtRow2=div();
       pmtRow2.style.cssText='display:flex;justify-content:space-between;padding:6px 0;margin-top:4px;font-size:12px';
-      var pmtL2=el('span','','To close this gap, save an additional'); pmtL2.style.color='#8899bb';
+      var pmtL2=el('span','','To accumulate R\u202f'+Math.round(shortfall2).toLocaleString('en-ZA')+' by retirement, save an additional'); pmtL2.style.color='#8899bb';
       var pmtV2=el('span','',Rfmt(pmtNeeded2)+' /pm'); pmtV2.style.cssText='font-weight:700;color:#fbbf24';
       pmtRow2.appendChild(pmtL2); pmtRow2.appendChild(pmtV2);
       calcBox.appendChild(pmtRow2);
