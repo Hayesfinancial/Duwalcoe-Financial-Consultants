@@ -348,6 +348,16 @@ function syncNow() {
           var _pi=DB.policies.findIndex(function(sp){return String(sp.ID)===String(lp.ID);});
           if(_pi>=0) DB.policies[_pi]=lp;
           else DB.policies.push(lp);
+          // Retry server save for pending policies
+          var _retryPol = JSON.parse(JSON.stringify(lp));
+          delete _retryPol._pendingSave;
+          post({action:'savePolicy',policy:_retryPol},function(result){
+            if(result && result.ok){
+              var _ri=DB.policies.findIndex(function(x){return String(x.ID)===String(lp.ID);});
+              if(_ri>=0){ DB.policies[_ri]=_retryPol; }
+              try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
+            }
+          });
         }
       });
     }catch(e){}
@@ -3717,12 +3727,17 @@ function savePolicy(){
   closeAll();render();
   var _polForServer = JSON.parse(JSON.stringify(pol));
   delete _polForServer._pendingSave;
-  post({action:'savePolicy',policy:_polForServer},function(){
-    // Server confirmed — clear pending flag
-    var _ci=DB.policies.findIndex(function(x){return x.ID===pol.ID;});
-    if(_ci>=0){ DB.policies[_ci]=_polForServer; }
-    try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
-    toast('Policy saved ✓','ok');
+  post({action:'savePolicy',policy:_polForServer},function(result){
+    if(result && result.ok){
+      // Server confirmed — clear pending flag
+      var _ci=DB.policies.findIndex(function(x){return x.ID===pol.ID;});
+      if(_ci>=0){ DB.policies[_ci]=_polForServer; }
+      try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
+      toast('Policy saved ✓','ok');
+    } else {
+      // Server save FAILED — keep _pendingSave so sync doesn't wipe it
+      toast('⚠ Policy saved locally but server save failed — will retry on next sync','err');
+    }
   });
 }
 
