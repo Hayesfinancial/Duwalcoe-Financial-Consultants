@@ -2724,22 +2724,11 @@ function buildPolicyForm(p){
   if(isRA||isInv){
     html+=sec(isRA?'Fund & Retirement Values':'Investment Values');
     html+='<div class="g2">'+fld('pb_fv','Current Fund Value',p.BenFundValue,'text',isInv?'oninput="invCalcMaturity()"':'')+fld('pb_surr2','Nett Surrender Value',p.BenSurrenderValue)+'</div>';
-    // IRR — stated (from insurer statement) if entered, else calculated
-    (function(){
-      if(isInv && p.IllustrativeRate && parseFloat(p.IllustrativeRate)>0){
-        // Investment: use stated IRR from insurer statement
-        html += irrBadge(parseFloat(p.IllustrativeRate));
-      } else if(isRA){
-        // RA: calculate IRR (no withdrawals, calculation is accurate)
-        var irr = calcPolicyIRR(p.StartDate, p.Premium, p.Frequency, p.PremEscalation, p.BenFundValue);
-        html += irrBadge(irr);
-      }
-    })();
     if(isRA){
       html+='<div class="g2">'+fld('pb_vested','Vested Component (Pot 1)',p.VestedValue,'text','oninput="raAutoSum()"')+fld('pb_nonvested','Non-Vested Component',p.NonVestedValue,'text','oninput="raAutoSum()"')+'</div>';
       html+='<div class="g2">'+fld('pb_retcomp','Retirement Component (Pot 2)',p.RetirementComponent,'text','oninput="raAutoSum()"')+fld('pb_savcomp','Savings Component (Pot 3)',p.SavingsComponent,'text','oninput="raAutoSum()"')+'</div>';
       html+='<div class="g2">'+fld('pb_retage','Retirement Age',p.RetirementAge||'65','text','oninput="raCalcMaturity()"')+fdp('pb_matdate','Maturity Date',p.MaturityDate||'')+'</div>';
-      html+='<div class="g2">'+fld('pb_illrate','Illustrative Rate %',p.IllustrativeRate||'9')+(_isOnceOff?'<div></div>':fld('pb_growrate','Premium Growth Rate %',p.PremGrowthRate||'10'))+'</div>';
+      html+='<div class="g2">'+fld('pb_illrate','Growth Rate %',p.IllustrativeRate||'9')+(_isOnceOff?'<div></div>':fld('pb_growrate','Annual Premium Increase %',p.PremGrowthRate||'10'))+'</div>';
       html+='<div class="fld"><label>Will client withdraw Savings Pot (Pot 3) before retirement?</label><div style="display:flex;gap:12px;margin-top:8px">';
       html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="p3pot" value="Yes"'+(p.WithdrawSavingsPot==='Yes'?' checked':'')+'>Yes</label>';
       html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="p3pot" value="No"'+(p.WithdrawSavingsPot==='No'?' checked':'')+'>No</label>';
@@ -3180,7 +3169,7 @@ function irrBadge(irr){
   if(irr === null || irr === undefined) return '';
   var col = irr >= 10 ? '#166534' : irr >= 6 ? '#1e40af' : irr >= 0 ? '#92400e' : '#991b1b';
   var bg  = irr >= 10 ? '#f0fdf4' : irr >= 6 ? '#eff6ff' : irr >= 0 ? '#fffbeb' : '#fef2f2';
-  return '<div style="margin-top:6px;padding:6px 10px;background:'+bg+';border-radius:6px;font-size:12px;color:'+col+';font-weight:700">📈 Actual IRR since inception: '+irr+'% p.a.</div>';
+  return '<div style="margin-top:6px;padding:6px 10px;background:'+bg+';border-radius:6px;font-size:12px;color:'+col+';font-weight:700">📈 IRR: '+irr+'% p.a.</div>';
 }
 
 // ── Investment maturity value auto-calculation
@@ -4306,8 +4295,8 @@ function openPolicySchedule(cid){
       s+='<td style="padding:6px 10px;border-bottom:1px solid #e0e0d8;text-align:right">Dread Disease</td>';
     } else if(isRA||isInv){
       s+='<td style="padding:6px 10px;border-bottom:1px solid #e0e0d8;text-align:right">Fund Value</td>';
-      s+='<td style="padding:6px 10px;border-bottom:1px solid #e0e0d8;text-align:right">Maturity Value</td>';
-      s+='<td style="padding:6px 10px;border-bottom:1px solid #e0e0d8;text-align:right">Retirement Value</td>';
+      s+='<td style="padding:6px 10px;border-bottom:1px solid #e0e0d8;text-align:right">Projected Value</td>';
+      s+='<td style="padding:6px 10px;border-bottom:1px solid #e0e0d8;text-align:right"></td>';
     } else {
       s+='<td colspan="3" style="padding:6px 10px;border-bottom:1px solid #e0e0d8"></td>';
     }
@@ -4335,8 +4324,34 @@ function openPolicySchedule(cid){
         s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+R(p.BenDreadDisease)+(p.DreadDiseaseType?'<div style="font-size:10px;color:#888;font-weight:400">'+p.DreadDiseaseType+'</div>':'')+'</td>';
       } else if(isRA||isInv){
         s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+R(p.BenFundValue)+'</td>';
-        s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+R(p.BenMaturityValue)+'</td>';
-        s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+R(p.BenRetirementValue)+'</td>';
+        // Projected value: for RAs calculate from fund value + contributions; for investments use stored maturity value or calculate
+        var _schedProj='';
+        var _schedFV=N(p.BenFundValue);
+        var _schedGR=N(p.IllustrativeRate)||N(p.PremGrowthRate)||N(p.GrowthRate)||0;
+        var _schedPrem=N(p.Premium);
+        var _schedEsc=N(p.PremEscalation)||0;
+        var _schedFreq=p.Frequency||'Monthly';
+        var _schedIsMonthly=(_schedFreq==='Monthly'||_schedFreq==='');
+        var _schedMatAge=N(p.MaturityAge)||N(p.maturityAge)||0;
+        var _schedRetAge=N(p.RetirementAge)||65;
+        var _schedCliAge=c?calcAge(c.DOB):null;
+        if(_schedCliAge && _schedGR>0){
+          var _schedTargetAge=_schedMatAge>0?_schedMatAge:_schedRetAge;
+          var _schedYrs=Math.max(0,_schedTargetAge-_schedCliAge);
+          if(_schedYrs>0){
+            var _r=_schedGR/100;
+            var _proj=_schedFV*Math.pow(1+_r,_schedYrs);
+            if(_schedIsMonthly&&_schedPrem>0){
+              var _mr=_r/12;var _ge=_schedEsc/100/12;var _n=_schedYrs*12;
+              if(Math.abs(_mr-_ge)>0.0001) _proj+=_schedPrem*(Math.pow(1+_mr,_n)-Math.pow(1+_ge,_n))/(_mr-_ge);
+              else _proj+=_schedPrem*_n*Math.pow(1+_mr,_n);
+            }
+            _schedProj=R(Math.round(_proj));
+          }
+        }
+        if(!_schedProj&&N(p.BenMaturityValue)>0) _schedProj=R(p.BenMaturityValue);
+        s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+(_schedProj||'—')+'<div style="font-size:9px;color:#888;font-weight:400">'+(_schedMatAge>0?'age '+_schedMatAge:'age '+_schedRetAge)+' @ '+(_schedGR||'?')+'%</div></td>';
+        s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8"></td>';
       } else {
         s+='<td colspan="3" style="padding:9px 10px;border-bottom:1px solid #eeede8"></td>';
       }
@@ -4354,23 +4369,16 @@ function openPolicySchedule(cid){
       if(isBiz&&p.LoanAmount) details.push('<span style="font-size:11px;color:#888">Loan/Cover: </span><span style="font-size:12px;font-weight:600">'+R(p.LoanAmount)+'</span>');
       if(p.MaturityDate) details.push('<span style="font-size:11px;color:#888">Maturity: </span><span style="font-size:12px">'+FD(p.MaturityDate)+'</span>');
       if(isRA||isInv){
-        // IRR — one figure only, clear priority:
-        // LA: stated IRR only (calculated is inaccurate due to income drawn)
-        // Investment: stated IRR if entered, else calculated
-        // RA: calculated only (accurate — no income drawn)
+        // Growth rate display — stated only, no calculated IRR
         if(p.Type==='Living Annuity'){
           if(p.IllustrativeRate && N(p.IllustrativeRate)>0)
             details.push('<span style="font-size:11px;color:#1e40af;font-weight:700">📈 IRR: '+p.IllustrativeRate+'% p.a.</span>');
-        } else if(isInv){
-          if(p.IllustrativeRate && N(p.IllustrativeRate)>0){
-            details.push('<span style="font-size:11px;color:#1e40af;font-weight:700">📈 IRR: '+p.IllustrativeRate+'% p.a.</span>');
-          } else {
-            var _irr = calcPolicyIRR(p.StartDate, p.Premium, p.Frequency, p.PremEscalation, p.BenFundValue);
-            if(_irr !== null && _irr !== 0) details.push('<span style="font-size:11px;color:#1e40af;font-weight:700">📈 IRR: '+_irr+'% p.a.</span>');
-          }
+        } else if(isInv && !isRA){
+          var _gr3=N(p.GrowthRate)||N(p.PremGrowthRate)||N(p.IllustrativeRate)||0;
+          if(_gr3>0) details.push('<span style="font-size:11px;color:#1e40af;font-weight:700">Growth: '+_gr3+'% p.a.</span>');
         } else if(isRA){
-          var _irr = calcPolicyIRR(p.StartDate, p.Premium, p.Frequency, p.PremEscalation, p.BenFundValue);
-          if(_irr !== null && _irr !== 0) details.push('<span style="font-size:11px;color:#1e40af;font-weight:700">📈 IRR: '+_irr+'% p.a.</span>');
+          var _gr4=N(p.IllustrativeRate)||N(p.GrowthRate)||0;
+          if(_gr4>0) details.push('<span style="font-size:11px;color:#1e40af;font-weight:700">Growth: '+_gr4+'% p.a.</span>');
         }
         // EAC
         if(p.BenEscalation && N(p.BenEscalation)>0){
