@@ -85,6 +85,8 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--cream);c
 .toast{position:fixed;bottom:24px;right:24px;background:var(--navy);color:#fff;padding:12px 20px;border-radius:8px;font-size:13px;font-weight:600;z-index:9999;box-shadow:0 4px 24px rgba(0,0,0,.2);transform:translateY(80px);opacity:0;transition:all .3s}
 .toast.show{transform:translateY(0);opacity:1}
 .toast.ok{border-left:4px solid var(--sage)}.toast.err{border-left:4px solid var(--rose)}
+.save-fail-bar{position:fixed;top:0;left:0;right:0;background:#9e2a2b;color:#fff;padding:10px 20px;font-size:13px;font-weight:700;z-index:10000;display:none;text-align:center;box-shadow:0 4px 16px rgba(0,0,0,.3)}
+.save-fail-bar.show{display:block}
 .dr{display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--smoke);font-size:13px}
 .dr:last-child{border-bottom:none}
 .dl{color:#889;font-weight:500;flex-shrink:0}.dv{font-weight:600;text-align:right;max-width:65%;word-break:break-word}
@@ -94,10 +96,11 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--cream);c
 </head>
 <body>
 <div class="shell">
+  <div id="saveFailBar" class="save-fail-bar">⚠ SAVE FAILED — Your data is at risk. Check your internet connection. <button onclick="retrySaveQueue()" style="background:#fff;color:#9e2a2b;border:none;padding:4px 14px;border-radius:5px;font-weight:700;cursor:pointer;margin-left:10px">↻ Retry Now</button> <span id="saveFailDetail" style="font-size:11px;opacity:0.8;margin-left:8px"></span></div>
   <div class="topbar">
     <div>
       <div class="logo">Duwalcoe <em>Practice Manager</em></div>
-      <div class="fsp">FSP No: 9978 &nbsp;·&nbsp; <span style="color:var(--gold);font-weight:700">v1.1</span> <span style="color:#556688;font-size:10px">built 29 Mar 2026</span></div>
+      <div class="fsp">FSP No: 9978 &nbsp;·&nbsp; <span style="color:var(--gold);font-weight:700">v1.2</span> <span style="color:#556688;font-size:10px">built 01 Apr 2026</span></div>
     </div>
     <div class="tright">
       <span id="todayLbl" style="font-size:12px;color:#8899bb"></span>
@@ -401,8 +404,18 @@ function syncNow() {
   }
 
   needed.forEach(function(table){
-    sbFetch('GET', '/rest/v1/'+table+'?select=*&limit=10000', null, function(data){
-      loaded[table] = data||[];
+    sbFetch('GET', '/rest/v1/'+table+'?select=*&limit=10000', null, function(data, err){
+      if(err){
+        // Load failed — use localStorage fallback for this table
+        console.warn('Failed to load '+table+' from server, using localStorage');
+        try{
+          var _ldb3=JSON.parse(localStorage.getItem('du_db')||'{}');
+          loaded[table] = _ldb3[table==='familylinks'?'links':table]||[];
+        }catch(e){ loaded[table]=[]; }
+        if(table==='policies') showSaveFailure('Could not load policies from server — using local copy');
+      } else {
+        loaded[table] = data||[];
+      }
       checkDone();
     });
   });
@@ -430,13 +443,65 @@ function startDiscussAutoRefresh(){
 }
 
 // post() — maps every legacy action to a direct Supabase call
+// ── SAVE SAFETY: queue, retry, and loud failure alerts ──────
+var _SAVE_QUEUE = []; // failed saves waiting to retry
+var _UNSAVED_CHANGES = false;
+
+function showSaveFailure(detail) {
+  var bar = document.getElementById('saveFailBar');
+  var det = document.getElementById('saveFailDetail');
+  if (bar) { bar.className = 'save-fail-bar show'; }
+  if (det && detail) { det.textContent = detail; }
+  _UNSAVED_CHANGES = true;
+}
+function clearSaveFailure() {
+  var bar = document.getElementById('saveFailBar');
+  if (bar) { bar.className = 'save-fail-bar'; }
+  if (_SAVE_QUEUE.length === 0) { _UNSAVED_CHANGES = false; }
+}
+function retrySaveQueue() {
+  if (!_SAVE_QUEUE.length) { clearSaveFailure(); toast('Nothing to retry','ok'); return; }
+  var queue = _SAVE_QUEUE.slice();
+  _SAVE_QUEUE = [];
+  var ok = 0, fail = 0;
+  queue.forEach(function(item) {
+    sbFetch('POST', '/rest/v1/' + item.table, [item.row], function(res, err) {
+      if (err) { _SAVE_QUEUE.push(item); fail++; }
+      else { ok++; }
+      if (ok + fail === queue.length) {
+        if (fail > 0) { showSaveFailure(fail + ' save(s) still failing'); toast(fail + ' save(s) still failing — will retry', 'err'); }
+        else { clearSaveFailure(); toast('All ' + ok + ' pending save(s) recovered ✓', 'ok'); }
+        try { localStorage.setItem('du_db', JSON.stringify(DB)); } catch(e) {}
+      }
+    });
+  });
+}
+// Auto-retry every 30 seconds
+setInterval(function() { if (_SAVE_QUEUE.length > 0) retrySaveQueue(); }, 30000);
+// Warn before closing tab
+window.addEventListener('beforeunload', function(e) {
+  if (_UNSAVED_CHANGES || _SAVE_QUEUE.length > 0) {
+    e.preventDefault();
+    e.returnValue = 'You have unsaved changes. Are you sure you want to leave?';
+    return e.returnValue;
+  }
+});
+
 function post(data, cb){
   var action = data.action;
 
-  // upsert a single row into a table
+  // upsert a single row into a table — WITH failure alerting and retry queue
   function upsert(table, row, callback){
     sbFetch('POST', '/rest/v1/'+table, [row], function(res, err){
       try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
+      if(err){
+        _SAVE_QUEUE.push({table: table, row: row});
+        showSaveFailure('Failed to save to ' + table + ': ' + (err||'unknown error'));
+        toast('SAVE FAILED — ' + table + '. Data saved locally, will retry.', 'err');
+      } else {
+        // If this was the last failure, clear the bar
+        if(_SAVE_QUEUE.length === 0) clearSaveFailure();
+      }
       if(callback) callback(err?{ok:0}:{ok:1});
     });
   }
