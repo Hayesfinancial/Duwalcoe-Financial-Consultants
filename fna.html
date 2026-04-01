@@ -625,6 +625,30 @@ var DEFAULTS = {
 
 var S = JSON.parse(JSON.stringify(DEFAULTS));
 
+var _fnaEditTimer = null;
+function fnaStateKey() {
+  return 'du_fna_' + (S.cli.id || (S.cli.name || '').replace(/\s+/g,'_') || 'draft');
+}
+function fnaMetaKey() {
+  return fnaStateKey() + '_meta';
+}
+function saveStampNow() {
+  var d = new Date();
+  var p = function(n){ return String(n).padStart(2,'0'); };
+  return d.getFullYear() + '-' + p(d.getMonth()+1) + '-' + p(d.getDate()) + ' ' +
+         p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+}
+function saveStampValue(str) {
+  if (!str) return 0;
+  var t = Date.parse(String(str).trim().replace(' ', 'T'));
+  return isNaN(t) ? 0 : t;
+}
+function queueSmartSave() {
+  persist();
+  clearTimeout(_fnaEditTimer);
+  _fnaEditTimer = setTimeout(function(){ saveToServer(true); }, 1200);
+}
+
 // URL param injection (called from CRM)
 (function () {
   var params = new URLSearchParams(window.location.search);
@@ -639,7 +663,11 @@ var S = JSON.parse(JSON.stringify(DEFAULTS));
       if (params.get('id')) lsKey = 'du_fna_' + params.get('id');
       else if (params.get('name')) lsKey = 'du_fna_' + decodeURIComponent(params.get('name')).replace(/\s+/g,'_');
       var lsSaved = lsKey ? localStorage.getItem(lsKey) : null;
-      if (lsSaved) { S = deepMerge(JSON.parse(JSON.stringify(DEFAULTS)), JSON.parse(lsSaved)); hasSavedState = true; }
+      if (lsSaved) {
+        S = deepMerge(JSON.parse(JSON.stringify(DEFAULTS)), JSON.parse(lsSaved));
+        hasSavedState = true;
+        window._fnaHadLocalState = true;
+      }
     } catch(e) {}
   }
 
@@ -709,6 +737,19 @@ var S = JSON.parse(JSON.stringify(DEFAULTS));
   loadFromServer(clientId, function(serverState, savedTime) {
     if (!serverState) {
       if (indicator) { indicator.textContent = ''; }
+      return;
+    }
+    var localMetaTs = 0;
+    try {
+      var localMeta = JSON.parse(localStorage.getItem('du_fna_' + clientId + '_meta') || 'null');
+      localMetaTs = saveStampValue(localMeta && localMeta.editedAt);
+    } catch(e) {}
+    var serverTs = saveStampValue(savedTime);
+    if (localMetaTs && (!serverTs || localMetaTs >= serverTs)) {
+      if (indicator) {
+        indicator.textContent = '✓ Restored local data';
+        indicator.style.color = '#86efac';
+      }
       return;
     }
     // Merge server state into S — but never overwrite importedPols (always from CRM)
@@ -931,8 +972,11 @@ function deepMerge(base, over) {
 function persist() {
   var json = JSON.stringify(S);
   document.getElementById('saved-data').textContent = json;
-  var key = 'du_fna_' + (S.cli.id || S.cli.name.replace(/\s+/g,'_') || 'draft');
-  try { localStorage.setItem(key, json); } catch(e) {}
+  var key = fnaStateKey();
+  try {
+    localStorage.setItem(key, json);
+    localStorage.setItem(fnaMetaKey(), JSON.stringify({editedAt: saveStampNow()}));
+  } catch(e) {}
   // Remember last-worked client for recovery
   if (S.cli.id && S.cli.name) {
     try { localStorage.setItem('du_fna_lastClient', JSON.stringify({id:S.cli.id, name:S.cli.name, time:Date.now()})); } catch(e) {}
@@ -6437,6 +6481,20 @@ function printAandL() {
 render();
 setInterval(autoSave, 60000);
 document.addEventListener('visibilitychange', function(){ if(document.hidden) autoSave(); });
+document.addEventListener('input', function(e){
+  var t = e.target;
+  if (!t) return;
+  var tag = (t.tagName || '').toUpperCase();
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') queueSmartSave();
+}, true);
+document.addEventListener('change', function(e){
+  var t = e.target;
+  if (!t) return;
+  var tag = (t.tagName || '').toUpperCase();
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') queueSmartSave();
+}, true);
+window.addEventListener('pagehide', function(){ persist(); saveToServer(true); });
+window.addEventListener('beforeunload', function(){ persist(); });
 </script>
 </body>
 </html>
