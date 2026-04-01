@@ -160,8 +160,8 @@ table input:focus, table select:focus { outline: none; border-color: var(--gold)
     <span id="syncIndicator" style="font-size:10px;color:#8899bb;margin-right:4px"></span>
     <button class="btn btn-ghost btn-sm" onclick="newClient()">New</button>
     <button class="btn btn-ghost btn-sm" onclick="refreshFromCRM()" title="Re-pull policies and personal details from CRM without losing FNA data">↻ CRM</button>
-    <button class="btn btn-ghost btn-sm" onclick="persist();saveToServer()" title="Save to server — accessible from any computer">☁ Sync</button>
-    <button class="btn btn-ghost btn-sm" onclick="printFNA()">🖨 Print FNA</button>
+    <button class="btn btn-ghost btn-sm" onclick="persist();saveToServer()" title="Save to server" style="background:#a8b938;color:#fff;border-color:#a8b938">💾 Save</button>
+    <button class="btn btn-ghost btn-sm" onclick="showPrintDialog()">🖨 Print FNA</button>
     <button class="btn btn-ghost btn-sm" onclick="printAandL()" title="Print Asset & Liability Statement for loan applications">🖨 A&L</button>
   </div>
 </div>
@@ -232,6 +232,14 @@ function laEscRate(p) {
 }
 function Rfmt(v) { return 'R\u202f' + Math.round(N(v)).toLocaleString('en-ZA'); }
 function Rval(v) { return N(v) > 0 ? Rfmt(v) : '—'; }
+
+function getRetEndAge() {
+  var endAge = N(S && S.assump && S.assump.retEndAge);
+  return endAge > 0 ? endAge : 85;
+}
+function getYearsInRetirement(retAge) {
+  return Math.max(1, getRetEndAge() - N(retAge || 0));
+}
 
 function ageFrom(dob) {
   if (!dob) return null;
@@ -390,25 +398,6 @@ function projectFund(currentVal, monthlyContrib, escalation, growth, years) {
   return Math.round(fvExisting + fvContribs);
 }
 
-
-function solveMonthlyToTargetFV(targetFV, escalation, growth, years) {
-  var fv = N(targetFV);
-  var g = pct(escalation);
-  var r = pct(growth);
-  var n = N(years);
-  if (fv <= 0 || n <= 0) return 0;
-  var annualPmt;
-  if (Math.abs(r - g) < 0.0001) {
-    var denomEq = n * Math.pow(1 + r, n / 2);
-    annualPmt = denomEq > 0 ? fv / denomEq : 0;
-  } else {
-    var denom = (Math.pow(1 + r, n) - Math.pow(1 + g, n)) / (r - g);
-    annualPmt = denom > 0 ? fv / denom : 0;
-  }
-  return Math.round(annualPmt / 12);
-}
-
-
 // Capital needed to fund income in retirement
 // monthlyIncome: income needed in first year of retirement (today's rands, will inflate to retirement)
 // yearsToRet: inflation-adjust the income to retirement date
@@ -433,7 +422,7 @@ function retirementCapitalNeeded(monthlyIncomeToday, yearsToRet, yearsInRet, cpi
 // Spouse beneficiary: rollover — no CGT on death
 // Returns { gain, includedGain, cgt } for a single asset
 // marginalRate: client's marginal income tax rate (decimal)
-// primaryResidence: boolean — apply R2m exclusion
+// primaryResidence: boolean — apply R3m exclusion
 // Applied against shared R440k annual exclusion externally
 var CGT_INCLUSION   = 0.40;
 var CGT_ANNUAL_EXCL = 440000;  // year of death
@@ -532,7 +521,7 @@ var DEFAULTS = {
   whyHere: '',
 
   // Assumptions
-  assump: { cpi: '6', growth: '9', incEsc: '6', drawdown: '4', medInflation: '9', retReturn: '8' },
+  assump: { cpi: '6', growth: '9', incEsc: '6', drawdown: '4', medInflation: '9', retReturn: '8', retEndAge: '85' },
 
   // Income
   incRows: [
@@ -644,6 +633,30 @@ var DEFAULTS = {
 
 var S = JSON.parse(JSON.stringify(DEFAULTS));
 
+var _fnaEditTimer = null;
+function fnaStateKey() {
+  return 'du_fna_' + (S.cli.id || (S.cli.name || '').replace(/\s+/g,'_') || 'draft');
+}
+function fnaMetaKey() {
+  return fnaStateKey() + '_meta';
+}
+function saveStampNow() {
+  var d = new Date();
+  var p = function(n){ return String(n).padStart(2,'0'); };
+  return d.getFullYear() + '-' + p(d.getMonth()+1) + '-' + p(d.getDate()) + ' ' +
+         p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+}
+function saveStampValue(str) {
+  if (!str) return 0;
+  var t = Date.parse(String(str).trim().replace(' ', 'T'));
+  return isNaN(t) ? 0 : t;
+}
+function queueSmartSave() {
+  persist();
+  clearTimeout(_fnaEditTimer);
+  _fnaEditTimer = setTimeout(function(){ saveToServer(true); }, 1200);
+}
+
 // URL param injection (called from CRM)
 (function () {
   var params = new URLSearchParams(window.location.search);
@@ -658,7 +671,11 @@ var S = JSON.parse(JSON.stringify(DEFAULTS));
       if (params.get('id')) lsKey = 'du_fna_' + params.get('id');
       else if (params.get('name')) lsKey = 'du_fna_' + decodeURIComponent(params.get('name')).replace(/\s+/g,'_');
       var lsSaved = lsKey ? localStorage.getItem(lsKey) : null;
-      if (lsSaved) { S = deepMerge(JSON.parse(JSON.stringify(DEFAULTS)), JSON.parse(lsSaved)); hasSavedState = true; }
+      if (lsSaved) {
+        S = deepMerge(JSON.parse(JSON.stringify(DEFAULTS)), JSON.parse(lsSaved));
+        hasSavedState = true;
+        window._fnaHadLocalState = true;
+      }
     } catch(e) {}
   }
 
@@ -730,6 +747,19 @@ var S = JSON.parse(JSON.stringify(DEFAULTS));
       if (indicator) { indicator.textContent = ''; }
       return;
     }
+    var localMetaTs = 0;
+    try {
+      var localMeta = JSON.parse(localStorage.getItem('du_fna_' + clientId + '_meta') || 'null');
+      localMetaTs = saveStampValue(localMeta && localMeta.editedAt);
+    } catch(e) {}
+    var serverTs = saveStampValue(savedTime);
+    if (localMetaTs && (!serverTs || localMetaTs >= serverTs)) {
+      if (indicator) {
+        indicator.textContent = '✓ Restored local data';
+        indicator.style.color = '#86efac';
+      }
+      return;
+    }
     // Merge server state into S — but never overwrite importedPols (always from CRM)
     var currentPols = S.importedPols;
     // Keep the current incRows so URL-seeded income isn't wiped by server
@@ -788,29 +818,102 @@ var S = JSON.parse(JSON.stringify(DEFAULTS));
   });
 })();
 
+// ── Last-client recovery: if FNA opened with no client, offer to reload last-worked client
+(function checkLastClient() {
+  var params = new URLSearchParams(window.location.search);
+  if (params.get('id')) return; // client loaded from CRM — no recovery needed
+  try {
+    var last = JSON.parse(localStorage.getItem('du_fna_lastClient') || 'null');
+    if (!last || !last.id || !last.name) return;
+    var age = Math.round((Date.now() - (last.time||0)) / 60000); // minutes
+    if (age > 10080) return; // older than 7 days — don't offer
+    var label = age < 60 ? age + ' min ago' : age < 1440 ? Math.round(age/60) + ' hrs ago' : Math.round(age/1440) + ' days ago';
+    setTimeout(function() {
+      if (confirm('Load last-worked FNA?\n\n' + last.name + ' ('+label+')\n\nData is saved on the server. Click OK to reload.')) {
+        // Try localStorage first for instant load
+        var lsKey = 'du_fna_' + last.id;
+        var lsData = localStorage.getItem(lsKey);
+        if (lsData) {
+          try {
+            S = deepMerge(JSON.parse(JSON.stringify(DEFAULTS)), JSON.parse(lsData));
+            render();
+          } catch(e) {}
+        }
+        // Then pull from server (will overwrite with latest)
+        loadFromServer(last.id, function(serverState, savedTime) {
+          if (!serverState) { status('No server data found for '+last.name); return; }
+          Object.keys(serverState).forEach(function(k) { if(k!=='importedPols') S[k] = serverState[k]; });
+          persist();
+          render();
+          status('✓ Loaded FNA for '+last.name+(savedTime?' (saved '+savedTime.slice(0,16)+')':''));
+        });
+      }
+    }, 300);
+  } catch(e) {}
+})();
+
 // Applies CRM policy data to state — used on fresh load and on "Refresh from CRM"
 function applyPolsFromCRM(pols) {
   S.importedPols = pols;
   if (!S.existingCover) S.existingCover = {death:'',disability:'',dread:'',ipPM:'',totalPrem:''};
   var totDeath=0,totDis=0,totDD=0,totIP=0,totPrem=0;
+
   pols.forEach(function(p){
     var n=function(v){return parseFloat(String(v||'').replace(/[^0-9.\-]/g,''))||0;};
-    if(p.Type!=='Business Assurance'){totDeath+=n(p.BenDeath);totDis+=n(p.BenDisability);totDD+=n(p.BenDreadDisease);}
-    try{var ib=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):[];ib.forEach(function(r){totIP+=n(r.amount);});}catch(e){}
+
+    // Normalise CRM → FNA field names so the FNA schedule mirrors the CRM schedule
+    if((p.GrowthRate==null || p.GrowthRate==='') && p.PremGrowthRate!=null && p.PremGrowthRate!=='') p.GrowthRate = p.PremGrowthRate;
+    if((p.GrowthRate==null || p.GrowthRate==='') && p.IllustrativeRate!=null && p.IllustrativeRate!=='') p.GrowthRate = p.IllustrativeRate;
+    if((p.PremGrowthRate==null || p.PremGrowthRate==='') && p.GrowthRate!=null && p.GrowthRate!=='') p.PremGrowthRate = p.GrowthRate;
+    if((p.premEsc==null || p.premEsc==='') && p.PremEscalation!=null && p.PremEscalation!=='') p.premEsc = p.PremEscalation;
+    if((p.PremEscalation==null || p.PremEscalation==='') && p.premEsc!=null && p.premEsc!=='') p.PremEscalation = p.premEsc;
+
+    if((p.maturityAge==null || p.maturityAge==='') && p.MaturityAge!=null && p.MaturityAge!=='') p.maturityAge = String(p.MaturityAge);
+    if((p.MaturityAge==null || p.MaturityAge==='') && p.maturityAge!=null && p.maturityAge!=='') p.MaturityAge = String(p.maturityAge);
+
+    // Derive maturityAge from MaturityDate + DOB only as fallback for older CRM records
+    if((p.maturityAge==null || p.maturityAge==='') && p.MaturityDate && S.cli && S.cli.dob){
+      var matYear=parseInt((p.MaturityDate||'').split('-')[0]||0,10);
+      var dobYear=0;
+      if((S.cli.dob||'').indexOf('/')>-1) dobYear=parseInt((S.cli.dob||'').split('/')[2]||0,10);
+      else dobYear=parseInt((S.cli.dob||'').split('-')[0]||0,10);
+      if(matYear>0 && dobYear>0){
+        p.maturityAge=String(matYear-dobYear);
+        p.MaturityAge=p.maturityAge;
+      }
+    }
+
+    // Beneficiary routing fallback from CRM Beneficiaries array
+    if((!p.Beneficiary || !p.BeneficiaryType || !p.EstateDutiable) && p.Beneficiaries){
+      try{
+        var bens = typeof p.Beneficiaries==='string' ? JSON.parse(p.Beneficiaries) : p.Beneficiaries;
+        if(bens && bens.length){
+          var b = bens[0] || {};
+          if(!p.Beneficiary && b.Name) p.Beneficiary = b.Name;
+          if(!p.BeneficiaryType && b.Type) p.BeneficiaryType = b.Type;
+          if(!p.EstateDutiable && b.EstateDutiable) p.EstateDutiable = b.EstateDutiable;
+        }
+      }catch(e){}
+    }
+
+    if(p.Type!=='Business Assurance'){
+      totDeath+=n(p.BenDeath);
+      totDis+=n(p.BenDisability);
+      totDD+=n(p.BenDreadDisease);
+    }
+    try{
+      var ib=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):[];
+      ib.forEach(function(r){totIP+=n(r.amount);});
+    }catch(e){}
     var f=p.Frequency||'Monthly';
     if(f==='Monthly'||f==='') totPrem+=n(p.Premium);
-    // Derive maturityAge from MaturityDate + DOB
-    if(p.MaturityDate&&S.cli&&S.cli.dob){
-      var matYear=parseInt((p.MaturityDate||'').split('-')[0]||0);
-      var dobYear=parseInt((S.cli.dob||'').split('/')[2]||(S.cli.dob||'').split('-')[0]||0);
-      if(matYear>0&&dobYear>0) p.maturityAge=String(matYear-dobYear);
-    }
   });
-  if(totDeath>0) S.existingCover.death     =String(Math.round(totDeath));
-  if(totDis>0)   S.existingCover.disability=String(Math.round(totDis));
-  if(totDD>0)    S.existingCover.dread      =String(Math.round(totDD));
-  if(totIP>0)    S.existingCover.ipPM       =String(Math.round(totIP));
-  if(totPrem>0)  S.existingCover.totalPrem  =String(Math.round(totPrem));
+
+  if(totDeath>0) S.existingCover.death      = String(Math.round(totDeath));
+  if(totDis>0)   S.existingCover.disability = String(Math.round(totDis));
+  if(totDD>0)    S.existingCover.dread      = String(Math.round(totDD));
+  if(totIP>0)    S.existingCover.ipPM       = String(Math.round(totIP));
+  if(totPrem>0)  S.existingCover.totalPrem  = String(Math.round(totPrem));
 }
 
 // Called by the "Refresh from CRM" button — re-applies URL params over current state
@@ -877,8 +980,15 @@ function deepMerge(base, over) {
 function persist() {
   var json = JSON.stringify(S);
   document.getElementById('saved-data').textContent = json;
-  var key = 'du_fna_' + (S.cli.id || S.cli.name.replace(/\s+/g,'_') || 'draft');
-  try { localStorage.setItem(key, json); } catch(e) {}
+  var key = fnaStateKey();
+  try {
+    localStorage.setItem(key, json);
+    localStorage.setItem(fnaMetaKey(), JSON.stringify({editedAt: saveStampNow()}));
+  } catch(e) {}
+  // Remember last-worked client for recovery
+  if (S.cli.id && S.cli.name) {
+    try { localStorage.setItem('du_fna_lastClient', JSON.stringify({id:S.cli.id, name:S.cli.name, time:Date.now()})); } catch(e) {}
+  }
 }
 
 // Save FNA state to Supabase
@@ -902,7 +1012,7 @@ function saveToServer(silent) {
   var now = new Date().toISOString().slice(0,16).replace('T',' ');
   var indicator = document.getElementById('syncIndicator');
   if(indicator){ indicator.textContent = '↑ Saving...'; indicator.style.color = '#a8b938'; }
-  sbFetch('POST','/rest/v1/fnadata',[{ClientID:clientId,Data:JSON.stringify(saveData),LastSaved:now,SavedBy:'Clinton Hayes'}],function(res,err){
+  sbFetch('POST','/rest/v1/fnadata?on_conflict=ClientID',[{ClientID:clientId,Data:JSON.stringify(saveData),LastSaved:now,SavedBy:'Clinton Hayes'}],function(res,err){
     if(err){
       if(indicator){ indicator.textContent = '⚠ Sync failed'; indicator.style.color = '#f87171'; }
       if(!silent) status('⚠ Save failed: '+err);
@@ -917,7 +1027,7 @@ function saveToServer(silent) {
 // Load FNA state from Supabase
 function loadFromServer(clientId, onDone) {
   if(!clientId){ if(onDone) onDone(null); return; }
-  sbFetch('GET','/rest/v1/fnadata?ClientID=eq.'+encodeURIComponent(clientId)+'&select=*',null,function(rows,err){
+  sbFetch('GET','/rest/v1/fnadata?ClientID=eq.'+encodeURIComponent(clientId)+'&select=*&order=LastSaved.desc&limit=1',null,function(rows,err){
     if(rows && rows.length && rows[0].Data){
       try {
         var serverState = typeof rows[0].Data==='string' ? JSON.parse(rows[0].Data) : rows[0].Data;
@@ -958,7 +1068,7 @@ function status(msg) {
 // ═══════════════════════════════════════════════════════════
 // NAVIGATION
 // ═══════════════════════════════════════════════════════════
-var TABS = ['Client', 'Scope', 'Income', 'Assets', 'Needs', 'Policies', 'Retirement', 'Estate', 'Summary', 'Overview', 'ROA'];
+var TABS = ['Client', 'Scope', 'Income', 'Assets', 'Needs', 'Policies', 'Retirement', 'Estate', 'Advice Board', 'Checklist', 'ROA'];
 var activeTab = 0;
 function go(i)    { persist(); activeTab = i; render(); }
 function nextTab(){ if (activeTab < TABS.length-1) { persist(); activeTab++; render(); window.scrollTo(0,0); } }
@@ -1599,7 +1709,7 @@ function buildAssets() {
       var cgtEst=Math.round(cgtR.gainAfterExcl*CGT_INCLUSION*mr);
       var cgtBox=div(); cgtBox.style.cssText='margin-top:8px;padding:8px 12px;border-radius:6px;background:#fef9ee;border:1px solid var(--gold2);font-size:11px';
       cgtBox.innerHTML='<strong>CGT estimate on death:</strong> Gain: '+Rfmt(cgtR.gain)+
-        (p.primaryResidence&&N(p.baseCost)>0?' (less R2m primary residence exclusion = '+Rfmt(cgtR.gainAfterExcl)+')':'')+
+        (p.primaryResidence&&N(p.baseCost)>0?' (less R3m primary residence exclusion = '+Rfmt(cgtR.gainAfterExcl)+')':'')+
         ' · Included gain (40%): '+Rfmt(Math.round(cgtR.gainAfterExcl*CGT_INCLUSION))+
         ' · Est. CGT @ '+Math.round(mr*100)+'% marginal: <strong>'+Rfmt(cgtEst)+'</strong>'+
         ' <span style="color:var(--sub)">(before R440k annual exclusion shared across all assets)</span>';
@@ -2278,24 +2388,35 @@ function buildRetirement() {
 
   var cliAge = ageFrom(S.cli.dob);
   var retAge = N(S.cli.retAge) || 65;
+  var retEndAge = getRetEndAge();
   var yrsToRet = cliAge ? Math.max(0, retAge - cliAge) : null;
-  var yrsInRet = 85 - retAge;
+  var yrsInRet = getYearsInRetirement(retAge);
+
+  if(!S.retScenario) S.retScenario = { growth:'', extraLump:'', extraPM:'', extraEsc:'' };
 
   // ── Assumptions reminder
   s.appendChild(stitle('Retirement Planning'));
   var inf=div('info');
-  inf.innerHTML = 'All amounts in <strong>today\'s rands</strong>. The system inflates to retirement using CPI and projects funds using the growth rate.';
+  inf.innerHTML = 'All amounts in <strong>today\'s rands</strong>. The system inflates to retirement using CPI and projects funds using the growth rate. '
+    + 'Use <strong>Planning to age</strong> below as the main retirement-horizon lever for this client.';
   s.appendChild(inf);
 
-  // ── Retirement age
-  var rg0 = g3();
+  // ── Retirement age and planning horizon
+  var rg0 = div();
+  rg0.style.cssText='display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin-bottom:10px';
   rg0.appendChild(rfld('Current Age (auto)', {v:String(cliAge||'')}, 'v', {readonly:true}));
   var retAgeF = div('f'); retAgeF.appendChild(el('label','','Retirement Age'));
   var retAgeI = document.createElement('input'); retAgeI.type='text'; retAgeI.inputMode='numeric';
   retAgeI.value = S.cli.retAge||'65'; retAgeI.placeholder='65';
   retAgeI.addEventListener('blur',function(e){ S.cli.retAge=e.target.value; render(); });
   retAgeF.appendChild(retAgeI); rg0.appendChild(retAgeF);
+  var retEndF = div('f'); retEndF.appendChild(el('label','','Planning to age'));
+  var retEndI = document.createElement('input'); retEndI.type='text'; retEndI.inputMode='numeric';
+  retEndI.value = S.assump.retEndAge||'85'; retEndI.placeholder='85';
+  retEndI.addEventListener('blur',function(e){ S.assump.retEndAge=e.target.value||'85'; render(); });
+  retEndF.appendChild(retEndI); rg0.appendChild(retEndF);
   rg0.appendChild(rfld('Years to retirement (auto)', {v:String(yrsToRet||'')}, 'v', {readonly:true}));
+  rg0.appendChild(rfld('Years in retirement (auto)', {v:String(yrsInRet||'')}, 'v', {readonly:true}));
   s.appendChild(rg0);
 
   // ── Retirement Income Needs (flexible table)
@@ -2753,43 +2874,103 @@ function buildRetirement() {
 
     s.appendChild(calcBox);
 
+    // ── What-if calculator
     s.appendChild(stitle('Retirement What-If Calculator'));
-    if(!S.retScenario) S.retScenario = {growthRate:'', extraLump:'', extraMonthly:'', extraEsc:''};
     var scInf = div('info');
-    scInf.innerHTML = 'Use this on the <strong>Retirement</strong> tab for live client scenario planning. The Advice Board stays a decision board only.';
+    scInf.innerHTML = 'Use this to test a different growth assumption and additional savings without changing the core retirement inputs above.';
     s.appendChild(scInf);
 
     var scGrid = g4();
-    scGrid.appendChild(pfld('Scenario growth %', S.retScenario, 'growthRate', {onblur:function(){render();}}));
-    scGrid.appendChild(rfld('Extra lump sum now', S.retScenario, 'extraLump', {onblur:function(){render();}}));
-    scGrid.appendChild(rfld('Extra monthly saving', S.retScenario, 'extraMonthly', {onblur:function(){render();}}));
-    scGrid.appendChild(pfld('Esc on extra saving %', S.retScenario, 'extraEsc', {onblur:function(){render();}}));
+
+    var scGrowthF = div('f'); scGrowthF.appendChild(el('label','','Growth %'));
+    var scGrowthW = div('pw'); scGrowthW.appendChild(el('span','pp','%'));
+    var scGrowthI = document.createElement('input'); scGrowthI.type='text'; scGrowthI.inputMode='numeric';
+    scGrowthI.value = S.retScenario.growth||''; scGrowthI.placeholder = S.assump.growth||'9';
+    scGrowthI.addEventListener('input',function(e){ S.retScenario.growth=e.target.value; });
+    scGrowthI.addEventListener('blur',function(){ render(); });
+    scGrowthW.insertBefore(scGrowthI, scGrowthW.firstChild); scGrowthF.appendChild(scGrowthW); scGrid.appendChild(scGrowthF);
+
+    var scLumpF = div('f'); scLumpF.appendChild(el('label','','Extra lump sum now'));
+    var scLumpW = div('rw'); scLumpW.appendChild(el('span','rp','R'));
+    var scLumpI = document.createElement('input'); scLumpI.type='text'; scLumpI.inputMode='numeric';
+    scLumpI.value = S.retScenario.extraLump||''; scLumpI.placeholder = '0';
+    scLumpI.addEventListener('input',function(e){ S.retScenario.extraLump=e.target.value; });
+    scLumpI.addEventListener('blur',function(){ render(); });
+    scLumpW.appendChild(scLumpI); scLumpF.appendChild(scLumpW); scGrid.appendChild(scLumpF);
+
+    var scPmF = div('f'); scPmF.appendChild(el('label','','Extra monthly saving'));
+    var scPmW = div('rw'); scPmW.appendChild(el('span','rp','R'));
+    var scPmI = document.createElement('input'); scPmI.type='text'; scPmI.inputMode='numeric';
+    scPmI.value = S.retScenario.extraPM||''; scPmI.placeholder = '0';
+    scPmI.addEventListener('input',function(e){ S.retScenario.extraPM=e.target.value; });
+    scPmI.addEventListener('blur',function(){ render(); });
+    scPmW.appendChild(scPmI); scPmF.appendChild(scPmW); scGrid.appendChild(scPmF);
+
+    var scEscF = div('f'); scEscF.appendChild(el('label','','Escalation on extra saving %'));
+    var scEscW = div('pw'); scEscW.appendChild(el('span','pp','%'));
+    var scEscI = document.createElement('input'); scEscI.type='text'; scEscI.inputMode='numeric';
+    scEscI.value = S.retScenario.extraEsc||''; scEscI.placeholder = '0';
+    scEscI.addEventListener('input',function(e){ S.retScenario.extraEsc=e.target.value; });
+    scEscI.addEventListener('blur',function(){ render(); });
+    scEscW.insertBefore(scEscI, scEscW.firstChild); scEscF.appendChild(scEscW); scGrid.appendChild(scEscF);
+
     s.appendChild(scGrid);
 
-    var scGrowth = N(S.retScenario.growthRate)>0 ? N(S.retScenario.growthRate) : (N(S.assump.growth)||9);
+    var scGrowth = N(S.retScenario.growth)>0 ? N(S.retScenario.growth) : (N(S.assump.growth)||9);
     var scExtraLump = N(S.retScenario.extraLump);
-    var scExtraMonthly = N(S.retScenario.extraMonthly);
-    var scExtraEsc = N(S.retScenario.extraEsc)>0 ? N(S.retScenario.extraEsc) : (N(S.assump.incEsc)||6);
-    var currentShortfallAtRet = Math.max(0, -retGap);
-    var lumpNowNeeded = currentShortfallAtRet>0 ? Math.round(currentShortfallAtRet / Math.pow(1 + scGrowth/100, yrsToRet)) : 0;
-    var extraSaveNeeded = currentShortfallAtRet>0 ? solveMonthlyToTargetFV(currentShortfallAtRet, scExtraEsc, scGrowth, yrsToRet) : 0;
-    var scenarioExtraLumpFV = scExtraLump>0 ? Math.round(scExtraLump * Math.pow(1 + scGrowth/100, yrsToRet)) : 0;
-    var scenarioExtraMonthlyFV = scExtraMonthly>0 ? projectFund(0, scExtraMonthly, scExtraEsc, scGrowth, yrsToRet) : 0;
-    var scenarioTotalProj = totalProj + scenarioExtraLumpFV + scenarioExtraMonthlyFV;
-    var scenarioGap = scenarioTotalProj - totalCapNeed;
+    var scExtraPM = N(S.retScenario.extraPM);
+    var scExtraEsc = N(S.retScenario.extraEsc);
 
-    var scenarioBox = div('calc-result');
-    scenarioBox.innerHTML = ''
-      + '<div class="cr-row"><span>Current shortfall at retirement</span><span class="gold">'+Rfmt(currentShortfallAtRet)+'</span></div>'
-      + '<div class="cr-row"><span>Lump sum needed now to close current gap</span><span class="gold">'+Rfmt(lumpNowNeeded)+'</span></div>'
-      + '<div class="cr-row"><span>Extra saving needed from now</span><span class="gold">'+Rfmt(extraSaveNeeded)+'/pm</span></div>'
-      + '<div class="cr-row"><span>Scenario growth assumption</span><span class="gold">'+scGrowth+'%</span></div>'
-      + '<div class="cr-row"><span>Future value of extra lump sum</span><span class="gold">'+Rfmt(scenarioExtraLumpFV)+'</span></div>'
-      + '<div class="cr-row"><span>Future value of extra monthly saving</span><span class="gold">'+Rfmt(scenarioExtraMonthlyFV)+'</span></div>'
-      + '<div class="cr-row big"><span>Scenario total at retirement</span><span class="gold">'+Rfmt(scenarioTotalProj)+'</span></div>'
-      + '<div class="cr-row big"><span>Scenario surplus / shortfall</span><span class="gold" style="color:'+(scenarioGap>=0?'#86efac':'#f87171')+'">'+(scenarioGap>=0?'Surplus ':'Shortfall ')+Rfmt(Math.abs(scenarioGap))+'</span></div>';
-    s.appendChild(scenarioBox);
+    var lumpNeededNow = 0;
+    var extraPMNeeded = 0;
+    if(retGap < 0 && yrsToRet > 0){
+      var _sf0 = Math.abs(retGap);
+      lumpNeededNow = scGrowth>0 ? Math.round(_sf0 / Math.pow(1+scGrowth/100, yrsToRet)) : Math.round(_sf0);
+      var _mr0 = scGrowth/100/12;
+      var _nm0 = yrsToRet*12;
+      extraPMNeeded = _nm0>0 ? (_mr0>0 ? Math.round(_sf0*_mr0/(Math.pow(1+_mr0,_nm0)-1)) : Math.round(_sf0/_nm0)) : Math.round(_sf0);
+    }
 
+    var scenarioFundsProj = S.retAssets.reduce(function(a,r){
+      if(!N(r.currentVal)&&!N(r.monthlyContrib)) return a;
+      var esc3=N(r.contribEsc)>0?N(r.contribEsc):N(S.assump.incEsc)||6;
+      var matAge=N(r.maturityAge);
+      if(matAge>0&&clientAgeNow&&matAge<retAge){
+        var yrsToMat=Math.max(0,matAge-clientAgeNow);
+        var matVal=projectFund(r.currentVal,r.monthlyContrib,esc3,scGrowth,yrsToMat);
+        var yrsMatToRet=retAge-matAge;
+        return a+Math.round(matVal*Math.pow(1+scGrowth/100,yrsMatToRet));
+      }
+      return a+projectFund(r.currentVal,r.monthlyContrib,esc3,scGrowth,yrsToRet);
+    },0);
+
+    var extraLumpFV = (scExtraLump>0 && yrsToRet>0) ? Math.round(scExtraLump*Math.pow(1+scGrowth/100,yrsToRet)) : scExtraLump;
+    var extraPMFV = (scExtraPM>0 && yrsToRet>0) ? projectFund(0, scExtraPM, scExtraEsc, scGrowth, yrsToRet) : 0;
+    var scenarioTotal = scenarioFundsProj + N(S.retOtherCapital) + propSoldTotal + soldProceedsAtRet + extraLumpFV + extraPMFV;
+    var scenarioGap = scenarioTotal - totalCapNeed;
+
+    var scCards = div('cards c2');
+    var scC1 = div('card');
+    scC1.innerHTML = '<div class="lbl">Lump sum needed now</div><div class="val '+(retGap<0?'warn':'ok')+'">'+(retGap<0?Rfmt(lumpNeededNow):'—')+'</div><div class="sub">At '+scGrowth+'% growth to retirement</div>';
+    scCards.appendChild(scC1);
+    var scC2 = div('card');
+    scC2.innerHTML = '<div class="lbl">Extra saving needed /pm</div><div class="val '+(retGap<0?'warn':'ok')+'">'+(retGap<0?Rfmt(extraPMNeeded):'—')+'</div><div class="sub">To close the current shortfall</div>';
+    scCards.appendChild(scC2);
+    s.appendChild(scCards);
+
+    var scBox = div(); scBox.className='calc-result';
+    function scRow(lbl,val,big){
+      var r=div('cr-row'+(big?' big':''));
+      var l=el('span','',lbl);
+      var v=el('span','',val);
+      r.appendChild(l); r.appendChild(v); scBox.appendChild(r);
+    }
+    scRow('Scenario growth', scGrowth+'%');
+    scRow('Scenario total at retirement', Rfmt(scenarioTotal));
+    if(extraLumpFV>0) scRow('Extra lump sum at retirement value', Rfmt(extraLumpFV));
+    if(extraPMFV>0) scRow('Extra monthly savings at retirement value', Rfmt(extraPMFV));
+    scRow(scenarioGap>=0?'Scenario surplus':'Scenario shortfall', Rfmt(Math.abs(scenarioGap)), true);
+    s.appendChild(scBox);
   }
 
   return s;
@@ -2851,7 +3032,7 @@ function buildPolicies() {
     var cliAge2  = ageFrom(S.cli.dob);
     var retAge2  = N(S.cli.retAge) || 65;
     var yrsToRet2 = cliAge2 ? Math.max(0, retAge2 - cliAge2) : null;
-    var yrsInRet  = Math.max(1, 85 - retAge2);
+    var yrsInRet  = getYearsInRetirement(retAge2);
     var grossPM   = N(S.cli.grossPM) || N(S.incRows&&S.incRows[0]&&S.incRows[0].pm);
     var incEscRate = N(S.assump.incEsc) || 6;
 
@@ -3626,13 +3807,14 @@ function buildPolCard(p, i) {
       // Projected maturity value — auto-calculated
       var _projMatVal2='';
       var _cliAge2=ageFrom(S.cli.dob);
-      var _matAge2=N(p.maturityAge);
-      var _gr2=N(p.GrowthRate);
+      var _matAge2=N(p.maturityAge||p.MaturityAge);
+      var _gr2=N(p.GrowthRate||p.PremGrowthRate||p.IllustrativeRate);
       if(_matAge2>0 && _cliAge2 && _matAge2>_cliAge2 && _gr2>0){
         var _yrs2=Math.max(0,_matAge2-_cliAge2);
         var _escR2=parseFloat(String(p.PremEscalation!=null&&p.PremEscalation!==''?p.PremEscalation:(p.premEsc||'')).replace(/[^0-9.]/g,''))||0;
         _projMatVal2=projectFund(p.BenFundValue||0,_isMonthly2?p.Premium:0,_escR2,_gr2,_yrs2);
       }
+      if(!_projMatVal2 && N(p.BenMaturityValue)>0) _projMatVal2=N(p.BenMaturityValue);
       var pmWrap=div('f'); pmWrap.appendChild(el('label','','Projected Maturity Value'));
       var pmDisp=document.createElement('div');
       pmDisp.style.cssText='padding:8px 11px;background:'+(_projMatVal2?'#f0fdf4':'var(--smoke)')+';border:1.5px solid var(--mist);border-radius:7px;font-size:13px;font-weight:700;color:'+(_projMatVal2?'#166534':'var(--sub)');
@@ -4243,11 +4425,40 @@ function buildEstate() {
   var dutyPayableByEstate       = dutyOnPhysical + dutyOnEstatePols;
   var dutyPayableByThirdParties = dutyOnThirdParty + dutyOnBizDutiable;
 
+  var bondLiabs = (S.props||[]).reduce(function(a,p){return a+N(p.bond);},0);
+  var vehLiabs = (S.vehicles||[]).reduce(function(a,v){return a+N(v.finance);},0);
+  var otherLiabs = (S.liabilities||[]).reduce(function(a,l){return a+N(l.bal);},0);
+  var totalLiabsBeforeDuty = physLiab + cgtLiability;
+
+  s.appendChild(stitle('Estate Build-Up'));
+  var buildBox = makeCalcBox('What Makes Up the Gross Estate');
+  buildBox.row('Physical assets in estate', Rfmt(totalDutiableAssets));
+  buildBox.sub('Properties + vehicles + other assets before spouse deductions', '');
+  if(s4qPolicies>0){ buildBox.row('+ Policies to spouse (s.4(q))', Rfmt(s4qPolicies), true); }
+  if(estatePols>0){ buildBox.row('+ Policies to estate', Rfmt(estatePols), true); }
+  if(thirdPartyPols>0){ buildBox.row('+ Third party / trust policies (deemed property)', Rfmt(thirdPartyPols), true); }
+  if(bizDutiable>0){ buildBox.row('+ Business assurance deemed property', Rfmt(bizDutiable), true); }
+  buildBox.row('Gross estate', Rfmt(grossEstate), false, true, true);
+  buildBox.sub('Spouse-directed physical assets are already included above and are deducted later under s.4(q)', '');
+  s.appendChild(buildBox.box);
+
+  var liabBox = makeCalcBox('Liabilities & Deductions Before Estate Duty');
+  if(bondLiabs>0){ liabBox.row('Bond liabilities', '('+Rfmt(bondLiabs)+')'); }
+  if(vehLiabs>0){ liabBox.row('Vehicle finance', '('+Rfmt(vehLiabs)+')'); }
+  if(otherLiabs>0){ liabBox.row('Other liabilities', '('+Rfmt(otherLiabs)+')'); }
+  if(cgtLiability>0){
+    liabBox.row('Capital Gains Tax on death', '('+Rfmt(cgtLiability)+')');
+    liabBox.sub('Deductible as a tax liability before estate duty is calculated', '');
+  }
+  liabBox.row('Total liabilities / deductions before duty', '('+Rfmt(totalLiabsBeforeDuty)+')', false, true, true);
+  liabBox.row('Net estate before accrual / s.4(q)', Rfmt(netEstate), false, true, true);
+  s.appendChild(liabBox.box);
+
   // ── BOX 1: ESTATE DUTY
   s.appendChild(stitle('Estate Duty'));
   var b1 = makeCalcBox('Estate Duty Calculation');
-  b1.row('Gross estate', Rfmt(grossEstate));
-  b1.sub('Physical assets + all deemed property (policies)', '');
+  b1.row('Gross estate (see build-up above)', Rfmt(grossEstate));
+  b1.sub('Use the build-up above to see exactly what sits inside the gross estate', '');
   if(physLiab>0){ b1.row('Less: Liabilities (bonds, finance, loans)', '('+Rfmt(physLiab)+')', true); }
   if(cgtLiability>0){
     b1.row('Less: CGT on death (s.4(a) — deemed income tax)', '('+Rfmt(cgtLiability)+')', true);
@@ -4636,11 +4847,6 @@ function buildSummary() {
   cards.appendChild(card('Retirement capital', retirementGap===null?'Not modelled':resultText(retirementGap), retirementGap===null?'Retirement not in scope':'Projected capital vs required capital', retirementGap!==null&&retirementGap>=0?'ok':retirementGap===null?'':'bad'));
   s.appendChild(cards);
 
-  if(S.scope.retirement && retirementGap !== null && retirementGap < 0 && yrsToRet){
-    var boardSaveNeed = solveMonthlyToTargetFV(Math.abs(retirementGap), N(S.assump.incEsc)||6, N(S.assump.growth)||9, yrsToRet);
-    note('To accumulate the current retirement shortfall by age <strong>'+retAge+'</strong>, an additional saving of about <strong>'+Rfmt(boardSaveNeed)+'/pm</strong> is required from now, escalating at <strong>'+(N(S.assump.incEsc)||6)+'%</strong>.', 'red');
-  }
-
   section('Core Advice Gaps');
   var tbl = document.createElement('table');
   tbl.style.cssText='width:100%;border-collapse:collapse;font-size:12px;margin-bottom:14px';
@@ -4722,17 +4928,20 @@ function buildSummary() {
     addLine(capitalBox,'Total capital required',Rfmt(retirementNeed),true);
     addLine(capitalBox,'Projected retirement capital',Rfmt(retirementHave),true,'#1d4ed8');
     addLine(capitalBox,'Retirement result', retirementGap===null ? '—' : resultText(retirementGap), true, retirementGap===null ? 'var(--navy)' : resultTone(retirementGap));
-    rgrid.appendChild(capitalBox);
-
-    if(retirementGap !== null && retirementGap < 0 && yrsToRet){
-      var extraSavePM = solveMonthlyToTargetFV(Math.abs(retirementGap), N(S.assump.incEsc)||6, N(S.assump.growth)||9, yrsToRet);
-      addLine(capitalBox,'Extra saving needed from now',Rfmt(extraSavePM)+'/pm',true,'#b45309');
+    if(retirementGap!==null && retirementGap<0 && yrsToRet>0){
+      var _sfAB = Math.abs(retirementGap);
+      var _mrAB = (N(S.assump.growth)||9)/100/12;
+      var _nmAB = yrsToRet*12;
+      var _pmtAB = _nmAB>0 ? (_mrAB>0 ? Math.round(_sfAB*_mrAB/(Math.pow(1+_mrAB,_nmAB)-1)) : Math.round(_sfAB/_nmAB)) : Math.round(_sfAB);
+      addLine(capitalBox,'Extra saving needed /pm',Rfmt(_pmtAB),true,'#d97706');
     }
+    rgrid.appendChild(capitalBox);
     s.appendChild(rgrid);
   }
 
   return s;
 }
+
 
 function buildOverview() {
   var s = div();
@@ -4817,7 +5026,7 @@ function buildOverview() {
   // Retirement
   var _cliAgeO=ageFrom(S.cli.dob),_retAgeO=N(S.cli.retAge)||65;
   var _yrsToRO=_cliAgeO?Math.max(0,_retAgeO-_cliAgeO):null;
-  var _yrsInRetO=Math.max(1,85-_retAgeO);
+  var _yrsInRetO=getYearsInRetirement(_retAgeO);
   var _retNeedO=0,_retHaveO=0,_retGapO=null;
   if(S.scope.retirement&&_yrsToRO&&_yrsInRetO>0){
     // Calculate net monthly gap at retirement — must match buildRetirement logic exactly
@@ -5046,7 +5255,7 @@ function buildROATab() {
         if(!yrsToR) return '';
         var totalProj=S.retAssets.reduce(function(a,r2){if(!N(r2.currentVal)&&!N(r2.monthlyContrib))return a;var g=N(r2.growthRate)>0?r2.growthRate:S.assump.growth;var e=N(r2.contribEsc)>0?r2.contribEsc:S.assump.incEsc;return a+projectFund(r2.currentVal,r2.monthlyContrib,e,g,yrsToR);},0);
         var mNeed=(S.retNeeds&&S.retNeeds.length>0)?S.retNeeds.reduce(function(a,r2){return a+N(r2.amtToday);},0):N(S.retIncomeToday)+N(S.retMedAidToday)+N(S.retOtherMonthly);
-        var capNeed=retirementCapitalNeeded(mNeed,yrsToR,85-retAge,S.assump.cpi,S.assump.retReturn);
+        var capNeed=retirementCapitalNeeded(mNeed,yrsToR,getYearsInRetirement(retAge),S.assump.cpi,S.assump.retReturn);
         var gap=totalProj-capNeed;
         return capNeed>0?'FNA: need '+Rfmt(capNeed)+' / have '+Rfmt(totalProj)+(gap<0?' \u25bc '+Rfmt(Math.abs(gap))+' shortfall':' \u25b2 surplus'):'';
       default: return '';
@@ -5335,7 +5544,69 @@ function generateROA() {
 }
 
 
-function printFNA() {
+// ═══════════════════════════════════════════════════════════
+// PRINT DIALOG — select which sections to include
+// ═══════════════════════════════════════════════════════════
+function showPrintDialog() {
+  var sections = [
+    {key:'client',  label:'Client Profile & Scope', checked:true},
+    {key:'assets',  label:'Assets & Liabilities', checked:true},
+    {key:'policies',label:'Policy Schedule', checked:true},
+    {key:'needs',   label:'Needs Analysis (Death / Disability)', checked:!!S.scope.death||!!S.scope.disability},
+    {key:'retirement',label:'Retirement Planning', checked:!!S.scope.retirement},
+    {key:'estate',  label:'Estate Planning', checked:!!S.scope.estate},
+    {key:'summary', label:'Summary & Recommendations', checked:true}
+  ];
+  var ov = document.createElement('div');
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(10,20,40,.55);z-index:9999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(2px)';
+  var box = document.createElement('div');
+  box.style.cssText = 'background:#fff;border-radius:12px;padding:24px 28px;max-width:380px;width:100%;box-shadow:0 12px 48px rgba(0,0,0,.25)';
+  box.innerHTML = '<div style="font-family:Georgia,serif;font-size:17px;color:#0e413a;margin-bottom:4px">Print FNA</div>'
+    +'<div style="font-size:12px;color:#889;margin-bottom:16px">Select the sections to include:</div>';
+  sections.forEach(function(s) {
+    var row = document.createElement('label');
+    row.style.cssText = 'display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:6px;cursor:pointer;margin-bottom:2px';
+    row.onmouseenter = function(){row.style.background='#f5f5f0';};
+    row.onmouseleave = function(){row.style.background='transparent';};
+    var cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.checked = s.checked; cb.id = 'prt_'+s.key;
+    cb.style.cssText = 'width:18px;height:18px;accent-color:#0e413a;cursor:pointer';
+    var lbl = document.createElement('span');
+    lbl.textContent = s.label;
+    lbl.style.cssText = 'font-size:13px;font-weight:500;color:#1a2a2e';
+    row.appendChild(cb); row.appendChild(lbl); box.appendChild(row);
+  });
+  // Select all / none
+  var selRow = document.createElement('div');
+  selRow.style.cssText = 'display:flex;gap:12px;margin:10px 0 16px;padding-left:10px';
+  selRow.innerHTML = '<a href="#" style="font-size:11px;color:#0e413a" onclick="event.preventDefault();document.querySelectorAll(\'[id^=prt_]\').forEach(function(c){c.checked=true})">Select all</a>'
+    +'<a href="#" style="font-size:11px;color:#9e2a2b" onclick="event.preventDefault();document.querySelectorAll(\'[id^=prt_]\').forEach(function(c){c.checked=false})">Clear all</a>';
+  box.appendChild(selRow);
+  // Buttons
+  var btnRow = document.createElement('div');
+  btnRow.style.cssText = 'display:flex;justify-content:flex-end;gap:8px';
+  var cancelBtn = document.createElement('button');
+  cancelBtn.textContent = 'Cancel';
+  cancelBtn.style.cssText = 'padding:8px 18px;border-radius:7px;border:1.5px solid #ddd;background:#fff;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;color:#555';
+  cancelBtn.onclick = function(){ document.body.removeChild(ov); };
+  var printBtn = document.createElement('button');
+  printBtn.textContent = '🖨 Print';
+  printBtn.style.cssText = 'padding:8px 22px;border-radius:7px;border:none;background:#0e413a;color:#fff;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit';
+  printBtn.onclick = function(){
+    var sel = {};
+    sections.forEach(function(s){ sel[s.key] = document.getElementById('prt_'+s.key).checked; });
+    document.body.removeChild(ov);
+    printFNA(sel);
+  };
+  btnRow.appendChild(cancelBtn); btnRow.appendChild(printBtn); box.appendChild(btnRow);
+  ov.appendChild(box);
+  // Close on backdrop click
+  ov.addEventListener('click', function(ev){ if(ev.target===ov) document.body.removeChild(ov); });
+  document.body.appendChild(ov);
+}
+
+function printFNA(sections) {
+  if(!sections) sections = {client:true,assets:true,policies:true,needs:true,retirement:true,estate:true,summary:true};
   persist();
   var pols = S.importedPols || [];
   var today = new Date().toLocaleDateString('en-ZA',{day:'2-digit',month:'long',year:'numeric'});
@@ -5376,7 +5647,7 @@ function printFNA() {
   var cliAge = ageFrom(S.cli.dob);
   var retAge = N(S.cli.retAge)||65;
   var yrsToRet = cliAge ? Math.max(0,retAge-cliAge) : null;
-  var yrsInRet = Math.max(1,85-retAge);
+  var yrsInRet = getYearsInRetirement(retAge);
 
   var physAssets=(S.props||[]).reduce(function(a,p){return a+N(p.val);},0)
     +(S.vehicles||[]).reduce(function(a,v){return a+N(v.val);},0)
@@ -5542,6 +5813,7 @@ function printFNA() {
   }
 
   // PAGE 1 — CLIENT PROFILE
+  if(sections.client){
   h+=pageHdr('Client Profile &amp; Scope of Advice');
   h+='<div class="grid3">';
   h+='<div><div class="lbl">Full Name</div><div class="val">'+e(S.cli.name)+'</div></div>';
@@ -5590,7 +5862,10 @@ function printFNA() {
     h+='</div>';
   }
 
+  } // end PAGE 1
+
   // PAGE 2 — ASSETS
+  if(sections.assets){
   h+='<div class="pb">'+pageHdr('Assets &amp; Liabilities')+'</div>';
 
   if((S.props||[]).length>0){
@@ -5643,8 +5918,10 @@ function printFNA() {
     h+='</tbody></table>';
   }
 
+  } // end PAGE 2
+
   // PAGE 3 — POLICY SCHEDULE
-  if(pols.length>0){
+  if(sections.policies && pols.length>0){
     h+='<div class="pb">'+pageHdr('Existing Policy Schedule')+'</div>';
     h+=tblHead(['Insurer / Product','Type','Policy No','Premium','Prem Esc','Ben Esc','Life Cover','Disability','Dread','IP /pm','Fund Value','Beneficiary']);
     pols.forEach(function(p){
@@ -5673,7 +5950,7 @@ function printFNA() {
   }
 
   // PAGE 4 — NEEDS ANALYSIS
-  if(S.scope.death||S.scope.disability||S.scope.dread||S.scope.ip){
+  if(sections.needs && (S.scope.death||S.scope.disability||S.scope.dread||S.scope.ip)){
     h+='<div class="pb">'+pageHdr('Needs Analysis')+'</div>';
 
     if(S.scope.death){
@@ -5752,7 +6029,7 @@ function printFNA() {
   }
 
   // PAGE 5 — RETIREMENT
-  if(S.scope.retirement&&yrsToRet){
+  if(sections.retirement && S.scope.retirement&&yrsToRet){
     h+='<div class="pb">'+pageHdr('Retirement Planning')+'</div>';
 
     h+=sec('Retirement Income Needs (Today\'s Rands)');
@@ -5838,11 +6115,20 @@ function printFNA() {
       +'<div style="display:flex;justify-content:space-between;padding:7px 0;border-top:2px solid #334;margin-top:5px;font-size:12px;font-weight:700">'
       +'<span style="color:#ccd6f6">'+(retGapP>=0?'SURPLUS':'SHORTFALL')+'</span>'
       +'<span style="color:'+(retGapP>=0?'#86efac':'#f87171')+'">'+r(Math.abs(retGapP))+'</span></div>'
+      +(retGapP<0?(function(){
+        var _sf=Math.abs(retGapP);
+        var _mr=N(S.assump.growth)/100/12;
+        var _nm=(yrsToRet||0)*12;
+        var _pmt=_mr>0?Math.round(_sf*_mr/(Math.pow(1+_mr,_nm)-1)):(_nm>0?Math.round(_sf/_nm):0);
+        return '<div style="display:flex;justify-content:space-between;padding:5px 0;margin-top:3px;font-size:10px">'
+          +'<span style="color:#8899bb">To accumulate '+r(_sf)+' by retirement, save an additional</span>'
+          +'<span style="font-weight:700;color:#fbbf24">'+r(_pmt)+' /pm</span></div>';
+      })():'')
     );
   }
 
   // PAGE 6 — ESTATE PLANNING
-  if(S.scope.estate){
+  if(sections.estate && S.scope.estate){
     h+='<div class="pb">'+pageHdr('Estate Planning')+'</div>';
 
     h+=sec('Estate Duty Calculation');
@@ -5915,6 +6201,7 @@ function printFNA() {
   } // end if(S.scope.estate)
 
   // PAGE 7 — SUMMARY & RECOMMENDATIONS
+  if(sections.summary){
   h+='<div class="pb">'+pageHdr('Summary &amp; Recommendations')+'</div>';
 
   // Helper for % funded column
@@ -5993,6 +6280,8 @@ function printFNA() {
     if(S.roa.declined){h+=sec('Products / Advice Declined by Client');h+='<p style="font-size:10px;margin-bottom:8px">'+e(S.roa.declined)+'</p>';}
     if(S.roa.comments){h+=sec('Additional Comments');h+='<p style="font-size:10px;margin-bottom:8px">'+e(S.roa.comments)+'</p>';}
   }
+
+  } // end PAGE 7 summary
 
   h+=sec('Client Declaration &amp; Signature');
   h+='<p style="font-size:10px;margin-bottom:16px">I, <strong>'+e(S.cli.name)+'</strong>, confirm that the information in this Financial Needs Analysis is accurate and complete to the best of my knowledge, and that I understand the assumptions and recommendations contained herein.</p>';
@@ -6253,6 +6542,20 @@ function printAandL() {
 render();
 setInterval(autoSave, 60000);
 document.addEventListener('visibilitychange', function(){ if(document.hidden) autoSave(); });
+document.addEventListener('input', function(e){
+  var t = e.target;
+  if (!t) return;
+  var tag = (t.tagName || '').toUpperCase();
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') queueSmartSave();
+}, true);
+document.addEventListener('change', function(e){
+  var t = e.target;
+  if (!t) return;
+  var tag = (t.tagName || '').toUpperCase();
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') queueSmartSave();
+}, true);
+window.addEventListener('pagehide', function(){ persist(); saveToServer(true); });
+window.addEventListener('beforeunload', function(){ persist(); });
 </script>
 </body>
 </html>
