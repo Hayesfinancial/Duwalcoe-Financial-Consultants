@@ -160,7 +160,7 @@ table input:focus, table select:focus { outline: none; border-color: var(--gold)
     <span id="syncIndicator" style="font-size:10px;color:#8899bb;margin-right:4px"></span>
     <button class="btn btn-ghost btn-sm" onclick="newClient()">New</button>
     <button class="btn btn-ghost btn-sm" onclick="refreshFromCRM()" title="Re-pull policies and personal details from CRM without losing FNA data">↻ CRM</button>
-    <button class="btn btn-ghost btn-sm" onclick="persist();saveToServer()" title="Save to server — accessible from any computer">☁ Sync</button>
+    <button class="btn btn-ghost btn-sm" onclick="persist();saveToServer()" title="Save to server" style="background:#a8b938;color:#fff;border-color:#a8b938">💾 Save</button>
     <button class="btn btn-ghost btn-sm" onclick="printFNA()">🖨 Print FNA</button>
     <button class="btn btn-ghost btn-sm" onclick="printAandL()" title="Print Asset & Liability Statement for loan applications">🖨 A&L</button>
   </div>
@@ -769,6 +769,40 @@ var S = JSON.parse(JSON.stringify(DEFAULTS));
   });
 })();
 
+// ── Last-client recovery: if FNA opened with no client, offer to reload last-worked client
+(function checkLastClient() {
+  var params = new URLSearchParams(window.location.search);
+  if (params.get('id')) return; // client loaded from CRM — no recovery needed
+  try {
+    var last = JSON.parse(localStorage.getItem('du_fna_lastClient') || 'null');
+    if (!last || !last.id || !last.name) return;
+    var age = Math.round((Date.now() - (last.time||0)) / 60000); // minutes
+    if (age > 10080) return; // older than 7 days — don't offer
+    var label = age < 60 ? age + ' min ago' : age < 1440 ? Math.round(age/60) + ' hrs ago' : Math.round(age/1440) + ' days ago';
+    setTimeout(function() {
+      if (confirm('Load last-worked FNA?\n\n' + last.name + ' ('+label+')\n\nData is saved on the server. Click OK to reload.')) {
+        // Try localStorage first for instant load
+        var lsKey = 'du_fna_' + last.id;
+        var lsData = localStorage.getItem(lsKey);
+        if (lsData) {
+          try {
+            S = deepMerge(JSON.parse(JSON.stringify(DEFAULTS)), JSON.parse(lsData));
+            render();
+          } catch(e) {}
+        }
+        // Then pull from server (will overwrite with latest)
+        loadFromServer(last.id, function(serverState, savedTime) {
+          if (!serverState) { status('No server data found for '+last.name); return; }
+          Object.keys(serverState).forEach(function(k) { if(k!=='importedPols') S[k] = serverState[k]; });
+          persist();
+          render();
+          status('✓ Loaded FNA for '+last.name+(savedTime?' (saved '+savedTime.slice(0,16)+')':''));
+        });
+      }
+    }, 300);
+  } catch(e) {}
+})();
+
 // Applies CRM policy data to state — used on fresh load and on "Refresh from CRM"
 function applyPolsFromCRM(pols) {
   S.importedPols = pols;
@@ -899,6 +933,10 @@ function persist() {
   document.getElementById('saved-data').textContent = json;
   var key = 'du_fna_' + (S.cli.id || S.cli.name.replace(/\s+/g,'_') || 'draft');
   try { localStorage.setItem(key, json); } catch(e) {}
+  // Remember last-worked client for recovery
+  if (S.cli.id && S.cli.name) {
+    try { localStorage.setItem('du_fna_lastClient', JSON.stringify({id:S.cli.id, name:S.cli.name, time:Date.now()})); } catch(e) {}
+  }
 }
 
 // Save FNA state to Supabase
@@ -922,7 +960,7 @@ function saveToServer(silent) {
   var now = new Date().toISOString().slice(0,16).replace('T',' ');
   var indicator = document.getElementById('syncIndicator');
   if(indicator){ indicator.textContent = '↑ Saving...'; indicator.style.color = '#a8b938'; }
-  sbFetch('POST','/rest/v1/fnadata',[{ClientID:clientId,Data:JSON.stringify(saveData),LastSaved:now,SavedBy:'Clinton Hayes'}],function(res,err){
+  sbFetch('POST','/rest/v1/fnadata?on_conflict=ClientID',[{ClientID:clientId,Data:JSON.stringify(saveData),LastSaved:now,SavedBy:'Clinton Hayes'}],function(res,err){
     if(err){
       if(indicator){ indicator.textContent = '⚠ Sync failed'; indicator.style.color = '#f87171'; }
       if(!silent) status('⚠ Save failed: '+err);
@@ -937,7 +975,7 @@ function saveToServer(silent) {
 // Load FNA state from Supabase
 function loadFromServer(clientId, onDone) {
   if(!clientId){ if(onDone) onDone(null); return; }
-  sbFetch('GET','/rest/v1/fnadata?ClientID=eq.'+encodeURIComponent(clientId)+'&select=*',null,function(rows,err){
+  sbFetch('GET','/rest/v1/fnadata?ClientID=eq.'+encodeURIComponent(clientId)+'&select=*&order=LastSaved.desc&limit=1',null,function(rows,err){
     if(rows && rows.length && rows[0].Data){
       try {
         var serverState = typeof rows[0].Data==='string' ? JSON.parse(rows[0].Data) : rows[0].Data;
