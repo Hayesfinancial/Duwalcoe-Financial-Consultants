@@ -4205,6 +4205,8 @@ function buildEstate() {
 
   var physVal = 0;
   var physLiab = 0;
+  var grossEstateItems = [];
+  var preDutyLiabilityItems = [];
 
   // Properties
   if((S.props||[]).length>0||(S.vehicles||[]).length>0||(S.otherAssets||[]).length>0){
@@ -4225,6 +4227,24 @@ function buildEstate() {
       tbody.appendChild(tr);
       physVal += N(val);
       physLiab += N(liab);
+      grossEstateItems.push({
+        component: desc || 'Asset',
+        category: 'Physical asset',
+        amount: N(val),
+        note: (benType||'Estate')==='Spouse'
+          ? 'Included in gross estate; deducted later under s.4(q) if left to spouse.'
+          : ((benType||'Estate')==='Third Party'
+              ? 'Physical asset included in gross estate; route shown for planning context.'
+              : 'Included in gross estate as a physical estate asset.')
+      });
+      if(N(liab)>0){
+        preDutyLiabilityItems.push({
+          component: desc || 'Asset',
+          category: 'Attached liability',
+          amount: N(liab),
+          note: 'Deducted before estate duty as debt against the asset.'
+        });
+      }
     }
 
     (S.props||[]).forEach(function(p){
@@ -4303,6 +4323,12 @@ function buildEstate() {
       var treatment, colour;
       if(p.EstateDutiable==='Yes'){
         bizDutiable+=amt;
+        grossEstateItems.push({
+          component: (p.Insurer||'Policy') + (p.BizType ? ' — ' + p.BizType : ''),
+          category: 'Business assurance deemed property',
+          amount: amt,
+          note: 'Marked estate dutiable, so included as deemed property in the gross estate.'
+        });
         treatment='Deemed property — dutiable'; colour='#dc2626';
       } else {
         treatment='Outside estate — '+esc2(p.BizType||'Business assurance'); colour='#6b7280';
@@ -4314,12 +4340,30 @@ function buildEstate() {
     if(!ben) return;
     if(bt==='Spouse'){
       s4qPolicies+=ben;
+      grossEstateItems.push({
+        component: (p.Insurer||'Policy') + (p.Product ? ' — ' + p.Product : ''),
+        category: 'Policy to spouse',
+        amount: ben,
+        note: 'Included in gross estate, then deducted under s.4(q).'
+      });
       polRow(p.Insurer,p.Product,p.Beneficiary||'Spouse','Spouse',ben,'s.4(q) — not dutiable','#16a34a');
     } else if(bt==='Estate'){
       estatePols+=ben;
+      grossEstateItems.push({
+        component: (p.Insurer||'Policy') + (p.Product ? ' — ' + p.Product : ''),
+        category: 'Policy to estate',
+        amount: ben,
+        note: 'Falls into the estate and is administered by the executor.'
+      });
       polRow(p.Insurer,p.Product,'Estate','Estate',ben,'Dutiable — executor administers','#dc2626');
     } else if(bt==='Third Party'){
       thirdPartyPols+=ben;
+      grossEstateItems.push({
+        component: (p.Insurer||'Policy') + (p.Product ? ' — ' + p.Product : ''),
+        category: 'Third party / trust deemed property',
+        amount: ben,
+        note: 'Paid direct, but still treated as deemed property for estate duty.'
+      });
       polRow(p.Insurer,p.Product,p.Beneficiary||'Third Party','Third Party',ben,'Deemed property — dutiable','#f59e0b');
     } else {
       polRow(p.Insurer,p.Product,p.Beneficiary||'—',bt||'—',ben,'Set beneficiary type on policy card','#9ca3af');
@@ -4428,7 +4472,69 @@ function buildEstate() {
   var bondLiabs = (S.props||[]).reduce(function(a,p){return a+N(p.bond);},0);
   var vehLiabs = (S.vehicles||[]).reduce(function(a,v){return a+N(v.finance);},0);
   var otherLiabs = (S.liabilities||[]).reduce(function(a,l){return a+N(l.bal);},0);
+  if(otherLiabs>0){
+    preDutyLiabilityItems.push({
+      component: 'General liabilities from Assets tab',
+      category: 'Other liabilities',
+      amount: otherLiabs,
+      note: 'Outstanding liabilities captured separately on the Assets tab.'
+    });
+  }
   var totalLiabsBeforeDuty = physLiab + cgtLiability;
+
+  s.appendChild(stitle('Gross Estate Components'));
+  var compInf = div('info');
+  compInf.innerHTML = 'This is the full build-up of the <strong>gross estate</strong> inside the Estate tab, so you do not need to go back to Assets to see what is being counted.';
+  s.appendChild(compInf);
+
+  var compTbl = document.createElement('table');
+  compTbl.style.cssText='width:100%;border-collapse:collapse;margin-bottom:14px;font-size:12px';
+  compTbl.innerHTML='<thead><tr><th style="text-align:left;padding:6px 8px;background:var(--navy);color:#fff">Component</th><th style="text-align:left;padding:6px 8px;background:var(--navy);color:#fff">Category</th><th style="text-align:right;padding:6px 8px;background:var(--navy);color:#fff">Amount</th><th style="text-align:left;padding:6px 8px;background:var(--navy);color:#fff">Treatment</th></tr></thead>';
+  var compBody = document.createElement('tbody');
+  grossEstateItems.forEach(function(it){
+    var tr = document.createElement('tr');
+    tr.innerHTML = '<td style="padding:6px 8px;border-bottom:1px solid var(--mist)"><strong>'+esc2(it.component)+'</strong></td>'+
+      '<td style="padding:6px 8px;border-bottom:1px solid var(--mist);font-size:11px;color:var(--sub)">'+esc2(it.category)+'</td>'+
+      '<td style="text-align:right;padding:6px 8px;border-bottom:1px solid var(--mist);font-weight:600">'+Rfmt(it.amount)+'</td>'+
+      '<td style="padding:6px 8px;border-bottom:1px solid var(--mist);font-size:11px;color:var(--sub)">'+esc2(it.note)+'</td>';
+    compBody.appendChild(tr);
+  });
+  var compTot = document.createElement('tr');
+  compTot.innerHTML = '<td colspan="2" style="padding:7px 8px;border-top:2px solid var(--navy);font-weight:700">Gross estate total</td>'+
+    '<td style="text-align:right;padding:7px 8px;border-top:2px solid var(--navy);font-weight:700;color:var(--navy)">'+Rfmt(grossEstate)+'</td>'+
+    '<td style="padding:7px 8px;border-top:2px solid var(--navy);font-size:11px;color:var(--sub)">Total of all included physical assets and deemed-property policy proceeds.</td>';
+  compBody.appendChild(compTot);
+  compTbl.appendChild(compBody);
+  s.appendChild(compTbl);
+
+  s.appendChild(stitle('Liabilities & Pre-Duty Deductions Detail'));
+  var dedTbl = document.createElement('table');
+  dedTbl.style.cssText='width:100%;border-collapse:collapse;margin-bottom:14px;font-size:12px';
+  dedTbl.innerHTML='<thead><tr><th style="text-align:left;padding:6px 8px;background:var(--navy);color:#fff">Deduction</th><th style="text-align:left;padding:6px 8px;background:var(--navy);color:#fff">Category</th><th style="text-align:right;padding:6px 8px;background:var(--navy);color:#fff">Amount</th><th style="text-align:left;padding:6px 8px;background:var(--navy);color:#fff">Treatment</th></tr></thead>';
+  var dedBody = document.createElement('tbody');
+  preDutyLiabilityItems.forEach(function(it){
+    var tr = document.createElement('tr');
+    tr.innerHTML = '<td style="padding:6px 8px;border-bottom:1px solid var(--mist)"><strong>'+esc2(it.component)+'</strong></td>'+
+      '<td style="padding:6px 8px;border-bottom:1px solid var(--mist);font-size:11px;color:var(--sub)">'+esc2(it.category)+'</td>'+
+      '<td style="text-align:right;padding:6px 8px;border-bottom:1px solid var(--mist);font-weight:600">('+Rfmt(it.amount)+')</td>'+
+      '<td style="padding:6px 8px;border-bottom:1px solid var(--mist);font-size:11px;color:var(--sub)">'+esc2(it.note)+'</td>';
+    dedBody.appendChild(tr);
+  });
+  if(cgtLiability>0){
+    var trCGT = document.createElement('tr');
+    trCGT.innerHTML = '<td style="padding:6px 8px;border-bottom:1px solid var(--mist)"><strong>Capital Gains Tax on death</strong></td>'+
+      '<td style="padding:6px 8px;border-bottom:1px solid var(--mist);font-size:11px;color:var(--sub)">Tax deduction</td>'+
+      '<td style="text-align:right;padding:6px 8px;border-bottom:1px solid var(--mist);font-weight:600">('+Rfmt(cgtLiability)+')</td>'+
+      '<td style="padding:6px 8px;border-bottom:1px solid var(--mist);font-size:11px;color:var(--sub)">Deemed income tax liability deducted before estate duty.</td>';
+    dedBody.appendChild(trCGT);
+  }
+  var dedTot = document.createElement('tr');
+  dedTot.innerHTML = '<td colspan="2" style="padding:7px 8px;border-top:2px solid var(--navy);font-weight:700">Total liabilities / deductions before duty</td>'+
+    '<td style="text-align:right;padding:7px 8px;border-top:2px solid var(--navy);font-weight:700;color:var(--navy)">('+Rfmt(totalLiabsBeforeDuty)+')</td>'+
+    '<td style="padding:7px 8px;border-top:2px solid var(--navy);font-size:11px;color:var(--sub)">Used to move from gross estate to net estate before accrual and s.4(q).</td>';
+  dedBody.appendChild(dedTot);
+  dedTbl.appendChild(dedBody);
+  s.appendChild(dedTbl);
 
   s.appendChild(stitle('Estate Build-Up'));
   var buildBox = makeCalcBox('What Makes Up the Gross Estate');
