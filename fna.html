@@ -161,7 +161,7 @@ table input:focus, table select:focus { outline: none; border-color: var(--gold)
     <button class="btn btn-ghost btn-sm" onclick="newClient()">New</button>
     <button class="btn btn-ghost btn-sm" onclick="refreshFromCRM()" title="Re-pull policies and personal details from CRM without losing FNA data">↻ CRM</button>
     <button class="btn btn-ghost btn-sm" onclick="persist();saveToServer()" title="Save to server" style="background:#a8b938;color:#fff;border-color:#a8b938">💾 Save</button>
-    <button class="btn btn-ghost btn-sm" onclick="printFNA()">🖨 Print FNA</button>
+    <button class="btn btn-ghost btn-sm" onclick="showPrintDialog()">🖨 Print FNA</button>
     <button class="btn btn-ghost btn-sm" onclick="printAandL()" title="Print Asset & Liability Statement for loan applications">🖨 A&L</button>
   </div>
 </div>
@@ -5439,7 +5439,69 @@ function generateROA() {
 }
 
 
-function printFNA() {
+// ═══════════════════════════════════════════════════════════
+// PRINT DIALOG — select which sections to include
+// ═══════════════════════════════════════════════════════════
+function showPrintDialog() {
+  var sections = [
+    {key:'client',  label:'Client Profile & Scope', checked:true},
+    {key:'assets',  label:'Assets & Liabilities', checked:true},
+    {key:'policies',label:'Policy Schedule', checked:true},
+    {key:'needs',   label:'Needs Analysis (Death / Disability)', checked:!!S.scope.death||!!S.scope.disability},
+    {key:'retirement',label:'Retirement Planning', checked:!!S.scope.retirement},
+    {key:'estate',  label:'Estate Planning', checked:!!S.scope.estate},
+    {key:'summary', label:'Summary & Recommendations', checked:true}
+  ];
+  var ov = document.createElement('div');
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(10,20,40,.55);z-index:9999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(2px)';
+  var box = document.createElement('div');
+  box.style.cssText = 'background:#fff;border-radius:12px;padding:24px 28px;max-width:380px;width:100%;box-shadow:0 12px 48px rgba(0,0,0,.25)';
+  box.innerHTML = '<div style="font-family:Georgia,serif;font-size:17px;color:#0e413a;margin-bottom:4px">Print FNA</div>'
+    +'<div style="font-size:12px;color:#889;margin-bottom:16px">Select the sections to include:</div>';
+  sections.forEach(function(s) {
+    var row = document.createElement('label');
+    row.style.cssText = 'display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:6px;cursor:pointer;margin-bottom:2px';
+    row.onmouseenter = function(){row.style.background='#f5f5f0';};
+    row.onmouseleave = function(){row.style.background='transparent';};
+    var cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.checked = s.checked; cb.id = 'prt_'+s.key;
+    cb.style.cssText = 'width:18px;height:18px;accent-color:#0e413a;cursor:pointer';
+    var lbl = document.createElement('span');
+    lbl.textContent = s.label;
+    lbl.style.cssText = 'font-size:13px;font-weight:500;color:#1a2a2e';
+    row.appendChild(cb); row.appendChild(lbl); box.appendChild(row);
+  });
+  // Select all / none
+  var selRow = document.createElement('div');
+  selRow.style.cssText = 'display:flex;gap:12px;margin:10px 0 16px;padding-left:10px';
+  selRow.innerHTML = '<a href="#" style="font-size:11px;color:#0e413a" onclick="event.preventDefault();document.querySelectorAll(\'[id^=prt_]\').forEach(function(c){c.checked=true})">Select all</a>'
+    +'<a href="#" style="font-size:11px;color:#9e2a2b" onclick="event.preventDefault();document.querySelectorAll(\'[id^=prt_]\').forEach(function(c){c.checked=false})">Clear all</a>';
+  box.appendChild(selRow);
+  // Buttons
+  var btnRow = document.createElement('div');
+  btnRow.style.cssText = 'display:flex;justify-content:flex-end;gap:8px';
+  var cancelBtn = document.createElement('button');
+  cancelBtn.textContent = 'Cancel';
+  cancelBtn.style.cssText = 'padding:8px 18px;border-radius:7px;border:1.5px solid #ddd;background:#fff;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;color:#555';
+  cancelBtn.onclick = function(){ document.body.removeChild(ov); };
+  var printBtn = document.createElement('button');
+  printBtn.textContent = '🖨 Print';
+  printBtn.style.cssText = 'padding:8px 22px;border-radius:7px;border:none;background:#0e413a;color:#fff;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit';
+  printBtn.onclick = function(){
+    var sel = {};
+    sections.forEach(function(s){ sel[s.key] = document.getElementById('prt_'+s.key).checked; });
+    document.body.removeChild(ov);
+    printFNA(sel);
+  };
+  btnRow.appendChild(cancelBtn); btnRow.appendChild(printBtn); box.appendChild(btnRow);
+  ov.appendChild(box);
+  // Close on backdrop click
+  ov.addEventListener('click', function(ev){ if(ev.target===ov) document.body.removeChild(ov); });
+  document.body.appendChild(ov);
+}
+
+function printFNA(sections) {
+  if(!sections) sections = {client:true,assets:true,policies:true,needs:true,retirement:true,estate:true,summary:true};
   persist();
   var pols = S.importedPols || [];
   var today = new Date().toLocaleDateString('en-ZA',{day:'2-digit',month:'long',year:'numeric'});
@@ -5646,6 +5708,7 @@ function printFNA() {
   }
 
   // PAGE 1 — CLIENT PROFILE
+  if(sections.client){
   h+=pageHdr('Client Profile &amp; Scope of Advice');
   h+='<div class="grid3">';
   h+='<div><div class="lbl">Full Name</div><div class="val">'+e(S.cli.name)+'</div></div>';
@@ -5694,7 +5757,10 @@ function printFNA() {
     h+='</div>';
   }
 
+  } // end PAGE 1
+
   // PAGE 2 — ASSETS
+  if(sections.assets){
   h+='<div class="pb">'+pageHdr('Assets &amp; Liabilities')+'</div>';
 
   if((S.props||[]).length>0){
@@ -5747,8 +5813,10 @@ function printFNA() {
     h+='</tbody></table>';
   }
 
+  } // end PAGE 2
+
   // PAGE 3 — POLICY SCHEDULE
-  if(pols.length>0){
+  if(sections.policies && pols.length>0){
     h+='<div class="pb">'+pageHdr('Existing Policy Schedule')+'</div>';
     h+=tblHead(['Insurer / Product','Type','Policy No','Premium','Prem Esc','Ben Esc','Life Cover','Disability','Dread','IP /pm','Fund Value','Beneficiary']);
     pols.forEach(function(p){
@@ -5777,7 +5845,7 @@ function printFNA() {
   }
 
   // PAGE 4 — NEEDS ANALYSIS
-  if(S.scope.death||S.scope.disability||S.scope.dread||S.scope.ip){
+  if(sections.needs && (S.scope.death||S.scope.disability||S.scope.dread||S.scope.ip)){
     h+='<div class="pb">'+pageHdr('Needs Analysis')+'</div>';
 
     if(S.scope.death){
@@ -5856,7 +5924,7 @@ function printFNA() {
   }
 
   // PAGE 5 — RETIREMENT
-  if(S.scope.retirement&&yrsToRet){
+  if(sections.retirement && S.scope.retirement&&yrsToRet){
     h+='<div class="pb">'+pageHdr('Retirement Planning')+'</div>';
 
     h+=sec('Retirement Income Needs (Today\'s Rands)');
@@ -5955,7 +6023,7 @@ function printFNA() {
   }
 
   // PAGE 6 — ESTATE PLANNING
-  if(S.scope.estate){
+  if(sections.estate && S.scope.estate){
     h+='<div class="pb">'+pageHdr('Estate Planning')+'</div>';
 
     h+=sec('Estate Duty Calculation');
@@ -6028,6 +6096,7 @@ function printFNA() {
   } // end if(S.scope.estate)
 
   // PAGE 7 — SUMMARY & RECOMMENDATIONS
+  if(sections.summary){
   h+='<div class="pb">'+pageHdr('Summary &amp; Recommendations')+'</div>';
 
   // Helper for % funded column
@@ -6106,6 +6175,8 @@ function printFNA() {
     if(S.roa.declined){h+=sec('Products / Advice Declined by Client');h+='<p style="font-size:10px;margin-bottom:8px">'+e(S.roa.declined)+'</p>';}
     if(S.roa.comments){h+=sec('Additional Comments');h+='<p style="font-size:10px;margin-bottom:8px">'+e(S.roa.comments)+'</p>';}
   }
+
+  } // end PAGE 7 summary
 
   h+=sec('Client Declaration &amp; Signature');
   h+='<p style="font-size:10px;margin-bottom:16px">I, <strong>'+e(S.cli.name)+'</strong>, confirm that the information in this Financial Needs Analysis is accurate and complete to the best of my knowledge, and that I understand the assumptions and recommendations contained herein.</p>';
