@@ -2571,23 +2571,40 @@ function saveClient(openFNA){
   var savedIsLead = c.IsLead==='Yes';
   var wasEdit = !!EC;
 
-  // Show saving state — keep modal open until server confirms
+  // Show saving state
   var saveBtn=document.querySelector('[data-save="client"],[data-save="client-only"],[data-save="client-fna"]');
   var _origBtnText = saveBtn ? saveBtn.textContent : '';
   if(saveBtn){saveBtn.textContent='⏳ Saving…';saveBtn.disabled=true;}
 
-  // Send to Supabase FIRST — only update local DB after server confirms
+  function _restoreCliBtn(){
+    var b=document.querySelector('[data-save="client"],[data-save="client-only"],[data-save="client-fna"]');
+    if(b){b.textContent=_origBtnText;b.disabled=false;}
+  }
+  function _saveCliLocally(){
+    if(wasEdit){var i=DB.clients.findIndex(function(x){return x.ID===id;});if(i>=0)DB.clients[i]=c;}
+    else { if(!DB.clients.find(function(x){return x.ID===id;})) DB.clients.push(c); }
+    try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
+  }
+
+  // Hard 12-second timeout
+  var _cliDone=false;
+  var _cliTimer=setTimeout(function(){
+    if(_cliDone) return; _cliDone=true;
+    console.warn('[SAVE] Client timed out after 12s — saving locally');
+    _saveCliLocally(); _restoreCliBtn();
+    toast('⚠️ Server slow — client saved locally. Re-save to push to server.','err');
+  }, 12000);
+
   post({action:'saveClient',client:c},function(result){
+    if(_cliDone) return; _cliDone=true; clearTimeout(_cliTimer);
     if(!result || !result.ok){
-      // Server FAILED — keep modal open so user can retry
-      if(saveBtn){saveBtn.textContent=_origBtnText;saveBtn.disabled=false;}
-      toast('⚠️ Client save FAILED — check connection and try again','err');
+      _saveCliLocally(); _restoreCliBtn();
+      toast('⚠️ Server error — client saved locally. Re-save to push to server.','err');
       return;
     }
 
-    // Server confirmed — NOW safe to update local state
-    if(wasEdit){var i=DB.clients.findIndex(function(x){return x.ID===id;});if(i>=0)DB.clients[i]=c;}
-    else DB.clients.push(c);
+    // Server confirmed
+    _saveCliLocally();
 
     // Save children as family members (secondary — fire-and-forget)
     _childrenToSave.forEach(function(link){
@@ -2652,6 +2669,9 @@ function saveClient(openFNA){
 }
 
 function openPolicyModal(cid,idx){
+  // Reset save button in case a previous save timed out or failed
+  var _sb=document.querySelector('[data-save="policy"]');
+  if(_sb){_sb.textContent='💾 Save Policy';_sb.disabled=false;}
   EPC=cid; EPI=(idx!==undefined?idx:null);
   var pols=polsFor(cid);
   var p=(idx!==undefined&&pols[idx])?pols[idx]:{};
@@ -3838,24 +3858,38 @@ function savePolicy(){
   pol.ReviewHistory=oldPol?(oldPol.ReviewHistory||''):'';
   backupPolicySnapshot(oldPol||pol, oldPol?'before-policy-update':'before-policy-create');
 
-  // Show saving state — keep modal open until server confirms
+  // Show saving state
   var saveBtn=document.querySelector('[data-save="policy"]');
   if(saveBtn){saveBtn.textContent='⏳ Saving…';saveBtn.disabled=true;}
 
-  // Send to Supabase FIRST — only update local DB after server confirms
+  function _restoreBtn(){
+    var b=document.querySelector('[data-save="policy"]');
+    if(b){b.textContent='💾 Save Policy';b.disabled=false;}
+  }
+  function _saveLocally(){
+    var _idx=DB.policies.findIndex(function(x){return String(x.ID)===String(pol.ID);});
+    if(_idx>=0) DB.policies[_idx]=pol; else DB.policies.push(pol);
+    try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
+  }
+
+  // Hard 12-second timeout — user is NEVER stuck
+  var _done=false;
+  var _timer=setTimeout(function(){
+    if(_done) return; _done=true;
+    console.warn('[SAVE] Policy timed out after 12s — saving locally');
+    _saveLocally(); _restoreBtn();
+    toast('⚠️ Server slow — saved locally. Click Save again to push to server.','err');
+  }, 12000);
+
   post({action:'savePolicy',policy:pol},function(result){
+    if(_done) return; _done=true; clearTimeout(_timer);
     if(result && result.ok){
-      // Server confirmed — NOW safe to update local state
-      var _idx=DB.policies.findIndex(function(x){return String(x.ID)===String(pol.ID);});
-      if(_idx>=0) DB.policies[_idx]=pol;
-      else DB.policies.push(pol);
-      try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
-      closeAll();render();
+      _saveLocally(); closeAll(); render();
       toast('Policy saved ✓','ok');
     } else {
-      // Server FAILED — keep modal open so user can retry
-      if(saveBtn){saveBtn.textContent='💾 Save Policy';saveBtn.disabled=false;}
-      toast('⚠️ Policy save FAILED — check connection and try again','err');
+      console.warn('[SAVE] Policy server error:', result);
+      _saveLocally(); _restoreBtn();
+      toast('⚠️ Server error — saved locally. Click Save again to retry.','err');
     }
   });
 }
