@@ -344,17 +344,6 @@ function retryPendingSaves(){
     sbFetch('POST', '/rest/v1/'+item.table, [item.row], function(res, err){
       if(!err){
         clearPendingSaveQueueItem(item.table, item.row.ID);
-        try{
-          if(item.table==='policies'){
-            var idx = (DB.policies||[]).findIndex(function(p){ return p && String(p.ID)===String(item.row.ID); });
-            if(idx>=0){
-              DB.policies[idx] = Object.assign({}, item.row);
-              delete DB.policies[idx]._pendingSave;
-            }
-            localStorage.setItem('du_db', JSON.stringify(DB));
-            render();
-          }
-        }catch(e){}
         toast('Recovered pending save for '+item.table, 'ok');
       }
     });
@@ -378,10 +367,9 @@ function backupPolicySnapshot(pol, reason){
 window.addEventListener('online', retryPendingSaves);
 setInterval(retryPendingSaves, 30000);
 window.addEventListener('beforeunload', function(e){
-  var hasPendingPolicies = (DB.policies||[]).some(function(p){ return p && p._pendingSave; });
-  if(_SAVE_QUEUE.length || hasPendingPolicies){
+  if(_SAVE_QUEUE.length){
     e.preventDefault();
-    e.returnValue = 'There are policy saves still pending.';
+    e.returnValue = 'There are saves still pending.';
     return e.returnValue;
   }
 });
@@ -398,36 +386,15 @@ function syncNow() {
     done++;
     if(done < needed.length) return;
 
-    // Clients — load from server then re-apply any locally pending client saves
+    // Clients — server is source of truth
     DB.clients = (loaded.clients||[]).map(function(c){ return c; });
-    try{
-      var _ldb2=JSON.parse(localStorage.getItem('du_db')||'{}');
-      (_ldb2.clients||[]).forEach(function(lc){
-        if(lc._pendingSave){
-          var _ci=DB.clients.findIndex(function(sc){return String(sc.ID)===String(lc.ID);});
-          if(_ci>=0) DB.clients[_ci]=lc;
-          else DB.clients.push(lc);
-        }
-      });
-    }catch(e){}
 
-    // Policies
+    // Policies — server is source of truth
     DB.policies = (loaded.policies||[]).map(function(p){
       // Remap sheet typo NonVestedVaue -> NonVestedValue
       if(p.NonVestedVaue !== undefined && !p.NonVestedValue){ p.NonVestedValue = p.NonVestedVaue; }
       return p;
     });
-    // Re-apply any locally pending saves (in case sync fires mid-save)
-    try{
-      var _ldb=JSON.parse(localStorage.getItem('du_db')||'{}');
-      (_ldb.policies||[]).forEach(function(lp){
-        if(lp._pendingSave){
-          var _pi=DB.policies.findIndex(function(sp){return String(sp.ID)===String(lp.ID);});
-          if(_pi>=0) DB.policies[_pi]=lp;
-          else DB.policies.push(lp);
-        }
-      });
-    }catch(e){}
 
     DB.tasks  = loaded.tasks||[];
     DB.roas   = loaded.roas||[];
@@ -2579,83 +2546,102 @@ function saveClient(openFNA){
   } else {
     c.Notes='';
   }
-  if(EC){var i=DB.clients.findIndex(function(x){return x.ID===EC;});if(i>=0)DB.clients[i]=c;}
-  else DB.clients.push(c);
 
-  // Save children as family members
+  // Collect children from form BEFORE server call (form fields won't exist after modal closes)
+  var _childrenToSave = [];
   if(NEW_CHILDREN && NEW_CHILDREN.length){
     NEW_CHILDREN.forEach(function(ch){
       var chname = document.getElementById('chname_'+ch.id);
       var chdob = document.getElementById('chdob_'+ch.id);
       var chid = document.getElementById('chid_'+ch.id);
       if(chname && chname.value.trim()){
-        var link = {ID:'fam_'+Date.now()+'_'+ch.id, PrincipalID:id,
+        _childrenToSave.push({ID:'fam_'+Date.now()+'_'+ch.id, PrincipalID:id,
           Name:chname.value.trim(), IDNumber:chid?chid.value:'',
-          DOB:chdob?chdob.value:'', Cell:'', Email:'', Type:'Child', IsClient:'No', ClientID:''};
-        DB.links.push(link);
-        post({action:'saveFamMember', member:link});
+          DOB:chdob?chdob.value:'', Cell:'', Email:'', Type:'Child', IsClient:'No', ClientID:''});
       }
+    });
+  }
+
+  // Collect spouse data from form
+  var _spFormName = g('fspname');
+  var _spFormData = _spFormName ? {name:_spFormName, idnum:g('fspid')||'', dob:g('fspdob'), cell:g('fspcell'), email:g('fspemail')} : null;
+
+  var savedIsLead = c.IsLead==='Yes';
+  var wasEdit = !!EC;
+
+  // Show saving state — keep modal open until server confirms
+  var saveBtn=document.querySelector('[data-save="client"],[data-save="client-only"],[data-save="client-fna"]');
+  var _origBtnText = saveBtn ? saveBtn.textContent : '';
+  if(saveBtn){saveBtn.textContent='⏳ Saving…';saveBtn.disabled=true;}
+
+  // Send to Supabase FIRST — only update local DB after server confirms
+  post({action:'saveClient',client:c},function(result){
+    if(!result || !result.ok){
+      // Server FAILED — keep modal open so user can retry
+      if(saveBtn){saveBtn.textContent=_origBtnText;saveBtn.disabled=false;}
+      toast('⚠️ Client save FAILED — check connection and try again','err');
+      return;
+    }
+
+    // Server confirmed — NOW safe to update local state
+    if(wasEdit){var i=DB.clients.findIndex(function(x){return x.ID===id;});if(i>=0)DB.clients[i]=c;}
+    else DB.clients.push(c);
+
+    // Save children as family members (secondary — fire-and-forget)
+    _childrenToSave.forEach(function(link){
+      DB.links.push(link);
+      post({action:'saveFamMember', member:link});
     });
     NEW_CHILDREN=[];
-  }
 
-  // Save spouse as family member if name entered
-  if(g('fspname')){
-    var existing = DB.links.find(function(l){ return String(l.PrincipalID)===String(id) && l.Type==='Spouse'; });
-    if(!existing){
-      var spLink = {ID:'fam_sp_'+Date.now(), PrincipalID:id,
-        Name:g('fspname'), IDNumber:g('fspid')||'', DOB:g('fspdob'),
-        Cell:g('fspcell'), Email:g('fspemail'), Type:'Spouse', IsClient:'No', ClientID:''};
-      DB.links.push(spLink);
-      post({action:'saveFamMember', member:spLink});
-    } else {
-      // Update existing spouse link with latest info from client form
-      existing.Name = g('fspname');
-      existing.IDNumber = g('fspid')||existing.IDNumber||'';
-      existing.DOB  = g('fspdob')||existing.DOB||'';
-      existing.Cell = g('fspcell')||existing.Cell||'';
-      existing.Email= g('fspemail')||existing.Email||'';
-      post({action:'saveFamMember', member:existing});
-    }
-  }
-
-  // Sync Anniversary, MaritalStatus, Address to linked spouse client
-  if(EC){
-    // Find the linked spouse in either direction
-    var _spLink = DB.links.find(function(l){
-      return l.Type==='Spouse' && l.IsClient==='Yes' && l.ClientID && (
-        (String(l.PrincipalID)===String(c.ID)) ||  // This client is the principal
-        (String(l.ClientID)===String(c.ID))          // This client is the linked spouse
-      );
-    });
-    var linkedId = null;
-    if(_spLink){
-      // If this client is the principal, linked ID is ClientID; otherwise it's PrincipalID
-      linkedId = String(_spLink.PrincipalID)===String(c.ID) ? String(_spLink.ClientID) : String(_spLink.PrincipalID);
-    }
-    if(linkedId){
-      var linked = DB.clients.find(function(x){ return String(x.ID)===linkedId; });
-      if(linked){
-        var changed = false;
-        if(c.Anniversary && c.Anniversary !== linked.Anniversary){ linked.Anniversary = c.Anniversary; changed=true; }
-        if(c.MaritalStatus && c.MaritalStatus !== linked.MaritalStatus){ linked.MaritalStatus = c.MaritalStatus; changed=true; }
-        if(c.Address && c.Address !== linked.Address){ linked.Address = c.Address; changed=true; }
-        if(changed){ post({action:'saveClient', client:linked}); }
+    // Save spouse as family member if name entered
+    if(_spFormData){
+      var existingSp = DB.links.find(function(l){ return String(l.PrincipalID)===String(id) && l.Type==='Spouse'; });
+      if(!existingSp){
+        var spLink = {ID:'fam_sp_'+Date.now(), PrincipalID:id,
+          Name:_spFormData.name, IDNumber:_spFormData.idnum, DOB:_spFormData.dob,
+          Cell:_spFormData.cell, Email:_spFormData.email, Type:'Spouse', IsClient:'No', ClientID:''};
+        DB.links.push(spLink);
+        post({action:'saveFamMember', member:spLink});
+      } else {
+        existingSp.Name = _spFormData.name;
+        existingSp.IDNumber = _spFormData.idnum||existingSp.IDNumber||'';
+        existingSp.DOB  = _spFormData.dob||existingSp.DOB||'';
+        existingSp.Cell = _spFormData.cell||existingSp.Cell||'';
+        existingSp.Email= _spFormData.email||existingSp.Email||'';
+        post({action:'saveFamMember', member:existingSp});
       }
     }
-  }
 
-  var savedId = c.ID;
-  var savedIsLead = c.IsLead==='Yes';
-  EC=null; closeAll();
-  // Write to localStorage immediately so a refresh before server responds keeps the data
-  try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
-  // Open the client/lead profile immediately after save
-  openClient(savedId);
-  post({action:'saveClient',client:c},function(){
-    clearEditingLock(c.ID);
+    // Sync Anniversary, MaritalStatus, Address to linked spouse client
+    if(wasEdit){
+      var _spLink = DB.links.find(function(l){
+        return l.Type==='Spouse' && l.IsClient==='Yes' && l.ClientID && (
+          (String(l.PrincipalID)===String(c.ID)) ||
+          (String(l.ClientID)===String(c.ID))
+        );
+      });
+      var linkedId = null;
+      if(_spLink){
+        linkedId = String(_spLink.PrincipalID)===String(c.ID) ? String(_spLink.ClientID) : String(_spLink.PrincipalID);
+      }
+      if(linkedId){
+        var linked = DB.clients.find(function(x){ return String(x.ID)===linkedId; });
+        if(linked){
+          var changed = false;
+          if(c.Anniversary && c.Anniversary !== linked.Anniversary){ linked.Anniversary = c.Anniversary; changed=true; }
+          if(c.MaritalStatus && c.MaritalStatus !== linked.MaritalStatus){ linked.MaritalStatus = c.MaritalStatus; changed=true; }
+          if(c.Address && c.Address !== linked.Address){ linked.Address = c.Address; changed=true; }
+          if(changed){ post({action:'saveClient', client:linked}); }
+        }
+      }
+    }
+
+    EC=null; closeAll();
     try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
-    toast((savedIsLead?'Lead':'Client')+' saved','ok');
+    clearEditingLock(c.ID);
+    openClient(c.ID);
+    toast((savedIsLead?'Lead':'Client')+' saved ✓','ok');
     if(openFNA){
       var fnaUrl = buildFnaUrl(c);
       window.open(fnaUrl,'_blank');
@@ -3803,28 +3789,27 @@ function savePolicy(){
   if(!oldPol&&window.REPLACING_POL_ID){window.REPLACING_POL_ID=null;window.REPLACING_POL_NO=null;}
   // Keep existing history, don't overwrite
   pol.ReviewHistory=oldPol?(oldPol.ReviewHistory||''):'';
-  // Mark pending so a refresh before server confirms doesn't lose the policy
-  pol._pendingSave = true;
   backupPolicySnapshot(oldPol||pol, oldPol?'before-policy-update':'before-policy-create');
-  if(EPI!==null&&oldPol){var gi=DB.policies.indexOf(oldPol);if(gi>=0)DB.policies[gi]=pol;}
-  else DB.policies.push(pol);
-  // Write to localStorage immediately — survives a refresh before server responds
-  try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
-  closeAll();render();
-  var _polForServer = JSON.parse(JSON.stringify(pol));
-  delete _polForServer._pendingSave;
-  post({action:'savePolicy',policy:_polForServer},function(result){
+
+  // Show saving state — keep modal open until server confirms
+  var saveBtn=document.querySelector('[data-save="policy"]');
+  if(saveBtn){saveBtn.textContent='⏳ Saving…';saveBtn.disabled=true;}
+
+  // Send to Supabase FIRST — only update local DB after server confirms
+  post({action:'savePolicy',policy:pol},function(result){
     if(result && result.ok){
-      // Server confirmed — clear pending flag
-      var _ci=DB.policies.findIndex(function(x){return x.ID===pol.ID;});
-      if(_ci>=0){ DB.policies[_ci]=_polForServer; }
+      // Server confirmed — NOW safe to update local state
+      var _idx=DB.policies.findIndex(function(x){return String(x.ID)===String(pol.ID);});
+      if(_idx>=0) DB.policies[_idx]=pol;
+      else DB.policies.push(pol);
       try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
+      closeAll();render();
       toast('Policy saved ✓','ok');
-      return;
+    } else {
+      // Server FAILED — keep modal open so user can retry
+      if(saveBtn){saveBtn.textContent='💾 Save Policy';saveBtn.disabled=false;}
+      toast('⚠️ Policy save FAILED — check connection and try again','err');
     }
-    try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
-    toast('Policy saved locally only — server save failed. It will retry automatically.','err');
-    retryPendingSaves();
   });
 }
 
@@ -3892,7 +3877,6 @@ function replacePolicy(cid,idx){
   var old=pols[idx];
   if(!old)return;
   if(!confirm('This will archive '+old.Insurer+' policy '+( old.PolicyNo||'')+ ' and open a new replacement. Continue?'))return;
-  var gi=DB.policies.indexOf(old);
   var now=new Date().toISOString().slice(0,10);
   backupPolicySnapshot(old, 'before-policy-replace');
   // Snapshot the old policy before archiving
@@ -3902,40 +3886,39 @@ function replacePolicy(cid,idx){
   var history=[];
   try{history=JSON.parse(old.ReviewHistory||'[]');}catch(e){}
   history.push(snap);
-  if(gi>=0){
-    DB.policies[gi].Status='Replaced';
-    DB.policies[gi].ReplacedDate=now;
-    DB.policies[gi].ReviewHistory=JSON.stringify(history);
-    DB.policies[gi]._pendingSave = true;
-  }
-  try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
-  var archivedForServer = JSON.parse(JSON.stringify(DB.policies[gi]||old));
-  delete archivedForServer._pendingSave;
-  post({action:'savePolicy',policy:archivedForServer},function(result){
+
+  // Build archived version for server
+  var archivedPol = Object.assign({}, old, {
+    Status:'Replaced',
+    ReplacedDate:now,
+    ReviewHistory:JSON.stringify(history)
+  });
+
+  toast('⏳ Archiving old policy…','ok');
+  post({action:'savePolicy',policy:archivedPol},function(result){
     if(result && result.ok){
-      var _ri=DB.policies.findIndex(function(x){ return x && String(x.ID)===String(archivedForServer.ID); });
-      if(_ri>=0) DB.policies[_ri]=archivedForServer;
+      // Server confirmed — update local state
+      var gi=DB.policies.findIndex(function(x){return String(x.ID)===String(old.ID);});
+      if(gi>=0) DB.policies[gi]=archivedPol;
       try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
+
+      // NOW open replacement policy form
+      EPC=cid;EPI=null;
+      window.REPLACING_POL_ID=old.ID;
+      window.REPLACING_POL_NO=old.PolicyNo||old.Insurer;
+      document.getElementById('pModT').textContent='Replacement Policy — was '+old.Insurer+' '+( old.PolicyNo||'');
+      var prefill=Object.assign({},old,{
+        ID:'',PolicyNo:'',Status:'Active',StartDate:now,
+        ReplacedBy:old.ID,ReplacedPolicyNo:old.PolicyNo,
+        ReviewHistory:'',CapturedDate:now
+      });
+      buildPolicyForm(prefill);
+      document.getElementById('pMod').classList.add('open');
+      toast('Old policy archived ✓ — update the details for the new policy','ok');
     } else {
-      try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
-      toast('Old policy archived locally only — server save failed. It will retry automatically.','err');
-      retryPendingSaves();
+      toast('⚠️ Archive FAILED — old policy not changed. Check connection and try again.','err');
     }
   });
-  // Open new policy pre-filled with old details, linked back
-  EPC=cid;EPI=null;
-  window.REPLACING_POL_ID=old.ID;
-  window.REPLACING_POL_NO=old.PolicyNo||old.Insurer;
-  document.getElementById('pModT').textContent='Replacement Policy — was '+old.Insurer+' '+( old.PolicyNo||'');
-  // Pre-fill with all old values so adviser just changes what's different
-  var prefill=Object.assign({},old,{
-    ID:'',PolicyNo:'',Status:'Active',StartDate:now,
-    ReplacedBy:old.ID,ReplacedPolicyNo:old.PolicyNo,
-    ReviewHistory:'',CapturedDate:now
-  });
-  buildPolicyForm(prefill);
-  document.getElementById('pMod').classList.add('open');
-  toast('Old policy archived locally — update the details for the new policy','ok');
 }
 
 
