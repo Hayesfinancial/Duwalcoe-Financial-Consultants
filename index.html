@@ -2695,6 +2695,7 @@ function buildPolicyForm(p){
 
   var isRisk=(type==='Life / Income Protector'||type==='');
   var isRA=['Retirement Annuity','Pension Fund','Provident Fund','Pension Preservation','Provident Preservation'].indexOf(type)>=0;
+  var isGroupFund=(type==='Pension Fund'||type==='Provident Fund');
   var isInv=['Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment','Unit Trust','Tax Free Savings'].indexOf(type)>=0;
   var isLA=(type==='Living Annuity');
   var isLifeAnn=(type==='Life Annuity');
@@ -2769,7 +2770,7 @@ function buildPolicyForm(p){
     '</div>';
     // No policy-level escalation fields for risk — each benefit row has its own
   } else {
-    html+='<div class="g2">'+fld('ppm',isLifeAnn?'Purchase Price (Lump Sum)':'Premium / Contribution',p.Premium)+(function(){
+    html+='<div class="g2">'+fld('ppm',isLifeAnn?'Purchase Price (Lump Sum)':(isGroupFund?'Total Contribution / Deduction':'Premium / Contribution'),p.Premium,'text',isGroupFund?'oninput="riskPremAutoSum()"':'')+(function(){
       var _fOpts=['Monthly','Quarterly','Annually','Once Off','Paid Up'];
       var _fv=p.Frequency||'Monthly';
       return '<div class="fld"><label>Frequency</label><select id="pfreq" onchange="freqChanged(this)" style="border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px;width:100%">'+
@@ -2782,23 +2783,31 @@ function buildPolicyForm(p){
         +(isRA?'<div></div>':fld('pben_pct','Benefit Escalation %',p.BenEscalation))
         +'</div>';
     }
+    if(isGroupFund){
+      html+='<div class="g2" style="margin-top:6px">';
+      html+='<div class="fld"><label>Of which: Risk Premiums <span style="font-size:10px;color:#889;font-weight:400">(auto-summed from benefit rows below)</span></label>';
+      html+='<div style="padding:8px 11px;background:#fef9ee;border:1.5px solid #f0ede6;border-radius:7px;font-size:13px;font-weight:600;color:#92400e" id="groupRiskTotal">R 0</div></div>';
+      html+='<div class="fld"><label>Retirement Contribution <span style="font-size:10px;color:#889;font-weight:400">(total − risk premiums)</span></label>';
+      html+='<div style="padding:8px 11px;background:#f0fdf4;border:1.5px solid #bbf7d0;border-radius:7px;font-size:13px;font-weight:600;color:#166534" id="groupRetContrib">—</div></div>';
+      html+='</div>';
+    }
   }
 
-  // RISK COVER
-  if(isRisk){
+  // RISK COVER — shown for Life/Income Protector AND Pension/Provident Funds (group risk)
+  if(isRisk||isGroupFund){
     // Seed POL_LUMP_ROWS from legacy single fields if rows are empty
     if(POL_LUMP_ROWS.length===0){
-      if(p.BenDeath) POL_LUMP_ROWS.push({type:'Life Cover',label:'',cover:p.BenDeath,prem:'',premEsc:'',benEsc:''});
-      if(p.BenDisability) POL_LUMP_ROWS.push({type:'Capital Disability',label:'',cover:p.BenDisability,prem:'',premEsc:'',benEsc:''});
-      if(p.BenDreadDisease) POL_LUMP_ROWS.push({type:'Dread Disease / Severe Illness',label:p.DreadDiseaseNotes||'',cover:p.BenDreadDisease,prem:'',premEsc:'',benEsc:''});
+      if(p.BenDeath) POL_LUMP_ROWS.push({type:'Life Cover',label:'',cover:p.BenDeath,prem:'',premEsc:'',benEsc:'',approved:isGroupFund?'Approved':''});
+      if(p.BenDisability) POL_LUMP_ROWS.push({type:'Capital Disability',label:'',cover:p.BenDisability,prem:'',premEsc:'',benEsc:'',approved:isGroupFund?'Approved':''});
+      if(p.BenDreadDisease) POL_LUMP_ROWS.push({type:'Dread Disease / Severe Illness',label:p.DreadDiseaseNotes||'',cover:p.BenDreadDisease,prem:'',premEsc:'',benEsc:'',approved:isGroupFund?'Approved':''});
     }
-    html+=sec('Risk Cover — Lump Sums');
+    html+=sec(isGroupFund?'Group Risk Benefits — Lump Sums':'Risk Cover — Lump Sums');
     html+='<div style="font-size:11px;color:#889;margin-bottom:8px">One row per benefit. Each benefit can have its own cover, premium and escalation.</div>';
     html+='<div id="lumpRowsWrap">'+renderLumpRows()+'</div>';
     html+='<div id="pWgtAvgEsc"></div>';
     html+='<button type="button" class="btn b-gh sm" style="margin-top:6px" onclick="addLumpRow()">+ Add Lump Sum Benefit</button>';
 
-    html+=sec('Income Benefits');
+    html+=sec(isGroupFund?'Group Risk Benefits — Income':'Income Benefits');
     html+='<div style="font-size:11px;color:#889;margin-bottom:8px">Death income, income protection, sickness benefits — one row per benefit stream.</div>';
     html+='<div id="incomeRowsWrap">'+renderIncomeRows()+'</div>';
     html+='<button type="button" class="btn b-gh sm" style="margin-top:6px" onclick="addIncomeRow()">+ Add Income Benefit</button>';
@@ -3105,6 +3114,7 @@ function renderLumpRows(){
   if(!Array.isArray(POL_LUMP_ROWS)) POL_LUMP_ROWS=[];
   if(POL_LUMP_ROWS.length===0) return '<div style="font-size:12px;color:#aaa;padding:8px 0">No lump sum benefits added yet — click + Add Lump Sum Benefit.</div>';
   var typeOpts=['Life Cover','Capital Disability','Dread Disease / Severe Illness','Other Lump Sum'];
+  var _isGF=(function(){var el=document.getElementById('pt');return el&&(el.value==='Pension Fund'||el.value==='Provident Fund');})();
   return POL_LUMP_ROWS.map(function(r,i){
     return '<div style="background:var(--smoke);border-radius:8px;padding:10px 12px;margin-bottom:8px">'+
       '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">'+
@@ -3112,6 +3122,7 @@ function renderLumpRows(){
         typeOpts.map(function(o){return '<option'+(r.type===o?' selected':'')+'>'+o+'</option>';}).join('')+
       '</select>'+
       '<input type="text" value="'+(r.label||'')+'" placeholder="Benefit label / notes" onchange="POL_LUMP_ROWS['+i+'].label=this.value" style="flex:2;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px">'+
+      (_isGF?'<select onchange="POL_LUMP_ROWS['+i+'].approved=this.value;document.getElementById(\'lumpRowsWrap\').innerHTML=renderLumpRows()" style="border:1.5px solid '+(r.approved==='Unapproved'?'#fca5a5':'#86efac')+';border-radius:6px;padding:6px 8px;font-family:inherit;font-size:11px;font-weight:700;background:'+(r.approved==='Unapproved'?'#fef2f2':'#f0fdf4')+';color:'+(r.approved==='Unapproved'?'#991b1b':'#166534')+';min-width:120px"><option value="Approved"'+(r.approved!=='Unapproved'?' selected':'')+'>✓ Approved</option><option value="Unapproved"'+(r.approved==='Unapproved'?' selected':'')+'>✗ Unapproved</option></select>':'')+
       '<button type="button" onclick="lumpRowDelete('+i+')" style="background:var(--rose);color:#fff;border:none;border-radius:6px;padding:5px 9px;cursor:pointer;font-size:11px;font-weight:700">✕</button>'+
       '</div>'+
       '<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px">'+
@@ -3155,7 +3166,7 @@ function lumpRowDelete(i){
   document.getElementById('lumpRowsWrap').innerHTML=renderLumpRows();
 }
 function addLumpRow(){
-  POL_LUMP_ROWS.push({type:'Life Cover',label:'',cover:'',prem:'',premEsc:'',benEsc:''});
+  var _isGF2=(function(){var el=document.getElementById('pt');return el&&(el.value==='Pension Fund'||el.value==='Provident Fund');})();POL_LUMP_ROWS.push({type:'Life Cover',label:'',cover:'',prem:'',premEsc:'',benEsc:'',approved:_isGF2?'Approved':''});
   document.getElementById('lumpRowsWrap').innerHTML=renderLumpRows();
 }
 
@@ -3165,6 +3176,7 @@ function renderIncomeRows(){
   var waitOpts=['7 days','2 weeks','1 month','3 months','6 months','1 year','2 years'];
   var termOpts=['1 year','2 years','5 years','To age 55','To age 60','To age 65','To age 70','Whole of Life'];
   var typeOpts=['Temporary IP','Income Protection','Death Income','Sickness Benefit','Hospital Income','Other'];
+  var _isGF=(function(){var el=document.getElementById('pt');return el&&(el.value==='Pension Fund'||el.value==='Provident Fund');})();
   return POL_INCOME_ROWS.map(function(r,i){
     return '<div style="background:var(--smoke);border-radius:8px;padding:10px 12px;margin-bottom:8px">'+
       '<div style="display:flex;gap:6px;align-items:center;margin-bottom:8px">'+
@@ -3172,6 +3184,7 @@ function renderIncomeRows(){
       typeOpts.map(function(o){return '<option'+(r.type===o?' selected':'')+'>'+o+'</option>';}).join('')+
       '</select>'+
       '<input type="text" value="'+(r.label||'')+'" placeholder="Benefit label e.g. Income Protection Plus" onchange="POL_INCOME_ROWS['+i+'].label=this.value" style="flex:2;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px">'+
+      (_isGF?'<select onchange="POL_INCOME_ROWS['+i+'].approved=this.value;document.getElementById(\'incomeRowsWrap\').innerHTML=renderIncomeRows()" style="border:1.5px solid '+(r.approved==='Unapproved'?'#fca5a5':'#86efac')+';border-radius:6px;padding:6px 8px;font-family:inherit;font-size:11px;font-weight:700;background:'+(r.approved==='Unapproved'?'#fef2f2':'#f0fdf4')+';color:'+(r.approved==='Unapproved'?'#991b1b':'#166534')+';min-width:120px"><option value="Approved"'+(r.approved!=='Unapproved'?' selected':'')+'>✓ Approved</option><option value="Unapproved"'+(r.approved==='Unapproved'?' selected':'')+'>✗ Unapproved</option></select>':'')+
       '<button type="button" onclick="POL_INCOME_ROWS.splice('+i+',1);document.getElementById(\'incomeRowsWrap\').innerHTML=renderIncomeRows()" style="background:var(--rose);color:#fff;border:none;border-radius:6px;padding:5px 9px;cursor:pointer;font-size:11px;font-weight:700">✕</button>'+
       '</div>'+
       '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:6px">'+
@@ -3201,7 +3214,7 @@ function renderIncomeRows(){
 
 function addIncomeRow(){
   if(!Array.isArray(POL_INCOME_ROWS)) POL_INCOME_ROWS=[];
-  POL_INCOME_ROWS.push({type:'Temporary IP',label:'',amount:'',prem:'',waiting:'1 month',term:'To age 65',esc:'',premEscType:'Fixed %',premEsc:'',benEsc:'',claimEsc:'',taxable:'No',convert:'No'});
+  var _isGF3=(function(){var el=document.getElementById('pt');return el&&(el.value==='Pension Fund'||el.value==='Provident Fund');})();POL_INCOME_ROWS.push({type:'Temporary IP',label:'',amount:'',prem:'',waiting:'1 month',term:'To age 65',esc:'',premEscType:'Fixed %',premEsc:'',benEsc:'',claimEsc:'',taxable:'No',convert:'No',approved:_isGF3?'Approved':''});
   document.getElementById('incomeRowsWrap').innerHTML=renderIncomeRows();
 }
 
@@ -3378,14 +3391,24 @@ function riskPremAutoSum(){
   if(!Array.isArray(POL_LUMP_ROWS)) POL_LUMP_ROWS=[];
   if(!Array.isArray(POL_INCOME_ROWS)) POL_INCOME_ROWS=[];
   var total = 0;
-  // Sum lump sum row premiums
   POL_LUMP_ROWS.forEach(function(r){ total += parseFloat(r.prem||0)||0; });
-  // Sum income row premiums (if present)
   POL_INCOME_ROWS.forEach(function(r){ total += parseFloat(r.prem||0)||0; });
-  var hid = document.getElementById('ppm');
-  var disp = document.getElementById('ppm_display');
-  if(hid) hid.value = total > 0 ? String(Math.round(total*100)/100) : '';
-  if(disp) disp.textContent = total > 0 ? 'R '+Math.round(total*100/100).toLocaleString('en-ZA') : 'Will calculate from rows below';
+  var pType=document.getElementById('pt');
+  var _isGF=pType&&(pType.value==='Pension Fund'||pType.value==='Provident Fund');
+  if(_isGF){
+    // Group fund: show risk premium split, don't overwrite total contribution
+    var grDisp=document.getElementById('groupRiskTotal');
+    if(grDisp) grDisp.textContent=total>0?'R '+Math.round(total).toLocaleString('en-ZA'):'R 0';
+    var totalPrem=parseFloat((document.getElementById('ppm')||{}).value||0)||0;
+    var retDisp=document.getElementById('groupRetContrib');
+    if(retDisp) retDisp.textContent=totalPrem>0?'R '+Math.round(Math.max(0,totalPrem-total)).toLocaleString('en-ZA'):'—';
+  } else {
+    // Standalone risk policy: auto-sum to total premium
+    var hid=document.getElementById('ppm');
+    var disp=document.getElementById('ppm_display');
+    if(hid) hid.value=total>0?String(Math.round(total*100)/100):'';
+    if(disp) disp.textContent=total>0?'R '+Math.round(total*100/100).toLocaleString('en-ZA'):'Will calculate from rows below';
+  }
 }
 
 // ── Living Annuity two-way calculation ───────────────────────
