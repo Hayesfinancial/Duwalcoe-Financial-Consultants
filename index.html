@@ -90,10 +90,12 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--cream);c
 .dl{color:#889;font-weight:500;flex-shrink:0}.dv{font-weight:600;text-align:right;max-width:65%;word-break:break-word}
 .roa-card{border:1.5px solid var(--smoke);border-radius:8px;padding:14px 16px;margin-bottom:10px}
 ::-webkit-scrollbar{width:6px}::-webkit-scrollbar-thumb{background:var(--mist);border-radius:3px}
+.save-fail-bar.show{display:block!important}
 </style>
 </head>
 <body>
 <div class="shell">
+  <div id="saveFailBar" class="save-fail-bar" style="position:fixed;top:0;left:0;right:0;background:#9e2a2b;color:#fff;padding:10px 20px;font-size:13px;font-weight:700;z-index:10000;display:none;text-align:center;box-shadow:0 4px 16px rgba(0,0,0,.3)">⚠ SAVE FAILED — Your data is at risk. Check your internet connection. <button onclick="retrySaveQueue()" style="background:#fff;color:#9e2a2b;border:none;padding:4px 14px;border-radius:5px;font-weight:700;cursor:pointer;margin-left:10px">↻ Retry Now</button> <span id="saveFailDetail" style="font-size:11px;opacity:0.8;margin-left:8px"></span></div>
   <div class="topbar">
     <div>
       <div class="logo">Duwalcoe <em>Practice Manager</em></div>
@@ -285,6 +287,95 @@ var EPI = null; // edit policy index
 var RC = null;  // roa client id
 var TC = '';    // task client name
 
+// SAVE SAFETY
+var _SAVE_QUEUE = [];
+var _UNSAVED_CHANGES = false;
+function cloneForQueue(obj){ try{return JSON.parse(JSON.stringify(obj));}catch(e){return obj;} }
+function saveQueueStorageKey(){ return 'du_save_queue'; }
+function queueIdentity(item){
+  if(!item) return '';
+  var row=item.row||{};
+  if(row.ID) return item.table+'::ID::'+row.ID;
+  if(row.ClientID) return item.table+'::ClientID::'+row.ClientID;
+  if(row.Key) return item.table+'::Key::'+row.Key;
+  if(row.User||row.WeekKey) return item.table+'::APPT::'+(row.User||'')+'::'+(row.WeekKey||'');
+  return item.table+'::'+JSON.stringify(row);
+}
+function persistSaveQueue(){ try{localStorage.setItem(saveQueueStorageKey(), JSON.stringify(_SAVE_QUEUE));}catch(e){} }
+function loadSaveQueue(){
+  try{
+    var raw=localStorage.getItem(saveQueueStorageKey())||'[]';
+    var parsed=JSON.parse(raw);
+    _SAVE_QUEUE=Array.isArray(parsed)?parsed:[];
+  }catch(e){ _SAVE_QUEUE=[]; }
+  if(_SAVE_QUEUE.length) _UNSAVED_CHANGES=true;
+}
+function enqueueSave(item){
+  var key=queueIdentity(item);
+  var idx=_SAVE_QUEUE.findIndex(function(x){ return queueIdentity(x)===key; });
+  var clean={table:item.table,row:cloneForQueue(item.row)};
+  if(idx>=0) _SAVE_QUEUE[idx]=clean;
+  else _SAVE_QUEUE.push(clean);
+  _UNSAVED_CHANGES=true;
+  persistSaveQueue();
+}
+function markRowConfirmed(table,row){
+  if(!row) return;
+  function replaceIn(arrName){
+    var arr=DB[arrName]||[];
+    var idx=arr.findIndex(function(x){ return String(x.ID)===String(row.ID); });
+    if(idx>=0) DB[arrName][idx]=row;
+  }
+  if(table==='policies' && row.ID) replaceIn('policies');
+  else if(table==='tasks' && row.ID) replaceIn('tasks');
+  else if(table==='clients' && row.ID) replaceIn('clients');
+  else if(table==='notes' && row.ClientID){
+    window._sharedNotes=window._sharedNotes||{};
+    window._sharedNotes[String(row.ClientID)]={text:row.Text||'',by:row.By||'',date:row.LastUpdated||''};
+  }
+  try{localStorage.setItem('du_db', JSON.stringify(DB));}catch(e){}
+}
+function showSaveFailure(detail){
+  var bar=document.getElementById('saveFailBar');
+  if(!bar){ alert('SAVE FAILED: '+(detail||'Unknown error')); return; }
+  bar.className='save-fail-bar show';
+  var det=document.getElementById('saveFailDetail');
+  if(det) det.textContent=detail||'';
+  _UNSAVED_CHANGES=true;
+}
+function clearSaveFailure(){
+  var bar=document.getElementById('saveFailBar');
+  if(bar) bar.className='save-fail-bar';
+  if(_SAVE_QUEUE.length===0) _UNSAVED_CHANGES=false;
+  persistSaveQueue();
+}
+function retrySaveQueue(){
+  if(!_SAVE_QUEUE.length){ clearSaveFailure(); return; }
+  var queue=_SAVE_QUEUE.slice();
+  _SAVE_QUEUE=[];
+  persistSaveQueue();
+  var ok=0, fail=0;
+  queue.forEach(function(item){
+    sbFetch('POST','/rest/v1/'+item.table,[item.row],function(res,err){
+      if(err){ enqueueSave(item); fail++; }
+      else { markRowConfirmed(item.table,item.row); ok++; }
+      if(ok+fail===queue.length){
+        if(fail>0){ showSaveFailure(fail+' save(s) still failing'); toast(fail+' save(s) still failing - will retry','err'); }
+        else { clearSaveFailure(); toast('All '+ok+' pending save(s) recovered','ok'); }
+      }
+    });
+  });
+}
+loadSaveQueue();
+setInterval(function(){ if(_SAVE_QUEUE.length>0) retrySaveQueue(); },30000);
+window.addEventListener('beforeunload', function(e){
+  if(_UNSAVED_CHANGES || _SAVE_QUEUE.length>0){
+    e.preventDefault();
+    e.returnValue='You have unsaved changes. Are you sure you want to leave?';
+    return e.returnValue;
+  }
+});
+
 // ══ NETWORK (Supabase) ═══════════════════════════════════════
 
 // Core Supabase REST helper — fetch wrapper used by all operations
@@ -308,83 +399,6 @@ function sbFetch(method, path, body, cb){
     })
     .catch(function(e){ console.error('Supabase fetch error:', e); if(cb) cb(null, e.message); });
 }
-
-var _SAVE_QUEUE = [];
-try{
-  var _sq = JSON.parse(localStorage.getItem('du_save_queue')||'[]');
-  if(Array.isArray(_sq)) _SAVE_QUEUE = _sq;
-}catch(e){ _SAVE_QUEUE = []; }
-
-function persistSaveQueue(){
-  try{ localStorage.setItem('du_save_queue', JSON.stringify(_SAVE_QUEUE)); }catch(e){}
-}
-
-function queuePendingSave(table, row){
-  if(!row || !row.ID) return;
-  _SAVE_QUEUE = _SAVE_QUEUE.filter(function(item){
-    return !(item && item.table===table && item.row && String(item.row.ID)===String(row.ID));
-  });
-  _SAVE_QUEUE.push({table:table, row:JSON.parse(JSON.stringify(row))});
-  persistSaveQueue();
-}
-
-function clearPendingSaveQueueItem(table, id){
-  if(!id) return;
-  _SAVE_QUEUE = _SAVE_QUEUE.filter(function(item){
-    return !(item && item.table===table && item.row && String(item.row.ID)===String(id));
-  });
-  persistSaveQueue();
-}
-
-function retryPendingSaves(){
-  if(!_SAVE_QUEUE.length) return;
-  var queue = _SAVE_QUEUE.slice();
-  queue.forEach(function(item){
-    if(!item || !item.table || !item.row) return;
-    sbFetch('POST', '/rest/v1/'+item.table, [item.row], function(res, err){
-      if(!err){
-        clearPendingSaveQueueItem(item.table, item.row.ID);
-        try{
-          if(item.table==='policies'){
-            var idx = (DB.policies||[]).findIndex(function(p){ return p && String(p.ID)===String(item.row.ID); });
-            if(idx>=0){
-              DB.policies[idx] = Object.assign({}, item.row);
-              delete DB.policies[idx]._pendingSave;
-            }
-            localStorage.setItem('du_db', JSON.stringify(DB));
-            render();
-          }
-        }catch(e){}
-        toast('Recovered pending save for '+item.table, 'ok');
-      }
-    });
-  });
-}
-
-function backupPolicySnapshot(pol, reason){
-  if(!pol || !pol.ID) return;
-  try{
-    var backups = JSON.parse(localStorage.getItem('du_policy_backups')||'[]');
-    backups.unshift({
-      ts: new Date().toISOString(),
-      reason: reason||'policy-change',
-      policy: JSON.parse(JSON.stringify(pol))
-    });
-    if(backups.length > 500) backups = backups.slice(0,500);
-    localStorage.setItem('du_policy_backups', JSON.stringify(backups));
-  }catch(e){}
-}
-
-window.addEventListener('online', retryPendingSaves);
-setInterval(retryPendingSaves, 30000);
-window.addEventListener('beforeunload', function(e){
-  var hasPendingPolicies = (DB.policies||[]).some(function(p){ return p && p._pendingSave; });
-  if(_SAVE_QUEUE.length || hasPendingPolicies){
-    e.preventDefault();
-    e.returnValue = 'There are policy saves still pending.';
-    return e.returnValue;
-  }
-});
 
 function syncNow() {
   setSS('ld');
@@ -429,7 +443,17 @@ function syncNow() {
       });
     }catch(e){}
 
-    DB.tasks  = loaded.tasks||[];
+    DB.tasks  = (loaded.tasks||[]).map(function(t){ return t; });
+    try{
+      var _ldb4=JSON.parse(localStorage.getItem('du_db')||'{}');
+      (_ldb4.tasks||[]).forEach(function(lt){
+        if(lt._pendingSave){
+          var _ti=DB.tasks.findIndex(function(st){return String(st.ID)===String(lt.ID);});
+          if(_ti>=0) DB.tasks[_ti]=lt;
+          else DB.tasks.push(lt);
+        }
+      });
+    }catch(e){}
     DB.roas   = loaded.roas||[];
     DB.links  = loaded.familylinks||[];
 
@@ -464,7 +488,6 @@ function syncNow() {
     setSS('ok');
     render();
     toast('Synced — ' + DB.clients.length + ' clients','ok');
-    retryPendingSaves();
     if(!window._discussTimer) startDiscussAutoRefresh();
   }
 
@@ -503,15 +526,17 @@ function post(data, cb){
 
   // upsert a single row into a table
   function upsert(table, row, callback){
+    var queuedRow = cloneForQueue(row);
     sbFetch('POST', '/rest/v1/'+table, [row], function(res, err){
       try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
       if(err){
-        queuePendingSave(table, row);
-        if(callback) callback({ok:0,error:err});
-        return;
+        enqueueSave({table:table,row:queuedRow});
+        showSaveFailure('Failed to save to '+table+': '+(err||'unknown error'));
+      } else {
+        markRowConfirmed(table, queuedRow);
+        if(_SAVE_QUEUE.length===0) clearSaveFailure();
       }
-      clearPendingSaveQueueItem(table, row && row.ID);
-      if(callback) callback({ok:1});
+      if(callback) callback(err?{ok:0}:{ok:1});
     });
   }
 
@@ -519,7 +544,7 @@ function post(data, cb){
   function del(table, id, callback){
     sbFetch('DELETE', '/rest/v1/'+table+'?ID=eq.'+encodeURIComponent(id), null, function(res, err){
       try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
-      if(callback) callback(err?{ok:0,error:err}:{ok:1});
+      if(callback) callback(err?{ok:0}:{ok:1});
     });
   }
 
@@ -1713,8 +1738,9 @@ function renderPolicies(c,pols){
     '<button class="btn b-gh sm" data-act="view-schedule" data-cid="'+c.ID+'">🖨 Print Schedule</button>'+
     '<button class="btn b-gd sm" data-act="open-new-policy" data-cid="'+c.ID+'">+ Add Policy</button></div></div>'+
     (function(){
-      var active=pols.filter(function(p){return p.Status!=='Replaced';});
+      var active=pols.filter(function(p){return p.Status!=='Replaced' && p.Status!=='Deleted';});
       var replaced=pols.filter(function(p){return p.Status==='Replaced';});
+      var archived=pols.filter(function(p){return p.Status==='Deleted';});
       function polTable(pp,showReplace){
         return '<div style="overflow:hidden"><table class="tbl"><thead><tr>'+
         '<th>Insurer</th><th>Product</th><th>Policy No.</th><th>Type</th><th>Inception</th><th>Age</th><th>Benefit</th><th>Premium</th><th>Status</th><th></th>'+
@@ -1737,7 +1763,7 @@ function renderPolicies(c,pols){
               return '—';
             })()+'</td>'+
             '<td style="color:var(--sage);font-weight:600">'+rnd(p.Premium)+'</td>'+
-            '<td>'+bx(p.Status==='Active'?'bx-sg':p.Status==='Lapsed'?'bx-rd':'bx-gd',p.Status||'Active')+'</td>'+
+            '<td>'+bx(p.Status==='Active'?'bx-sg':p.Status==='Lapsed'?'bx-rd':p.Status==='Deleted'?'bx-rd':'bx-gd',p.Status||'Active')+'</td>'+
             '<td style="display:flex;gap:4px">'+
             '<button class="btn b-gh xs" data-act="edit-policy" data-cid="'+c.ID+'" data-idx="'+origIdx+'">Edit</button>'+
             '<button class="btn b-nv xs" data-act="pol-history" data-cid="'+c.ID+'" data-idx="'+origIdx+'">📋</button>'+
@@ -1746,7 +1772,8 @@ function renderPolicies(c,pols){
         }).join('')+'</tbody></table></div>';
       }
       return (active.length===0?'<div class="empty cb">No policies yet</div>':polTable(active,true))+
-        (replaced.length?'<details style="margin-top:8px"><summary style="cursor:pointer;padding:10px 16px;font-size:12px;font-weight:700;color:#889;background:#f8f8f5">🔄 '+replaced.length+' Replaced Polic'+(replaced.length===1?'y':'ies')+'</summary>'+polTable(replaced,false)+'</details>':'');
+        (replaced.length?'<details style="margin-top:8px"><summary style="cursor:pointer;padding:10px 16px;font-size:12px;font-weight:700;color:#889;background:#f8f8f5">🔄 '+replaced.length+' Replaced Polic'+(replaced.length===1?'y':'ies')+'</summary>'+polTable(replaced,false)+'</details>':'')+
+        (archived.length?'<details style="margin-top:8px"><summary style="cursor:pointer;padding:10px 16px;font-size:12px;font-weight:700;color:#889;background:#fbf6f6">🗄 '+archived.length+' Archived Polic'+(archived.length===1?'y':'ies')+'</summary>'+polTable(archived,false)+'</details>':'');
     })()+
     '</div>';
 }
@@ -3787,6 +3814,26 @@ function snapshotPolicy(pol){
   };
 }
 
+function persistPolicySafely(pol, successMsg, onDone){
+  if(!pol || !pol.ID) return;
+  pol._pendingSave = true;
+  try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
+  var polForServer = JSON.parse(JSON.stringify(pol));
+  delete polForServer._pendingSave;
+  post({action:'savePolicy',policy:polForServer},function(result){
+    if(result && result.ok){
+      var _pi=DB.policies.findIndex(function(x){return String(x.ID)===String(polForServer.ID);});
+      if(_pi>=0) DB.policies[_pi]=polForServer;
+      try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
+      if(successMsg) toast(successMsg,'ok');
+      if(onDone) onDone(true);
+    } else {
+      showSaveFailure('Policy save failed');
+      if(onDone) onDone(false);
+    }
+  });
+}
+
 function savePolicy(){
   if(!g('pi')){toast('Insurer required','err');return;}
   var now=new Date().toISOString().slice(0,10);
@@ -3805,48 +3852,30 @@ function savePolicy(){
   pol.ReviewHistory=oldPol?(oldPol.ReviewHistory||''):'';
   // Mark pending so a refresh before server confirms doesn't lose the policy
   pol._pendingSave = true;
-  backupPolicySnapshot(oldPol||pol, oldPol?'before-policy-update':'before-policy-create');
   if(EPI!==null&&oldPol){var gi=DB.policies.indexOf(oldPol);if(gi>=0)DB.policies[gi]=pol;}
   else DB.policies.push(pol);
-  // Write to localStorage immediately — survives a refresh before server responds
   try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
   closeAll();render();
-  var _polForServer = JSON.parse(JSON.stringify(pol));
-  delete _polForServer._pendingSave;
-  post({action:'savePolicy',policy:_polForServer},function(result){
-    if(result && result.ok){
-      // Server confirmed — clear pending flag
-      var _ci=DB.policies.findIndex(function(x){return x.ID===pol.ID;});
-      if(_ci>=0){ DB.policies[_ci]=_polForServer; }
-      try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
-      toast('Policy saved ✓','ok');
-      return;
-    }
-    try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
-    toast('Policy saved locally only — server save failed. It will retry automatically.','err');
-    retryPendingSaves();
-  });
+  persistPolicySafely(pol,'Policy saved ✓');
 }
 
 function deletePolicy(){
   var existing = polsFor(EPC);
   var oldPol = (EPI!==null && existing[EPI]) ? existing[EPI] : null;
-  if(!oldPol){ toast('Cannot find policy to delete','err'); return; }
+  if(!oldPol){ toast('Cannot find policy to archive','err'); return; }
   var label = (oldPol.Insurer||'') + (oldPol.Product?' — '+oldPol.Product:'') + (oldPol.PolicyNo?' ('+oldPol.PolicyNo+')':'');
-  if(!confirm('Permanently delete this policy?\n\n' + label + '\n\nThis cannot be undone.')) return;
-  backupPolicySnapshot(oldPol, 'before-policy-delete');
-  // Delete from Supabase FIRST. Only remove locally once server confirms.
-  post({action:'deleteRow', sheet:'policies', id:oldPol.ID}, function(result){
-    if(!(result && result.ok)){
-      toast('Delete failed — policy kept intact.','err');
-      return;
-    }
-    var gi = DB.policies.indexOf(oldPol);
-    if(gi >= 0) DB.policies.splice(gi, 1);
-    try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
-    closeAll(); render();
-    toast('Policy deleted','ok');
-  });
+  if(!confirm('Archive this policy instead of deleting it?\n\n' + label + '\n\nThe record will be kept for compliance and removed from the active list.')) return;
+  var gi = DB.policies.indexOf(oldPol);
+  if(gi < 0){ toast('Policy not found','err'); return; }
+  var history=[];
+  try{history=JSON.parse(oldPol.ReviewHistory||'[]');}catch(e){}
+  history.push({date:new Date().toISOString(), type:'archived', note:'Policy archived instead of deleted by '+cu()});
+  DB.policies[gi].Status='Deleted';
+  DB.policies[gi].ReviewHistory=JSON.stringify(history);
+  DB.policies[gi]._pendingSave=true;
+  try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
+  closeAll(); render();
+  persistPolicySafely(DB.policies[gi],'Policy archived ✓');
 }
 
 function logAnnualReview(){
@@ -3894,7 +3923,6 @@ function replacePolicy(cid,idx){
   if(!confirm('This will archive '+old.Insurer+' policy '+( old.PolicyNo||'')+ ' and open a new replacement. Continue?'))return;
   var gi=DB.policies.indexOf(old);
   var now=new Date().toISOString().slice(0,10);
-  backupPolicySnapshot(old, 'before-policy-replace');
   // Snapshot the old policy before archiving
   var snap=snapshotPolicy(old);
   snap.type='replaced';
@@ -3906,22 +3934,10 @@ function replacePolicy(cid,idx){
     DB.policies[gi].Status='Replaced';
     DB.policies[gi].ReplacedDate=now;
     DB.policies[gi].ReviewHistory=JSON.stringify(history);
-    DB.policies[gi]._pendingSave = true;
   }
-  try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
-  var archivedForServer = JSON.parse(JSON.stringify(DB.policies[gi]||old));
-  delete archivedForServer._pendingSave;
-  post({action:'savePolicy',policy:archivedForServer},function(result){
-    if(result && result.ok){
-      var _ri=DB.policies.findIndex(function(x){ return x && String(x.ID)===String(archivedForServer.ID); });
-      if(_ri>=0) DB.policies[_ri]=archivedForServer;
-      try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
-    } else {
-      try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
-      toast('Old policy archived locally only — server save failed. It will retry automatically.','err');
-      retryPendingSaves();
-    }
-  });
+  DB.policies[gi]._pendingSave=true;
+  try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
+  persistPolicySafely(DB.policies[gi]);
   // Open new policy pre-filled with old details, linked back
   EPC=cid;EPI=null;
   window.REPLACING_POL_ID=old.ID;
@@ -3935,7 +3951,7 @@ function replacePolicy(cid,idx){
   });
   buildPolicyForm(prefill);
   document.getElementById('pMod').classList.add('open');
-  toast('Old policy archived locally — update the details for the new policy','ok');
+  toast('Old policy archived — update the details for the new policy','ok');
 }
 
 
@@ -4059,6 +4075,26 @@ function toggleTaskPri(){
   btn.style.color=isUrgent?'':'var(--rose)';
 }
 
+function persistTaskSafely(task, successMsg, onDone){
+  if(!task || !task.ID) return;
+  task._pendingSave = true;
+  try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
+  var taskForServer = JSON.parse(JSON.stringify(task));
+  delete taskForServer._pendingSave;
+  post({action:'saveTask',task:taskForServer},function(result){
+    if(result && result.ok){
+      var _ti=DB.tasks.findIndex(function(x){return String(x.ID)===String(taskForServer.ID);});
+      if(_ti>=0) DB.tasks[_ti]=taskForServer;
+      try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
+      if(successMsg) toast(successMsg,'ok');
+      if(onDone) onDone(true);
+    } else {
+      showSaveFailure('Task save failed');
+      if(onDone) onDone(false);
+    }
+  });
+}
+
 function saveTask(){
   var title=g('tt');
   if(!title){toast('Task title required','err');return;}
@@ -4068,14 +4104,11 @@ function saveTask(){
   var log = initNote ? JSON.stringify([{date:now, text:initNote, user:cu()}]) : '[]';
   var ccWife = document.getElementById('tccwife') && document.getElementById('tccwife').checked ? 'Yes' : '';
   var task={ID:id,Title:title,Assignee:g('tas'),DueDate:g('tdue'),Priority:g('tpri')||'Normal',
-    CCWife:ccWife,ClientName:g('tcl'),Notes:log,Done:false,Timestamp:now,OpenedBy:cu(),OpenedDate:now};
+    CCWife:ccWife,ClientName:g('tcl'),Notes:log,Done:false,Timestamp:now,OpenedBy:cu(),OpenedDate:now,_pendingSave:true};
   DB.tasks.push(task);
   try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
   closeAll(); render();
-  post({action:'saveTask',task:task},function(){
-    try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
-    toast('Task saved ✓','ok');
-  });
+  persistTaskSafely(task,'Task saved ✓');
 }
 
 function completeTaskFromLog(){
@@ -4088,10 +4121,9 @@ function completeTaskFromLog(){
   log.push({date:new Date().toISOString(), text:noteText, user:cu()});
   t.Notes = JSON.stringify(log);
   t.Done = true;
+  try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
   closeAll(); render();
-  post({action:'updateDueDate',id:TASK_LOG_ID,assignee:t.Assignee,dueDate:t.DueDate},function(){});
-  post({action:'updateTaskNotes',id:TASK_LOG_ID,notes:t.Notes},function(){});
-  post({action:'toggleTask',id:TASK_LOG_ID,done:true},function(){toast('Task completed ✅','ok');});
+  persistTaskSafely(t,'Task completed ✅');
 }
 
 function saveTaskLog(){
@@ -4129,9 +4161,8 @@ function saveTaskLog(){
   }
   log.push({date:new Date().toISOString(), text:entryText, user:cu()});
   t.Notes = JSON.stringify(log);
-  // Save to server
-  post({action:'updateDueDate',id:TASK_LOG_ID,assignee:t.Assignee,dueDate:t.DueDate},function(){});
-  post({action:'updateTaskNotes',id:TASK_LOG_ID,notes:t.Notes},function(){toast('Entry added ✓','ok');});
+  try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
+  persistTaskSafely(t,'Entry added ✓');
   // Stay in the modal — refresh the log view in place without closing
   openTaskLogModal(TASK_LOG_ID);
 }
@@ -4174,28 +4205,37 @@ function saveTaskLogAndClose(){
     try{ log = JSON.parse(t.Notes||'[]'); }catch(e){ if(t.Notes) log=[{date:t.Timestamp||'',text:t.Notes,user:t.Assignee||''}]; }
     log.push({date:new Date().toISOString(), text:noteText, user:cu()});
     t.Notes = JSON.stringify(log);
-    post({action:'updateTaskNotes',id:TASK_LOG_ID,notes:t.Notes},function(){});
     changed = true;
   }
   if(changed){
-    post({action:'updateDueDate',id:TASK_LOG_ID,assignee:t.Assignee,dueDate:t.DueDate},function(){});
-    toast('Saved ✓','ok');
+    try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
+    persistTaskSafely(t,'Saved ✓');
   }
   closeAll(); render();
 }
 
 function toggleTask(id,wasDone){
   var t=DB.tasks.find(function(x){return x.ID===id;});
-  if(t){t.Done=!wasDone;}
-  render();
-  post({action:'toggleTask',id:id,done:!wasDone});
+  if(t){
+    t.Done=!wasDone;
+    try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
+    render();
+    persistTaskSafely(t,!wasDone?'Task completed ✅':'Task reopened ✓');
+  }
 }
 
 function delTask(id){
-  if(!confirm('Delete this task?'))return;
-  DB.tasks=DB.tasks.filter(function(t){return t.ID!==id;});
+  var t=DB.tasks.find(function(x){return x.ID===id;});
+  if(!t)return;
+  if(!confirm('Archive this task instead of deleting it?\n\nThe task will be kept for compliance and hidden from normal open-task views.'))return;
+  var log = [];
+  try{ log = JSON.parse(t.Notes||'[]'); }catch(e){ if(t.Notes) log=[{date:t.Timestamp||'',text:t.Notes,user:t.Assignee||''}]; }
+  log.push({date:new Date().toISOString(), text:'Task archived instead of deleted.', user:cu()});
+  t.Notes = JSON.stringify(log);
+  t.Done = true;
+  try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
   render();
-  post({action:'deleteRow',sheet:'Tasks',id:id});
+  persistTaskSafely(t,'Task archived ✓');
 }
 
 // ══ EVENT DELEGATION (single listener, handles everything) ════
@@ -4814,47 +4854,9 @@ function selectUser(name){
 }
 
 function bootApp(){
-  // Version stamp - preserve cached client/policy data across builds
+  // Version stamp - never wipe operational data on boot
   try{
-    var _storedVer = localStorage.getItem('du_ver');
-    if(_storedVer!=='v16'){
-      var _existingDb = localStorage.getItem('du_db');
-      if(_existingDb) localStorage.setItem('du_db_backup_'+(_storedVer||'unknown')+'_'+Date.now(), _existingDb);
-      // Preserve Recent Clients across builds. If the dedicated du_recent store is missing,
-      // rebuild it from cached client LastAccessed values, then fall back to the latest du_db backup.
-      try{
-        var _rk = recentKey();
-        var _existingRecent = localStorage.getItem(_rk);
-        function _recoverRecentMap(_dbStr){
-          var _map = {};
-          if(!_dbStr) return _map;
-          try{
-            var _parsed = JSON.parse(_dbStr);
-            (_parsed.clients||[]).forEach(function(c){
-              if(c && c.ID && c.LastAccessed) _map[String(c.ID)] = c.LastAccessed;
-            });
-          }catch(e){}
-          return _map;
-        }
-        if(!_existingRecent || _existingRecent==='{}'){
-          var _recoveredRecent = _recoverRecentMap(_existingDb);
-          if(!Object.keys(_recoveredRecent).length){
-            var _latestBackupKey = null, _latestBackupTs = 0;
-            for(var _i=0; _i<localStorage.length; _i++){
-              var _k = localStorage.key(_i)||'';
-              if(_k.indexOf('du_db_backup_')===0){
-                var _m = _k.match(/_(\d+)$/);
-                var _ts = _m ? parseInt(_m[1],10) : 0;
-                if(_ts >= _latestBackupTs){ _latestBackupTs = _ts; _latestBackupKey = _k; }
-              }
-            }
-            if(_latestBackupKey) _recoveredRecent = _recoverRecentMap(localStorage.getItem(_latestBackupKey));
-          }
-          if(Object.keys(_recoveredRecent).length){
-            localStorage.setItem(_rk, JSON.stringify(_recoveredRecent));
-          }
-        }
-      }catch(e){}
+    if(localStorage.getItem('du_ver')!=='v16'){
       localStorage.setItem('du_ver','v16');
     }
   }catch(e){}
@@ -4868,46 +4870,11 @@ function bootApp(){
     var cached = localStorage.getItem('du_db');
     if(cached){
       DB = JSON.parse(cached);
-      // Capture any embedded LastAccessed values before stripping them from cached DB.
-      // This lets us recover Recent Clients if the dedicated du_recent store was ever missing.
-      var _cachedRecent = {};
-      try{
-        (DB.clients||[]).forEach(function(c){
-          if(c && c.ID && c.LastAccessed) _cachedRecent[String(c.ID)] = c.LastAccessed;
-        });
-      }catch(e){}
       // Strip all LastAccessed from cached DB first
       DB.clients.forEach(function(c){ delete c.LastAccessed; });
-      // Re-apply only from the trusted du_recent store, with recovery fallback from cached DB,
-      // then from the latest du_db backup if needed.
+      // Re-apply only from the trusted du_recent store
       try{
-        var _rk2 = recentKey();
-        var _raRaw = localStorage.getItem(_rk2);
-        var ra=JSON.parse(_raRaw||'{}');
-        if(!Object.keys(ra).length){
-          if(Object.keys(_cachedRecent).length){
-            ra = _cachedRecent;
-          } else {
-            var _latestBackupKey2 = null, _latestBackupTs2 = 0;
-            for(var _j=0; _j<localStorage.length; _j++){
-              var _bk = localStorage.key(_j)||'';
-              if(_bk.indexOf('du_db_backup_')===0){
-                var _mm = _bk.match(/_(\d+)$/);
-                var _ts2 = _mm ? parseInt(_mm[1],10) : 0;
-                if(_ts2 >= _latestBackupTs2){ _latestBackupTs2 = _ts2; _latestBackupKey2 = _bk; }
-              }
-            }
-            if(_latestBackupKey2){
-              try{
-                var _backupParsed = JSON.parse(localStorage.getItem(_latestBackupKey2)||'{}');
-                (_backupParsed.clients||[]).forEach(function(c){
-                  if(c && c.ID && c.LastAccessed) ra[String(c.ID)] = c.LastAccessed;
-                });
-              }catch(e){}
-            }
-          }
-          if(Object.keys(ra).length) localStorage.setItem(_rk2, JSON.stringify(ra));
-        }
+        var ra=JSON.parse(localStorage.getItem(recentKey())||'{}');
         DB.clients.forEach(function(c){ if(ra[String(c.ID)]) c.LastAccessed=ra[String(c.ID)]; });
       }catch(e){}
       render();
@@ -4979,16 +4946,21 @@ if(checkAuth()) bootApp();
   function saveNote(id, val){
     padNotes[String(id)] = val;
     try{ localStorage.setItem('du_note_'+String(id), val); }catch(e){}
-    // Debounce server save — wait 1.5s after last keystroke
+    // Debounce server save — wait briefly after last keystroke
     if(_saveNoteTimer) clearTimeout(_saveNoteTimer);
     _saveNoteTimer = setTimeout(function(){
-      post({action:'saveNote', clientId:id, text:val, by:cu()}, function(){});
-    }, 1500);
+      post({action:'saveNote', clientId:id, text:val, by:cu()}, function(result){
+        if(!(result && result.ok)) showSaveFailure('Shared note save failed');
+      });
+    }, 800);
   }
   function clearNote(id){
+    if(!confirm('Clear this note draft from this browser only?\n\nThe shared note will be kept so notes are not lost.')) return;
     delete padNotes[String(id)];
     try{ localStorage.removeItem('du_note_'+String(id)); }catch(e){}
-    post({action:'saveNote', clientId:id, text:'', by:cu()}, function(){});
+    if(window._sharedNotes && window._sharedNotes[String(id)]){
+      padNotes[String(id)] = window._sharedNotes[String(id)].text || '';
+    }
   }
 
   var _origRender = render;
