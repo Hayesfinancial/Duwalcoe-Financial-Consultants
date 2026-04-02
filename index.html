@@ -85,8 +85,6 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--cream);c
 .toast{position:fixed;bottom:24px;right:24px;background:var(--navy);color:#fff;padding:12px 20px;border-radius:8px;font-size:13px;font-weight:600;z-index:9999;box-shadow:0 4px 24px rgba(0,0,0,.2);transform:translateY(80px);opacity:0;transition:all .3s}
 .toast.show{transform:translateY(0);opacity:1}
 .toast.ok{border-left:4px solid var(--sage)}.toast.err{border-left:4px solid var(--rose)}
-.save-fail-bar{position:fixed;top:0;left:0;right:0;background:#9e2a2b;color:#fff;padding:10px 20px;font-size:13px;font-weight:700;z-index:10000;display:none;text-align:center;box-shadow:0 4px 16px rgba(0,0,0,.3)}
-.save-fail-bar.show{display:block}
 .dr{display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--smoke);font-size:13px}
 .dr:last-child{border-bottom:none}
 .dl{color:#889;font-weight:500;flex-shrink:0}.dv{font-weight:600;text-align:right;max-width:65%;word-break:break-word}
@@ -96,11 +94,10 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--cream);c
 </head>
 <body>
 <div class="shell">
-  <div id="saveFailBar" class="save-fail-bar">⚠ SAVE FAILED — Your data is at risk. Check your internet connection. <button onclick="retrySaveQueue()" style="background:#fff;color:#9e2a2b;border:none;padding:4px 14px;border-radius:5px;font-weight:700;cursor:pointer;margin-left:10px">↻ Retry Now</button> <span id="saveFailDetail" style="font-size:11px;opacity:0.8;margin-left:8px"></span></div>
   <div class="topbar">
     <div>
       <div class="logo">Duwalcoe <em>Practice Manager</em></div>
-      <div class="fsp">FSP No: 9978 &nbsp;·&nbsp; <span style="color:var(--gold);font-weight:700">v1.2</span> <span style="color:#556688;font-size:10px">built 01 Apr 2026</span></div>
+      <div class="fsp">FSP No: 9978 &nbsp;·&nbsp; <span style="color:var(--gold);font-weight:700">v1.1</span> <span style="color:#556688;font-size:10px">built 29 Mar 2026</span></div>
     </div>
     <div class="tright">
       <span id="todayLbl" style="font-size:12px;color:#8899bb"></span>
@@ -312,6 +309,83 @@ function sbFetch(method, path, body, cb){
     .catch(function(e){ console.error('Supabase fetch error:', e); if(cb) cb(null, e.message); });
 }
 
+var _SAVE_QUEUE = [];
+try{
+  var _sq = JSON.parse(localStorage.getItem('du_save_queue')||'[]');
+  if(Array.isArray(_sq)) _SAVE_QUEUE = _sq;
+}catch(e){ _SAVE_QUEUE = []; }
+
+function persistSaveQueue(){
+  try{ localStorage.setItem('du_save_queue', JSON.stringify(_SAVE_QUEUE)); }catch(e){}
+}
+
+function queuePendingSave(table, row){
+  if(!row || !row.ID) return;
+  _SAVE_QUEUE = _SAVE_QUEUE.filter(function(item){
+    return !(item && item.table===table && item.row && String(item.row.ID)===String(row.ID));
+  });
+  _SAVE_QUEUE.push({table:table, row:JSON.parse(JSON.stringify(row))});
+  persistSaveQueue();
+}
+
+function clearPendingSaveQueueItem(table, id){
+  if(!id) return;
+  _SAVE_QUEUE = _SAVE_QUEUE.filter(function(item){
+    return !(item && item.table===table && item.row && String(item.row.ID)===String(id));
+  });
+  persistSaveQueue();
+}
+
+function retryPendingSaves(){
+  if(!_SAVE_QUEUE.length) return;
+  var queue = _SAVE_QUEUE.slice();
+  queue.forEach(function(item){
+    if(!item || !item.table || !item.row) return;
+    sbFetch('POST', '/rest/v1/'+item.table, [item.row], function(res, err){
+      if(!err){
+        clearPendingSaveQueueItem(item.table, item.row.ID);
+        try{
+          if(item.table==='policies'){
+            var idx = (DB.policies||[]).findIndex(function(p){ return p && String(p.ID)===String(item.row.ID); });
+            if(idx>=0){
+              DB.policies[idx] = Object.assign({}, item.row);
+              delete DB.policies[idx]._pendingSave;
+            }
+            localStorage.setItem('du_db', JSON.stringify(DB));
+            render();
+          }
+        }catch(e){}
+        toast('Recovered pending save for '+item.table, 'ok');
+      }
+    });
+  });
+}
+
+function backupPolicySnapshot(pol, reason){
+  if(!pol || !pol.ID) return;
+  try{
+    var backups = JSON.parse(localStorage.getItem('du_policy_backups')||'[]');
+    backups.unshift({
+      ts: new Date().toISOString(),
+      reason: reason||'policy-change',
+      policy: JSON.parse(JSON.stringify(pol))
+    });
+    if(backups.length > 500) backups = backups.slice(0,500);
+    localStorage.setItem('du_policy_backups', JSON.stringify(backups));
+  }catch(e){}
+}
+
+window.addEventListener('online', retryPendingSaves);
+setInterval(retryPendingSaves, 30000);
+window.addEventListener('beforeunload', function(e){
+  var hasPendingPolicies = (DB.policies||[]).some(function(p){ return p && p._pendingSave; });
+  if(_SAVE_QUEUE.length || hasPendingPolicies){
+    e.preventDefault();
+    e.returnValue = 'There are policy saves still pending.';
+    return e.returnValue;
+  }
+});
+
 function syncNow() {
   setSS('ld');
 
@@ -351,16 +425,6 @@ function syncNow() {
           var _pi=DB.policies.findIndex(function(sp){return String(sp.ID)===String(lp.ID);});
           if(_pi>=0) DB.policies[_pi]=lp;
           else DB.policies.push(lp);
-          // Retry server save for pending policies
-          var _retryPol = JSON.parse(JSON.stringify(lp));
-          delete _retryPol._pendingSave;
-          post({action:'savePolicy',policy:_retryPol},function(result){
-            if(result && result.ok){
-              var _ri=DB.policies.findIndex(function(x){return String(x.ID)===String(lp.ID);});
-              if(_ri>=0){ DB.policies[_ri]=_retryPol; }
-              try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
-            }
-          });
         }
       });
     }catch(e){}
@@ -400,22 +464,13 @@ function syncNow() {
     setSS('ok');
     render();
     toast('Synced — ' + DB.clients.length + ' clients','ok');
+    retryPendingSaves();
     if(!window._discussTimer) startDiscussAutoRefresh();
   }
 
   needed.forEach(function(table){
-    sbFetch('GET', '/rest/v1/'+table+'?select=*&limit=10000', null, function(data, err){
-      if(err){
-        // Load failed — use localStorage fallback for this table
-        console.warn('Failed to load '+table+' from server, using localStorage');
-        try{
-          var _ldb3=JSON.parse(localStorage.getItem('du_db')||'{}');
-          loaded[table] = _ldb3[table==='familylinks'?'links':table]||[];
-        }catch(e){ loaded[table]=[]; }
-        if(table==='policies') showSaveFailure('Could not load policies from server — using local copy');
-      } else {
-        loaded[table] = data||[];
-      }
+    sbFetch('GET', '/rest/v1/'+table+'?select=*&limit=10000', null, function(data){
+      loaded[table] = data||[];
       checkDone();
     });
   });
@@ -443,66 +498,20 @@ function startDiscussAutoRefresh(){
 }
 
 // post() — maps every legacy action to a direct Supabase call
-// ── SAVE SAFETY: queue, retry, and loud failure alerts ──────
-var _SAVE_QUEUE = []; // failed saves waiting to retry
-var _UNSAVED_CHANGES = false;
-
-function showSaveFailure(detail) {
-  var bar = document.getElementById('saveFailBar');
-  var det = document.getElementById('saveFailDetail');
-  if (bar) { bar.className = 'save-fail-bar show'; }
-  if (det && detail) { det.textContent = detail; }
-  _UNSAVED_CHANGES = true;
-}
-function clearSaveFailure() {
-  var bar = document.getElementById('saveFailBar');
-  if (bar) { bar.className = 'save-fail-bar'; }
-  if (_SAVE_QUEUE.length === 0) { _UNSAVED_CHANGES = false; }
-}
-function retrySaveQueue() {
-  if (!_SAVE_QUEUE.length) { clearSaveFailure(); toast('Nothing to retry','ok'); return; }
-  var queue = _SAVE_QUEUE.slice();
-  _SAVE_QUEUE = [];
-  var ok = 0, fail = 0;
-  queue.forEach(function(item) {
-    sbFetch('POST', '/rest/v1/' + item.table, [item.row], function(res, err) {
-      if (err) { _SAVE_QUEUE.push(item); fail++; }
-      else { ok++; }
-      if (ok + fail === queue.length) {
-        if (fail > 0) { showSaveFailure(fail + ' save(s) still failing'); toast(fail + ' save(s) still failing — will retry', 'err'); }
-        else { clearSaveFailure(); toast('All ' + ok + ' pending save(s) recovered ✓', 'ok'); }
-        try { localStorage.setItem('du_db', JSON.stringify(DB)); } catch(e) {}
-      }
-    });
-  });
-}
-// Auto-retry every 30 seconds
-setInterval(function() { if (_SAVE_QUEUE.length > 0) retrySaveQueue(); }, 30000);
-// Warn before closing tab
-window.addEventListener('beforeunload', function(e) {
-  if (_UNSAVED_CHANGES || _SAVE_QUEUE.length > 0) {
-    e.preventDefault();
-    e.returnValue = 'You have unsaved changes. Are you sure you want to leave?';
-    return e.returnValue;
-  }
-});
-
 function post(data, cb){
   var action = data.action;
 
-  // upsert a single row into a table — WITH failure alerting and retry queue
+  // upsert a single row into a table
   function upsert(table, row, callback){
     sbFetch('POST', '/rest/v1/'+table, [row], function(res, err){
       try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
       if(err){
-        _SAVE_QUEUE.push({table: table, row: row});
-        showSaveFailure('Failed to save to ' + table + ': ' + (err||'unknown error'));
-        toast('SAVE FAILED — ' + table + '. Data saved locally, will retry.', 'err');
-      } else {
-        // If this was the last failure, clear the bar
-        if(_SAVE_QUEUE.length === 0) clearSaveFailure();
+        queuePendingSave(table, row);
+        if(callback) callback({ok:0,error:err});
+        return;
       }
-      if(callback) callback(err?{ok:0}:{ok:1});
+      clearPendingSaveQueueItem(table, row && row.ID);
+      if(callback) callback({ok:1});
     });
   }
 
@@ -510,7 +519,7 @@ function post(data, cb){
   function del(table, id, callback){
     sbFetch('DELETE', '/rest/v1/'+table+'?ID=eq.'+encodeURIComponent(id), null, function(res, err){
       try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
-      if(callback) callback(err?{ok:0}:{ok:1});
+      if(callback) callback(err?{ok:0,error:err}:{ok:1});
     });
   }
 
@@ -614,11 +623,8 @@ function calcAge(dob, atDate){
 function daysTo(ds){
   if(!ds||ds==='None')return null;
   var today=new Date(); today.setHours(0,0,0,0);
-  // Strip time portion from ISO timestamps
-  var dsClean=String(ds);
-  if(dsClean.indexOf('T')>-1) dsClean=dsClean.split('T')[0];
   // Parse as local date to avoid UTC timezone shift causing off-by-one
-  var parts=dsClean.split(/[-\/]/);
+  var parts=String(ds).split(/[-\/]/);
   var d;
   if(parts.length===3){
     if(parts[0].length===4) d=new Date(+parts[0],+parts[1]-1,+parts[2]);
@@ -1916,8 +1922,6 @@ function parseDateVal(val){
   var d='', m='', y='';
   if(!val || val==='None' || val==='') return {d:d,m:m,y:y};
   var v=String(val).trim();
-  // Strip time portion from ISO timestamps (e.g. 2026-03-31T00:00:00+00:00 → 2026-03-31)
-  if(v.indexOf('T')>-1) v=v.split('T')[0];
   var parts;
   // YYYY-MM-DD
   parts=v.split('-');
@@ -2137,11 +2141,7 @@ function openClientModal(id, isLead){
     '<div class="g2" style="margin-top:10px">'+
     fld('fdr','Google Drive Folder URL',c.DriveUrl)+
     fld('frc','Risk Category',c.RiskCategory||'')+
-    '</div>'+
-    // SECTION: Notes
-    '<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:1px;padding:4px 0 8px;border-bottom:2px solid var(--gold);margin:18px 0 14px">Notes</div>'+
-    '<div class="fld"><label>Client Notes <span style="font-weight:400;color:#889">(editable — careful, this overwrites existing notes)</span></label>'+
-    '<textarea id="fnt" style="min-height:120px;white-space:pre-wrap;line-height:1.7">'+(c.Notes&&c.Notes!=='undefined'?c.Notes:'')+'</textarea></div>';
+    '</div>';
 
   // Initialise working copies from existing data
   try{ EDIT_BANKS = c.BankDetails ? JSON.parse(c.BankDetails) : []; }catch(e){ EDIT_BANKS=[]; }
@@ -2574,10 +2574,10 @@ function saveClient(openFNA){
   c.BankDetails = JSON.stringify(EDIT_BANKS);
   c.Doctors     = JSON.stringify(EDIT_DOCS);
   if(_existing){
-    c.Notes=g('fnt')||_existing.Notes||'';
+    c.Notes=_existing.Notes||'';
     c.LastAccessed=_existing.LastAccessed||'';
   } else {
-    c.Notes=g('fnt')||'';
+    c.Notes='';
   }
   if(EC){var i=DB.clients.findIndex(function(x){return x.ID===EC;});if(i>=0)DB.clients[i]=c;}
   else DB.clients.push(c);
@@ -2779,7 +2779,7 @@ function buildPolicyForm(p){
     if(!isLA && !isLifeAnn){
       html+='<div id="pEscRow" class="g2"'+(_isOnceOff?' style="display:none"':'')+'>'
         +fld('pprem_pct','Premium Escalation %',p.PremEscalation)
-        +((isRA||isInv)?'<div></div>':fld('pben_pct','Benefit Escalation %',p.BenEscalation))
+        +(isRA?'<div></div>':fld('pben_pct','Benefit Escalation %',p.BenEscalation))
         +'</div>';
     }
   }
@@ -2808,24 +2808,36 @@ function buildPolicyForm(p){
   if(isRA||isInv){
     html+=sec(isRA?'Fund & Retirement Values':'Investment Values');
     html+='<div class="g2">'+fld('pb_fv','Current Fund Value',p.BenFundValue,'text',isInv?'oninput="invCalcMaturity()"':'')+fld('pb_surr2','Nett Surrender Value',p.BenSurrenderValue)+'</div>';
+    // IRR — stated (from insurer statement) if entered, else calculated
+    (function(){
+      if(isInv && p.IllustrativeRate && parseFloat(p.IllustrativeRate)>0){
+        // Investment: use stated IRR from insurer statement
+        html += irrBadge(parseFloat(p.IllustrativeRate));
+      } else if(isRA){
+        // RA: calculate IRR (no withdrawals, calculation is accurate)
+        var irr = calcPolicyIRR(p.StartDate, p.Premium, p.Frequency, p.PremEscalation, p.BenFundValue);
+        html += irrBadge(irr);
+      }
+    })();
     if(isRA){
       html+='<div class="g2">'+fld('pb_vested','Vested Component (Pot 1)',p.VestedValue,'text','oninput="raAutoSum()"')+fld('pb_nonvested','Non-Vested Component',p.NonVestedValue,'text','oninput="raAutoSum()"')+'</div>';
       html+='<div class="g2">'+fld('pb_retcomp','Retirement Component (Pot 2)',p.RetirementComponent,'text','oninput="raAutoSum()"')+fld('pb_savcomp','Savings Component (Pot 3)',p.SavingsComponent,'text','oninput="raAutoSum()"')+'</div>';
       html+='<div class="g2">'+fld('pb_retage','Retirement Age',p.RetirementAge||'65','text','oninput="raCalcMaturity()"')+fdp('pb_matdate','Maturity Date',p.MaturityDate||'')+'</div>';
-      html+='<div class="g2">'+fld('pb_illrate','Growth Rate %',p.IllustrativeRate||'9')+(_isOnceOff?'<div></div>':fld('pb_growrate','Annual Premium Increase %',p.PremGrowthRate||'10'))+'</div>';
+      html+='<div class="g2">'+fld('pb_illrate','Illustrative Rate %',p.IllustrativeRate||'9')+(_isOnceOff?'<div></div>':fld('pb_growrate','Premium Growth Rate %',p.PremGrowthRate||'10'))+'</div>';
       html+='<div class="fld"><label>Will client withdraw Savings Pot (Pot 3) before retirement?</label><div style="display:flex;gap:12px;margin-top:8px">';
       html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="p3pot" value="Yes"'+(p.WithdrawSavingsPot==='Yes'?' checked':'')+'>Yes</label>';
       html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="p3pot" value="No"'+(p.WithdrawSavingsPot==='No'?' checked':'')+'>No</label>';
       html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="p3pot" value="Undecided"'+((!p.WithdrawSavingsPot||p.WithdrawSavingsPot==='Undecided')?' checked':'')+'>Undecided</label>';
       html+='</div></div>';
     } else {
-      html+='<div class="g2">'+fld('pb_matval','Maturity Value',p.BenMaturityValue,'text','oninput=""')+fld('pb_matage','Maturity Age',p.MaturityAge||p.maturityAge||'','text','oninput="invCalcMaturity()"')+'</div>';
+      html+='<div class="g2">'+fld('pb_matval','Maturity Value',p.BenMaturityValue,'text','oninput=""')+fdp('pb_matdate','Maturity Date',p.MaturityDate||'')+'</div>';
+      // Stated IRR from insurer statement (replaces Illustrative Rate for investments)
       html+='<div class="g2">';
-      html+='<div class="fld"><label>Growth Rate % <span style="font-size:10px;color:#889;font-weight:400">(used for projection)</span></label>';
-      html+='<div style="position:relative"><input id="pb_growrate" type="text" value="'+(p.GrowthRate||p.PremGrowthRate||p.IllustrativeRate||'')+'" placeholder="e.g. 8.5" oninput="invCalcMaturity()" ';
+      html+='<div class="fld"><label>Stated IRR % <span style="font-size:10px;color:#889;font-weight:400">(from insurer statement)</span></label>';
+      html+='<div style="position:relative"><input id="pb_illrate" type="text" value="'+(p.IllustrativeRate||'')+'" placeholder="e.g. 8.28" oninput="invCalcGain();(function(){var v=parseFloat(this.value)||0;var el=document.getElementById(\'irr_badge_wrap\');if(el)el.innerHTML=v>0?irrBadge(v):\'\';}).call(this)" ';
       html+='style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 28px 8px 10px;font-family:inherit;font-size:13px">';
       html+='<span style="position:absolute;right:10px;top:50%;transform:translateY(-50%);color:#889;font-size:11px;pointer-events:none">%</span></div></div>';
-      html+=(_isOnceOff?'<div></div>':'<div></div>');
+      html+=(_isOnceOff?'<div></div>':fld('pb_growrate','Growth Rate % (projection)',p.PremGrowthRate||''));
       html+='</div>';
       // Total invested / withdrawn / gain
       html+='<div class="g2">';
@@ -3253,7 +3265,7 @@ function irrBadge(irr){
   if(irr === null || irr === undefined) return '';
   var col = irr >= 10 ? '#166534' : irr >= 6 ? '#1e40af' : irr >= 0 ? '#92400e' : '#991b1b';
   var bg  = irr >= 10 ? '#f0fdf4' : irr >= 6 ? '#eff6ff' : irr >= 0 ? '#fffbeb' : '#fef2f2';
-  return '<div style="margin-top:6px;padding:6px 10px;background:'+bg+';border-radius:6px;font-size:12px;color:'+col+';font-weight:700">📈 IRR: '+irr+'% p.a.</div>';
+  return '<div style="margin-top:6px;padding:6px 10px;background:'+bg+';border-radius:6px;font-size:12px;color:'+col+';font-weight:700">📈 Actual IRR since inception: '+irr+'% p.a.</div>';
 }
 
 // ── Investment maturity value auto-calculation
@@ -3276,36 +3288,40 @@ function invCalcGain(){
 }
 
 function invCalcMaturity(){
-  var fv = parseFloat((document.getElementById('pb_fv')||{value:'0'}).value.replace(/[^0-9.]/g,'')||0) || 0;
-  var prem = parseFloat((document.getElementById('ppm')||{value:'0'}).value.replace(/[^0-9.]/g,'')||0) || 0;
-  var rate = parseFloat((document.getElementById('pb_growrate')||{value:''}).value||0)||0;
-  var ageEl = document.getElementById('pb_matage');
-  var out = document.getElementById('pb_matval');
-  if(!out) return;
-  if(!fv || !rate || !ageEl || !ageEl.value){ out.value=''; return; }
-  var c = DB.clients.find(function(x){ return String(x.ID)===String(EPC); });
-  if(!c || !clean(c.DOB)){ out.value=''; return; }
-  var currentAge = calcAge(c.DOB);
-  var matAge = parseInt(ageEl.value,10);
-  if(!currentAge || !matAge || matAge <= currentAge){ out.value=''; return; }
-  var yrs = matAge - currentAge;
+  var fv = parseFloat((document.getElementById('pb_fv')||{value:''}).value.replace(/[^0-9.]/g,'')||0)||0;
+  var prem = parseFloat((document.getElementById('ppm')||{value:''}).value.replace(/[^0-9.]/g,'')||0)||0;
+  var rate = parseFloat((document.getElementById('pb_illrate')||{value:''}).value||0)||0;
+  // Get maturity date
+  var matEl = document.getElementById('pb_matdate');
+  if(!matEl||!matEl.value) return;
+  var matParts = matEl.value.split('-');
+  if(matParts.length < 3) return;
+  var matDate = new Date(+matParts[0], +matParts[1]-1, +matParts[2]);
+  if(isNaN(matDate)) return;
+  var today = new Date();
+  var yrs = (matDate - today) / (365.25 * 24 * 60 * 60 * 1000);
+  if(yrs <= 0) return;
   var r = rate / 100;
-  var projected = fv * Math.pow(1+r, yrs);
-
+  // Project existing fund value
+  var projected = fv * Math.pow(1 + r, yrs);
+  // For once-off: no ongoing premium contributions
+  // For recurring: add premium contributions (monthly, growing at premium growth rate)
   var freqEl = document.getElementById('pfreq');
   var freq = freqEl ? freqEl.value : 'Monthly';
   if(prem > 0 && freq !== 'Once Off' && freq !== 'Paid Up' && r > 0){
-    var escEl = document.getElementById('pprem_pct');
-    var escRate = parseFloat((escEl||{value:'0'}).value||0)||0;
-    var g = escRate / 100;
+    var growEl = document.getElementById('pb_growrate');
+    var growRate = parseFloat((growEl||{value:'0'}).value||0)||0;
+    var g = growRate / 100;
     var n = Math.floor(yrs * 12);
+    // FV of growing annuity
     if(Math.abs(r/12 - g/12) > 0.0001){
       projected += prem * (Math.pow(1+r/12, n) - Math.pow(1+g/12, n)) / (r/12 - g/12);
     } else {
       projected += prem * n * Math.pow(1+r/12, n);
     }
   }
-  if(out) out.value = Math.round(projected);
+  var matValEl = document.getElementById('pb_matval');
+  if(matValEl) matValEl.value = Math.round(projected);
 }
 
 // ── RA maturity date auto-calculation
@@ -3511,10 +3527,10 @@ function collectPolicyForm(){
     LumpBenefits:JSON.stringify(POL_LUMP_ROWS),
     BenSurrenderValue:g('pb_surr')||g('pb_surr2'),
     BenFundValue:g('pb_fv'),BenMaturityValue:g('pb_matval'),
-    MaturityDate:g('pb_matdate'),MaturityAge:g('pb_matage'),maturityAge:g('pb_matage'),RetirementAge:g('pb_retage'),
+    MaturityDate:g('pb_matdate'),RetirementAge:g('pb_retage'),
     VestedValue:g('pb_vested'),NonVestedValue:g('pb_nonvested'),
     RetirementComponent:g('pb_retcomp'),SavingsComponent:g('pb_savcomp'),
-    IllustrativeRate:g('pb_growrate')||g('pb_illrate'),PremGrowthRate:g('pb_growrate'),GrowthRate:g('pb_growrate'),
+    IllustrativeRate:g('pb_illrate'),PremGrowthRate:g('pb_growrate'),
     TotalInvested:g('pb_totalinv'),TotalWithdrawn:g('pb_totalwith'),
     WithdrawSavingsPot:getR('p3pot'),IncludeInRetirement:getR('pinret'),
     MedPlan:g('pmedplan'),MedLives:g('pmedlives'),
@@ -3789,6 +3805,7 @@ function savePolicy(){
   pol.ReviewHistory=oldPol?(oldPol.ReviewHistory||''):'';
   // Mark pending so a refresh before server confirms doesn't lose the policy
   pol._pendingSave = true;
+  backupPolicySnapshot(oldPol||pol, oldPol?'before-policy-update':'before-policy-create');
   if(EPI!==null&&oldPol){var gi=DB.policies.indexOf(oldPol);if(gi>=0)DB.policies[gi]=pol;}
   else DB.policies.push(pol);
   // Write to localStorage immediately — survives a refresh before server responds
@@ -3803,10 +3820,11 @@ function savePolicy(){
       if(_ci>=0){ DB.policies[_ci]=_polForServer; }
       try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
       toast('Policy saved ✓','ok');
-    } else {
-      // Server save FAILED — keep _pendingSave so sync doesn't wipe it
-      toast('⚠ Policy saved locally but server save failed — will retry on next sync','err');
+      return;
     }
+    try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
+    toast('Policy saved locally only — server save failed. It will retry automatically.','err');
+    retryPendingSaves();
   });
 }
 
@@ -3816,13 +3834,17 @@ function deletePolicy(){
   if(!oldPol){ toast('Cannot find policy to delete','err'); return; }
   var label = (oldPol.Insurer||'') + (oldPol.Product?' — '+oldPol.Product:'') + (oldPol.PolicyNo?' ('+oldPol.PolicyNo+')':'');
   if(!confirm('Permanently delete this policy?\n\n' + label + '\n\nThis cannot be undone.')) return;
-  // Remove from DB in memory
-  var gi = DB.policies.indexOf(oldPol);
-  if(gi >= 0) DB.policies.splice(gi, 1);
-  try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
-  closeAll(); render();
-  // Delete from Supabase
-  post({action:'deleteRow', sheet:'policies', id:oldPol.ID}, function(){
+  backupPolicySnapshot(oldPol, 'before-policy-delete');
+  // Delete from Supabase FIRST. Only remove locally once server confirms.
+  post({action:'deleteRow', sheet:'policies', id:oldPol.ID}, function(result){
+    if(!(result && result.ok)){
+      toast('Delete failed — policy kept intact.','err');
+      return;
+    }
+    var gi = DB.policies.indexOf(oldPol);
+    if(gi >= 0) DB.policies.splice(gi, 1);
+    try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
+    closeAll(); render();
     toast('Policy deleted','ok');
   });
 }
@@ -3872,6 +3894,7 @@ function replacePolicy(cid,idx){
   if(!confirm('This will archive '+old.Insurer+' policy '+( old.PolicyNo||'')+ ' and open a new replacement. Continue?'))return;
   var gi=DB.policies.indexOf(old);
   var now=new Date().toISOString().slice(0,10);
+  backupPolicySnapshot(old, 'before-policy-replace');
   // Snapshot the old policy before archiving
   var snap=snapshotPolicy(old);
   snap.type='replaced';
@@ -3883,8 +3906,22 @@ function replacePolicy(cid,idx){
     DB.policies[gi].Status='Replaced';
     DB.policies[gi].ReplacedDate=now;
     DB.policies[gi].ReviewHistory=JSON.stringify(history);
+    DB.policies[gi]._pendingSave = true;
   }
-  post({action:'savePolicy',policy:DB.policies[gi]},function(){});
+  try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
+  var archivedForServer = JSON.parse(JSON.stringify(DB.policies[gi]||old));
+  delete archivedForServer._pendingSave;
+  post({action:'savePolicy',policy:archivedForServer},function(result){
+    if(result && result.ok){
+      var _ri=DB.policies.findIndex(function(x){ return x && String(x.ID)===String(archivedForServer.ID); });
+      if(_ri>=0) DB.policies[_ri]=archivedForServer;
+      try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
+    } else {
+      try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
+      toast('Old policy archived locally only — server save failed. It will retry automatically.','err');
+      retryPendingSaves();
+    }
+  });
   // Open new policy pre-filled with old details, linked back
   EPC=cid;EPI=null;
   window.REPLACING_POL_ID=old.ID;
@@ -3898,7 +3935,7 @@ function replacePolicy(cid,idx){
   });
   buildPolicyForm(prefill);
   document.getElementById('pMod').classList.add('open');
-  toast('Old policy archived — update the details for the new policy','ok');
+  toast('Old policy archived locally — update the details for the new policy','ok');
 }
 
 
@@ -4384,8 +4421,8 @@ function openPolicySchedule(cid){
       s+='<td style="padding:6px 10px;border-bottom:1px solid #e0e0d8;text-align:right">Dread Disease</td>';
     } else if(isRA||isInv){
       s+='<td style="padding:6px 10px;border-bottom:1px solid #e0e0d8;text-align:right">Fund Value</td>';
-      s+='<td style="padding:6px 10px;border-bottom:1px solid #e0e0d8;text-align:right">Projected Value</td>';
-      s+='<td style="padding:6px 10px;border-bottom:1px solid #e0e0d8;text-align:right"></td>';
+      s+='<td style="padding:6px 10px;border-bottom:1px solid #e0e0d8;text-align:right">Maturity Value</td>';
+      s+='<td style="padding:6px 10px;border-bottom:1px solid #e0e0d8;text-align:right">Retirement Value</td>';
     } else {
       s+='<td colspan="3" style="padding:6px 10px;border-bottom:1px solid #e0e0d8"></td>';
     }
@@ -4413,34 +4450,8 @@ function openPolicySchedule(cid){
         s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+R(p.BenDreadDisease)+(p.DreadDiseaseType?'<div style="font-size:10px;color:#888;font-weight:400">'+p.DreadDiseaseType+'</div>':'')+'</td>';
       } else if(isRA||isInv){
         s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+R(p.BenFundValue)+'</td>';
-        // Projected value: for RAs calculate from fund value + contributions; for investments use stored maturity value or calculate
-        var _schedProj='';
-        var _schedFV=N(p.BenFundValue);
-        var _schedGR=N(p.IllustrativeRate)||N(p.PremGrowthRate)||N(p.GrowthRate)||0;
-        var _schedPrem=N(p.Premium);
-        var _schedEsc=N(p.PremEscalation)||0;
-        var _schedFreq=p.Frequency||'Monthly';
-        var _schedIsMonthly=(_schedFreq==='Monthly'||_schedFreq==='');
-        var _schedMatAge=N(p.MaturityAge)||N(p.maturityAge)||0;
-        var _schedRetAge=N(p.RetirementAge)||65;
-        var _schedCliAge=c?calcAge(c.DOB):null;
-        if(_schedCliAge && _schedGR>0){
-          var _schedTargetAge=_schedMatAge>0?_schedMatAge:_schedRetAge;
-          var _schedYrs=Math.max(0,_schedTargetAge-_schedCliAge);
-          if(_schedYrs>0){
-            var _r=_schedGR/100;
-            var _proj=_schedFV*Math.pow(1+_r,_schedYrs);
-            if(_schedIsMonthly&&_schedPrem>0){
-              var _mr=_r/12;var _ge=_schedEsc/100/12;var _n=_schedYrs*12;
-              if(Math.abs(_mr-_ge)>0.0001) _proj+=_schedPrem*(Math.pow(1+_mr,_n)-Math.pow(1+_ge,_n))/(_mr-_ge);
-              else _proj+=_schedPrem*_n*Math.pow(1+_mr,_n);
-            }
-            _schedProj=R(Math.round(_proj));
-          }
-        }
-        if(!_schedProj&&N(p.BenMaturityValue)>0) _schedProj=R(p.BenMaturityValue);
-        s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+(_schedProj||'—')+'<div style="font-size:9px;color:#888;font-weight:400">'+(_schedMatAge>0?'age '+_schedMatAge:'age '+_schedRetAge)+' @ '+(_schedGR||'?')+'%</div></td>';
-        s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8"></td>';
+        s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+R(p.BenMaturityValue)+'</td>';
+        s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+R(p.BenRetirementValue)+'</td>';
       } else {
         s+='<td colspan="3" style="padding:9px 10px;border-bottom:1px solid #eeede8"></td>';
       }
@@ -4458,16 +4469,23 @@ function openPolicySchedule(cid){
       if(isBiz&&p.LoanAmount) details.push('<span style="font-size:11px;color:#888">Loan/Cover: </span><span style="font-size:12px;font-weight:600">'+R(p.LoanAmount)+'</span>');
       if(p.MaturityDate) details.push('<span style="font-size:11px;color:#888">Maturity: </span><span style="font-size:12px">'+FD(p.MaturityDate)+'</span>');
       if(isRA||isInv){
-        // Growth rate display — stated only, no calculated IRR
+        // IRR — one figure only, clear priority:
+        // LA: stated IRR only (calculated is inaccurate due to income drawn)
+        // Investment: stated IRR if entered, else calculated
+        // RA: calculated only (accurate — no income drawn)
         if(p.Type==='Living Annuity'){
           if(p.IllustrativeRate && N(p.IllustrativeRate)>0)
             details.push('<span style="font-size:11px;color:#1e40af;font-weight:700">📈 IRR: '+p.IllustrativeRate+'% p.a.</span>');
-        } else if(isInv && !isRA){
-          var _gr3=N(p.GrowthRate)||N(p.PremGrowthRate)||N(p.IllustrativeRate)||0;
-          if(_gr3>0) details.push('<span style="font-size:11px;color:#1e40af;font-weight:700">Growth: '+_gr3+'% p.a.</span>');
+        } else if(isInv){
+          if(p.IllustrativeRate && N(p.IllustrativeRate)>0){
+            details.push('<span style="font-size:11px;color:#1e40af;font-weight:700">📈 IRR: '+p.IllustrativeRate+'% p.a.</span>');
+          } else {
+            var _irr = calcPolicyIRR(p.StartDate, p.Premium, p.Frequency, p.PremEscalation, p.BenFundValue);
+            if(_irr !== null && _irr !== 0) details.push('<span style="font-size:11px;color:#1e40af;font-weight:700">📈 IRR: '+_irr+'% p.a.</span>');
+          }
         } else if(isRA){
-          var _gr4=N(p.IllustrativeRate)||N(p.GrowthRate)||0;
-          if(_gr4>0) details.push('<span style="font-size:11px;color:#1e40af;font-weight:700">Growth: '+_gr4+'% p.a.</span>');
+          var _irr = calcPolicyIRR(p.StartDate, p.Premium, p.Frequency, p.PremEscalation, p.BenFundValue);
+          if(_irr !== null && _irr !== 0) details.push('<span style="font-size:11px;color:#1e40af;font-weight:700">📈 IRR: '+_irr+'% p.a.</span>');
         }
         // EAC
         if(p.BenEscalation && N(p.BenEscalation)>0){
@@ -4796,12 +4814,14 @@ function selectUser(name){
 }
 
 function bootApp(){
-  // Version stamp - wipe stale recent-client data from old builds
+  // Version stamp - preserve cached client/policy data across builds
   try{
-    if(localStorage.getItem('du_ver')!=='v15'){
+    var _storedVer = localStorage.getItem('du_ver');
+    if(_storedVer!=='v16'){
+      var _existingDb = localStorage.getItem('du_db');
+      if(_existingDb) localStorage.setItem('du_db_backup_'+(_storedVer||'unknown')+'_'+Date.now(), _existingDb);
       localStorage.removeItem(recentKey());
-      localStorage.removeItem('du_db');
-      localStorage.setItem('du_ver','v15');
+      localStorage.setItem('du_ver','v16');
     }
   }catch(e){}
   document.getElementById('todayLbl').textContent=
@@ -4987,13 +5007,13 @@ if(checkAuth()) bootApp();
     // Update in DB
     var idx = DB.clients.findIndex(function(x){ return String(x.ID)===String(SEL); });
     if(idx >= 0) DB.clients[idx].Notes = c.Notes;
-    // Save to Supabase
+    // Save to Google Sheets
     post({action:'saveClient', client:c}, function(){
       toast('Saved to client notes ✅','ok');
     });
-    // Clear the scratchpad after saving — prevents re-appending on multiple clicks
-    textarea.value = '';
-    // Visual confirmation on the button briefly
+    // DO NOT clear the scratchpad — user may want to keep writing
+    // DO NOT render — would reload scratchpad from server overwriting what's there
+    // Just show a visual confirmation on the button briefly
     var btn = document.getElementById('notepad-save-btn');
     if(btn){ btn.textContent='✅ Saved!'; btn.style.background='var(--sage)'; }
     setTimeout(function(){
