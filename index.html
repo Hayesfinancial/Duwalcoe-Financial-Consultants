@@ -309,6 +309,83 @@ function sbFetch(method, path, body, cb){
     .catch(function(e){ console.error('Supabase fetch error:', e); if(cb) cb(null, e.message); });
 }
 
+var _SAVE_QUEUE = [];
+try{
+  var _sq = JSON.parse(localStorage.getItem('du_save_queue')||'[]');
+  if(Array.isArray(_sq)) _SAVE_QUEUE = _sq;
+}catch(e){ _SAVE_QUEUE = []; }
+
+function persistSaveQueue(){
+  try{ localStorage.setItem('du_save_queue', JSON.stringify(_SAVE_QUEUE)); }catch(e){}
+}
+
+function queuePendingSave(table, row){
+  if(!row || !row.ID) return;
+  _SAVE_QUEUE = _SAVE_QUEUE.filter(function(item){
+    return !(item && item.table===table && item.row && String(item.row.ID)===String(row.ID));
+  });
+  _SAVE_QUEUE.push({table:table, row:JSON.parse(JSON.stringify(row))});
+  persistSaveQueue();
+}
+
+function clearPendingSaveQueueItem(table, id){
+  if(!id) return;
+  _SAVE_QUEUE = _SAVE_QUEUE.filter(function(item){
+    return !(item && item.table===table && item.row && String(item.row.ID)===String(id));
+  });
+  persistSaveQueue();
+}
+
+function retryPendingSaves(){
+  if(!_SAVE_QUEUE.length) return;
+  var queue = _SAVE_QUEUE.slice();
+  queue.forEach(function(item){
+    if(!item || !item.table || !item.row) return;
+    sbFetch('POST', '/rest/v1/'+item.table, [item.row], function(res, err){
+      if(!err){
+        clearPendingSaveQueueItem(item.table, item.row.ID);
+        try{
+          if(item.table==='policies'){
+            var idx = (DB.policies||[]).findIndex(function(p){ return p && String(p.ID)===String(item.row.ID); });
+            if(idx>=0){
+              DB.policies[idx] = Object.assign({}, item.row);
+              delete DB.policies[idx]._pendingSave;
+            }
+            localStorage.setItem('du_db', JSON.stringify(DB));
+            render();
+          }
+        }catch(e){}
+        toast('Recovered pending save for '+item.table, 'ok');
+      }
+    });
+  });
+}
+
+function backupPolicySnapshot(pol, reason){
+  if(!pol || !pol.ID) return;
+  try{
+    var backups = JSON.parse(localStorage.getItem('du_policy_backups')||'[]');
+    backups.unshift({
+      ts: new Date().toISOString(),
+      reason: reason||'policy-change',
+      policy: JSON.parse(JSON.stringify(pol))
+    });
+    if(backups.length > 500) backups = backups.slice(0,500);
+    localStorage.setItem('du_policy_backups', JSON.stringify(backups));
+  }catch(e){}
+}
+
+window.addEventListener('online', retryPendingSaves);
+setInterval(retryPendingSaves, 30000);
+window.addEventListener('beforeunload', function(e){
+  var hasPendingPolicies = (DB.policies||[]).some(function(p){ return p && p._pendingSave; });
+  if(_SAVE_QUEUE.length || hasPendingPolicies){
+    e.preventDefault();
+    e.returnValue = 'There are policy saves still pending.';
+    return e.returnValue;
+  }
+});
+
 function syncNow() {
   setSS('ld');
 
@@ -387,6 +464,7 @@ function syncNow() {
     setSS('ok');
     render();
     toast('Synced — ' + DB.clients.length + ' clients','ok');
+    retryPendingSaves();
     if(!window._discussTimer) startDiscussAutoRefresh();
   }
 
@@ -427,7 +505,13 @@ function post(data, cb){
   function upsert(table, row, callback){
     sbFetch('POST', '/rest/v1/'+table, [row], function(res, err){
       try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
-      if(callback) callback(err?{ok:0}:{ok:1});
+      if(err){
+        queuePendingSave(table, row);
+        if(callback) callback({ok:0,error:err});
+        return;
+      }
+      clearPendingSaveQueueItem(table, row && row.ID);
+      if(callback) callback({ok:1});
     });
   }
 
@@ -435,7 +519,7 @@ function post(data, cb){
   function del(table, id, callback){
     sbFetch('DELETE', '/rest/v1/'+table+'?ID=eq.'+encodeURIComponent(id), null, function(res, err){
       try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
-      if(callback) callback(err?{ok:0}:{ok:1});
+      if(callback) callback(err?{ok:0,error:err}:{ok:1});
     });
   }
 
@@ -569,9 +653,6 @@ function roasFor(id){ return DB.roas.filter(function(r){return String(r.ClientID
 function tasksFor(nm){ return DB.tasks.filter(function(t){return t.ClientName===nm&&!isdone(t);}); }
 function isdone(t){ return t.Done===true||t.Done==='TRUE'||t.Done===1||t.Done==='true'; }
 function clean(v){ if(v===0||v==='0') return '0'; return (!v||v==='None')?'':String(v); }
-function escAttr(v){ return String(v==null?'':v).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-function escHtml(v){ return String(v==null?'':v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-function escJsStr(v){ return String(v==null?'':v).split("'").join("\\'").split('\n').join(' ').split('\r').join(' '); }
 function togglePolicyOwner(val){
   var el = document.getElementById('pownother');
   if(el) el.style.display = (val==='No') ? 'block' : 'none';
@@ -1823,15 +1904,15 @@ function taskRow(t){
 
 // ══ MODAL BUILDERS ═══════════════════════════════════════════
 function fld(id,lbl,val,type,extra){
-  var v=clean(val), va=escAttr(v), vh=escHtml(v);
+  var v=clean(val);
   var t=type||'text';
-  if(t==='textarea') return '<div class="fld" style="grid-column:1/-1"><label>'+lbl+'</label><textarea id="'+id+'">'+vh+'</textarea></div>';
+  if(t==='textarea') return '<div class="fld" style="grid-column:1/-1"><label>'+lbl+'</label><textarea id="'+id+'">'+v+'</textarea></div>';
   if(t==='select'){
     return '<div class="fld"><label>'+lbl+'</label><select id="'+id+'">'+
-      (extra||[]).map(function(o){ var ov=String(o||''); return '<option value="'+escAttr(ov)+'"'+((ov&&ov.trim().toLowerCase())===(v&&v.trim().toLowerCase())?' selected':'')+'>'+escHtml(ov||'Select…')+'</option>'; }).join('')+
+      (extra||[]).map(function(o){return '<option value="'+o+'"'+((o&&o.trim().toLowerCase())===(v&&v.trim().toLowerCase())?' selected':'')+'>'+( o||'Select…')+'</option>';}).join('')+
       '</select></div>';
   }
-  return '<div class="fld"><label>'+lbl+'</label><input type="'+t+'" id="'+id+'" value="'+va+'"'+(extra?' '+extra:'')+' autocomplete="off"></div>';
+  return '<div class="fld"><label>'+lbl+'</label><input type="'+t+'" id="'+id+'" value="'+v+'"'+(extra?' '+extra:'')+' autocomplete="off"></div>';
 }
 function fs(id,lbl,opts,val){ return fld(id,lbl,val,'select',opts); }
 
@@ -2638,7 +2719,7 @@ function buildPolicyForm(p){
     '<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="pisowner" value="No" onchange="togglePolicyOwner(this.value)"'+(p.ClientIsOwner==='No'?' checked':'')+'>No</label>'+
     '</div>'+
     '<div id="pownother" style="margin-top:6px;display:'+(p.ClientIsOwner==='No'?'block':'none')+'">'+
-    '<input id="pown" type="text" value="'+escAttr(p.Owner||'')+'" placeholder="Owner name / entity" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px">'+
+    '<input id="pown" type="text" value="'+(p.Owner||'')+'" placeholder="Owner name / entity" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px">'+
     '</div></div>'+'</div>';
   html+='<div class="g2">';
   html+=fs('pst','Status',['Active','Lapsed','Paid Up','Cancelled'],p.Status||'Active');
@@ -2654,7 +2735,7 @@ function buildPolicyForm(p){
     ['Client','Third Party','Other'].forEach(function(o){ html+='<option value="'+o+'"'+(laType===o?' selected':'')+'>'+o+'</option>'; });
     html+='</select>';
     html+='<div id="pla_other" style="flex:1;display:'+(laType==='Other'?'block':'none')+'">';
-    html+='<input id="plifeassured" type="text" value="'+escAttr(p.LifeAssured||'')+'" placeholder="Full name of life assured" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px">';
+    html+='<input id="plifeassured" type="text" value="'+(p.LifeAssured||'')+'" placeholder="Full name of life assured" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px">';
     html+='</div></div></div>';
     html+='<div class="g2" style="margin-top:10px">'+fld('ploanamt','Loan / Business Cover Amount',p.LoanAmount)+fld('pkeypos','Key Person Position',p.KeyPosition)+'</div>';
     // Estate Dutiable: Contingent Liability = Yes, Buy & Sell and Keyman = No
@@ -2897,7 +2978,7 @@ function buildPolicyForm(p){
   var clientForInsured = DB.clients.find(function(x){return String(x.ID)===String(EPC);})||{};
   var insuredVal = p.Insured || clientForInsured.Name || '';
   html+='<div class="g2">';
-  html+='<div class="fld"><label>Life Assured / Insured</label><div style="padding:8px 11px;background:var(--smoke);border:1.5px solid var(--mist);border-radius:7px;font-size:13px;color:var(--ink)">'+escHtml(insuredVal)+'</div><input type="hidden" id="pins" value="'+escAttr(insuredVal)+'"></div>';
+  html+='<div class="fld"><label>Life Assured / Insured</label><div style="padding:8px 11px;background:var(--smoke);border:1.5px solid var(--mist);border-radius:7px;font-size:13px;color:var(--ink)">'+insuredVal+'</div><input type="hidden" id="pins" value="'+insuredVal+'"></div>';
   html+=fld('ppay','Payer',p.Payer);
   html+='</div>';
   html+=sec('Beneficiaries');
@@ -2980,7 +3061,7 @@ function renderPolBens(){
     // Build name datalist for autocomplete
     var listId = 'ben_names_'+i;
     var datalist = '<datalist id="'+listId+'">'+known.map(function(k){
-      return '<option value="'+escAttr(k.name)+'"></option>';
+      return '<option value="'+k.name+'"></option>';
     }).join('')+'</datalist>';
 
     // Auto-fill button if spouse selected and spouse name known
@@ -2999,12 +3080,12 @@ function renderPolBens(){
       benTypes.map(function(o){return '<option value="'+o+'"'+(( b.type||'Third Party')===o?' selected':'')+'>'+o+'</option>';}).join('')+
       '</select>'+
       // Name input with datalist autocomplete
-      '<input type="text" value="'+escAttr(b.name||'')+'" list="'+listId+'" placeholder="Beneficiary name" '+
+      '<input type="text" value="'+(b.name||'')+'" list="'+listId+'" placeholder="Beneficiary name" '+
         'onchange="POL_BENS['+i+'].name=this.value" '+
         'style="flex:2;border:1.5px solid var(--mist);border-radius:7px;padding:7px 10px;font-family:inherit;font-size:13px">'+
       autoFill+
       // Percentage
-      '<input type="text" value="'+escAttr(b.pct||'')+'" placeholder="%" onchange="POL_BENS['+i+'].pct=this.value" '+
+      '<input type="text" value="'+(b.pct||'')+'" placeholder="%" onchange="POL_BENS['+i+'].pct=this.value" '+
         'style="width:58px;border:1.5px solid var(--mist);border-radius:7px;padding:7px 10px;font-family:inherit;font-size:13px;text-align:center">'+
       '<button type="button" onclick="POL_BENS.splice('+i+',1);document.getElementById(\'polBensWrap\').innerHTML=renderPolBens()" '+
         'style="background:var(--rose);color:#fff;border:none;border-radius:6px;padding:6px 10px;cursor:pointer;font-size:12px;font-weight:700;flex-shrink:0">✕</button>'+
@@ -3029,14 +3110,14 @@ function renderLumpRows(){
       '<select onchange="POL_LUMP_ROWS['+i+'].type=this.value" style="border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px;flex:1.5">'+
         typeOpts.map(function(o){return '<option'+(r.type===o?' selected':'')+'>'+o+'</option>';}).join('')+
       '</select>'+
-      '<input type="text" value="'+escAttr(r.label||'')+'" placeholder="Benefit label / notes" onchange="POL_LUMP_ROWS['+i+'].label=this.value" style="flex:2;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px">'+
+      '<input type="text" value="'+(r.label||'')+'" placeholder="Benefit label / notes" onchange="POL_LUMP_ROWS['+i+'].label=this.value" style="flex:2;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px">'+
       '<button type="button" onclick="lumpRowDelete('+i+')" style="background:var(--rose);color:#fff;border:none;border-radius:6px;padding:5px 9px;cursor:pointer;font-size:11px;font-weight:700">✕</button>'+
       '</div>'+
       '<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px">'+
-      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Cover Amount</div><input type="text" value="'+escAttr(r.cover||'')+'" placeholder="R" onchange="POL_LUMP_ROWS['+i+'].cover=this.value" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
-      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Premium</div><input type="text" value="'+escAttr(r.prem||'')+'" placeholder="R" onchange="POL_LUMP_ROWS['+i+'].prem=this.value;riskPremAutoSum()" oninput="riskPremAutoSum()" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
-      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Premium Esc %</div><input type="text" value="'+escAttr(r.premEsc||'')+'" placeholder="% or Age Rated" onchange="POL_LUMP_ROWS['+i+'].premEsc=this.value;calcWeightedAvgPremEsc()" oninput="calcWeightedAvgPremEsc()" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
-      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Benefit Esc %</div><input type="text" value="'+escAttr(r.benEsc||'')+'" placeholder="%" onchange="POL_LUMP_ROWS['+i+'].benEsc=this.value" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
+      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Cover Amount</div><input type="text" value="'+(r.cover||'')+'" placeholder="R" onchange="POL_LUMP_ROWS['+i+'].cover=this.value" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
+      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Premium</div><input type="text" value="'+(r.prem||'')+'" placeholder="R" onchange="POL_LUMP_ROWS['+i+'].prem=this.value;riskPremAutoSum()" oninput="riskPremAutoSum()" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
+      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Premium Esc %</div><input type="text" value="'+(r.premEsc||'')+'" placeholder="% or Age Rated" onchange="POL_LUMP_ROWS['+i+'].premEsc=this.value;calcWeightedAvgPremEsc()" oninput="calcWeightedAvgPremEsc()" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
+      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Benefit Esc %</div><input type="text" value="'+(r.benEsc||'')+'" placeholder="%" onchange="POL_LUMP_ROWS['+i+'].benEsc=this.value" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
       '</div>'+
       '</div>';
   }).join('');
@@ -3086,12 +3167,12 @@ function renderIncomeRows(){
       '<select onchange="POL_INCOME_ROWS['+i+'].type=this.value" style="border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px;flex:1">'+
       typeOpts.map(function(o){return '<option'+(r.type===o?' selected':'')+'>'+o+'</option>';}).join('')+
       '</select>'+
-      '<input type="text" value="'+escAttr(r.label||'')+'" placeholder="Benefit label e.g. Income Protection Plus" onchange="POL_INCOME_ROWS['+i+'].label=this.value" style="flex:2;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px">'+
+      '<input type="text" value="'+(r.label||'')+'" placeholder="Benefit label e.g. Income Protection Plus" onchange="POL_INCOME_ROWS['+i+'].label=this.value" style="flex:2;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px">'+
       '<button type="button" onclick="POL_INCOME_ROWS.splice('+i+',1);document.getElementById(\'incomeRowsWrap\').innerHTML=renderIncomeRows()" style="background:var(--rose);color:#fff;border:none;border-radius:6px;padding:5px 9px;cursor:pointer;font-size:11px;font-weight:700">✕</button>'+
       '</div>'+
       '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:6px">'+
-      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Monthly Benefit</div><input type="text" value="'+escAttr(r.amount||'')+'" placeholder="R" onchange="POL_INCOME_ROWS['+i+'].amount=this.value" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
-      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Premium</div><input type="text" value="'+escAttr(r.prem||'')+'" placeholder="R" onchange="POL_INCOME_ROWS['+i+'].prem=this.value;riskPremAutoSum()" oninput="riskPremAutoSum()" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
+      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Monthly Benefit</div><input type="text" value="'+(r.amount||'')+'" placeholder="R" onchange="POL_INCOME_ROWS['+i+'].amount=this.value" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
+      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Premium</div><input type="text" value="'+(r.prem||'')+'" placeholder="R" onchange="POL_INCOME_ROWS['+i+'].prem=this.value;riskPremAutoSum()" oninput="riskPremAutoSum()" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
       '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Waiting Period</div><select onchange="POL_INCOME_ROWS['+i+'].waiting=this.value" style="width:100%;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px">'+waitOpts.map(function(o){return '<option'+(r.waiting===o?' selected':'')+'>'+o+'</option>';}).join('')+'</select></div>'+
       '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Benefit Period</div><select onchange="POL_INCOME_ROWS['+i+'].term=this.value" style="width:100%;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px">'+termOpts.map(function(o){return '<option'+(r.term===o?' selected':'')+'>'+o+'</option>';}).join('')+'</select></div>'+
       '</div>'+
@@ -3102,10 +3183,10 @@ function renderIncomeRows(){
       '<select onchange="POL_INCOME_ROWS['+i+'].premEscType=this.value" style="width:100%;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px;margin-bottom:4px">'+
       ['Level','5%','Fixed %','Compulsory','Age-rated'].map(function(o){return '<option'+((r.premEscType||'Fixed %')===o?' selected':'')+'>'+o+'</option>';}).join('')+
       '</select>'+
-      '<input type="text" value="'+escAttr(r.premEsc||r.esc||'')+'" placeholder="e.g. 7%" onchange="POL_INCOME_ROWS['+i+'].premEsc=this.value" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:5px 8px;font-family:inherit;font-size:12px">'+
+      '<input type="text" value="'+(r.premEsc||r.esc||'')+'" placeholder="e.g. 7%" onchange="POL_INCOME_ROWS['+i+'].premEsc=this.value" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:5px 8px;font-family:inherit;font-size:12px">'+
       '</div>'+
       '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Annual Benefit Increase</div><input type="text" value="'+(r.benEsc||'')+'" placeholder="e.g. 3%" onchange="POL_INCOME_ROWS['+i+'].benEsc=this.value" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
-      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">In-Claim Benefit Increase</div><input type="text" value="'+escAttr(r.claimEsc||'')+'" placeholder="e.g. 0%" onchange="POL_INCOME_ROWS['+i+'].claimEsc=this.value" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
+      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">In-Claim Benefit Increase</div><input type="text" value="'+(r.claimEsc||'')+'" placeholder="e.g. 0%" onchange="POL_INCOME_ROWS['+i+'].claimEsc=this.value" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
       '</div></div>'+
       '<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">'+
       '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Taxable</div><select onchange="POL_INCOME_ROWS['+i+'].taxable=this.value" style="width:100%;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"><option'+(r.taxable==='Yes'?' selected':'')+'>Yes</option><option'+(r.taxable!=='Yes'?' selected':'')+'>No</option></select></div>'+
@@ -3724,6 +3805,7 @@ function savePolicy(){
   pol.ReviewHistory=oldPol?(oldPol.ReviewHistory||''):'';
   // Mark pending so a refresh before server confirms doesn't lose the policy
   pol._pendingSave = true;
+  backupPolicySnapshot(oldPol||pol, oldPol?'before-policy-update':'before-policy-create');
   if(EPI!==null&&oldPol){var gi=DB.policies.indexOf(oldPol);if(gi>=0)DB.policies[gi]=pol;}
   else DB.policies.push(pol);
   // Write to localStorage immediately — survives a refresh before server responds
@@ -3731,12 +3813,18 @@ function savePolicy(){
   closeAll();render();
   var _polForServer = JSON.parse(JSON.stringify(pol));
   delete _polForServer._pendingSave;
-  post({action:'savePolicy',policy:_polForServer},function(){
-    // Server confirmed — clear pending flag
-    var _ci=DB.policies.findIndex(function(x){return x.ID===pol.ID;});
-    if(_ci>=0){ DB.policies[_ci]=_polForServer; }
+  post({action:'savePolicy',policy:_polForServer},function(result){
+    if(result && result.ok){
+      // Server confirmed — clear pending flag
+      var _ci=DB.policies.findIndex(function(x){return x.ID===pol.ID;});
+      if(_ci>=0){ DB.policies[_ci]=_polForServer; }
+      try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
+      toast('Policy saved ✓','ok');
+      return;
+    }
     try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
-    toast('Policy saved ✓','ok');
+    toast('Policy saved locally only — server save failed. It will retry automatically.','err');
+    retryPendingSaves();
   });
 }
 
@@ -3746,13 +3834,17 @@ function deletePolicy(){
   if(!oldPol){ toast('Cannot find policy to delete','err'); return; }
   var label = (oldPol.Insurer||'') + (oldPol.Product?' — '+oldPol.Product:'') + (oldPol.PolicyNo?' ('+oldPol.PolicyNo+')':'');
   if(!confirm('Permanently delete this policy?\n\n' + label + '\n\nThis cannot be undone.')) return;
-  // Remove from DB in memory
-  var gi = DB.policies.indexOf(oldPol);
-  if(gi >= 0) DB.policies.splice(gi, 1);
-  try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
-  closeAll(); render();
-  // Delete from Supabase
-  post({action:'deleteRow', sheet:'policies', id:oldPol.ID}, function(){
+  backupPolicySnapshot(oldPol, 'before-policy-delete');
+  // Delete from Supabase FIRST. Only remove locally once server confirms.
+  post({action:'deleteRow', sheet:'policies', id:oldPol.ID}, function(result){
+    if(!(result && result.ok)){
+      toast('Delete failed — policy kept intact.','err');
+      return;
+    }
+    var gi = DB.policies.indexOf(oldPol);
+    if(gi >= 0) DB.policies.splice(gi, 1);
+    try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
+    closeAll(); render();
     toast('Policy deleted','ok');
   });
 }
@@ -3802,6 +3894,7 @@ function replacePolicy(cid,idx){
   if(!confirm('This will archive '+old.Insurer+' policy '+( old.PolicyNo||'')+ ' and open a new replacement. Continue?'))return;
   var gi=DB.policies.indexOf(old);
   var now=new Date().toISOString().slice(0,10);
+  backupPolicySnapshot(old, 'before-policy-replace');
   // Snapshot the old policy before archiving
   var snap=snapshotPolicy(old);
   snap.type='replaced';
@@ -3813,8 +3906,22 @@ function replacePolicy(cid,idx){
     DB.policies[gi].Status='Replaced';
     DB.policies[gi].ReplacedDate=now;
     DB.policies[gi].ReviewHistory=JSON.stringify(history);
+    DB.policies[gi]._pendingSave = true;
   }
-  post({action:'savePolicy',policy:DB.policies[gi]},function(){});
+  try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
+  var archivedForServer = JSON.parse(JSON.stringify(DB.policies[gi]||old));
+  delete archivedForServer._pendingSave;
+  post({action:'savePolicy',policy:archivedForServer},function(result){
+    if(result && result.ok){
+      var _ri=DB.policies.findIndex(function(x){ return x && String(x.ID)===String(archivedForServer.ID); });
+      if(_ri>=0) DB.policies[_ri]=archivedForServer;
+      try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
+    } else {
+      try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
+      toast('Old policy archived locally only — server save failed. It will retry automatically.','err');
+      retryPendingSaves();
+    }
+  });
   // Open new policy pre-filled with old details, linked back
   EPC=cid;EPI=null;
   window.REPLACING_POL_ID=old.ID;
@@ -3828,7 +3935,7 @@ function replacePolicy(cid,idx){
   });
   buildPolicyForm(prefill);
   document.getElementById('pMod').classList.add('open');
-  toast('Old policy archived — update the details for the new policy','ok');
+  toast('Old policy archived locally — update the details for the new policy','ok');
 }
 
 
@@ -4707,10 +4814,47 @@ function selectUser(name){
 }
 
 function bootApp(){
-  // Version stamp - preserve recent-client data and cached CRM data across builds
-  // Never wipe compliance / working data on version change.
+  // Version stamp - preserve cached client/policy data across builds
   try{
-    if(localStorage.getItem('du_ver')!=='v16'){
+    var _storedVer = localStorage.getItem('du_ver');
+    if(_storedVer!=='v16'){
+      var _existingDb = localStorage.getItem('du_db');
+      if(_existingDb) localStorage.setItem('du_db_backup_'+(_storedVer||'unknown')+'_'+Date.now(), _existingDb);
+      // Preserve Recent Clients across builds. If the dedicated du_recent store is missing,
+      // rebuild it from cached client LastAccessed values, then fall back to the latest du_db backup.
+      try{
+        var _rk = recentKey();
+        var _existingRecent = localStorage.getItem(_rk);
+        function _recoverRecentMap(_dbStr){
+          var _map = {};
+          if(!_dbStr) return _map;
+          try{
+            var _parsed = JSON.parse(_dbStr);
+            (_parsed.clients||[]).forEach(function(c){
+              if(c && c.ID && c.LastAccessed) _map[String(c.ID)] = c.LastAccessed;
+            });
+          }catch(e){}
+          return _map;
+        }
+        if(!_existingRecent || _existingRecent==='{}'){
+          var _recoveredRecent = _recoverRecentMap(_existingDb);
+          if(!Object.keys(_recoveredRecent).length){
+            var _latestBackupKey = null, _latestBackupTs = 0;
+            for(var _i=0; _i<localStorage.length; _i++){
+              var _k = localStorage.key(_i)||'';
+              if(_k.indexOf('du_db_backup_')===0){
+                var _m = _k.match(/_(\d+)$/);
+                var _ts = _m ? parseInt(_m[1],10) : 0;
+                if(_ts >= _latestBackupTs){ _latestBackupTs = _ts; _latestBackupKey = _k; }
+              }
+            }
+            if(_latestBackupKey) _recoveredRecent = _recoverRecentMap(localStorage.getItem(_latestBackupKey));
+          }
+          if(Object.keys(_recoveredRecent).length){
+            localStorage.setItem(_rk, JSON.stringify(_recoveredRecent));
+          }
+        }
+      }catch(e){}
       localStorage.setItem('du_ver','v16');
     }
   }catch(e){}
@@ -4724,11 +4868,46 @@ function bootApp(){
     var cached = localStorage.getItem('du_db');
     if(cached){
       DB = JSON.parse(cached);
+      // Capture any embedded LastAccessed values before stripping them from cached DB.
+      // This lets us recover Recent Clients if the dedicated du_recent store was ever missing.
+      var _cachedRecent = {};
+      try{
+        (DB.clients||[]).forEach(function(c){
+          if(c && c.ID && c.LastAccessed) _cachedRecent[String(c.ID)] = c.LastAccessed;
+        });
+      }catch(e){}
       // Strip all LastAccessed from cached DB first
       DB.clients.forEach(function(c){ delete c.LastAccessed; });
-      // Re-apply only from the trusted du_recent store
+      // Re-apply only from the trusted du_recent store, with recovery fallback from cached DB,
+      // then from the latest du_db backup if needed.
       try{
-        var ra=JSON.parse(localStorage.getItem(recentKey())||'{}');
+        var _rk2 = recentKey();
+        var _raRaw = localStorage.getItem(_rk2);
+        var ra=JSON.parse(_raRaw||'{}');
+        if(!Object.keys(ra).length){
+          if(Object.keys(_cachedRecent).length){
+            ra = _cachedRecent;
+          } else {
+            var _latestBackupKey2 = null, _latestBackupTs2 = 0;
+            for(var _j=0; _j<localStorage.length; _j++){
+              var _bk = localStorage.key(_j)||'';
+              if(_bk.indexOf('du_db_backup_')===0){
+                var _mm = _bk.match(/_(\d+)$/);
+                var _ts2 = _mm ? parseInt(_mm[1],10) : 0;
+                if(_ts2 >= _latestBackupTs2){ _latestBackupTs2 = _ts2; _latestBackupKey2 = _bk; }
+              }
+            }
+            if(_latestBackupKey2){
+              try{
+                var _backupParsed = JSON.parse(localStorage.getItem(_latestBackupKey2)||'{}');
+                (_backupParsed.clients||[]).forEach(function(c){
+                  if(c && c.ID && c.LastAccessed) ra[String(c.ID)] = c.LastAccessed;
+                });
+              }catch(e){}
+            }
+          }
+          if(Object.keys(ra).length) localStorage.setItem(_rk2, JSON.stringify(ra));
+        }
         DB.clients.forEach(function(c){ if(ra[String(c.ID)]) c.LastAccessed=ra[String(c.ID)]; });
       }catch(e){}
       render();
