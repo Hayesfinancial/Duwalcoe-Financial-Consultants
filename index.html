@@ -1969,6 +1969,8 @@ function fdpSync(id){
     if(d.value&&m.value&&y.value) h.value=y.value+'-'+m.value+'-'+d.value;
     else h.value='';
   }
+  // Bidirectional: maturity date → retirement age
+  if(id==='pb_matdate') setTimeout(raCalcAgeFromDate,50);
 }
 function fdpUpdateDay(id){
   fdpSync(id);
@@ -2851,7 +2853,7 @@ function buildPolicyForm(p){
     if(isRA){
       html+='<div class="g2">'+fld('pb_vested','Vested Component (Pot 1)',p.VestedValue,'text','oninput="raAutoSum()"')+fld('pb_nonvested','Non-Vested Component',p.NonVestedValue,'text','oninput="raAutoSum()"')+'</div>';
       html+='<div class="g2">'+fld('pb_retcomp','Retirement Component (Pot 2)',p.RetirementComponent,'text','oninput="raAutoSum()"')+fld('pb_savcomp','Savings Component (Pot 3)',p.SavingsComponent,'text','oninput="raAutoSum()"')+'</div>';
-      html+='<div class="g2">'+fld('pb_retage','Retirement Age',p.RetirementAge||'65','text','oninput="raCalcMaturity()"')+fdp('pb_matdate','Maturity Date',p.MaturityDate||'')+'</div>';
+      html+='<div class="g2">'+fld('pb_retage','Retirement Age',p.RetirementAge||'65','text','oninput="raCalcMaturity()"')+fdp('pb_matdate','Maturity / Retirement Date',p.MaturityDate||'')+'</div>';
       html+='<div class="g2">'+fld('pb_illrate','Illustrative Rate %',p.IllustrativeRate||'9')+(_isOnceOff?'<div></div>':fld('pb_growrate','Premium Growth Rate %',p.PremGrowthRate||'10'))+'</div>';
       html+='<div class="fld"><label>Will client withdraw Savings Pot (Pot 3) before retirement?</label><div style="display:flex;gap:12px;margin-top:8px">';
       html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="p3pot" value="Yes"'+(p.WithdrawSavingsPot==='Yes'?' checked':'')+'>Yes</label>';
@@ -3388,6 +3390,27 @@ function raCalcMaturity(){
   if(mEl) mEl.value = matMon;
   if(dEl){ dEl.innerHTML = fdpDayOpts(String(matYear), matMon, matDay); dEl.value = matDay; }
   fdpUpdateDay('pb_matdate');
+}
+
+// ── Reverse: maturity date → retirement age
+function raCalcAgeFromDate(){
+  var hid=document.getElementById('pb_matdate');
+  if(!hid||!hid.value) return;
+  var c=DB.clients.find(function(x){return String(x.ID)===String(EPC);});
+  if(!c||!clean(c.DOB)) return;
+  var _dp=String(c.DOB).split(/[-\/]/);
+  if(_dp.length<3) return;
+  var dob=new Date(parseInt(_dp[0]),parseInt(_dp[1])-1,parseInt(_dp[2]));
+  if(isNaN(dob)) return;
+  var _mp=String(hid.value).split(/[-\/]/);
+  if(_mp.length<3) return;
+  var matDate=new Date(parseInt(_mp[0]),parseInt(_mp[1])-1,parseInt(_mp[2]));
+  if(isNaN(matDate)) return;
+  var age=matDate.getFullYear()-dob.getFullYear();
+  var m=matDate.getMonth()-dob.getMonth();
+  if(m<0||(m===0&&matDate.getDate()<dob.getDate())) age--;
+  var ageEl=document.getElementById('pb_retage');
+  if(ageEl&&age>=20&&age<=100) ageEl.value=String(age);
 }
 
 // ── Frequency change handler — toggles escalation row visibility
@@ -4372,18 +4395,20 @@ function openPolicySchedule(cid){
   var invTypes=['Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment','Unit Trust','Tax Free Savings'];
 
   var groups={
-    personal:{label:'Personal Life & Risk Cover', color:'#0e413a', pols:[]},
-    ra:      {label:'Retirement Funds & Living Annuities', color:'#2e7d5a', pols:[]},
-    invest:  {label:'Investments & Savings', color:'#2563ab', pols:[]},
-    medical: {label:'Medical Aid', color:'#7c3aed', pols:[]},
-    business:{label:'Business Assurance', color:'#92400e', pols:[]},
-    other:   {label:'Other', color:'#6b7280', pols:[]}
+    personal: {label:'Personal Life & Risk Cover', color:'#0e413a', pols:[]},
+    groupfund:{label:'Group Risk & Retirement Funds', color:'#1a5a50', pols:[]},
+    ra:       {label:'Retirement Funds & Annuities', color:'#2e7d5a', pols:[]},
+    invest:   {label:'Investments & Savings', color:'#2563ab', pols:[]},
+    medical:  {label:'Medical Aid', color:'#7c3aed', pols:[]},
+    business: {label:'Business Assurance', color:'#92400e', pols:[]},
+    other:    {label:'Other', color:'#6b7280', pols:[]}
   };
 
   allPols.forEach(function(p){
     var t=p.Type||'';
     if(t==='Business Assurance')       groups.business.pols.push(p);
     else if(t==='Life / Income Protector') groups.personal.pols.push(p);
+    else if(t==='Pension Fund'||t==='Provident Fund') groups.groupfund.pols.push(p);
     else if(raTypes.indexOf(t)>=0)     groups.ra.pols.push(p);
     else if(invTypes.indexOf(t)>=0)    groups.invest.pols.push(p);
     else if(t==='Medical Aid')         groups.medical.pols.push(p);
@@ -4395,7 +4420,7 @@ function openPolicySchedule(cid){
   var nonMonthly=[];
   var tPersM=0, tBizM=0, tPersAll=0, tBizAll=0;
 
-  var personalGroups=[groups.personal,groups.ra,groups.invest,groups.medical,groups.other];
+  var personalGroups=[groups.personal,groups.groupfund,groups.ra,groups.invest,groups.medical,groups.other];
   personalGroups.forEach(function(g){
     g.pols.forEach(function(p){
       var n=N(p.Premium);
@@ -4436,13 +4461,13 @@ function openPolicySchedule(cid){
   function R2(n){return n>0?'R\u00a0'+Math.round(n).toLocaleString('en-ZA'):null;}
 
   function summaryBlock(title,color,rows){
-    var s='<div style="flex:1;min-width:200px;border:1px solid #e8e4d8;border-radius:8px;overflow:hidden">';
-    s+='<div style="background:'+color+';color:#fff;padding:8px 14px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px">'+title+'</div>';
+    var s='<div style="flex:1;min-width:220px;border:1.5px solid '+color+'22;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.06)">';
+    s+='<div style="background:'+color+';color:#fff;padding:10px 16px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.8px">'+title+'</div>';
     rows.forEach(function(r){
       if(!r.val)return;
-      s+='<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 14px;border-bottom:1px solid #f0f0ec">';
-      s+='<span style="font-size:12px;color:#667">'+r.lbl+'</span>';
-      s+='<span style="font-size:13px;font-weight:700;color:#0e413a">'+r.val+'</span>';
+      s+='<div style="display:flex;justify-content:space-between;align-items:center;padding:10px 16px;border-bottom:1px solid #f4f2ed">';
+      s+='<span style="font-size:12px;color:#555">'+r.lbl+'</span>';
+      s+='<span style="font-size:14px;font-weight:700;color:#0e413a">'+r.val+'</span>';
       s+='</div>';
     });
     s+='</div>';
@@ -4465,6 +4490,7 @@ function openPolicySchedule(cid){
   function buildTableSection(grp){
     if(!grp.pols.length) return '';
     var isRisk  = grp===groups.personal;
+    var isGrpFund = grp===groups.groupfund;
     var isRA    = grp===groups.ra;
     var isInv   = grp===groups.invest;
     var isBiz   = grp===groups.business;
@@ -4474,7 +4500,7 @@ function openPolicySchedule(cid){
     // Section header
     s+='<tr><td colspan="9" style="background:'+col+';color:#fff;padding:9px 14px;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.5px">'+grp.label+'</td></tr>';
 
-    // Column sub-header
+    // Column sub-header — adaptive per group type
     s+='<tr style="background:#f5f5f2;font-size:10px;color:#666;text-transform:uppercase;letter-spacing:.3px">';
     s+='<td style="padding:6px 10px;border-bottom:1px solid #e0e0d8">Insurer / Product</td>';
     s+='<td style="padding:6px 10px;border-bottom:1px solid #e0e0d8">Policy No</td>';
@@ -4483,10 +4509,18 @@ function openPolicySchedule(cid){
       s+='<td style="padding:6px 10px;border-bottom:1px solid #e0e0d8;text-align:right">Death</td>';
       s+='<td style="padding:6px 10px;border-bottom:1px solid #e0e0d8;text-align:right">Disability</td>';
       s+='<td style="padding:6px 10px;border-bottom:1px solid #e0e0d8;text-align:right">Dread Disease</td>';
-    } else if(isRA||isInv){
+    } else if(isGrpFund){
+      s+='<td style="padding:6px 10px;border-bottom:1px solid #e0e0d8;text-align:right">Fund Value</td>';
+      s+='<td style="padding:6px 10px;border-bottom:1px solid #e0e0d8;text-align:right">Life Cover</td>';
+      s+='<td style="padding:6px 10px;border-bottom:1px solid #e0e0d8;text-align:right">Disability</td>';
+    } else if(isRA){
+      s+='<td style="padding:6px 10px;border-bottom:1px solid #e0e0d8;text-align:right">Fund Value</td>';
+      s+='<td style="padding:6px 10px;border-bottom:1px solid #e0e0d8;text-align:right">Ret. Age</td>';
+      s+='<td style="padding:6px 10px;border-bottom:1px solid #e0e0d8;text-align:right">Growth %</td>';
+    } else if(isInv){
       s+='<td style="padding:6px 10px;border-bottom:1px solid #e0e0d8;text-align:right">Fund Value</td>';
       s+='<td style="padding:6px 10px;border-bottom:1px solid #e0e0d8;text-align:right">Maturity Value</td>';
-      s+='<td style="padding:6px 10px;border-bottom:1px solid #e0e0d8;text-align:right">Retirement Value</td>';
+      s+='<td style="padding:6px 10px;border-bottom:1px solid #e0e0d8;text-align:right">IRR %</td>';
     } else {
       s+='<td colspan="3" style="padding:6px 10px;border-bottom:1px solid #e0e0d8"></td>';
     }
@@ -4512,10 +4546,21 @@ function openPolicySchedule(cid){
         s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+R(p.BenDeath)+'</td>';
         s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+R(p.BenDisability)+'</td>';
         s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+R(p.BenDreadDisease)+(p.DreadDiseaseType?'<div style="font-size:10px;color:#888;font-weight:400">'+p.DreadDiseaseType+'</div>':'')+'</td>';
-      } else if(isRA||isInv){
+      } else if(isGrpFund){
+        s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+R(p.BenFundValue)+'</td>';
+        s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+R(p.BenDeath)+'</td>';
+        s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+R(p.BenDisability)+'</td>';
+      } else if(isRA){
+        var _raIRR=p.IllustrativeRate||p.PremGrowthRate||'';
+        s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+R(p.BenFundValue)+'</td>';
+        s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+(p.RetirementAge||'65')+'</td>';
+        s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+(_raIRR?_raIRR+'%':'\u2014')+'</td>';
+      } else if(isInv){
+        var _invIRR2=calcPolicyIRR(p.StartDate,p.Premium,p.Frequency,p.PremEscalation,p.BenFundValue);
+        if(p.IllustrativeRate&&N(p.IllustrativeRate)>0) _invIRR2=N(p.IllustrativeRate);
         s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+R(p.BenFundValue)+'</td>';
         s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+R(p.BenMaturityValue)+'</td>';
-        s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+R(p.BenRetirementValue)+'</td>';
+        s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600;color:'+(_invIRR2!==null&&_invIRR2>=0?'#166534':'#991b1b')+'">'+(_invIRR2!==null?_invIRR2+'%':'\u2014')+'</td>';
       } else {
         s+='<td colspan="3" style="padding:9px 10px;border-bottom:1px solid #eeede8"></td>';
       }
@@ -4590,9 +4635,19 @@ function openPolicySchedule(cid){
       }
       if(p.RetirementDate) details.push('<span style="font-size:11px;color:#888">Retirement: </span><span style="font-size:12px">'+FD(p.RetirementDate)+'</span>');
 
+      // Group fund extra details: dread disease + income benefits + retirement age
+      if(isGrpFund){
+        if(N(p.BenDreadDisease)>0) details.push('<span style="font-size:11px;color:#888">Dread Disease: </span><span style="font-size:12px;font-weight:600">'+R(p.BenDreadDisease)+'</span>');
+        if(p.RetirementAge) details.push('<span style="font-size:11px;color:#888">Ret. Age: </span><span style="font-size:12px;font-weight:600">'+p.RetirementAge+'</span>');
+      }
       // Income benefits summary
       if(incBens.length){
-        var ipStr=incBens.map(function(r){return (r.label||r.type||'IP')+' '+R(r.amount)+'/pm'+(r.waiting?' (wait '+r.waiting+')':'');}).join(' · ');
+        var ipStr=incBens.map(function(r){
+          var parts=[(r.label||r.type||'IP'),R(r.amount)+'/pm'];
+          if(r.waiting) parts.push('wait '+r.waiting);
+          if(r.approved) parts.push(r.approved);
+          return parts.join(' ');
+        }).join(' · ');
         details.push('<span style="font-size:11px;color:#888">Income Benefit: </span><span style="font-size:12px">'+ipStr+'</span>');
       }
 
@@ -4669,6 +4724,7 @@ function openPolicySchedule(cid){
 
   // Investment & retirement performance summary block
   var _raT=['Retirement Annuity','Pension Fund','Provident Fund','Pension Preservation','Provident Preservation','Living Annuity'];
+  var _groupFundTypes=['Pension Fund','Provident Fund'];
   var _invT=['Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment','Unit Trust','Tax Free Savings'];
   var _invRaPols=allPols.filter(function(p){ return _raT.indexOf(p.Type||'')>=0||_invT.indexOf(p.Type||'')>=0; });
   if(_invRaPols.length>0){
@@ -4676,9 +4732,10 @@ function openPolicySchedule(cid){
     _invRaPols.forEach(function(p){
       var ti=N(p.TotalInvested||'0'),tw=N(p.TotalWithdrawn||'0'),fv=N(p.BenFundValue||'0');
       var irr=parseFloat(p.IllustrativeRate||'0')||0;
-      if(ti>0){invTotalInv+=ti;invTotalWith+=tw;invHasData=true;}
+      var _isGF4=_groupFundTypes.indexOf(p.Type||'')>=0;
+      if(ti>0&&!_isGF4){invTotalInv+=ti;invTotalWith+=tw;invHasData=true;}
       if(fv>0)invTotalFV+=fv;
-      if(irr>0)invIRRs.push(irr);
+      if(irr>0&&!_isGF4)invIRRs.push(irr);
     });
     var invNetInv=invTotalInv-invTotalWith;
     var invGain=invTotalFV-(invHasData?invNetInv:0);
@@ -4703,6 +4760,7 @@ function openPolicySchedule(cid){
   // ── POLICY TABLE ──
   doc+='<table>';
   doc+=buildTableSection(groups.personal);
+  doc+=buildTableSection(groups.groupfund);
   doc+=buildTableSection(groups.ra);
   doc+=buildTableSection(groups.invest);
   doc+=buildTableSection(groups.medical);
