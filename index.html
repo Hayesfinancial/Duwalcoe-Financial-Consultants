@@ -4820,7 +4820,41 @@ function bootApp(){
     if(_storedVer!=='v16'){
       var _existingDb = localStorage.getItem('du_db');
       if(_existingDb) localStorage.setItem('du_db_backup_'+(_storedVer||'unknown')+'_'+Date.now(), _existingDb);
-      localStorage.removeItem(recentKey());
+      // Preserve Recent Clients across builds. If the dedicated du_recent store is missing,
+      // rebuild it from cached client LastAccessed values, then fall back to the latest du_db backup.
+      try{
+        var _rk = recentKey();
+        var _existingRecent = localStorage.getItem(_rk);
+        function _recoverRecentMap(_dbStr){
+          var _map = {};
+          if(!_dbStr) return _map;
+          try{
+            var _parsed = JSON.parse(_dbStr);
+            (_parsed.clients||[]).forEach(function(c){
+              if(c && c.ID && c.LastAccessed) _map[String(c.ID)] = c.LastAccessed;
+            });
+          }catch(e){}
+          return _map;
+        }
+        if(!_existingRecent || _existingRecent==='{}'){
+          var _recoveredRecent = _recoverRecentMap(_existingDb);
+          if(!Object.keys(_recoveredRecent).length){
+            var _latestBackupKey = null, _latestBackupTs = 0;
+            for(var _i=0; _i<localStorage.length; _i++){
+              var _k = localStorage.key(_i)||'';
+              if(_k.indexOf('du_db_backup_')===0){
+                var _m = _k.match(/_(\d+)$/);
+                var _ts = _m ? parseInt(_m[1],10) : 0;
+                if(_ts >= _latestBackupTs){ _latestBackupTs = _ts; _latestBackupKey = _k; }
+              }
+            }
+            if(_latestBackupKey) _recoveredRecent = _recoverRecentMap(localStorage.getItem(_latestBackupKey));
+          }
+          if(Object.keys(_recoveredRecent).length){
+            localStorage.setItem(_rk, JSON.stringify(_recoveredRecent));
+          }
+        }
+      }catch(e){}
       localStorage.setItem('du_ver','v16');
     }
   }catch(e){}
@@ -4834,11 +4868,46 @@ function bootApp(){
     var cached = localStorage.getItem('du_db');
     if(cached){
       DB = JSON.parse(cached);
+      // Capture any embedded LastAccessed values before stripping them from cached DB.
+      // This lets us recover Recent Clients if the dedicated du_recent store was ever missing.
+      var _cachedRecent = {};
+      try{
+        (DB.clients||[]).forEach(function(c){
+          if(c && c.ID && c.LastAccessed) _cachedRecent[String(c.ID)] = c.LastAccessed;
+        });
+      }catch(e){}
       // Strip all LastAccessed from cached DB first
       DB.clients.forEach(function(c){ delete c.LastAccessed; });
-      // Re-apply only from the trusted du_recent store
+      // Re-apply only from the trusted du_recent store, with recovery fallback from cached DB,
+      // then from the latest du_db backup if needed.
       try{
-        var ra=JSON.parse(localStorage.getItem(recentKey())||'{}');
+        var _rk2 = recentKey();
+        var _raRaw = localStorage.getItem(_rk2);
+        var ra=JSON.parse(_raRaw||'{}');
+        if(!Object.keys(ra).length){
+          if(Object.keys(_cachedRecent).length){
+            ra = _cachedRecent;
+          } else {
+            var _latestBackupKey2 = null, _latestBackupTs2 = 0;
+            for(var _j=0; _j<localStorage.length; _j++){
+              var _bk = localStorage.key(_j)||'';
+              if(_bk.indexOf('du_db_backup_')===0){
+                var _mm = _bk.match(/_(\d+)$/);
+                var _ts2 = _mm ? parseInt(_mm[1],10) : 0;
+                if(_ts2 >= _latestBackupTs2){ _latestBackupTs2 = _ts2; _latestBackupKey2 = _bk; }
+              }
+            }
+            if(_latestBackupKey2){
+              try{
+                var _backupParsed = JSON.parse(localStorage.getItem(_latestBackupKey2)||'{}');
+                (_backupParsed.clients||[]).forEach(function(c){
+                  if(c && c.ID && c.LastAccessed) ra[String(c.ID)] = c.LastAccessed;
+                });
+              }catch(e){}
+            }
+          }
+          if(Object.keys(ra).length) localStorage.setItem(_rk2, JSON.stringify(ra));
+        }
         DB.clients.forEach(function(c){ if(ra[String(c.ID)]) c.LastAccessed=ra[String(c.ID)]; });
       }catch(e){}
       render();
