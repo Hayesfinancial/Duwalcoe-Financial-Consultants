@@ -57,12 +57,17 @@ tr:hover td{background:#f8f8f4}
 .neg{color:var(--rose);font-weight:700}
 .pos{color:var(--sage);font-weight:700}
 @media print{
+  @page{size:landscape;margin:10mm}
   .topbar,.noprint{display:none!important}
-  body{background:#fff;font-size:11px}
-  .wrap{max-width:100%;padding:10px}
-  .card{break-inside:avoid;border:1px solid #ddd}
-  table{font-size:9px}
-  th{padding:4px 6px}td{padding:4px 6px}
+  body{background:#fff;font-size:10px}
+  .wrap{max-width:100%;padding:5px}
+  .card{border:1px solid #ddd}
+  .result-box{break-inside:avoid}
+  table{font-size:8px;width:100%;table-layout:fixed}
+  th{padding:3px 4px;font-size:7px}td{padding:3px 4px}
+  td,th{overflow:hidden;text-overflow:ellipsis}
+  .tbl-wrap{overflow:visible}
+  .info{font-size:9px;padding:6px 8px}
 }
 </style>
 </head>
@@ -135,7 +140,7 @@ function savePlanner(){
     if(_done) return; _done = true;
     toast('Saved locally — server timed out. Will sync next save.','err');
   }, 12000);
-  sbFetch('POST', '/rest/v1/planner', [row], function(res, err){
+  sbFetch('POST', '/rest/v1/planner?on_conflict=ID', [row], function(res, err){
     if(_done) return; _done = true; clearTimeout(_timer);
     if(err){ toast('Saved locally — server error. Will sync next save.','err'); return; }
     toast(name + ' saved ✓','ok');
@@ -294,13 +299,31 @@ var S = {
   funds: [{ desc:'Living Annuity 1', balance:0, drawdownPct:5, incomeEsc:0, growthRate:8, eac:2.5 }],
   lifeAnn: [/* { desc:'', incomePM:0, esc:0 } */],
   otherIncome: [/* { desc:'', amountPM:0, esc:0, taxable:true, type:'Rental' } */],
-  expenses: { monthlyPM:0, esc:6, medAidPM:0, medAidEsc:8, medDeps:1 },
+  expenses: { items: [
+    { desc:'Monthly living expenses', amountPM:0, esc:6 },
+    { desc:'Medical aid', amountPM:0, esc:9 }
+  ], medDeps:1 },
   assumptions: { cpi:6 },
   results: null
 };
 
 function N(v){ var n = parseFloat(String(v||'0').replace(/[^0-9.\-]/g,'')); return isNaN(n)?0:n; }
 function R(v){ if(!v && v!==0) return '—'; var n=Math.round(N(v)); return n===0?'—':'R\u00a0'+n.toLocaleString('en-ZA'); }
+
+// Migrate old flat expenses format → new flexible items format
+function migrateExpenses(){
+  if(S.expenses && !S.expenses.items){
+    var items = [];
+    if(N(S.expenses.monthlyPM) > 0 || true){
+      items.push({ desc:'Monthly living expenses', amountPM: N(S.expenses.monthlyPM), esc: N(S.expenses.esc)||6 });
+    }
+    if(N(S.expenses.medAidPM) > 0 || true){
+      items.push({ desc:'Medical aid', amountPM: N(S.expenses.medAidPM), esc: N(S.expenses.medAidEsc)||9 });
+    }
+    S.expenses = { items: items, medDeps: N(S.expenses.medDeps)||1 };
+  }
+  if(!S.expenses.items) S.expenses.items = [];
+}
 
 // ══ RENDER ══════════════════════════════════════════════════
 function render(){
@@ -372,13 +395,24 @@ function render(){
   h += '</div></div>';
 
   // EXPENSES
-  h += '<div class="card"><div class="ch"><h2>🏠 Living Expenses</h2></div><div class="cb">';
-  h += '<div class="g4">';
-  h += fld('ex_month','Monthly Living Expenses',S.expenses.monthlyPM,'number');
-  h += fld('ex_esc','Expense Esc % pa',S.expenses.esc,'number','step="0.1"');
-  h += fld('ex_med','Medical Aid /pm',S.expenses.medAidPM,'number');
-  h += fld('ex_meddeps','Medical Aid Members',S.expenses.medDeps,'number','min="0" max="10"');
-  h += '</div></div></div>';
+  h += '<div class="card"><div class="ch"><h2>🏠 Living Expenses</h2><button class="btn b-sage" style="font-size:11px;padding:5px 12px" onclick="S.expenses.items.push({desc:\'\',amountPM:0,esc:6});render()">+ Add Item</button></div><div class="cb">';
+  h += '<div class="info">Add each expense category separately with its own escalation rate. E.g. living expenses at CPI, medical aid at medical inflation, insurance at its own rate.</div>';
+  migrateExpenses();
+  if(!S.expenses.items.length) h += '<div style="color:#bbb;font-size:12px;padding:8px 0">No expenses — click + Add Item.</div>';
+  S.expenses.items.forEach(function(ex,i){
+    h += '<div class="row-card"><div class="g4">';
+    h += fld('ex_desc_'+i,'Description',ex.desc,'text','placeholder="e.g. Medical aid, Insurance"');
+    h += fld('ex_amt_'+i,'Monthly Amount',ex.amountPM,'number');
+    h += fld('ex_esc_'+i,'Esc % pa',ex.esc,'number','step="0.1"');
+    h += '<div style="display:flex;gap:8px;align-items:flex-end"><button class="del-btn" style="margin-bottom:4px" onclick="S.expenses.items.splice('+i+',1);render()">✕</button></div>';
+    h += '</div></div>';
+  });
+  // Medical aid members (for tax credit calc) — always shown
+  h += '<div style="margin-top:8px"><div class="g4">';
+  h += fld('ex_meddeps','Medical Aid Members (for tax credit)',S.expenses.medDeps,'number','min="0" max="10"');
+  h += '<div></div><div></div><div></div>';
+  h += '</div></div>';
+  h += '</div></div>';
 
   // ASSUMPTIONS
   h += '<div class="card"><div class="ch"><h2>⚙ Assumptions</h2></div><div class="cb">';
@@ -410,6 +444,15 @@ function renderResults(){
   h += '</div>';
   if(r.fundLastsToAge && r.fundLastsToAge < S.client.planToAge){
     h += '<div style="background:#fef2f2;border:1px solid #fca5a5;border-radius:6px;padding:10px 14px;font-size:12px;color:#991b1b;margin-top:8px"><strong>⚠ Sustainability Warning:</strong> At the current drawdown, funds are projected to be depleted by age '+r.fundLastsToAge+'. The client plans to age '+S.client.planToAge+'. Consider reducing the drawdown rate or supplementing with other income.</div>';
+  }
+  // Rebate transition note — explain surplus/deficit oscillation
+  var startAge = N(S.client.age);
+  var planTo = N(S.client.planToAge)||90;
+  var transitions = [];
+  if(startAge < 65 && planTo >= 65) transitions.push('age 65 (secondary rebate: R17,820 → R27,585 total, plus interest exemption increases to R34,500)');
+  if(startAge < 75 && planTo >= 75) transitions.push('age 75 (tertiary rebate: R27,585 → R30,834 total)');
+  if(transitions.length){
+    h += '<div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:6px;padding:10px 14px;font-size:12px;color:#1e40af;margin-top:8px"><strong>ℹ Tax rebate transitions:</strong> The projection shows temporary surplus improvements at '+transitions.join(' and ')+'. This is correct — SARS rebates increase at these age thresholds, reducing tax payable.</div>';
   }
   h += '</div>';
 
@@ -475,10 +518,9 @@ function calculate(){
   var otherIncEscs = S.otherIncome.map(function(o){ return N(o.esc) / 100; });
   var otherIncTypes = S.otherIncome.map(function(o){ return o.type||'Other Taxable'; });
 
-  var expensePA = N(S.expenses.monthlyPM) * 12;
-  var expEsc = N(S.expenses.esc) / 100;
-  var medPA = N(S.expenses.medAidPM) * 12;
-  var medEsc = 0.08; // medical inflation
+  migrateExpenses();
+  var expItems = S.expenses.items.map(function(ex){ return N(ex.amountPM) * 12; });
+  var expEscs = S.expenses.items.map(function(ex){ return N(ex.esc) / 100; });
   var medDeps = N(S.expenses.medDeps);
 
   var yr1TotalGross = 0, yr1Nett = 0, yr1AvgRate = 0;
@@ -545,8 +587,8 @@ function calculate(){
     var tax = taxResult.tax;
     var nett = totalGross - tax;
 
-    // Expenses
-    var totalExp = expensePA + medPA;
+    // Expenses — sum all items
+    var totalExp = expItems.reduce(function(a,b){return a+b;},0);
 
     var surplus = nett - totalExp;
     var fundClose = fundBals.reduce(function(a,b){return a+b;},0);
@@ -579,9 +621,10 @@ function calculate(){
       pvFund: Math.round(pvFund)
     });
 
-    // Escalate expenses
-    expensePA *= (1 + expEsc);
-    medPA *= (1 + medEsc);
+    // Escalate each expense item individually
+    for(var ei = 0; ei < expItems.length; ei++){
+      expItems[ei] *= (1 + expEscs[ei]);
+    }
   }
 
   autoSaveLocal();
@@ -630,9 +673,12 @@ function collectAll(){
     o.amountPM = N(v('oi_amt_'+i));
     o.esc = N(v('oi_esc_'+i));
   });
-  S.expenses.monthlyPM = N(v('ex_month'));
-  S.expenses.esc = N(v('ex_esc'));
-  S.expenses.medAidPM = N(v('ex_med'));
+  migrateExpenses();
+  S.expenses.items.forEach(function(ex,i){
+    ex.desc = v('ex_desc_'+i);
+    ex.amountPM = N(v('ex_amt_'+i));
+    ex.esc = N(v('ex_esc_'+i));
+  });
   S.expenses.medDeps = N(v('ex_meddeps'));
   S.assumptions.cpi = N(v('as_cpi'));
 }
