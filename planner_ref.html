@@ -482,7 +482,7 @@ function render(){
 
   // CAPITAL EVENTS
   if(!S.capitalEvents) S.capitalEvents = [];
-  h += '<div class="card"><div class="ch"><h2>📅 Capital Events</h2><button class="btn b-sage" style="font-size:11px;padding:5px 12px" onclick="S.capitalEvents.push({desc:\'\',type:\'Inflow\',atAge:70,amount:0,inflate:true,reinvest:false});render()">+ Add Event</button></div><div class="cb">';
+  h += '<div class="card"><div class="ch"><h2>📅 Capital Events</h2><button class="btn b-sage" style="font-size:11px;padding:5px 12px" onclick="S.capitalEvents.push({desc:\'\',type:\'Inflow\',atAge:70,amount:0,growthRate:0,reinvest:false});render()">+ Add Event</button></div><div class="cb">';
   h += '<div class="info">Lump sum inflows (endowment maturity, property sale, inheritance) and outflows (car purchase, renovation). Inflows reinvested into the LA will increase the fund balance and a proportional share of future drawdown income becomes tax-free.</div>';
   if(!S.capitalEvents.length) h += '<div style="color:#bbb;font-size:12px;padding:8px 0">No capital events — click + Add Event if applicable.</div>';
   S.capitalEvents.forEach(function(ce,i){
@@ -492,22 +492,39 @@ function render(){
     h += sel('ce_type_'+i,'Type',['Inflow','Outflow'],ce.type);
     h += fld('ce_age_'+i,'At Age',ce.atAge,'number');
     h += fld('ce_amt_'+i,'Amount (today\'s rands)',ce.amount,'number');
-    h += sel('ce_inflate_'+i,'Inflate to age?',['Yes','No'],ce.inflate?'Yes':'No');
+    h += fld('ce_gr_'+i,'Growth Rate % pa',ce.growthRate!==undefined?ce.growthRate:0,'number','step="0.1" placeholder="0 = no growth"');
     h += '</div>';
     if(ce.type === 'Inflow'){
+      var _ceGr = N(ce.growthRate)/100;
+      var _yrsTo = Math.max(0, N(ce.atAge) - N(S.client.age));
+      var _futVal = Math.round(N(ce.amount) * Math.pow(1 + _ceGr, _yrsTo));
       h += '<div class="g5" style="margin-top:6px">';
       h += sel('ce_reinvest_'+i,'Reinvest into LA?',['No','Yes'],ce.reinvest?'Yes':'No');
-      var _cpiPrev = N(S.assumptions.cpi)/100;
-      var _yrsTo = Math.max(0, N(ce.atAge) - N(S.client.age));
-      var _futVal = ce.inflate ? Math.round(N(ce.amount) * Math.pow(1+_cpiPrev, _yrsTo)) : N(ce.amount);
-      if(N(ce.amount)>0) h += '<div class="f"><label>Projected value at age '+ce.atAge+'</label><div style="font-size:13px;font-weight:700;color:var(--sage);padding:7px 0">R\u00a0'+_futVal.toLocaleString('en-ZA')+'</div></div>';
-      else h += '<div></div>';
-      if(ce.reinvest){
-        var _totalFund = S.funds.reduce(function(a,f){return a+N(f.balance);},0);
-        var _projFund = _totalFund; // simplified — actual fund at that age will differ
-        if(_projFund > 0 && _futVal > 0){
-          var _tfPct = Math.round(_futVal / (_projFund + _futVal) * 1000)/10;
-          h += '<div class="f"><label>Est. tax-free % of drawdown</label><div style="font-size:13px;font-weight:700;color:var(--sky);padding:7px 0">≈ '+_tfPct+'%</div></div>';
+      if(N(ce.amount) > 0){
+        h += '<div class="f"><label>Projected value at age '+ce.atAge+'</label><div style="font-size:13px;font-weight:700;color:var(--sage);padding:7px 0">R\u00a0'+_futVal.toLocaleString('en-ZA')+'</div></div>';
+      } else h += '<div></div>';
+      if(ce.reinvest && N(ce.amount) > 0){
+        // Project each LA fund forward to estimate fund value at that age
+        var _projFundTotal = 0;
+        S.funds.forEach(function(f){
+          var _fb = N(f.balance);
+          var _fg = N(f.growthRate)/100;
+          var _fd = N(f.drawdownPct)/100;
+          var _fe = N(f.incomeEsc)/100;
+          var _fi = _fb * _fd; // year 1 income
+          for(var _yr = 0; _yr < _yrsTo; _yr++){
+            var _drawn = Math.min(_fb, _fi);
+            var _avgB = Math.max(0, _fb - _drawn/2);
+            _fb = Math.max(0, _fb - _drawn + _avgB * _fg);
+            _fi *= (1 + _fe);
+            if(_fb > 0 && _fi > _fb * 0.175) _fi = _fb * 0.175;
+            if(_fb > 0 && _fi < _fb * 0.025) _fi = _fb * 0.025;
+          }
+          _projFundTotal += _fb;
+        });
+        if(_projFundTotal > 0){
+          var _tfPct = Math.round(_futVal / (_projFundTotal + _futVal) * 1000)/10;
+          h += '<div class="f"><label>Est. tax-free % of drawdown</label><div style="font-size:13px;font-weight:700;color:var(--sky);padding:7px 0">≈ '+_tfPct+'% <span style="font-weight:400;color:#889;font-size:10px">('+R(_futVal)+' into proj. fund '+R(_projFundTotal)+')</span></div></div>';
         } else h += '<div></div>';
       } else h += '<div></div>';
       h += '<div></div><div></div>';
@@ -645,7 +662,8 @@ function calculate(){
     var a = N(ce.atAge);
     if(!a || N(ce.amount) <= 0) return;
     var yrsTo = Math.max(0, a - age);
-    var amt = ce.inflate ? N(ce.amount) * Math.pow(1 + cpi, yrsTo) : N(ce.amount);
+    var ceGr = N(ce.growthRate) / 100;
+    var amt = N(ce.amount) * Math.pow(1 + ceGr, yrsTo);
     if(!ceByAge[a]) ceByAge[a] = [];
     ceByAge[a].push({ desc: ce.desc, type: ce.type||'Inflow', amount: Math.round(amt), reinvest: ce.reinvest||false });
   });
@@ -856,7 +874,7 @@ function collectAll(){
     ce.type = v('ce_type_'+i);
     ce.atAge = N(v('ce_age_'+i));
     ce.amount = N(v('ce_amt_'+i));
-    ce.inflate = v('ce_inflate_'+i) === 'Yes';
+    ce.growthRate = N(v('ce_gr_'+i));
     ce.reinvest = v('ce_reinvest_'+i) === 'Yes';
   });
   S.assumptions.cpi = N(v('as_cpi'));
