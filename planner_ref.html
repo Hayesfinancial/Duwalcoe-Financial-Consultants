@@ -289,6 +289,7 @@ function calcTax(grossPA, age, medDeps, interestPA){
 
 // ══ STATE ════════════════════════════════════════════════════
 var S = {
+  clientId: '',
   client: { name:'', age:65, gender:'Male', planToAge:90 },
   funds: [{ desc:'Living Annuity 1', balance:0, drawdownPct:5, incomeEsc:0, growthRate:8, eac:2.5 }],
   lifeAnn: [/* { desc:'', incomePM:0, esc:0 } */],
@@ -667,8 +668,50 @@ function hookInputs(){
 }
 
 // ══ INIT ════════════════════════════════════════════════════
-render();
-setTimeout(checkCrashRecovery, 500);
+function checkCRMLaunch(){
+  try{
+    var raw = localStorage.getItem('du_planner_launch');
+    if(!raw) return false;
+    localStorage.removeItem('du_planner_launch'); // clean up after reading
+    var data = JSON.parse(raw);
+    if(!data || !data.name) return false;
+    S.clientId = data.clientId || '';
+    S.client.name = data.name;
+    S.client.age = data.age || 65;
+    S.client.gender = data.gender || 'Male';
+    // Pre-fill LA funds from CRM
+    if(data.funds && data.funds.length > 0){
+      S.funds = data.funds;
+    }
+    // Pre-fill Life Annuities from CRM
+    if(data.lifeAnn && data.lifeAnn.length > 0){
+      S.lifeAnn = data.lifeAnn;
+    }
+    // Try to load saved projection for this client (other income, expenses, assumptions)
+    var id = 'planner_' + data.name.replace(/[^a-zA-Z0-9]/g,'_').toLowerCase();
+    var saved = localStorage.getItem('du_planner_' + id);
+    if(saved){
+      try{
+        var savedState = JSON.parse(JSON.parse(saved).Data);
+        // Restore projection-specific data — NOT client/fund data (CRM is fresher)
+        if(savedState.otherIncome) S.otherIncome = savedState.otherIncome;
+        if(savedState.expenses) S.expenses = savedState.expenses;
+        if(savedState.assumptions) S.assumptions = savedState.assumptions;
+        if(savedState.client && savedState.client.planToAge) S.client.planToAge = savedState.client.planToAge;
+      }catch(e){}
+    }
+    render();
+    toast('Loaded ' + data.name + ' from CRM','ok');
+    return true;
+  }catch(e){ return false; }
+}
+(function(){
+  var fromCRM = checkCRMLaunch();
+  if(!fromCRM){
+    render();
+    setTimeout(checkCrashRecovery, 500);
+  }
+})();
 </script>
 </body>
 </html>

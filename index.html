@@ -1307,6 +1307,7 @@ function renderProfile(){
     '<button class="btn b-gh sm" style="color:#fff;border-color:#334466" data-act="edit-client" data-id="'+c.ID+'">✏️ Edit</button>'+
     "<a href='"+buildComplianceUrl(c)+"' target='_blank' style='text-decoration:none'><button class='btn b-sk sm' style='background:#0e413a;color:#d4af5a;border-color:#2a3a5e'>📋 Compliance Docs</button></a>"+
     "<a href='"+buildFormsUrl(c)+"' target='_blank' style='text-decoration:none'><button class='btn b-sk sm' style='background:#0e413a;color:#ccd660;border-color:#2a3a5e'>📝 Forms</button></a>"+
+    '<button class="btn b-sk sm" style="background:#2563ab;color:#fff;border-color:#1e40af" data-act="planner">📋 Planner</button>'+
     '<button class="btn b-sk sm" style="background:#0e413a;color:#d4af5a;border-color:#2a3a5e" onclick="printBrokerAuth(\''+c.ID+'\')">📄 Broker Auth</button>'+
     '<button class="btn b-sk sm" style="background:#0e413a;color:#d4af5a;border-color:#2a3a5e" onclick="printClientConsent(\''+c.ID+'\')">📄 Policy Consent</button>'+
     '<a href="https://drive.google.com/drive/search?q='+encodeURIComponent(c.Name)+'" target="_blank" style="text-decoration:none"><button class="btn b-gh sm" style="color:#fff;border-color:#334466">📁 Drive</button></a>'+
@@ -2254,6 +2255,49 @@ function buildFnaUrl(c){
     '&spouse='    + encodeURIComponent(c.SpouseName||'') +
     '&spousedob=' + encodeURIComponent(c.SpouseDOB||'');
   return url;
+}
+
+function launchPlanner(c){
+  var base = 'https://hayesfinancial.github.io/Duwalcoe-Financial-Consultants/planner_ref.html';
+  if(!c){ window.open(base,'_blank','width=1100,height=900'); return; }
+  var pols = DB.policies.filter(function(p){ return String(p.ClientID)===String(c.ID) && p.Status==='Active'; });
+  var age = calcAge(c.DOB);
+  // Build LA fund data from policies
+  var laFunds = [];
+  pols.forEach(function(p){
+    if(p.Type==='Living Annuity'){
+      laFunds.push({
+        desc: (p.Insurer||'')+(p.Product?' — '+p.Product:''),
+        balance: parseFloat(p.BenFundValue||'0')||0,
+        drawdownPct: parseFloat(p.DrawdownRate||'5')||5,
+        incomeEsc: 0,
+        growthRate: parseFloat(p.PremGrowthRate||'8')||8,
+        eac: parseFloat(p.BenEscalation||'2.5')||2.5
+      });
+    }
+  });
+  // Life Annuity data
+  var lifeAnns = [];
+  pols.forEach(function(p){
+    if(p.Type==='Life Annuity'){
+      lifeAnns.push({
+        desc: (p.Insurer||'')+(p.Product?' — '+p.Product:''),
+        incomePM: parseFloat(p.BenLifeAnnuityIncome||p.BenLAIncome||'0')||0,
+        esc: parseFloat(p.LifeAnnuityEsc||'0')||0
+      });
+    }
+  });
+  var data = {
+    clientId: c.ID,
+    name: c.Name||'',
+    age: age||65,
+    gender: c.Gender||'Male',
+    dob: c.DOB||'',
+    funds: laFunds,
+    lifeAnn: lifeAnns
+  };
+  try{ localStorage.setItem('du_planner_launch', JSON.stringify(data)); }catch(e){}
+  window.open(base,'_blank','width=1100,height=900');
 }
 
 function buildComplianceUrl(c){
@@ -4441,6 +4485,10 @@ document.addEventListener('click', function(e){
           var furl = 'https://hayesfinancial.github.io/Duwalcoe-Financial-Consultants/fna.html';
           if(fc) furl = buildFnaUrl(fc);
           window.open(furl,'_blank');
+          break;
+        case 'planner':
+          var pc = SEL ? DB.clients.find(function(x){ return String(x.ID)===String(SEL); }) : null;
+          launchPlanner(pc);
           break;
         case 'sync':           syncNow(); break;
       }
