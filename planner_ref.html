@@ -486,7 +486,7 @@ function render(){
 
   // CAPITAL EVENTS
   if(!S.capitalEvents) S.capitalEvents = [];
-  h += '<div class="card"><div class="ch"><h2>📅 Capital Events</h2><button class="btn b-sage" style="font-size:11px;padding:5px 12px" onclick="S.capitalEvents.push({desc:\'\',type:\'Inflow\',atAge:70,amount:0,growthRate:0,reinvest:false});render()">+ Add Event</button></div><div class="cb">';
+  h += '<div class="card"><div class="ch"><h2>📅 Capital Events</h2><button class="btn b-sage" style="font-size:11px;padding:5px 12px" onclick="S.capitalEvents.push({desc:\'\',type:\'Inflow\',atAge:70,amount:0,growthRate:0,reinvest:false,use:\'invest\',allocTo:\'\',postGrowth:6,postDrawdown:5,postTax:\'Tax-Free\'});render()">+ Add Event</button></div><div class="cb">';
   h += '<div class="info">Lump sum inflows (endowment maturity, property sale, inheritance) and outflows (car purchase, renovation). Inflows reinvested into the LA will increase the fund balance and a proportional share of future drawdown income becomes tax-free.</div>';
   if(!S.capitalEvents.length) h += '<div style="color:#bbb;font-size:12px;padding:8px 0">No capital events — click + Add Event if applicable.</div>';
   S.capitalEvents.forEach(function(ce,i){
@@ -507,40 +507,51 @@ function render(){
       var _yrsTo = Math.max(0, N(ce.atAge) - N(S.client.age));
       var _futVal = Math.round(N(ce.amount) * Math.pow(1 + _ceGr, _yrsTo));
       h += '<div class="g5" style="margin-top:6px">';
-      // Reinvest select with onchange→render
-      h += '<div class="f"><label>Reinvest into LA?</label><select id="ce_reinvest_'+i+'" onchange="collectAll();render()">';
-      h += '<option'+(ce.reinvest?'':' selected')+'>No</option>';
-      h += '<option'+(ce.reinvest?' selected':'')+'>Yes</option>';
-      h += '</select></div>';
-      if(N(ce.amount) > 0){
-        h += '<div class="f"><label>Projected value at age '+ce.atAge+'</label><div style="font-size:13px;font-weight:700;color:var(--sage);padding:7px 0">R\u00a0'+_futVal.toLocaleString('en-ZA')+'</div></div>';
-      } else h += '<div></div>';
-      if(ce.reinvest && N(ce.amount) > 0){
-        // Project each LA fund forward to estimate fund value at that age
-        var _projFundTotal = 0;
-        S.funds.forEach(function(f){
-          var _fb = N(f.balance);
-          var _fg = N(f.growthRate)/100;
-          var _fd = N(f.drawdownPct)/100;
-          var _fe = N(f.incomeEsc)/100;
-          var _fi = _fb * _fd; // year 1 income
-          for(var _yr = 0; _yr < _yrsTo; _yr++){
-            var _drawn = Math.min(_fb, _fi);
-            var _avgB = Math.max(0, _fb - _drawn/2);
-            _fb = Math.max(0, _fb - _drawn + _avgB * _fg);
-            _fi *= (1 + _fe);
-            if(_fb > 0 && _fi > _fb * 0.175) _fi = _fb * 0.175;
-            if(_fb > 0 && _fi < _fb * 0.025) _fi = _fb * 0.025;
-          }
-          _projFundTotal += _fb;
-        });
-        if(_projFundTotal > 0){
-          var _tfPct = Math.round(_futVal / (_projFundTotal + _futVal) * 1000)/10;
-          h += '<div class="f"><label>Est. tax-free % of drawdown</label><div style="font-size:13px;font-weight:700;color:var(--sky);padding:7px 0">≈ '+_tfPct+'% <span style="font-weight:400;color:#889;font-size:10px">('+R(_futVal)+' into proj. fund '+R(_projFundTotal)+')</span></div></div>';
-        } else h += '<div></div>';
-      } else h += '<div></div>';
-      h += '<div></div><div></div>';
+      h += '<div class="f"><label>Reinvest into LA?</label><select id="ce_reinvest_'+i+'" onchange="collectAll();render()"><option'+(ce.reinvest?'':' selected')+'>No</option><option'+(ce.reinvest?' selected':'')+'>Yes</option></select></div>';
+      if(N(ce.amount)>0) h += '<div class="f"><label>Projected value at age '+ce.atAge+'</label><div style="font-size:13px;font-weight:700;color:var(--sage);padding:7px 0">R\u00a0'+_futVal.toLocaleString('en-ZA')+'</div></div>';
+      else h += '<div></div>';
+      if(ce.reinvest && N(ce.amount)>0){
+        var _projFundTotal=0;
+        S.funds.forEach(function(f){ var _fb=N(f.balance),_fg=N(f.growthRate)/100,_fd=N(f.drawdownPct)/100,_fe=N(f.incomeEsc)/100,_fi=_fb*_fd; for(var _yr=0;_yr<_yrsTo;_yr++){var _dr=Math.min(_fb,_fi);var _ab=Math.max(0,_fb-_dr/2);_fb=Math.max(0,_fb-_dr+_ab*_fg);_fi*=(1+_fe);if(_fb>0&&_fi>_fb*0.175)_fi=_fb*0.175;if(_fb>0&&_fi<_fb*0.025)_fi=_fb*0.025;} _projFundTotal+=_fb; });
+        if(_projFundTotal>0){ var _tfPct=Math.round(_futVal/(_projFundTotal+_futVal)*1000)/10; h+='<div class="f"><label>Est. tax-free % of drawdown</label><div style="font-size:13px;font-weight:700;color:var(--sky);padding:7px 0">≈ '+_tfPct+'% <span style="font-weight:400;color:#889;font-size:10px">('+R(_futVal)+' into proj. fund '+R(_projFundTotal)+')</span></div></div>'; } else h+='<div></div>';
+        h += '<div></div><div></div>';
+      } else if(!ce.reinvest){
+        var _use=ce.use||'invest';
+        h += '<div class="f"><label>Use</label><select id="ce_use_'+i+'" onchange="collectAll();render()"><option value="invest"'+(_use==='invest'?' selected':'')+'>Invest separately</option><option value="goal"'+(_use==='goal'?' selected':'')+'>Allocate to goal</option></select></div>';
+        h += '<div></div><div></div>';
+      } else { h += '<div></div><div></div><div></div>'; }
       h += '</div>';
+      // ── Non-reinvested sub-options
+      if(!ce.reinvest){
+        var _use2=ce.use||'invest';
+        if(_use2==='goal'){
+          var _outflows=[];
+          S.capitalEvents.forEach(function(cev,j){ if(j!==i&&cev.type==='Outflow'&&N(cev.amount)>0) _outflows.push({idx:j,desc:cev.desc||'Outflow '+(j+1),age:cev.atAge}); });
+          h += '<div class="g5" style="margin-top:6px">';
+          if(_outflows.length>0){
+            h += '<div class="f"><label>Allocate to</label><select id="ce_allocTo_'+i+'" onchange="collectAll();render()"><option value="">— Select goal —</option>';
+            _outflows.forEach(function(o){ h += '<option value="'+o.idx+'"'+(String(ce.allocTo)===String(o.idx)?' selected':'')+'>'+ o.desc+' (age '+o.age+')</option>'; });
+            h += '</select></div>';
+          } else { h += '<div class="f"><label>Allocate to</label><div style="font-size:12px;color:#889;padding:7px 0">No outflows — add an outflow event first.</div></div>'; }
+          if(ce.allocTo!==''&&ce.allocTo!==undefined){
+            var _gi2=N(ce.allocTo),_ge2=S.capitalEvents[_gi2];
+            if(_ge2){ var _ggr2=N(_ge2.growthRate)/100,_gyrs2=Math.max(0,N(_ge2.atAge)-N(S.client.age)),_gval2=Math.round(N(_ge2.amount)*Math.pow(1+_ggr2,_gyrs2)),_rem2=Math.max(0,_futVal-_gval2);
+              h += '<div class="f"><label>Goal cost (projected)</label><div style="font-size:13px;font-weight:700;color:var(--rose);padding:7px 0">R\u00a0'+_gval2.toLocaleString('en-ZA')+'</div></div>';
+              h += '<div class="f"><label>Remainder to invest</label><div style="font-size:13px;font-weight:700;color:var(--sage);padding:7px 0">R\u00a0'+_rem2.toLocaleString('en-ZA')+'</div></div>';
+            } else { h += '<div></div><div></div>'; }
+          } else { h += '<div></div><div></div>'; }
+          h += '<div></div><div></div></div>';
+        }
+        // Post-investment fields
+        h += '<div class="g5" style="margin-top:6px">';
+        h += fld('ce_postGr_'+i,'Post-Event Growth %',ce.postGrowth!==undefined?ce.postGrowth:6,'number','step="0.1" onblur="collectAll();render()"');
+        h += fld('ce_postDD_'+i,'Drawdown % pa',ce.postDrawdown!==undefined?ce.postDrawdown:5,'number','step="0.1" onblur="collectAll();render()"');
+        h += '<div class="f"><label>Income Tax Treatment</label><select id="ce_postTax_'+i+'" onchange="collectAll();render()"><option'+((ce.postTax||'Tax-Free')==='Tax-Free'?' selected':'')+'>Tax-Free</option><option'+((ce.postTax||'Tax-Free')==='Taxable'?' selected':'')+'>Taxable</option></select></div>';
+        if(N(ce.amount)>0){ var _invAmt=_futVal; if(_use2==='goal'&&ce.allocTo!==''&&ce.allocTo!==undefined){var _gi3=N(ce.allocTo),_ge3=S.capitalEvents[_gi3];if(_ge3){var _ggr3=N(_ge3.growthRate)/100,_gyrs3=Math.max(0,N(_ge3.atAge)-N(S.client.age));_invAmt=Math.max(0,_futVal-Math.round(N(_ge3.amount)*Math.pow(1+_ggr3,_gyrs3)));}} var _yr1Inc=Math.round(_invAmt*N(ce.postDrawdown||5)/100/12);
+          h += '<div class="f"><label>Est. year 1 income</label><div style="font-size:13px;font-weight:700;color:var(--sage);padding:7px 0">R\u00a0'+_yr1Inc.toLocaleString('en-ZA')+' /pm '+(ce.postTax==='Taxable'?'(taxable)':'(tax-free)')+'</div></div>';
+        } else h += '<div></div>';
+        h += '<div></div></div>';
+      }
     }
     h += '</div>';
   });
@@ -670,18 +681,38 @@ function calculate(){
   // Pre-compute capital events by age
   if(!S.capitalEvents) S.capitalEvents = [];
   var ceByAge = {};
-  S.capitalEvents.forEach(function(ce){
+  S.capitalEvents.forEach(function(ce, ci){
     var a = N(ce.atAge);
     if(!a || N(ce.amount) <= 0) return;
     var yrsTo = Math.max(0, a - age);
     var ceGr = N(ce.growthRate) / 100;
     var amt = N(ce.amount) * Math.pow(1 + ceGr, yrsTo);
+    // If allocated to a goal, subtract the goal cost
+    var investAmt = amt;
+    if(!ce.reinvest && ce.use === 'goal' && ce.allocTo !== '' && ce.allocTo !== undefined){
+      var goalEvt = S.capitalEvents[N(ce.allocTo)];
+      if(goalEvt){
+        var goalGr = N(goalEvt.growthRate)/100;
+        var goalYrs = Math.max(0, N(goalEvt.atAge) - age);
+        var goalVal = N(goalEvt.amount) * Math.pow(1 + goalGr, goalYrs);
+        investAmt = Math.max(0, amt - goalVal);
+      }
+    }
     if(!ceByAge[a]) ceByAge[a] = [];
-    ceByAge[a].push({ desc: ce.desc, type: ce.type||'Inflow', amount: Math.round(amt), reinvest: ce.reinvest||false });
+    ceByAge[a].push({
+      desc: ce.desc, type: ce.type||'Inflow', amount: Math.round(amt),
+      reinvest: ce.reinvest||false, investAmt: Math.round(investAmt),
+      postGrowth: N(ce.postGrowth||6)/100, postDrawdown: N(ce.postDrawdown||5)/100,
+      postTax: ce.postTax||'Tax-Free', use: ce.use||'invest', allocTo: ce.allocTo
+    });
   });
 
   // Tax-free percentage of LA drawdown (from non-deductible reinvestments)
   var laTaxFreePct = 0;
+
+  // Separate investment vehicles created from non-reinvested inflows
+  // Each: { balance, growthRate, drawdownPct, income, taxFree }
+  var sepVehicles = [];
 
   var yr1TotalGross = 0, yr1Nett = 0, yr1AvgRate = 0;
 
@@ -744,20 +775,27 @@ function calculate(){
       ceByAge[curAge].forEach(function(ev){
         if(ev.type === 'Inflow'){
           if(ev.reinvest){
-            // Add to first LA fund balance
             var fundTotal = fundBals.reduce(function(a,b){return a+b;},0);
             if(fundBals.length > 0){
               fundBals[0] += ev.amount;
-              // Calculate tax-free percentage: injected / new total
               var newTotal = fundBals.reduce(function(a,b){return a+b;},0);
-              // Add to cumulative tax-free % (non-deductible portion of new total)
               var additionalTFPct = ev.amount / newTotal;
               laTaxFreePct = laTaxFreePct + (1 - laTaxFreePct) * additionalTFPct;
-              ceNotes.push('→ LA (+' + Math.round(laTaxFreePct*100) + '% tax-free)');
             }
             ceInflows += ev.amount;
           } else {
-            // One-off non-taxable income — offsets expenses
+            // Create a separate investment vehicle
+            var investBal = ev.investAmt || ev.amount;
+            if(investBal > 0){
+              var yr1Income = investBal * ev.postDrawdown;
+              sepVehicles.push({
+                balance: investBal,
+                growthRate: ev.postGrowth,
+                drawdownPct: ev.postDrawdown,
+                income: yr1Income,
+                taxFree: ev.postTax === 'Tax-Free'
+              });
+            }
             ceInflows += ev.amount;
           }
         } else {
@@ -766,18 +804,24 @@ function calculate(){
       });
     }
 
-    // Total gross income (capital inflows that are NOT reinvested appear as non-taxable income)
-    var ceIncomeOnly = 0; // non-reinvested inflows
-    if(ceByAge[curAge]){
-      ceByAge[curAge].forEach(function(ev){
-        if(ev.type === 'Inflow' && !ev.reinvest) ceIncomeOnly += ev.amount;
-      });
-    }
-    var totalGross = totalLAIncome + totalLifeAnn + otherTaxable + otherInterest + otherNonTax + otherDividend + ceIncomeOnly;
+    // Income from separate investment vehicles
+    var sepTaxFreeInc = 0, sepTaxableInc = 0;
+    sepVehicles.forEach(function(sv){
+      if(sv.balance <= 0) return;
+      var drawn = Math.min(sv.balance, sv.income);
+      if(sv.taxFree) sepTaxFreeInc += drawn;
+      else sepTaxableInc += drawn;
+      var avgBal = Math.max(0, sv.balance - drawn/2);
+      sv.balance = Math.max(0, sv.balance - drawn + avgBal * sv.growthRate);
+      sv.income *= 1.05; // escalate at 5% (CPI-linked)
+    });
+    var totalSepInc = sepTaxFreeInc + sepTaxableInc;
 
-    // Tax calculation — LA income (reduced by tax-free %) + Life Ann + other taxable + interest
+    var totalGross = totalLAIncome + totalLifeAnn + otherTaxable + otherInterest + otherNonTax + otherDividend + totalSepInc;
+
+    // Tax calculation — LA income (reduced by tax-free %) + Life Ann + other taxable + sep taxable + interest
     var taxableLAIncome = totalLAIncome * (1 - laTaxFreePct);
-    var taxableGross = taxableLAIncome + totalLifeAnn + otherTaxable;
+    var taxableGross = taxableLAIncome + totalLifeAnn + otherTaxable + sepTaxableInc;
     var taxResult = calcTax(taxableGross, curAge, medDeps, otherInterest);
     var tax = taxResult.tax;
     var nett = totalGross - tax;
@@ -808,7 +852,7 @@ function calculate(){
       effDrawdown: fundOpen > 0 ? Math.round(totalLAIncome / fundOpen * 1000) / 10 : 0,
       laTaxFreePct: Math.round(laTaxFreePct * 1000) / 10,
       lifeAnnIncome: Math.round(totalLifeAnn),
-      otherIncome: Math.round(totalOtherInc),
+      otherIncome: Math.round(totalOtherInc + totalSepInc),
       capitalEvent: Math.round(ceInflows - ceOutflows),
       ceInflow: Math.round(ceInflows),
       ceOutflow: Math.round(ceOutflows),
@@ -894,6 +938,12 @@ function collectAll(){
     ce.amount = N(v('ce_amt_'+i));
     ce.growthRate = N(v('ce_gr_'+i));
     ce.reinvest = v('ce_reinvest_'+i) === 'Yes';
+    ce.use = v('ce_use_'+i) || ce.use || 'invest';
+    var _allocVal = v('ce_allocTo_'+i);
+    ce.allocTo = (_allocVal === '' || _allocVal === '— Select goal —') ? '' : _allocVal;
+    var _pgr = v('ce_postGr_'+i); if(_pgr !== '') ce.postGrowth = N(_pgr);
+    var _pdd = v('ce_postDD_'+i); if(_pdd !== '') ce.postDrawdown = N(_pdd);
+    var _ptx = v('ce_postTax_'+i); if(_ptx) ce.postTax = _ptx;
   });
   S.assumptions.cpi = N(v('as_cpi'));
 }
