@@ -820,6 +820,20 @@ function renderDash(){
     }
   });
 
+  // Policy review cycle reminders — calculated from start date + frequency
+  DB.policies.forEach(function(p){
+    if(!clean(p.StartDate) || !p.ReviewFreqMonths || p.Status==='Cancelled' || p.Status==='Replaced' || p.Status==='Lapsed') return;
+    var client = DB.clients.find(function(x){ return String(x.ID)===String(p.ClientID); });
+    if(!client) return;
+    var next = polNextReviewDate(p.StartDate, p.ReviewFreqMonths);
+    if(!next) return;
+    var diff = Math.round((next - today)/86400000);
+    if(diff <= 60){
+      var label = p.Insurer ? p.Insurer+(p.Product?' — '+p.Product:'') : (p.Type||'Policy');
+      up.push({name:client.Name,id:client.ID,cell:client.Cell||'',type:'🔄 '+label+' review',days:diff,col:diff<=7?'var(--rose)':diff<=14?'var(--gold)':'var(--sky)',policyNo:p.PolicyNo||''});
+    }
+  });
+
   up.sort(function(a,b){return a.days-b.days;});
 
   var myT=open.filter(function(t){
@@ -2747,7 +2761,13 @@ function buildPolicyForm(p){
     '</div></div>'+'</div>';
   html+='<div class="g2">';
   html+=fs('pst','Status',['Active','Lapsed','Paid Up','Cancelled'],p.Status||'Active');
-  html+='<div></div></div>';
+  // Review cycle
+  var _rfOpts=['','3','6','9','12'];
+  html+='<div class="fld"><label>Review Every</label><select id="prevfreq" onchange="polReviewCalc()" style="width:100%;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px">';
+  _rfOpts.forEach(function(o){ html+='<option value="'+o+'"'+((p.ReviewFreqMonths||'')===o?' selected':'')+'>'+(o?o+' months':'— Not set —')+'</option>'; });
+  html+='</select></div></div>';
+  // Next review date display
+  html+='<div id="polNextReviewWrap" style="margin-bottom:4px"></div>';
 
   // BUSINESS ASSURANCE
   if(isBiz){
@@ -3030,6 +3050,15 @@ function buildPolicyForm(p){
   document.getElementById('pModB').innerHTML=html;
   // Calculate weighted average premium increase on load
   setTimeout(calcWeightedAvgPremEsc, 0);
+  // Calculate next review date on load
+  setTimeout(polReviewCalc, 0);
+  // Hook inception date change to recalculate review date
+  setTimeout(function(){
+    ['psd_y','psd_m','psd_d'].forEach(function(id){
+      var el=document.getElementById(id);
+      if(el) el.addEventListener('change',function(){ fdpSync('psd'); setTimeout(polReviewCalc,50); });
+    });
+  }, 0);
 
   // Auto-calculate maturity date on form load for all RA types
   // p.RetirementAge may be '' for new policies but the form defaults to 65
@@ -3421,6 +3450,49 @@ function freqChanged(sel){
   if(el) el.style.display = hide ? 'none' : '';
 }
 
+// ── Policy review cycle ──────────────────────────────────────
+function polNextReviewDate(startDateStr, freqMonths){
+  if(!startDateStr || !freqMonths) return null;
+  var freq = parseInt(freqMonths);
+  if(!freq || freq <= 0) return null;
+  var sp = String(startDateStr).split(/[T ]/)[0].split(/[-\/]/);
+  if(sp.length < 3) return null;
+  var start = new Date(+sp[0], +sp[1]-1, +sp[2]);
+  if(isNaN(start)) return null;
+  var today = new Date(); today.setHours(0,0,0,0);
+  // Walk forward from start date in freq-month steps until we find the next future date
+  var review = new Date(start);
+  var safety = 0;
+  while(review <= today && safety < 500){
+    review.setMonth(review.getMonth() + freq);
+    safety++;
+  }
+  return review;
+}
+
+function polReviewCalc(){
+  var wrap = document.getElementById('polNextReviewWrap');
+  if(!wrap) return;
+  var freqEl = document.getElementById('prevfreq');
+  var freq = freqEl ? freqEl.value : '';
+  if(!freq){ wrap.innerHTML=''; return; }
+  var startEl = document.getElementById('psd');
+  var startDate = startEl ? startEl.value : '';
+  if(!startDate){ wrap.innerHTML='<div style="font-size:11px;color:#d97706;padding:4px 0">Enter an inception date to calculate the next review.</div>'; return; }
+  var next = polNextReviewDate(startDate, freq);
+  if(!next){ wrap.innerHTML=''; return; }
+  var today = new Date(); today.setHours(0,0,0,0);
+  var diff = Math.round((next - today) / 86400000);
+  var col = diff <= 7 ? '#991b1b' : diff <= 30 ? '#d97706' : '#166534';
+  var bg = diff <= 7 ? '#fef2f2' : diff <= 30 ? '#fffbeb' : '#f0fdf4';
+  var dateStr = next.toLocaleDateString('en-ZA', {day:'numeric', month:'long', year:'numeric'});
+  var label = diff === 0 ? 'Today' : diff === 1 ? 'Tomorrow' : diff + ' days';
+  wrap.innerHTML = '<div style="display:flex;align-items:center;gap:10px;padding:8px 12px;background:'+bg+';border:1px solid '+col+'33;border-radius:7px;font-size:12px">'
+    + '<span style="font-weight:700;color:'+col+'">📅 Next review: '+dateStr+'</span>'
+    + '<span style="color:'+col+';font-size:11px">('+label+')</span>'
+    + '</div>';
+}
+
 // ── RA component auto-sum
 function raAutoSum(){
   var N=function(id){ var el=document.getElementById(id); return el?parseFloat(el.value.replace(/[^0-9.]/g,''))||0:0; };
@@ -3578,7 +3650,7 @@ function collectPolicyForm(){
   ['psd','pb_matdate'].forEach(function(id){ if(document.getElementById(id+'_d')) fdpSync(id); });
   return {
     Insurer:g('pi'),Product:g('pp'),PolicyNo:g('pn'),Type:g('pt'),
-    StartDate:g('psd'),ClientIsOwner:getR('pisowner'),Owner:g('pown'),Status:g('pst'),EstateDutiable:getR('pestate'),
+    StartDate:g('psd'),ClientIsOwner:getR('pisowner'),Owner:g('pown'),Status:g('pst'),ReviewFreqMonths:g('prevfreq'),EstateDutiable:getR('pestate'),
     BizType:g('pbiztype'),LifeAssuredType:(document.getElementById('plifeassured_type')?document.getElementById('plifeassured_type').value:''),LifeAssured:g('plifeassured'),LoanAmount:g('ploanamt'),KeyPosition:g('pkeypos'),
     Premium:g('ppm'),Frequency:g('pfreq'),
     // For risk policies escalations live on rows; use first lump row for policy-level field
