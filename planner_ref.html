@@ -81,6 +81,7 @@ tr:hover td{background:#f8f8f4}
     <input id="loadSearch" type="text" placeholder="🔍 Load client…" oninput="searchSaved(this.value)" onblur="setTimeout(function(){var d=document.getElementById('loadDrop');if(d)d.style.display='none';},200)" autocomplete="off" style="border:1px solid rgba(255,255,255,.25);border-radius:7px;padding:5px 10px;font-size:12px;font-family:inherit;width:160px;background:rgba(255,255,255,.1);color:#fff;outline:none">
     <div id="loadDrop" style="display:none;position:absolute;top:48px;right:200px;background:#fff;border:1.5px solid #ddd;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.15);max-height:280px;overflow-y:auto;min-width:260px;z-index:100"></div>
     <button class="btn b-gold" onclick="calculate()">📊 Calculate</button>
+    <button class="btn b-ghost" onclick="fetchFromCRM()" title="Refresh fund data from CRM">🔄 CRM</button>
     <button class="btn b-sage" onclick="savePlanner()">💾 Save</button>
     <button class="btn b-ghost" onclick="window.print()">🖨 Print</button>
   </div>
@@ -144,6 +145,70 @@ function savePlanner(){
     if(_done) return; _done = true; clearTimeout(_timer);
     if(err){ toast('Saved locally — server error. Will sync next save.','err'); return; }
     toast(name + ' saved ✓','ok');
+  });
+}
+
+// ── Fetch latest fund data from CRM (Supabase) ──
+function fetchFromCRM(){
+  collectAll();
+  var clientName = (S.client.name||'').trim();
+  if(!clientName){ toast('Enter a client name first','err'); return; }
+
+  // Find client by name in Supabase
+  toast('Fetching from CRM…','ok');
+  sbFetch('GET', '/rest/v1/clients?Name=eq.' + encodeURIComponent(clientName) + '&select=*&limit=1', null, function(clients, err){
+    if(err || !clients || !clients.length){ toast('Client not found in CRM','err'); return; }
+    var c = clients[0];
+    S.clientId = c.ID || '';
+
+    // Calculate age from DOB
+    if(c.DOB){
+      var p = (c.DOB||'').split('/');
+      if(p.length === 3){
+        var d = new Date(p[2]+'-'+p[1]+'-'+p[0]);
+        if(!isNaN(d)) S.client.age = Math.floor((Date.now()-d)/31557600000);
+      }
+    }
+    S.client.gender = c.Gender || S.client.gender;
+
+    // Fetch active policies
+    sbFetch('GET', '/rest/v1/policies?ClientID=eq.' + encodeURIComponent(c.ID) + '&Status=eq.Active&select=*', null, function(pols, err2){
+      if(err2 || !pols){ toast('Could not fetch policies','err'); return; }
+
+      // Build LA funds
+      var laFunds = [];
+      pols.forEach(function(p){
+        if(p.Type === 'Living Annuity'){
+          laFunds.push({
+            desc: (p.Insurer||'') + (p.Product ? ' — '+p.Product : ''),
+            balance: parseFloat(p.BenFundValue||'0')||0,
+            drawdownPct: parseFloat(p.DrawdownRate||'5')||5,
+            incomeEsc: 0,
+            growthRate: parseFloat(p.PremGrowthRate||'8')||8,
+            eac: parseFloat(p.BenEscalation||'2.5')||2.5
+          });
+        }
+      });
+
+      // Build Life Annuities
+      var lifeAnns = [];
+      pols.forEach(function(p){
+        if(p.Type === 'Life Annuity'){
+          lifeAnns.push({
+            desc: (p.Insurer||'') + (p.Product ? ' — '+p.Product : ''),
+            incomePM: parseFloat(p.BenLifeAnnuityIncome||p.BenLAIncome||'0')||0,
+            esc: parseFloat(p.LifeAnnuityEsc||'0')||0
+          });
+        }
+      });
+
+      if(laFunds.length > 0) S.funds = laFunds;
+      if(lifeAnns.length > 0) S.lifeAnn = lifeAnns;
+
+      S.results = null;
+      render();
+      toast('Updated from CRM — ' + laFunds.length + ' LA fund(s), ' + lifeAnns.length + ' life annuit(ies)','ok');
+    });
   });
 }
 
@@ -459,7 +524,7 @@ function renderResults(){
   // Year-by-year table
   h += '<div class="card"><div class="ch"><h2>📋 Year-by-Year Projection</h2></div><div class="cb"><div class="tbl-wrap">';
   h += '<table><thead><tr>';
-  h += '<th>Age</th><th>Fund Opening</th><th>Growth</th><th>LA Income</th><th>Life Ann</th><th>Other Inc</th><th>Total Gross</th><th>Tax</th><th>Nett Income</th><th>Expenses</th><th>Surplus / (Deficit)</th><th>Fund Closing</th><th>PV Fund</th>';
+  h += '<th>Age</th><th>Fund Opening</th><th>Growth</th><th>LA Income</th><th>Eff DD%</th><th>Life Ann</th><th>Other Inc</th><th>Total Gross</th><th>Tax</th><th>Nett Income</th><th>Expenses</th><th>Surplus / (Deficit)</th><th>Fund Closing</th><th>PV Fund</th>';
   h += '</tr></thead><tbody>';
   r.years.forEach(function(y){
     var cls = '';
@@ -471,6 +536,8 @@ function renderResults(){
     h += '<td>'+R(y.fundOpening)+'</td>';
     h += '<td>'+R(y.growth)+'</td>';
     h += '<td>'+R(y.laIncome)+'</td>';
+    var _ddColor = y.effDrawdown >= 15 ? 'var(--rose)' : y.effDrawdown >= 10 ? 'var(--orange)' : '#889';
+    h += '<td style="color:'+_ddColor+';font-size:10px">'+(y.effDrawdown > 0 ? y.effDrawdown.toFixed(1)+'%' : '—')+'</td>';
     h += '<td>'+R(y.lifeAnnIncome)+'</td>';
     h += '<td>'+R(y.otherIncome)+'</td>';
     h += '<td style="font-weight:700">'+R(y.totalGross)+'</td>';
@@ -610,6 +677,7 @@ function calculate(){
       fundOpening: Math.round(fundOpen),
       growth: Math.round(totalGrowth),
       laIncome: Math.round(totalLAIncome),
+      effDrawdown: fundOpen > 0 ? Math.round(totalLAIncome / fundOpen * 1000) / 10 : 0,
       lifeAnnIncome: Math.round(totalLifeAnn),
       otherIncome: Math.round(totalOtherInc),
       totalGross: Math.round(totalGross),
