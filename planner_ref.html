@@ -73,14 +73,174 @@ tr:hover td{background:#f8f8f4}
     <div class="fsp">In-Retirement Cash Flow Projection · FSP 9978</div>
   </div>
   <div class="topright">
+    <input id="loadSearch" type="text" placeholder="🔍 Load client…" oninput="searchSaved(this.value)" onblur="setTimeout(function(){var d=document.getElementById('loadDrop');if(d)d.style.display='none';},200)" autocomplete="off" style="border:1px solid rgba(255,255,255,.25);border-radius:7px;padding:5px 10px;font-size:12px;font-family:inherit;width:160px;background:rgba(255,255,255,.1);color:#fff;outline:none">
+    <div id="loadDrop" style="display:none;position:absolute;top:48px;right:200px;background:#fff;border:1.5px solid #ddd;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.15);max-height:280px;overflow-y:auto;min-width:260px;z-index:100"></div>
     <button class="btn b-gold" onclick="calculate()">📊 Calculate</button>
+    <button class="btn b-sage" onclick="savePlanner()">💾 Save</button>
     <button class="btn b-ghost" onclick="window.print()">🖨 Print</button>
   </div>
 </div>
 
 <div class="wrap" id="app"></div>
+<div id="toast" style="position:fixed;bottom:20px;right:20px;background:var(--navy);color:#fff;padding:10px 18px;border-radius:8px;font-size:13px;font-weight:600;z-index:9999;opacity:0;transition:opacity .3s;pointer-events:none"></div>
 
 <script>
+// ══ SUPABASE ════════════════════════════════════════════════
+var SB_URL = 'https://ayyexuwxaghzljykslxr.supabase.co';
+var SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImF5eWV4dXd4YWdoemxqeWtzbHhyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQzMTUyMTcsImV4cCI6MjA4OTg5MTIxN30.hp2cQ64FjKnThsLh2qfdqRKdiy39_900JfH6C0KKIx4';
+
+function sbFetch(method, path, body, cb){
+  var opts = { method: method, headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': method === 'POST' ? 'resolution=merge-duplicates' : '' } };
+  if(body) opts.body = JSON.stringify(body);
+  fetch(SB_URL + path, opts)
+    .then(function(r){
+      if(!r.ok){ r.text().then(function(t){ console.error('SB error:', r.status, t); if(cb) cb(null, t); }).catch(function(){ if(cb) cb(null, 'HTTP '+r.status); }); return; }
+      r.text().then(function(txt){
+        if(!txt || !txt.trim()){ if(cb) cb({}); return; }
+        try{ var d = JSON.parse(txt); if(cb) cb(d); } catch(e){ if(cb) cb({}); }
+      }).catch(function(){ if(cb) cb({}); });
+    })
+    .catch(function(e){ console.error('SB fetch error:', e); if(cb) cb(null, e.message); });
+}
+
+function toast(msg, type){
+  var t = document.getElementById('toast');
+  if(!t) return;
+  t.textContent = (type==='ok'?'✓ ':'⚠ ') + msg;
+  t.style.borderLeft = '4px solid ' + (type==='ok'?'var(--sage)':'var(--rose)');
+  t.style.opacity = '1';
+  setTimeout(function(){ t.style.opacity = '0'; }, 3000);
+}
+
+// ── Save to Supabase + localStorage ──
+function savePlanner(){
+  collectAll();
+  var name = (S.client.name||'').trim();
+  if(!name){ toast('Enter a client name before saving','err'); return; }
+  var id = 'planner_' + name.replace(/[^a-zA-Z0-9]/g,'_').toLowerCase();
+  var now = new Date().toISOString().slice(0,16).replace('T',' ');
+  var row = { ID: id, ClientName: name, Data: JSON.stringify(S), LastSaved: now, SavedBy: 'Clinton Hayes' };
+  // localStorage immediately
+  try{ localStorage.setItem('du_planner_' + id, JSON.stringify(row)); }catch(e){}
+  try{
+    var idx = JSON.parse(localStorage.getItem('du_planner_index')||'[]');
+    if(!idx.find(function(x){return x.id===id;})) idx.unshift({id:id, name:name, saved:now});
+    else idx.forEach(function(x){ if(x.id===id) x.saved=now; });
+    localStorage.setItem('du_planner_index', JSON.stringify(idx));
+  }catch(e){}
+
+  // Supabase
+  var _done = false;
+  var _timer = setTimeout(function(){
+    if(_done) return; _done = true;
+    toast('Saved locally — server timed out. Will sync next save.','err');
+  }, 12000);
+  sbFetch('POST', '/rest/v1/planner', [row], function(res, err){
+    if(_done) return; _done = true; clearTimeout(_timer);
+    if(err){ toast('Saved locally — server error. Will sync next save.','err'); return; }
+    toast(name + ' saved ✓','ok');
+  });
+}
+
+// ── Load from Supabase ──
+function loadPlanner(id){
+  // Try localStorage first
+  try{
+    var local = JSON.parse(localStorage.getItem('du_planner_' + id)||'null');
+    if(local && local.Data){
+      var state = JSON.parse(local.Data);
+      Object.keys(state).forEach(function(k){ if(k!=='results') S[k] = state[k]; });
+      S.results = null;
+      render();
+      toast('Loaded ' + (S.client.name||id) + ' (local)','ok');
+      return;
+    }
+  }catch(e){}
+  // Fall back to Supabase
+  sbFetch('GET', '/rest/v1/planner?ID=eq.' + encodeURIComponent(id) + '&select=*', null, function(rows){
+    if(!rows || !rows.length){ toast('Not found','err'); return; }
+    try{
+      var state = JSON.parse(rows[0].Data);
+      Object.keys(state).forEach(function(k){ if(k!=='results') S[k] = state[k]; });
+      S.results = null;
+      render();
+      toast('Loaded ' + (S.client.name||id),'ok');
+    }catch(e){ toast('Error loading data','err'); }
+  });
+}
+
+// ── Search saved clients ──
+function searchSaved(q){
+  var drop = document.getElementById('loadDrop');
+  if(!drop) return;
+  if(!q || q.length < 1){ drop.style.display='none'; return; }
+  q = q.toLowerCase();
+  // Search localStorage index
+  var results = [];
+  try{
+    var idx = JSON.parse(localStorage.getItem('du_planner_index')||'[]');
+    results = idx.filter(function(x){ return (x.name||'').toLowerCase().indexOf(q) > -1; }).slice(0,8);
+  }catch(e){}
+  if(!results.length){
+    // Try Supabase search
+    sbFetch('GET', '/rest/v1/planner?ClientName=ilike.*' + encodeURIComponent(q) + '*&select=ID,ClientName,LastSaved&limit=8', null, function(rows){
+      if(!rows || !rows.length){ drop.innerHTML='<div style="padding:12px;font-size:12px;color:#aaa">No saved plans found</div>'; drop.style.display='block'; return; }
+      drop.innerHTML = rows.map(function(r){
+        return '<div onmousedown="loadPlanner(\''+r.ID+'\')" style="padding:10px 14px;cursor:pointer;border-bottom:1px solid #eee;font-size:13px" onmouseover="this.style.background=\'#f5f7fa\'" onmouseout="this.style.background=\'#fff\'">'
+          +'<div style="font-weight:600;color:var(--navy)">'+r.ClientName+'</div>'
+          +'<div style="font-size:11px;color:#889">Saved: '+(r.LastSaved||'—')+'</div></div>';
+      }).join('');
+      drop.style.display='block';
+    });
+    return;
+  }
+  drop.innerHTML = results.map(function(r){
+    return '<div onmousedown="loadPlanner(\''+r.id+'\')" style="padding:10px 14px;cursor:pointer;border-bottom:1px solid #eee;font-size:13px" onmouseover="this.style.background=\'#f5f7fa\'" onmouseout="this.style.background=\'#fff\'">'
+      +'<div style="font-weight:600;color:var(--navy)">'+r.name+'</div>'
+      +'<div style="font-size:11px;color:#889">Saved: '+(r.saved||'—')+'</div></div>';
+  }).join('');
+  drop.style.display='block';
+}
+
+// ── Auto-save to localStorage on calculate ──
+function autoSaveLocal(){
+  var name = (S.client.name||'').trim();
+  if(!name) return;
+  var id = 'planner_' + name.replace(/[^a-zA-Z0-9]/g,'_').toLowerCase();
+  var now = new Date().toISOString().slice(0,16).replace('T',' ');
+  try{ localStorage.setItem('du_planner_' + id, JSON.stringify({ID:id, ClientName:name, Data:JSON.stringify(S), LastSaved:now})); }catch(e){}
+  try{
+    var idx = JSON.parse(localStorage.getItem('du_planner_index')||'[]');
+    if(!idx.find(function(x){return x.id===id;})) idx.unshift({id:id, name:name, saved:now});
+    else idx.forEach(function(x){ if(x.id===id) x.saved=now; });
+    localStorage.setItem('du_planner_index', JSON.stringify(idx));
+  }catch(e){}
+}
+
+// ── Crash recovery — check localStorage on load ──
+function checkCrashRecovery(){
+  try{
+    var idx = JSON.parse(localStorage.getItem('du_planner_index')||'[]');
+    if(!idx.length) return;
+    var last = idx[0]; // most recent
+    var local = JSON.parse(localStorage.getItem('du_planner_' + last.id)||'null');
+    if(local && local.Data){
+      // Check if saved within last 24 hours
+      var savedTime = new Date(local.LastSaved);
+      var hoursSince = (Date.now() - savedTime) / 3600000;
+      if(hoursSince < 24){
+        if(confirm('Recover last session?\n\n' + last.name + '\nSaved: ' + last.saved)){
+          var state = JSON.parse(local.Data);
+          Object.keys(state).forEach(function(k){ if(k!=='results') S[k] = state[k]; });
+          S.results = null;
+          render();
+          toast('Recovered ' + last.name,'ok');
+        }
+      }
+    }
+  }catch(e){}
+}
+
 // ══ SA TAX ENGINE — 2026/2027 ═══════════════════════════════
 var TAX_BRACKETS = [
   { limit: 245100,  base: 0,       rate: 0.18 },
@@ -153,6 +313,15 @@ function render(){
   h += sel('cl_gender','Gender',['Male','Female'],S.client.gender);
   h += fld('cl_plan','Plan to Age',S.client.planToAge,'number');
   h += '</div></div></div>';
+
+  // Last saved indicator
+  try{
+    var _sid = 'planner_' + (S.client.name||'').trim().replace(/[^a-zA-Z0-9]/g,'_').toLowerCase();
+    var _loc = JSON.parse(localStorage.getItem('du_planner_' + _sid)||'null');
+    if(_loc && _loc.LastSaved){
+      h += '<div style="font-size:11px;color:#889;margin:-10px 0 10px 4px">Last saved: '+_loc.LastSaved+' · <a href="#" onclick="savePlanner();return false" style="color:var(--sage);font-weight:600">Save now</a></div>';
+    }
+  }catch(e){}
 
   // LIVING ANNUITY FUNDS
   h += '<div class="card"><div class="ch"><h2>📈 Living Annuity Funds</h2><button class="btn b-sage" style="font-size:11px;padding:5px 12px" onclick="S.funds.push({desc:\'\',balance:0,drawdownPct:5,incomeEsc:0,growthRate:8,eac:2.5});render()">+ Add Fund</button></div><div class="cb">';
@@ -414,6 +583,7 @@ function calculate(){
     medPA *= (1 + medEsc);
   }
 
+  autoSaveLocal();
   S.results = {
     years: years,
     totalFundStart: Math.round(totalFundStart),
@@ -498,6 +668,7 @@ function hookInputs(){
 
 // ══ INIT ════════════════════════════════════════════════════
 render();
+setTimeout(checkCrashRecovery, 500);
 </script>
 </body>
 </html>
