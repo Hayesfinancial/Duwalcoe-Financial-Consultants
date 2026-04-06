@@ -1066,6 +1066,11 @@ function getWeekKey(){
   var mon=new Date(d); mon.setDate(diff); return mon.toISOString().slice(0,10);
 }
 
+var _dashSearchLeadsOnly = false;
+function toggleDashSearchLeads(){
+  _dashSearchLeadsOnly = !_dashSearchLeadsOnly;
+  dashSearchInput();
+}
 function dashSearchInput(){
   var inp = document.getElementById('dashSearch');
   var q = (inp ? inp.value||'' : '').toLowerCase().trim();
@@ -1074,7 +1079,7 @@ function dashSearchInput(){
   if(!drop){
     drop = document.createElement('div');
     drop.id = 'dashSearchDrop';
-    drop.style.cssText = 'display:none;position:fixed;width:300px;background:#fff;border:1.5px solid #c8d0e0;border-radius:10px;box-shadow:0 8px 24px rgba(15,31,61,.2);z-index:99999;max-height:320px;overflow-y:auto';
+    drop.style.cssText = 'display:none;position:fixed;width:300px;background:#fff;border:1.5px solid #c8d0e0;border-radius:10px;box-shadow:0 8px 24px rgba(15,31,61,.2);z-index:99999;max-height:360px;overflow-y:auto';
     document.body.appendChild(drop);
   }
   if(!q){ drop.style.display='none'; return; }
@@ -1100,13 +1105,21 @@ function dashSearchInput(){
   var matches = DB.clients.filter(function(c){
     // Exclude inactive and cancelled from search
     if(c.Status==='Inactive'||c.Status==='Cancelled') return false;
+    // Leads-only filter
+    if(_dashSearchLeadsOnly && c.IsLead!=='Yes') return false;
     return (c.Name||'').toLowerCase().indexOf(q)>-1 ||
            (c.CallingName||'').toLowerCase().indexOf(q)>-1 ||
            String(c.Cell||'').toLowerCase().indexOf(q)>-1 ||
            String(c.IDNumber||'').toLowerCase().indexOf(q)>-1;
   }).slice(0,8);
-  if(!matches.length){ drop.innerHTML='<div style="padding:12px 14px;font-size:13px;color:#aaa">No clients found</div>'; drop.style.display='block'; return; }
-  drop.innerHTML = matches.map(function(c){
+  // Filter toggle row
+  var filterRow = '<div style="display:flex;gap:0;border-bottom:1.5px solid #e2e8f0;background:#f8fafc">' +
+    '<div onmousedown="_dashSearchLeadsOnly=false;dashSearchInput()" style="flex:1;text-align:center;padding:7px 0;font-size:11px;font-weight:700;cursor:pointer;' + (!_dashSearchLeadsOnly?'color:var(--navy);border-bottom:2px solid var(--navy)':'color:#889;border-bottom:2px solid transparent') + '">👥 All</div>' +
+    '<div onmousedown="_dashSearchLeadsOnly=true;dashSearchInput()" style="flex:1;text-align:center;padding:7px 0;font-size:11px;font-weight:700;cursor:pointer;' + (_dashSearchLeadsOnly?'color:#d97706;border-bottom:2px solid #d97706':'color:#889;border-bottom:2px solid transparent') + '">🎯 Leads Only</div>' +
+    '</div>';
+  var noLabel = _dashSearchLeadsOnly ? 'No leads found' : 'No clients found';
+  if(!matches.length){ drop.innerHTML=filterRow+'<div style="padding:12px 14px;font-size:13px;color:#aaa">'+noLabel+'</div>'; drop.style.display='block'; return; }
+  drop.innerHTML = filterRow + matches.map(function(c){
     return '<div onmousedown="dashSearchGo(\''+c.ID+'\')" style="padding:10px 14px;cursor:pointer;border-bottom:1px solid var(--smoke);display:flex;flex-direction:column;gap:2px" '+
       'onmouseover="this.style.background=\'#f5f7fa\'" onmouseout="this.style.background=\'#fff\'">'+
       '<div style="font-size:13px;font-weight:600;color:var(--navy)">'+(c.Name||'')+(c.IsLead==='Yes'?' <span style="font-size:10px;color:#d97706">🎯 Lead</span>':'')+'</div>'+
@@ -2128,7 +2141,11 @@ function openClientModal(id, isLead){
     '<div class="g2" style="margin-top:10px">'+
     fld('fdr','Google Drive Folder URL',c.DriveUrl)+
     fld('frc','Risk Category',c.RiskCategory||'')+
-    '</div>';
+    '</div>'+
+
+    // SECTION: Notes
+    '<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:1px;padding:4px 0 8px;border-bottom:2px solid var(--gold);margin:18px 0 14px">Notes</div>'+
+    '<textarea id="fnotes" placeholder="Notes about this client or lead…" style="width:100%;min-height:100px;border:1.5px solid var(--mist);border-radius:8px;padding:10px 12px;font-size:13px;font-family:inherit;line-height:1.7;resize:vertical;color:var(--ink)">'+((c.Notes&&c.Notes!=='undefined')?c.Notes:'')+'</textarea>';
 
   // Initialise working copies from existing data
   try{ EDIT_BANKS = c.BankDetails ? JSON.parse(c.BankDetails) : []; }catch(e){ EDIT_BANKS=[]; }
@@ -2623,16 +2640,13 @@ function saveClient(openFNA){
     Gender:getRadio('fgen')||g('fgen'),Smoker:getRadio('fsm')||g('fsm'),
     Education:g('fedu'),Qualification:g('fqual'),TelHome:g('ftelh'),TelWork:g('ftelw'),
     SpouseName:g('fspname'),SpouseIDNumber:g('fspid'),SpouseDOB:g('fspdob'),SpouseCell:g('fspcell'),SpouseEmail:g('fspemail'),
-    Address:g('fadr'),POBox:g('fpobox')||'',DriveUrl:g('fdr'),Notes:'',RiskCategory:g('frc'),Adviser:cu(),IsLead:g('fisleadst')||'No'};
+    Address:g('fadr'),POBox:g('fpobox')||'',DriveUrl:g('fdr'),Notes:g('fnotes')||'',RiskCategory:g('frc'),Adviser:cu(),IsLead:g('fisleadst')||'No'};
   // Collect bank and doctor data from inline edit sections
   var _existing=DB.clients.find(function(x){return String(x.ID)===String(id);});
   c.BankDetails = JSON.stringify(EDIT_BANKS);
   c.Doctors     = JSON.stringify(EDIT_DOCS);
   if(_existing){
-    c.Notes=_existing.Notes||'';
     c.LastAccessed=_existing.LastAccessed||'';
-  } else {
-    c.Notes='';
   }
 
   // Collect children from form BEFORE server call (form fields won't exist after modal closes)
