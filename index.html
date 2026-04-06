@@ -1389,6 +1389,37 @@ function saveFamMember(){
   post({action:'saveFamMember', member:link}, function(){ toast(FAM_TYPE + ' saved','ok'); });
 }
 
+function deleteFamMember(linkId, name, linkedClientId, principalId){
+  // Handle virtual spouse entry — clear the spouse fields on the client record
+  if(String(linkId).indexOf('virtual_sp_')===0){
+    var pid = linkId.replace('virtual_sp_','');
+    if(!confirm('Remove '+name+' as spouse from this client?')) return;
+    var pc = DB.clients.find(function(x){ return String(x.ID)===String(pid); });
+    if(pc){
+      pc.SpouseName=''; pc.SpouseIDNumber=''; pc.SpouseDOB=''; pc.SpouseCell=''; pc.SpouseEmail='';
+      post({action:'saveClient', client:pc}, function(){ toast(name+' removed','ok'); });
+    }
+    render();
+    return;
+  }
+  if(!confirm('Remove '+name+' from the family card?\n\nThis only removes the link — it does not delete the person as a client.')) return;
+  // Remove the link from DB.links
+  DB.links = DB.links.filter(function(l){ return String(l.ID)!==String(linkId); });
+  // Delete from server
+  post({action:'deleteRow', sheet:'familylinks', id:linkId}, function(){ toast(name+' removed','ok'); });
+  // Also remove the reverse link if it exists (bidirectional spouse links)
+  if(linkedClientId){
+    var reverse = DB.links.find(function(l){
+      return String(l.PrincipalID)===String(linkedClientId) && String(l.ClientID)===String(principalId);
+    });
+    if(reverse){
+      DB.links = DB.links.filter(function(l){ return String(l.ID)!==String(reverse.ID); });
+      post({action:'deleteRow', sheet:'familylinks', id:reverse.ID}, function(){});
+    }
+  }
+  render();
+}
+
 function upgradeToClient(linkId){
   var lnk = DB.links.find(function(l){ return String(l.ID)===String(linkId); });
   // Handle virtual spouse entry (from client record, not yet in DB.links)
@@ -1467,6 +1498,33 @@ function confirmExistLink(linkedClientId) {
   var linked = DB.clients.find(function(x){ return String(x.ID)===String(linkedClientId); });
   var principal = DB.clients.find(function(x){ return String(x.ID)===String(LINK_EXIST_CLIENT); });
   if(!linked || !principal) return;
+
+  // Check if A -> B link already exists to avoid duplicates
+  var forwardExists = DB.links.find(function(l){
+    return String(l.PrincipalID)===String(LINK_EXIST_CLIENT) &&
+           String(l.ClientID)===String(linkedClientId);
+  });
+  if(forwardExists){
+    toast(linked.Name + ' is already linked','err');
+    closeAll(); render(); return;
+  }
+
+  // If linking as Spouse, clear the inline spouse fields on the principal to avoid virtual duplicate
+  if(rel === 'Spouse' && clean(principal.SpouseName)){
+    principal.SpouseName=''; principal.SpouseIDNumber=''; principal.SpouseDOB=''; principal.SpouseCell=''; principal.SpouseEmail='';
+    post({action:'saveClient', client:principal}, function(){});
+  }
+
+  // Also remove any existing non-linked spouse entries from DB.links for this principal
+  if(rel === 'Spouse'){
+    var oldSpouseLinks = DB.links.filter(function(l){
+      return String(l.PrincipalID)===String(LINK_EXIST_CLIENT) && l.Type==='Spouse' && l.IsClient!=='Yes';
+    });
+    oldSpouseLinks.forEach(function(ol){
+      DB.links = DB.links.filter(function(l){ return String(l.ID)!==String(ol.ID); });
+      post({action:'deleteRow', sheet:'familylinks', id:ol.ID}, function(){});
+    });
+  }
 
   // Link A -> B (principal's family card shows the linked client)
   var linkAB = {
@@ -1571,9 +1629,12 @@ function renderOverview(c,pols,roas,ctasks){
         (clean(m.DOB)?' <span>🎂 '+fdate(m.DOB)+'</span>':'')+
         (clean(m.Cell)?' <span>📱 '+m.Cell+'</span>':'')+
         '</div></div>'+
+        '<div style="display:flex;gap:6px;align-items:center">'+
         (isClient?
           '<button class="btn b-gh xs" data-act="open-client" data-id="'+m.ClientID+'">View Profile →</button>':
           '<button class="btn b-sg xs" data-act="upgrade-client" data-id="'+m.ID+'">Make Client</button>')+
+        '<button class="btn b-rd xs" data-act="delete-fam" data-id="'+m.ID+'" data-name="'+m.Name+'" data-cid="'+(m.ClientID||'')+'" data-pid="'+m.PrincipalID+'" title="Remove from family">🗑</button>'+
+        '</div>'+
         '</div>';
     }).join('')+
     '</div>')+
@@ -4514,6 +4575,7 @@ document.addEventListener('click', function(e){
         case 'remove-child':   removeChild(id); break;
         case 'add-child':      openFamModal(id,'Child'); break;
         case 'upgrade-client':      upgradeToClient(id); break;
+        case 'delete-fam':          deleteFamMember(id, el.getAttribute('data-name')||'', el.getAttribute('data-cid')||'', el.getAttribute('data-pid')||''); break;
         case 'link-existing':       openLinkExistModal(id, 'Spouse'); break;
         case 'confirm-exist-link':  confirmExistLink(id); break;
         case 'tab':            CTAB=el.getAttribute('data-tab'); render(); break;
