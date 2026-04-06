@@ -2236,7 +2236,10 @@ function buildNeeds() {
       if((S.cli.marital||'').indexOf('accrual')>-1){
         var _ra=(S.importedPols||[]).reduce(function(a,p){return POL_RA_TYPES.indexOf(p.Type)>-1?a+(N(p.BenFundValue)||N(p.BenDeath)):a;},0);
         var _invFV=(S.importedPols||[]).reduce(function(a,p){return POL_INV_TYPES.indexOf(p.Type)>-1?a+N(p.BenFundValue):a;},0);
-        var _ce=_pv+_ra+_invFV, _se=N(S.accrual&&S.accrual.spouseCurrentAssets);
+        var _cLiabs=(S.props||[]).reduce(function(a,p){return a+N(p.bond);},0)
+          +(S.vehicles||[]).reduce(function(a,v){return a+N(v.finance);},0)
+          +(S.liabilities||[]).reduce(function(a,l){return a+N(l.bal);},0);
+        var _ce=Math.max(0,_pv+_ra+_invFV-_cLiabs), _se=N(S.accrual&&S.accrual.spouseCurrentAssets);
         var _cs=N(S.accrual&&S.accrual.clientStartVal), _ss=N(S.accrual&&S.accrual.spouseStartVal);
         var _cex=N(S.accrual&&S.accrual.clientExclusions), _sex=N(S.accrual&&S.accrual.spouseExclusions);
         _acc=Math.max(0,(Math.max(0,_ce-_cex-_cs)-Math.max(0,_se-_sex-_ss))/2);
@@ -4465,29 +4468,41 @@ function buildEstate() {
     // ── CLIENT'S ACCRUAL ESTATE — auto from assets + RA fund values
     var accrClientItems=[];
     (S.props||[]).forEach(function(p){
-      if(N(p.val)>0) accrClientItems.push({desc:p.desc||'Property', val:N(p.val)});
+      if(N(p.val)>0) accrClientItems.push({desc:p.desc||'Property', val:N(p.val), isLiab:false});
     });
     (S.vehicles||[]).forEach(function(v){
-      if(N(v.val)>0) accrClientItems.push({desc:v.desc||'Vehicle', val:N(v.val)});
+      if(N(v.val)>0) accrClientItems.push({desc:v.desc||'Vehicle', val:N(v.val), isLiab:false});
     });
     (S.otherAssets||[]).forEach(function(a){
-      if(N(a.val)>0) accrClientItems.push({desc:a.desc||'Asset', val:N(a.val)});
+      if(N(a.val)>0) accrClientItems.push({desc:a.desc||'Asset', val:N(a.val), isLiab:false});
     });
     // RA / Preservation / Pension / Provident fund values
     var raFundValue = 0;
     pols.forEach(function(p){
       if(POL_RA_TYPES.indexOf(p.Type)>-1 && N(p.BenFundValue)>0){
-        accrClientItems.push({desc:(p.Insurer?p.Insurer+' — ':'')+p.Type, val:N(p.BenFundValue)});
+        accrClientItems.push({desc:(p.Insurer?p.Insurer+' — ':'')+p.Type, val:N(p.BenFundValue), isLiab:false});
         raFundValue += N(p.BenFundValue);
       }
     });
     // Investment policies (endowments, unit trusts, TFS etc.)
     pols.forEach(function(p){
       if(POL_INV_TYPES.indexOf(p.Type)>-1 && N(p.BenFundValue)>0){
-        accrClientItems.push({desc:(p.Insurer?p.Insurer+' — ':'')+p.Type, val:N(p.BenFundValue)});
+        accrClientItems.push({desc:(p.Insurer?p.Insurer+' — ':'')+p.Type, val:N(p.BenFundValue), isLiab:false});
       }
     });
-    var clientCurrentTotal = accrClientItems.reduce(function(a,x){return a+x.val;},0);
+    // Liabilities — bonds, vehicle finance, other debts
+    (S.props||[]).forEach(function(p){
+      if(N(p.bond)>0) accrClientItems.push({desc:'Bond: '+(p.desc||'Property'), val:N(p.bond), isLiab:true});
+    });
+    (S.vehicles||[]).forEach(function(v){
+      if(N(v.finance)>0) accrClientItems.push({desc:'Finance: '+(v.desc||'Vehicle'), val:N(v.finance), isLiab:true});
+    });
+    (S.liabilities||[]).forEach(function(l){
+      if(N(l.bal)>0) accrClientItems.push({desc:l.desc||'Liability', val:N(l.bal), isLiab:true});
+    });
+    var clientGrossAssets = accrClientItems.filter(function(x){return !x.isLiab;}).reduce(function(a,x){return a+x.val;},0);
+    var clientTotalLiabs = accrClientItems.filter(function(x){return x.isLiab;}).reduce(function(a,x){return a+x.val;},0);
+    var clientCurrentTotal = Math.max(0, clientGrossAssets - clientTotalLiabs);
 
     // Client exclusions (inheritances/donations during marriage)
     var clientExcl = N(S.accrual.clientExclusions)||0;
@@ -4496,16 +4511,20 @@ function buildEstate() {
     var accrCliTitle=div(); accrCliTitle.style.cssText='font-size:12px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:.5px;margin:14px 0 6px';
     accrCliTitle.textContent='Client\'s Accrual Estate'; s.appendChild(accrCliTitle);
     var accrCliTbl=document.createElement('table'); accrCliTbl.className='tbl';
-    accrCliTbl.innerHTML='<thead><tr><th style="text-align:left">Asset</th><th style="text-align:right">Value</th></tr></thead>';
+    accrCliTbl.innerHTML='<thead><tr><th style="text-align:left">Asset / Liability</th><th style="text-align:right">Value</th></tr></thead>';
     var accrCliTb=document.createElement('tbody');
     accrClientItems.forEach(function(item){
       var tr=document.createElement('tr');
-      tr.innerHTML='<td style="font-size:12px">'+item.desc+'</td><td style="text-align:right;font-weight:600;font-size:12px">'+Rfmt(item.val)+'</td>';
+      if(item.isLiab){
+        tr.innerHTML='<td style="font-size:12px;color:#991b1b">Less: '+item.desc+'</td><td style="text-align:right;font-weight:600;font-size:12px;color:#991b1b">('+Rfmt(item.val)+')</td>';
+      } else {
+        tr.innerHTML='<td style="font-size:12px">'+item.desc+'</td><td style="text-align:right;font-weight:600;font-size:12px">'+Rfmt(item.val)+'</td>';
+      }
       accrCliTb.appendChild(tr);
     });
     // Total row
     var trTot=document.createElement('tr'); trTot.style.cssText='background:#f0fdf4;font-weight:700';
-    trTot.innerHTML='<td style="font-size:12px;border-top:2px solid var(--navy)">Total current estate</td><td style="text-align:right;font-size:13px;border-top:2px solid var(--navy)">'+Rfmt(clientCurrentTotal)+'</td>';
+    trTot.innerHTML='<td style="font-size:12px;border-top:2px solid var(--navy)">Net current estate</td><td style="text-align:right;font-size:13px;border-top:2px solid var(--navy)">'+Rfmt(clientCurrentTotal)+'</td>';
     accrCliTb.appendChild(trTot);
     accrCliTbl.appendChild(accrCliTb);
     s.appendChild(accrCliTbl);
@@ -4544,7 +4563,9 @@ function buildEstate() {
       var _v=el('span','',val); _v.style.cssText='font-size:'+(bold?'14':'12')+'px;font-weight:'+(bold?'700':'400')+';color:'+(colour||'#f0f9d4');
       _r.appendChild(_l); _r.appendChild(_v); accrBox.appendChild(_r);
     }
-    accrRow('Client current estate', Rfmt(clientCurrentTotal));
+    accrRow('Client gross assets', Rfmt(clientGrossAssets));
+    if(clientTotalLiabs>0) accrRow('Less: liabilities', '('+Rfmt(clientTotalLiabs)+')');
+    accrRow('Client net estate', Rfmt(clientCurrentTotal), false);
     if(clientExcl>0) accrRow('Less: inheritances/donations', '('+Rfmt(clientExcl)+')');
     accrRow('Less: estate at marriage', '('+Rfmt(N(S.accrual.clientStartVal))+')');
     accrRow('Client accrual (growth)', Rfmt(clientAccrualGrowth), true);
