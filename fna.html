@@ -2874,13 +2874,22 @@ function buildRetirement() {
     // Use shortfall as FV (zero if surplus — shows what's needed to stay on track)
     if(retGap < 0) {
       var shortfall2 = Math.abs(retGap);
-      var mr3=N(S.assump.growth)/100/12;
-      var nm3=yrsToRet*12;
-      var pmtNeeded2=mr3>0?Math.round(shortfall2*mr3/(Math.pow(1+mr3,nm3)-1)):Math.round(shortfall2/nm3);
+      var savEsc2 = N(S.assump.incEsc)||6;
+      var growthPct2 = N(S.assump.growth)||9;
+      // Escalating contribution: solve for starting annual payment
+      // FV = pmt * ((1+r)^n - (1+g)^n) / (r - g)  =>  pmt = FV * (r-g) / ((1+r)^n - (1+g)^n)
+      var r2 = growthPct2/100, g2 = savEsc2/100, n2 = yrsToRet;
+      var pmtNeeded2;
+      if(Math.abs(r2-g2)<0.0001){
+        pmtNeeded2 = Math.round(shortfall2 / n2 / Math.pow(1+r2, n2/2) / 12);
+      } else {
+        var annPmt2 = shortfall2 * (r2-g2) / (Math.pow(1+r2,n2) - Math.pow(1+g2,n2));
+        pmtNeeded2 = Math.round(annPmt2/12);
+      }
       var pmtRow2=div();
       pmtRow2.style.cssText='display:flex;justify-content:space-between;padding:6px 0;margin-top:4px;font-size:12px';
-      var pmtL2=el('span','','To accumulate R\u202f'+Math.round(shortfall2).toLocaleString('en-ZA')+' by retirement, save an additional'); pmtL2.style.color='#8899bb';
-      var pmtV2=el('span','',Rfmt(pmtNeeded2)+' /pm'); pmtV2.style.cssText='font-weight:700;color:#fbbf24';
+      var pmtL2=el('span','','Additional saving needed (escalating '+savEsc2+'% p.a. at '+growthPct2+'% growth)'); pmtL2.style.color='#8899bb';
+      var pmtV2=el('span','',Rfmt(pmtNeeded2)+' /pm starting today'); pmtV2.style.cssText='font-weight:700;color:#fbbf24';
       pmtRow2.appendChild(pmtL2); pmtRow2.appendChild(pmtV2);
       calcBox.appendChild(pmtRow2);
     }
@@ -2939,9 +2948,16 @@ function buildRetirement() {
     if(retGap < 0 && yrsToRet > 0){
       var _sf0 = Math.abs(retGap);
       lumpNeededNow = scGrowth>0 ? Math.round(_sf0 / Math.pow(1+scGrowth/100, yrsToRet)) : Math.round(_sf0);
-      var _mr0 = scGrowth/100/12;
-      var _nm0 = yrsToRet*12;
-      extraPMNeeded = _nm0>0 ? (_mr0>0 ? Math.round(_sf0*_mr0/(Math.pow(1+_mr0,_nm0)-1)) : Math.round(_sf0/_nm0)) : Math.round(_sf0);
+      // Escalating PMT: solve for starting annual payment
+      var _r0 = scGrowth/100;
+      var _g0 = scExtraEsc/100;
+      var _n0 = yrsToRet;
+      if(Math.abs(_r0-_g0)<0.0001){
+        extraPMNeeded = _n0>0 ? Math.round(_sf0 / _n0 / Math.pow(1+_r0, _n0/2) / 12) : Math.round(_sf0);
+      } else {
+        var _annPmt0 = _sf0 * (_r0-_g0) / (Math.pow(1+_r0,_n0) - Math.pow(1+_g0,_n0));
+        extraPMNeeded = Math.round(_annPmt0/12);
+      }
     }
 
     var scenarioFundsProj = S.retAssets.reduce(function(a,r){
@@ -2967,7 +2983,7 @@ function buildRetirement() {
     scC1.innerHTML = '<div class="lbl">Lump sum needed now</div><div class="val '+(retGap<0?'warn':'ok')+'">'+(retGap<0?Rfmt(lumpNeededNow):'—')+'</div><div class="sub">At '+scGrowth+'% growth to retirement</div>';
     scCards.appendChild(scC1);
     var scC2 = div('card');
-    scC2.innerHTML = '<div class="lbl">Extra saving needed /pm</div><div class="val '+(retGap<0?'warn':'ok')+'">'+(retGap<0?Rfmt(extraPMNeeded):'—')+'</div><div class="sub">To close the current shortfall</div>';
+    scC2.innerHTML = '<div class="lbl">Extra saving needed /pm</div><div class="val '+(retGap<0?'warn':'ok')+'">'+(retGap<0?Rfmt(extraPMNeeded):'—')+'</div><div class="sub">'+(scExtraEsc>0?'Starting today, escalating '+scExtraEsc+'% p.a.':'Level payment — set escalation % to reduce')+'</div>';
     scCards.appendChild(scC2);
     s.appendChild(scCards);
 
@@ -5057,10 +5073,16 @@ function buildSummary() {
     addLine(capitalBox,'Retirement result', retirementGap===null ? '—' : resultText(retirementGap), true, retirementGap===null ? 'var(--navy)' : resultTone(retirementGap));
     if(retirementGap!==null && retirementGap<0 && yrsToRet>0){
       var _sfAB = Math.abs(retirementGap);
-      var _mrAB = (N(S.assump.growth)||9)/100/12;
-      var _nmAB = yrsToRet*12;
-      var _pmtAB = _nmAB>0 ? (_mrAB>0 ? Math.round(_sfAB*_mrAB/(Math.pow(1+_mrAB,_nmAB)-1)) : Math.round(_sfAB/_nmAB)) : Math.round(_sfAB);
-      addLine(capitalBox,'Extra saving needed /pm',Rfmt(_pmtAB),true,'#d97706');
+      var _rAB = (N(S.assump.growth)||9)/100;
+      var _gAB = (N(S.assump.incEsc)||6)/100;
+      var _nAB = yrsToRet;
+      var _pmtAB;
+      if(Math.abs(_rAB-_gAB)<0.0001){
+        _pmtAB = Math.round(_sfAB / _nAB / Math.pow(1+_rAB, _nAB/2) / 12);
+      } else {
+        _pmtAB = Math.round(_sfAB * (_rAB-_gAB) / (Math.pow(1+_rAB,_nAB) - Math.pow(1+_gAB,_nAB)) / 12);
+      }
+      addLine(capitalBox,'Extra saving needed /pm (esc '+(N(S.assump.incEsc)||6)+'%)',Rfmt(_pmtAB),true,'#d97706');
     }
     rgrid.appendChild(capitalBox);
     s.appendChild(rgrid);
@@ -6259,12 +6281,16 @@ function printFNA(sections) {
       +'<span style="color:'+(retGapP>=0?'#86efac':'#f87171')+'">'+r(Math.abs(retGapP))+'</span></div>'
       +(retGapP<0?(function(){
         var _sf=Math.abs(retGapP);
-        var _mr=N(S.assump.growth)/100/12;
-        var _nm=(yrsToRet||0)*12;
-        var _pmt=_mr>0?Math.round(_sf*_mr/(Math.pow(1+_mr,_nm)-1)):(_nm>0?Math.round(_sf/_nm):0);
+        var _rP=N(S.assump.growth)/100||0.09;
+        var _gP=(N(S.assump.incEsc)||6)/100;
+        var _nP=yrsToRet||0;
+        var _pmt;
+        if(_nP<=0){ _pmt=Math.round(_sf); }
+        else if(Math.abs(_rP-_gP)<0.0001){ _pmt=Math.round(_sf/_nP/Math.pow(1+_rP,_nP/2)/12); }
+        else { _pmt=Math.round(_sf*(_rP-_gP)/(Math.pow(1+_rP,_nP)-Math.pow(1+_gP,_nP))/12); }
         return '<div style="display:flex;justify-content:space-between;padding:5px 0;margin-top:3px;font-size:10px">'
-          +'<span style="color:#8899bb">To accumulate '+r(_sf)+' by retirement, save an additional</span>'
-          +'<span style="font-weight:700;color:#fbbf24">'+r(_pmt)+' /pm</span></div>';
+          +'<span style="color:#8899bb">Additional saving needed (escalating '+(N(S.assump.incEsc)||6)+'% p.a. at '+(N(S.assump.growth)||9)+'% growth)</span>'
+          +'<span style="font-weight:700;color:#fbbf24">'+r(_pmt)+' /pm starting today</span></div>';
       })():'')
     );
   }
