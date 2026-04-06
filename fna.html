@@ -2235,9 +2235,11 @@ function buildNeeds() {
       var _acc=0;
       if((S.cli.marital||'').indexOf('accrual')>-1){
         var _ra=(S.importedPols||[]).reduce(function(a,p){return POL_RA_TYPES.indexOf(p.Type)>-1?a+(N(p.BenFundValue)||N(p.BenDeath)):a;},0);
-        var _ce=_pv+_ra, _se=N(S.accrual&&S.accrual.spouseCurrentAssets);
+        var _invFV=(S.importedPols||[]).reduce(function(a,p){return POL_INV_TYPES.indexOf(p.Type)>-1?a+N(p.BenFundValue):a;},0);
+        var _ce=_pv+_ra+_invFV, _se=N(S.accrual&&S.accrual.spouseCurrentAssets);
         var _cs=N(S.accrual&&S.accrual.clientStartVal), _ss=N(S.accrual&&S.accrual.spouseStartVal);
-        _acc=Math.max(0,(Math.max(0,_ce-_cs)-Math.max(0,_se-_ss))/2);
+        var _cex=N(S.accrual&&S.accrual.clientExclusions), _sex=N(S.accrual&&S.accrual.spouseExclusions);
+        _acc=Math.max(0,(Math.max(0,_ce-_cex-_cs)-Math.max(0,_se-_sex-_ss))/2);
       }
       var _cgtNeed=calcTotalCGT((N(S.cli.grossPM)>0?calcMarginalRate(N(S.cli.grossPM)*12):0.45)*100).totalCGT;
       var _gr=_pv+_s4q+_ep+_tp+_bd;
@@ -4448,28 +4450,124 @@ function buildEstate() {
   var grossEstate    = totalDutiableAssets + estatePols + thirdPartyPols + bizDutiable + s4qPolicies;
   var netEstate      = Math.max(0, grossEstate - physLiab - cgtLiability);
 
-  // Accrual — on physical assets + RA fund values only (NOT risk policies)
+  // Accrual — automated from assets tab data
   var accrualClaim = 0;
   var isANC = (S.cli.marital||'').toLowerCase().indexOf('accrual') > -1;
   s.appendChild(stitle('Accrual Calculation'));
-  var accrBox=div(); accrBox.style.cssText='background:#fff;border:var(--border);border-radius:8px;padding:14px;margin-bottom:12px';
   if(isANC){
-    var accrInf=div('info'); accrInf.textContent='ANC with accrual detected. Accrual is calculated on growth of each spouse\'s estate since marriage. Risk policies are excluded — only physical assets and RA fund values count.';
+    var accrInf=div('info');
+    accrInf.innerHTML='ANC with accrual detected. Accrual measures the <strong>growth</strong> of each spouse\'s estate since marriage. '+
+      'The spouse whose estate grew less has a claim for <strong>half the difference</strong>. '+
+      'Risk policies, retirement fund death benefits paid to a nominated beneficiary, and assets inherited or received as donations during marriage are <strong>excluded</strong>.';
     s.appendChild(accrInf);
     if(!S.accrual) S.accrual={};
-    var ag=g3();
-    ag.appendChild(rfld('Client estate at marriage (R)', S.accrual, 'clientStartVal', {onblur:function(){render();}}));
-    ag.appendChild(rfld('Spouse current assets (R)', S.accrual, 'spouseCurrentAssets', {onblur:function(){render();}}));
-    ag.appendChild(rfld('Spouse estate at marriage (R)', S.accrual, 'spouseStartVal', {onblur:function(){render();}}));
-    s.appendChild(ag);
-    var raFundValue = pols.reduce(function(a,p){ return POL_RA_TYPES.indexOf(p.Type)>-1?a+N(p.BenFundValue):a; },0);
-    var clientCurrentAccrual = Math.max(0, totalDutiableAssets + raFundValue - N(S.accrual.clientStartVal));
-    var spouseAccrual = Math.max(0, N(S.accrual.spouseCurrentAssets) - N(S.accrual.spouseStartVal));
-    if(clientCurrentAccrual > spouseAccrual) accrualClaim = (clientCurrentAccrual - spouseAccrual) / 2;
-    var accrNote=div(); accrNote.style.cssText='font-size:12px;color:var(--sub);margin-top:8px;padding:8px 12px;background:#f0fdf4;border-radius:6px;border:1px solid #bbf7d0';
-    accrNote.innerHTML='Client accrual: <strong>'+Rfmt(clientCurrentAccrual)+'</strong> · Spouse accrual: <strong>'+Rfmt(spouseAccrual)+'</strong> · '+
-      (accrualClaim>0?'Accrual payable to spouse: <strong>'+Rfmt(accrualClaim)+'</strong>':'No accrual payable (spouse estate grew more)');
-    s.appendChild(accrNote);
+
+    // ── CLIENT'S ACCRUAL ESTATE — auto from assets + RA fund values
+    var accrClientItems=[];
+    (S.props||[]).forEach(function(p){
+      if(N(p.val)>0) accrClientItems.push({desc:p.desc||'Property', val:N(p.val)});
+    });
+    (S.vehicles||[]).forEach(function(v){
+      if(N(v.val)>0) accrClientItems.push({desc:v.desc||'Vehicle', val:N(v.val)});
+    });
+    (S.otherAssets||[]).forEach(function(a){
+      if(N(a.val)>0) accrClientItems.push({desc:a.desc||'Asset', val:N(a.val)});
+    });
+    // RA / Preservation / Pension / Provident fund values
+    var raFundValue = 0;
+    pols.forEach(function(p){
+      if(POL_RA_TYPES.indexOf(p.Type)>-1 && N(p.BenFundValue)>0){
+        accrClientItems.push({desc:(p.Insurer?p.Insurer+' — ':'')+p.Type, val:N(p.BenFundValue)});
+        raFundValue += N(p.BenFundValue);
+      }
+    });
+    // Investment policies (endowments, unit trusts, TFS etc.)
+    pols.forEach(function(p){
+      if(POL_INV_TYPES.indexOf(p.Type)>-1 && N(p.BenFundValue)>0){
+        accrClientItems.push({desc:(p.Insurer?p.Insurer+' — ':'')+p.Type, val:N(p.BenFundValue)});
+      }
+    });
+    var clientCurrentTotal = accrClientItems.reduce(function(a,x){return a+x.val;},0);
+
+    // Client exclusions (inheritances/donations during marriage)
+    var clientExcl = N(S.accrual.clientExclusions)||0;
+
+    // Build client accrual table
+    var accrCliTitle=div(); accrCliTitle.style.cssText='font-size:12px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:.5px;margin:14px 0 6px';
+    accrCliTitle.textContent='Client\'s Accrual Estate'; s.appendChild(accrCliTitle);
+    var accrCliTbl=document.createElement('table'); accrCliTbl.className='tbl';
+    accrCliTbl.innerHTML='<thead><tr><th style="text-align:left">Asset</th><th style="text-align:right">Value</th></tr></thead>';
+    var accrCliTb=document.createElement('tbody');
+    accrClientItems.forEach(function(item){
+      var tr=document.createElement('tr');
+      tr.innerHTML='<td style="font-size:12px">'+item.desc+'</td><td style="text-align:right;font-weight:600;font-size:12px">'+Rfmt(item.val)+'</td>';
+      accrCliTb.appendChild(tr);
+    });
+    // Total row
+    var trTot=document.createElement('tr'); trTot.style.cssText='background:#f0fdf4;font-weight:700';
+    trTot.innerHTML='<td style="font-size:12px;border-top:2px solid var(--navy)">Total current estate</td><td style="text-align:right;font-size:13px;border-top:2px solid var(--navy)">'+Rfmt(clientCurrentTotal)+'</td>';
+    accrCliTb.appendChild(trTot);
+    accrCliTbl.appendChild(accrCliTb);
+    s.appendChild(accrCliTbl);
+
+    // Client inputs — starting value & exclusions
+    var accrCliInputs=div(); accrCliInputs.style.cssText='display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:8px 0 16px';
+    accrCliInputs.appendChild(rfld('Client estate at marriage (R)', S.accrual, 'clientStartVal', {onblur:function(){render();}}));
+    accrCliInputs.appendChild(rfld('Less: inheritances/donations during marriage', S.accrual, 'clientExclusions', {onblur:function(){render();}}));
+    s.appendChild(accrCliInputs);
+
+    var clientAccrualGrowth = Math.max(0, clientCurrentTotal - clientExcl - N(S.accrual.clientStartVal));
+
+    // ── SPOUSE'S ACCRUAL ESTATE — manual (we don't have spouse asset data)
+    var spTitle=div(); spTitle.style.cssText='font-size:12px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:.5px;margin:14px 0 6px';
+    spTitle.textContent='Spouse\'s Accrual Estate'; s.appendChild(spTitle);
+    var spInf=div('info'); spInf.style.cssText='font-size:11px;padding:6px 10px;margin-bottom:6px';
+    spInf.textContent='Enter the spouse\'s total current asset value and starting value at marriage. Include properties, investments, fund values — same categories as above.';
+    s.appendChild(spInf);
+    var accrSpInputs=div(); accrSpInputs.style.cssText='display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:8px';
+    accrSpInputs.appendChild(rfld('Spouse current assets (R)', S.accrual, 'spouseCurrentAssets', {onblur:function(){render();}}));
+    accrSpInputs.appendChild(rfld('Spouse estate at marriage (R)', S.accrual, 'spouseStartVal', {onblur:function(){render();}}));
+    accrSpInputs.appendChild(rfld('Less: inheritances/donations', S.accrual, 'spouseExclusions', {onblur:function(){render();}}));
+    s.appendChild(accrSpInputs);
+
+    var spouseExcl = N(S.accrual.spouseExclusions)||0;
+    var spouseAccrualGrowth = Math.max(0, N(S.accrual.spouseCurrentAssets) - spouseExcl - N(S.accrual.spouseStartVal));
+
+    // ── ACCRUAL RESULT
+    if(clientAccrualGrowth > spouseAccrualGrowth){
+      accrualClaim = (clientAccrualGrowth - spouseAccrualGrowth) / 2;
+    }
+    var accrBox=div(); accrBox.style.cssText='background:var(--navy);color:#fff;border-radius:9px;padding:16px 18px;margin:12px 0 14px';
+    function accrRow(lbl,val,bold,colour){
+      var _r=div(); _r.style.cssText='display:flex;justify-content:space-between;padding:'+(bold?'7':'4')+'px 0'+(bold?';border-top:1px solid #334;margin-top:4px':'');
+      var _l=el('span','',lbl); _l.style.cssText='color:#ccd6f6;font-size:'+(bold?'13':'12')+'px';
+      var _v=el('span','',val); _v.style.cssText='font-size:'+(bold?'14':'12')+'px;font-weight:'+(bold?'700':'400')+';color:'+(colour||'#f0f9d4');
+      _r.appendChild(_l); _r.appendChild(_v); accrBox.appendChild(_r);
+    }
+    accrRow('Client current estate', Rfmt(clientCurrentTotal));
+    if(clientExcl>0) accrRow('Less: inheritances/donations', '('+Rfmt(clientExcl)+')');
+    accrRow('Less: estate at marriage', '('+Rfmt(N(S.accrual.clientStartVal))+')');
+    accrRow('Client accrual (growth)', Rfmt(clientAccrualGrowth), true);
+    accrRow('Spouse current estate', Rfmt(N(S.accrual.spouseCurrentAssets)));
+    if(spouseExcl>0) accrRow('Less: inheritances/donations', '('+Rfmt(spouseExcl)+')');
+    accrRow('Less: estate at marriage', '('+Rfmt(N(S.accrual.spouseStartVal))+')');
+    accrRow('Spouse accrual (growth)', Rfmt(spouseAccrualGrowth), true);
+    var diff = clientAccrualGrowth - spouseAccrualGrowth;
+    accrRow('Difference', Rfmt(Math.abs(diff)), false);
+    if(accrualClaim > 0){
+      accrRow('Accrual payable to spouse (½ difference)', Rfmt(accrualClaim), true, '#f87171');
+      var accrNote2=div(); accrNote2.style.cssText='font-size:10px;color:#667;margin-top:8px;padding-top:6px;border-top:1px solid #334';
+      accrNote2.textContent='The client\'s estate grew more than the spouse\'s. Half the difference is payable to the spouse as an accrual claim, deducted before estate duty.';
+      accrBox.appendChild(accrNote2);
+    } else if(diff < 0){
+      accrRow('Accrual claim by client (½ difference)', Rfmt(Math.abs(diff)/2), true, '#86efac');
+      var accrNote3=div(); accrNote3.style.cssText='font-size:10px;color:#667;margin-top:8px;padding-top:6px;border-top:1px solid #334';
+      accrNote3.textContent='The spouse\'s estate grew more. The client has an accrual claim against the spouse\'s estate — no deduction from this estate.';
+      accrBox.appendChild(accrNote3);
+    } else {
+      accrRow('No accrual payable', '—', true, '#86efac');
+    }
+    s.appendChild(accrBox);
   } else {
     var noAccrNote=div('info'); noAccrNote.textContent='Not married ANC with accrual — no accrual claim applies.';
     s.appendChild(noAccrNote);
