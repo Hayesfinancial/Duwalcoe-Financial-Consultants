@@ -1764,48 +1764,93 @@ function renderOverview(c,pols,roas,ctasks){
 }
 
 function renderPolicies(c,pols){
-  return '<div class="card">'+
+  var active=pols.filter(function(p){return p.Status!=='Replaced'&&p.Status!=='Cancelled';});
+  var replaced=pols.filter(function(p){return p.Status==='Replaced'||p.Status==='Cancelled';});
+
+  // Group active policies by category
+  var catOrder=[
+    {key:'risk',   label:'🛡 Life & Risk Cover',        color:'#0e413a', types:['Life / Income Protector']},
+    {key:'group',  label:'🏢 Group Risk & Retirement',   color:'#1a5a50', types:['Pension Fund','Provident Fund']},
+    {key:'ra',     label:'📈 Retirement Annuities & Preservation', color:'#2e7d5a', types:['Retirement Annuity','Pension Preservation','Provident Preservation']},
+    {key:'la',     label:'💰 Living Annuities',          color:'#1e6091', types:['Living Annuity']},
+    {key:'lifeann',label:'🔒 Life Annuities',            color:'#6d28d9', types:['Life Annuity']},
+    {key:'invest', label:'📊 Investments & Savings',     color:'#2563ab', types:['Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment','Unit Trust','Tax Free Savings']},
+    {key:'med',    label:'🏥 Medical Aid',               color:'#7c3aed', types:['Medical Aid']},
+    {key:'biz',    label:'🏗 Business Assurance',        color:'#92400e', types:['Business Assurance']}
+  ];
+  var grouped={}, otherPols=[];
+  catOrder.forEach(function(cat){ grouped[cat.key]=[]; });
+  active.forEach(function(p){
+    var placed=false;
+    catOrder.forEach(function(cat){
+      if(cat.types.indexOf(p.Type)>=0){ grouped[cat.key].push(p); placed=true; }
+    });
+    if(!placed) otherPols.push(p);
+  });
+
+  function polRow(p){
+    var origIdx=pols.indexOf(p);
+    var ageAtInception = calcAge(c.DOB, p.StartDate);
+    return '<tr>'+
+      '<td style="font-weight:600">'+(p.Insurer||'—')+'</td>'+
+      '<td>'+(p.Product||'—')+'</td>'+
+      '<td style="font-family:monospace;font-size:12px">'+(p.PolicyNo||'—')+'</td>'+
+      '<td>'+bx('bx-sk',p.Type||'—')+'</td>'+
+      '<td style="font-size:12px">'+(clean(p.StartDate)?fdate(p.StartDate):'—')+'</td>'+
+      '<td style="font-size:12px;font-weight:700;color:var(--navy)">'+(ageAtInception!==null?ageAtInception:'—')+'</td>'+
+      '<td>'+(function(){
+        if(p.Type==='Business Assurance') return rnd(p.LoanAmount);
+        if(p.BenDeath) return rnd(p.BenDeath);
+        if(p.BenFundValue) return rnd(p.BenFundValue);
+        if(p.BenDisability) return rnd(p.BenDisability);
+        return '—';
+      })()+'</td>'+
+      '<td style="color:var(--sage);font-weight:600">'+rnd(p.Premium)+'</td>'+
+      '<td>'+bx(p.Status==='Active'?'bx-sg':p.Status==='Lapsed'?'bx-rd':'bx-gd',p.Status||'Active')+'</td>'+
+      '<td style="display:flex;gap:4px">'+
+      '<button class="btn b-gh xs" data-act="edit-policy" data-cid="'+c.ID+'" data-idx="'+origIdx+'">Edit</button>'+
+      '<button class="btn b-nv xs" data-act="pol-history" data-cid="'+c.ID+'" data-idx="'+origIdx+'">📋</button>'+
+      '<button class="btn b-rd xs" data-act="replace-policy" data-cid="'+c.ID+'" data-idx="'+origIdx+'">Replace</button>'+
+      '</td></tr>';
+  }
+
+  function polSection(pp){
+    return '<table class="tbl"><thead><tr>'+
+      '<th>Insurer</th><th>Product</th><th>Policy No.</th><th>Type</th><th>Inception</th><th>Age</th><th>Benefit</th><th>Premium</th><th>Status</th><th></th>'+
+      '</tr></thead><tbody>'+pp.map(polRow).join('')+'</tbody></table>';
+  }
+
+  var html='<div class="card">'+
     '<div class="ch"><h2>📄 Policies</h2>'+
     '<div style="display:flex;gap:8px">'+
     '<button class="btn b-gh sm" data-act="view-schedule" data-cid="'+c.ID+'">🖨 Print Schedule</button>'+
-    '<button class="btn b-gd sm" data-act="open-new-policy" data-cid="'+c.ID+'">+ Add Policy</button></div></div>'+
-    (function(){
-      var active=pols.filter(function(p){return p.Status!=='Replaced';});
-      var replaced=pols.filter(function(p){return p.Status==='Replaced';});
-      function polTable(pp,showReplace){
-        return '<div style="overflow:hidden"><table class="tbl"><thead><tr>'+
-        '<th>Insurer</th><th>Product</th><th>Policy No.</th><th>Type</th><th>Inception</th><th>Age</th><th>Benefit</th><th>Premium</th><th>Status</th><th></th>'+
-        '</tr></thead><tbody>'+
-        pp.map(function(p,i){
-          var origIdx=pols.indexOf(p);
-          var ageAtInception = calcAge(c.DOB, p.StartDate);
-          return '<tr>'+
-            '<td style="font-weight:600">'+(p.Insurer||'—')+'</td>'+
-            '<td>'+(p.Product||'—')+'</td>'+
-            '<td style="font-family:monospace;font-size:12px">'+(p.PolicyNo||'—')+'</td>'+
-            '<td>'+bx('bx-sk',p.Type||'—')+'</td>'+
-            '<td style="font-size:12px">'+(clean(p.StartDate)?fdate(p.StartDate):'—')+'</td>'+
-            '<td style="font-size:12px;font-weight:700;color:var(--navy)">'+(ageAtInception!==null?ageAtInception:'—')+'</td>'+
-            '<td>'+(function(){
-              if(p.Type==='Business Assurance') return rnd(p.LoanAmount);
-              if(p.BenDeath) return rnd(p.BenDeath);
-              if(p.BenFundValue) return rnd(p.BenFundValue);
-              if(p.BenDisability) return rnd(p.BenDisability);
-              return '—';
-            })()+'</td>'+
-            '<td style="color:var(--sage);font-weight:600">'+rnd(p.Premium)+'</td>'+
-            '<td>'+bx(p.Status==='Active'?'bx-sg':p.Status==='Lapsed'?'bx-rd':'bx-gd',p.Status||'Active')+'</td>'+
-            '<td style="display:flex;gap:4px">'+
-            '<button class="btn b-gh xs" data-act="edit-policy" data-cid="'+c.ID+'" data-idx="'+origIdx+'">Edit</button>'+
-            '<button class="btn b-nv xs" data-act="pol-history" data-cid="'+c.ID+'" data-idx="'+origIdx+'">📋</button>'+
-            (showReplace?'<button class="btn b-rd xs" data-act="replace-policy" data-cid="'+c.ID+'" data-idx="'+origIdx+'">Replace</button>':'')+
-            '</td></tr>';
-        }).join('')+'</tbody></table></div>';
-      }
-      return (active.length===0?'<div class="empty cb">No policies yet</div>':polTable(active,true))+
-        (replaced.length?'<details style="margin-top:8px"><summary style="cursor:pointer;padding:10px 16px;font-size:12px;font-weight:700;color:#889;background:#f8f8f5">🔄 '+replaced.length+' Replaced Polic'+(replaced.length===1?'y':'ies')+'</summary>'+polTable(replaced,false)+'</details>':'');
-    })()+
-    '</div>';
+    '<button class="btn b-gd sm" data-act="open-new-policy" data-cid="'+c.ID+'">+ Add Policy</button></div></div>';
+
+  if(active.length===0){
+    html+='<div class="empty cb">No policies yet</div>';
+  } else {
+    catOrder.forEach(function(cat){
+      var pp=grouped[cat.key];
+      if(!pp.length) return;
+      html+='<div style="margin-bottom:2px">';
+      html+='<div style="background:'+cat.color+';color:#fff;padding:7px 14px;font-size:12px;font-weight:700;letter-spacing:.3px">'+cat.label+' <span style="opacity:.7;font-weight:400;margin-left:6px">('+pp.length+')</span></div>';
+      html+='<div style="overflow:hidden">'+polSection(pp)+'</div>';
+      html+='</div>';
+    });
+    if(otherPols.length){
+      html+='<div style="margin-bottom:2px">';
+      html+='<div style="background:#6b7280;color:#fff;padding:7px 14px;font-size:12px;font-weight:700;letter-spacing:.3px">Other <span style="opacity:.7;font-weight:400;margin-left:6px">('+otherPols.length+')</span></div>';
+      html+='<div style="overflow:hidden">'+polSection(otherPols)+'</div>';
+      html+='</div>';
+    }
+  }
+
+  if(replaced.length){
+    html+='<details style="margin-top:8px"><summary style="cursor:pointer;padding:10px 16px;font-size:12px;font-weight:700;color:#889;background:#f8f8f5">🔄 '+replaced.length+' Replaced/Cancelled Polic'+(replaced.length===1?'y':'ies')+'</summary>'+
+      '<div style="overflow:hidden">'+polSection(replaced)+'</div></details>';
+  }
+  html+='</div>';
+  return html;
 }
 
 function renderBanking(c){
