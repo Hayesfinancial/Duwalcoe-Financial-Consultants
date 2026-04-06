@@ -1620,6 +1620,7 @@ function buildAssets() {
     r3.appendChild(propChk('Primary residence', 'primaryResidence'));
     r3.appendChild(propChk('Sold at death', 'soldAtDeath'));
     r3.appendChild(propChk('Sold at retirement', 'soldAtRetirement'));
+    if(N(p.bond)>0) r3.appendChild(propChk('Pay off bond if disabled', 'payOffIfDisabled'));
 
     // On death, falls to
     var dbtFld=div('f'); dbtFld.style.cssText='display:flex;flex-direction:column;gap:4px;min-width:160px';
@@ -1796,6 +1797,14 @@ function buildAssets() {
     vcb.addEventListener('change',function(e){S.vehicles[i].soldAtDeath=e.target.checked;render();});
     var vlb=el('label','','Sold / realised at death'); vlb.style.cssText='font-size:12px;cursor:pointer;color:var(--navy)';
     vcbWrap.appendChild(vcb); vcbWrap.appendChild(vlb); vr2.appendChild(vcbWrap);
+
+    if(N(v.finance)>0){
+      var vdisCbWrap=div(); vdisCbWrap.style.cssText='display:flex;align-items:center;gap:6px;padding-bottom:2px';
+      var vdisCb=document.createElement('input'); vdisCb.type='checkbox'; vdisCb.checked=!!v.payOffIfDisabled;
+      vdisCb.addEventListener('change',function(e){S.vehicles[i].payOffIfDisabled=e.target.checked;render();});
+      var vdisLb=el('label','','Pay off finance if disabled'); vdisLb.style.cssText='font-size:12px;cursor:pointer;color:var(--navy)';
+      vdisCbWrap.appendChild(vdisCb); vdisCbWrap.appendChild(vdisLb); vr2.appendChild(vdisCbWrap);
+    }
     card.appendChild(vr2);
 
     // CGT preview
@@ -2066,12 +2075,17 @@ function buildAssets() {
   // ── Other Liabilities
   s.appendChild(stitle('Other Liabilities'));
   S.liabilities.forEach(function(l,i){
-    var row=div(); row.style.cssText='display:grid;grid-template-columns:2fr 1fr 1fr 36px;gap:12px;align-items:end;background:#fff;border:var(--border);border-radius:7px;padding:12px;margin-bottom:8px';
+    var row=div(); row.style.cssText='display:grid;grid-template-columns:2fr 1fr 1fr auto 36px;gap:12px;align-items:end;background:#fff;border:var(--border);border-radius:7px;padding:12px;margin-bottom:8px';
     var df=div('f'); df.appendChild(el('label','','Description'));
     var di=document.createElement('input'); di.type='text'; di.value=l.desc||''; di.placeholder='e.g. Personal loan, credit card';
     di.addEventListener('input',function(e){S.liabilities[i].desc=e.target.value;}); df.appendChild(di); row.appendChild(df);
     row.appendChild(rfld('Outstanding Balance', l, 'bal'));
     row.appendChild(rfld('Monthly Payment',     l, 'pmt'));
+    var ldisCbWrap=div(); ldisCbWrap.style.cssText='display:flex;align-items:center;gap:6px;padding-bottom:8px';
+    var ldisCb=document.createElement('input'); ldisCb.type='checkbox'; ldisCb.checked=!!l.payOffIfDisabled;
+    ldisCb.addEventListener('change',function(e){S.liabilities[i].payOffIfDisabled=e.target.checked;render();});
+    var ldisLb=el('label','','Pay off if disabled'); ldisLb.style.cssText='font-size:11px;cursor:pointer;color:var(--navy);white-space:nowrap';
+    ldisCbWrap.appendChild(ldisCb); ldisCbWrap.appendChild(ldisLb); row.appendChild(ldisCbWrap);
     var dd=div(); dd.appendChild(delBtn(function(){S.liabilities.splice(i,1);render();})); row.appendChild(dd);
     s.appendChild(row);
   });
@@ -2358,7 +2372,37 @@ function buildNeeds() {
       s.appendChild(stitle('Disability — income needs (capitalised)'));
       S.disIncome.forEach(function(r,i){ buildIncomeNeedRow(s,r,i,'disIncome'); });
       var dab=addBtn('+ Add income need',function(){S.disIncome.push({desc:'',nettPM:'',grossPM:'',years:'',esc:'',drawdown:''});render();}); s.appendChild(dab);
+
+      // Auto-pull liabilities flagged for disability from Assets tab
+      var disAutoLiabs=[];
+      (S.props||[]).forEach(function(p){
+        if(p.payOffIfDisabled && N(p.bond)>0) disAutoLiabs.push({desc:(p.desc||'Property')+' — bond outstanding', amt:N(p.bond)});
+      });
+      (S.vehicles||[]).forEach(function(v){
+        if(v.payOffIfDisabled && N(v.finance)>0) disAutoLiabs.push({desc:(v.desc||'Vehicle')+' — finance outstanding', amt:N(v.finance)});
+      });
+      (S.liabilities||[]).forEach(function(l){
+        if(l.payOffIfDisabled && N(l.bal)>0) disAutoLiabs.push({desc:(l.desc||'Liability')+' — pay off', amt:N(l.bal)});
+      });
+
       s.appendChild(stitle('Disability — lump sum capital needs'));
+
+      if(disAutoLiabs.length>0){
+        var disAutoInf=div('info'); disAutoInf.style.cssText='font-size:11px;padding:6px 10px;margin-bottom:8px';
+        disAutoInf.textContent='These liabilities are flagged on the Assets tab to be paid off if disabled. They are included automatically.';
+        s.appendChild(disAutoInf);
+        var disAutoTbl=document.createElement('table'); disAutoTbl.style.cssText='width:100%;border-collapse:collapse;margin-bottom:10px;font-size:12px';
+        disAutoTbl.innerHTML='<thead><tr><th style="text-align:left;padding:5px 8px;background:var(--navy);color:#fff">Liability (auto from Assets tab)</th><th style="text-align:right;padding:5px 8px;background:var(--navy);color:#fff">Amount</th></tr></thead>';
+        var disAutoTb=document.createElement('tbody');
+        disAutoLiabs.forEach(function(r){
+          var tr=document.createElement('tr');
+          tr.innerHTML='<td style="padding:5px 8px;border-bottom:1px solid var(--mist);color:var(--sub);font-style:italic">'+r.desc+'</td>'+
+            '<td style="text-align:right;padding:5px 8px;border-bottom:1px solid var(--mist);color:var(--sub)">'+Rfmt(r.amt)+'</td>';
+          disAutoTb.appendChild(tr);
+        });
+        disAutoTbl.appendChild(disAutoTb);
+        var disAutoTw=div('twrap'); disAutoTw.appendChild(disAutoTbl); s.appendChild(disAutoTw);
+      }
       S.disCapital.forEach(function(r,i){
         var row=g3();
         row.appendChild(fld('Description',r,'desc',{placeholder:'e.g. Adapt home / vehicle'}));
@@ -2371,8 +2415,13 @@ function buildNeeds() {
     }
     var disInc=S.disIncome.reduce(function(a,r){return a+calcIncomeNeed(r);},0);
     var disCap=S.disCapital.reduce(function(a,r){return a+N(r.amt);},0);
+    // Add auto-pulled liabilities flagged for disability
+    var disAutoCap=0;
+    (S.props||[]).forEach(function(p){ if(p.payOffIfDisabled && N(p.bond)>0) disAutoCap+=N(p.bond); });
+    (S.vehicles||[]).forEach(function(v){ if(v.payOffIfDisabled && N(v.finance)>0) disAutoCap+=N(v.finance); });
+    (S.liabilities||[]).forEach(function(l){ if(l.payOffIfDisabled && N(l.bal)>0) disAutoCap+=N(l.bal); });
     var disHave=N(S.existingCover&&S.existingCover.disability);
-    var disTotal=disInc+disCap;
+    var disTotal=disInc+disCap+disAutoCap;
     if(disTotal>0||N(S.ipGrossPM)>0){
       var disBox=div('calc-result'); disBox.style.marginTop='16px';
       disBox.innerHTML=(N(S.ipGrossPM)>0?'<div class="cr-row"><span>IP benefit needed /pm</span><span class="gold">'+Rfmt(S.ipGrossPM)+'</span></div>':'')+
@@ -5072,7 +5121,11 @@ function buildSummary() {
   var deathHave = pols.reduce(function(a,p){ return p.Type!=='Business Assurance' ? a+N(p.BenDeath) : a; },0);
   var deathGap = deathHave - deathNeed;
 
-  var disNeed = (S.disIncome||[]).reduce(function(a,r){return a+calcIncomeNeed(r);},0) + (S.disCapital||[]).reduce(function(a,r){return a+N(r.amt);},0);
+  var _disAutoAB=0;
+  (S.props||[]).forEach(function(p){ if(p.payOffIfDisabled && N(p.bond)>0) _disAutoAB+=N(p.bond); });
+  (S.vehicles||[]).forEach(function(v){ if(v.payOffIfDisabled && N(v.finance)>0) _disAutoAB+=N(v.finance); });
+  (S.liabilities||[]).forEach(function(l){ if(l.payOffIfDisabled && N(l.bal)>0) _disAutoAB+=N(l.bal); });
+  var disNeed = (S.disIncome||[]).reduce(function(a,r){return a+calcIncomeNeed(r);},0) + (S.disCapital||[]).reduce(function(a,r){return a+N(r.amt);},0) + _disAutoAB;
   var disHave = pols.reduce(function(a,p){return a+N(p.BenDisability);},0);
   var disGap = disHave - disNeed;
   var dreadNeed = N(S.dreadAmt);
@@ -5327,7 +5380,11 @@ function buildOverview() {
 
   var _disIncO=(S.disIncome||[]).reduce(function(a,r){return a+calcIncomeNeed(r);},0);
   var _disCapO=(S.disCapital||[]).reduce(function(a,r){return a+N(r.amt);},0);
-  var _disTotO=_disIncO+_disCapO;
+  var _disAutoO=0;
+  (S.props||[]).forEach(function(p){ if(p.payOffIfDisabled && N(p.bond)>0) _disAutoO+=N(p.bond); });
+  (S.vehicles||[]).forEach(function(v){ if(v.payOffIfDisabled && N(v.finance)>0) _disAutoO+=N(v.finance); });
+  (S.liabilities||[]).forEach(function(l){ if(l.payOffIfDisabled && N(l.bal)>0) _disAutoO+=N(l.bal); });
+  var _disTotO=_disIncO+_disCapO+_disAutoO;
   var _disHaveO=pols.reduce(function(a,p){return a+N(p.BenDisability);},0);
   var _dreadHaveO=pols.reduce(function(a,p){return a+N(p.BenDreadDisease);},0);
   var _ipHaveO=pols.reduce(function(a,p){
@@ -5571,6 +5628,9 @@ function buildROATab() {
         return need > 0 ? 'FNA need: '+Rfmt(need)+' / Have: '+Rfmt(have) : '';
       case 1: // Disability
         var dn = S.disIncome.reduce(function(a,x){return a+calcIncomeNeed(x);},0)+S.disCapital.reduce(function(a,x){return a+N(x.amt);},0);
+        (S.props||[]).forEach(function(p){ if(p.payOffIfDisabled && N(p.bond)>0) dn+=N(p.bond); });
+        (S.vehicles||[]).forEach(function(v){ if(v.payOffIfDisabled && N(v.finance)>0) dn+=N(v.finance); });
+        (S.liabilities||[]).forEach(function(l){ if(l.payOffIfDisabled && N(l.bal)>0) dn+=N(l.bal); });
         var dh = pols.reduce(function(a,p){return a+N(p.BenDisability);},0);
         return dn > 0 ? 'FNA need: '+Rfmt(dn)+' / Have: '+Rfmt(dh) : '';
       case 2: // Dread
@@ -5678,7 +5738,11 @@ function generateROA() {
   var totalDeathHave=pols.reduce(function(a,p){return p.Type!=='Business Assurance'?a+N(p.BenDeath):a;},0);
   var disIncCap=S.disIncome.reduce(function(a,x){return a+calcIncomeNeed(x);},0);
   var disCapNeed=S.disCapital.reduce(function(a,x){return a+N(x.amt);},0);
-  var totalDisNeed=disIncCap+disCapNeed;
+  var _disAutoPrint=0;
+  (S.props||[]).forEach(function(p){ if(p.payOffIfDisabled && N(p.bond)>0) _disAutoPrint+=N(p.bond); });
+  (S.vehicles||[]).forEach(function(v){ if(v.payOffIfDisabled && N(v.finance)>0) _disAutoPrint+=N(v.finance); });
+  (S.liabilities||[]).forEach(function(l){ if(l.payOffIfDisabled && N(l.bal)>0) _disAutoPrint+=N(l.bal); });
+  var totalDisNeed=disIncCap+disCapNeed+_disAutoPrint;
   var totalDisHave=pols.reduce(function(a,p){return a+N(p.BenDisability);},0);
   var totalDreadHave=pols.reduce(function(a,p){return a+N(p.BenDreadDisease);},0);
 
