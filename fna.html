@@ -544,7 +544,10 @@ var DEFAULTS = {
   accrual: {
     clientStartVal: '0',
     spouseStartVal: '0',
-    spouseCurrentAssets: '0'
+    spouseCurrentAssets: '0',
+    clientExclusions: '',
+    spouseExclusions: '',
+    cpiFactor: ''
   },
 
   // NEEDS
@@ -2242,7 +2245,12 @@ function buildNeeds() {
         var _ce=Math.max(0,_pv+_ra+_invFV-_cLiabs), _se=N(S.accrual&&S.accrual.spouseCurrentAssets);
         var _cs=N(S.accrual&&S.accrual.clientStartVal), _ss=N(S.accrual&&S.accrual.spouseStartVal);
         var _cex=N(S.accrual&&S.accrual.clientExclusions), _sex=N(S.accrual&&S.accrual.spouseExclusions);
-        _acc=Math.max(0,(Math.max(0,_ce-_cex-_cs)-Math.max(0,_se-_sex-_ss))/2);
+        // CPI adjust commencement values
+        var _mdt=S.cli.domDate?new Date(S.cli.domDate):null;
+        var _ymr=0; if(_mdt&&!isNaN(_mdt.getTime())) _ymr=Math.max(0,(new Date().getTime()-_mdt.getTime())/(365.25*24*60*60*1000));
+        var _acf=N(S.accrual&&S.accrual.cpiFactor)>0?N(S.accrual.cpiFactor):(_ymr>0?Math.pow(1+(N(S.assump.cpi)||6)/100,_ymr):1);
+        var _csCPI=Math.round(_cs*_acf), _ssCPI=Math.round(_ss*_acf);
+        _acc=Math.max(0,(Math.max(0,_ce-_cex-_csCPI)-Math.max(0,_se-_sex-_ssCPI))/2);
       }
       var _cgtNeed=calcTotalCGT((N(S.cli.grossPM)>0?calcMarginalRate(N(S.cli.grossPM)*12):0.45)*100).totalCGT;
       var _gr=_pv+_s4q+_ep+_tp+_bd;
@@ -4530,27 +4538,61 @@ function buildEstate() {
     s.appendChild(accrCliTbl);
 
     // Client inputs — starting value & exclusions
-    var accrCliInputs=div(); accrCliInputs.style.cssText='display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:8px 0 16px';
+    var accrCliInputs=div(); accrCliInputs.style.cssText='display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:8px 0 6px';
     accrCliInputs.appendChild(rfld('Client estate at marriage (R)', S.accrual, 'clientStartVal', {onblur:function(){render();}}));
     accrCliInputs.appendChild(rfld('Less: inheritances/donations during marriage', S.accrual, 'clientExclusions', {onblur:function(){render();}}));
     s.appendChild(accrCliInputs);
 
-    var clientAccrualGrowth = Math.max(0, clientCurrentTotal - clientExcl - N(S.accrual.clientStartVal));
+    // ── CPI ADJUSTMENT on commencement values
+    // Calculate years from marriage date to today
+    var marriageDate = S.cli.domDate ? new Date(S.cli.domDate) : null;
+    var cpiRate = N(S.assump.cpi)||6;
+    var yearsMarried = 0;
+    if(marriageDate && !isNaN(marriageDate.getTime())){
+      yearsMarried = Math.max(0, (new Date().getTime() - marriageDate.getTime()) / (365.25*24*60*60*1000));
+    }
+    // Auto CPI factor = (1 + cpi/100) ^ years
+    var autoCpiFactor = yearsMarried > 0 ? Math.pow(1 + cpiRate/100, yearsMarried) : 1;
+    // Manual override — if entered, use it instead
+    var cpiFactor = N(S.accrual.cpiFactor) > 0 ? N(S.accrual.cpiFactor) : autoCpiFactor;
+
+    var cpiRow = div(); cpiRow.style.cssText='background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:10px 14px;margin-bottom:16px';
+    var cpiInfo = div(); cpiInfo.style.cssText='font-size:11px;color:#1e40af;margin-bottom:8px';
+    cpiInfo.innerHTML='<strong>CPI Adjustment:</strong> Commencement values must be adjusted to today\'s rands using CPI (Matrimonial Property Act). '
+      +(marriageDate && !isNaN(marriageDate.getTime())
+        ? 'Marriage date: <strong>'+marriageDate.toLocaleDateString('en-ZA',{day:'numeric',month:'long',year:'numeric'})+'</strong> · '
+          +Math.round(yearsMarried*10)/10+' years · Auto factor at '+cpiRate+'%: <strong>'+Math.round(autoCpiFactor*1000)/1000+'</strong>'
+        : 'Enter the marriage date on the Client tab to auto-calculate, or enter a manual CPI factor below.');
+    cpiRow.appendChild(cpiInfo);
+    var cpiInputs=div(); cpiInputs.style.cssText='display:grid;grid-template-columns:1fr 1fr;gap:12px';
+    cpiInputs.appendChild(pfld('CPI factor override (leave blank for auto)', S.accrual, 'cpiFactor', {onblur:function(){render();}, placeholder: Math.round(autoCpiFactor*1000)/1000}));
+    var cpiUsed=div('f'); cpiUsed.appendChild(el('label','','Factor being used'));
+    var cpiDisp=div(); cpiDisp.style.cssText='font-size:14px;font-weight:700;color:#1e40af;padding:8px 10px;background:#fff;border:1.5px solid #bfdbfe;border-radius:6px';
+    cpiDisp.textContent=Math.round(cpiFactor*1000)/1000 + '×' + (N(S.accrual.cpiFactor)>0?' (manual override)':' (auto from CPI assumption)');
+    cpiUsed.appendChild(cpiDisp); cpiInputs.appendChild(cpiUsed);
+    cpiRow.appendChild(cpiInputs);
+    s.appendChild(cpiRow);
+
+    // Apply CPI to commencement values
+    var clientStartCPI = Math.round(N(S.accrual.clientStartVal) * cpiFactor);
+    var spouseStartCPI = Math.round(N(S.accrual.spouseStartVal) * cpiFactor);
+
+    var clientAccrualGrowth = Math.max(0, clientCurrentTotal - clientExcl - clientStartCPI);
 
     // ── SPOUSE'S ACCRUAL ESTATE — manual (we don't have spouse asset data)
     var spTitle=div(); spTitle.style.cssText='font-size:12px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:.5px;margin:14px 0 6px';
     spTitle.textContent='Spouse\'s Accrual Estate'; s.appendChild(spTitle);
     var spInf=div('info'); spInf.style.cssText='font-size:11px;padding:6px 10px;margin-bottom:6px';
-    spInf.textContent='Enter the spouse\'s total current asset value and starting value at marriage. Include properties, investments, fund values — same categories as above.';
+    spInf.textContent='Enter the spouse\'s net estate (assets minus liabilities), starting value at marriage, and any exclusions. The CPI factor above is applied to the commencement value automatically.';
     s.appendChild(spInf);
     var accrSpInputs=div(); accrSpInputs.style.cssText='display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:8px';
-    accrSpInputs.appendChild(rfld('Spouse current assets (R)', S.accrual, 'spouseCurrentAssets', {onblur:function(){render();}}));
+    accrSpInputs.appendChild(rfld('Spouse net estate (R)', S.accrual, 'spouseCurrentAssets', {onblur:function(){render();}}));
     accrSpInputs.appendChild(rfld('Spouse estate at marriage (R)', S.accrual, 'spouseStartVal', {onblur:function(){render();}}));
     accrSpInputs.appendChild(rfld('Less: inheritances/donations', S.accrual, 'spouseExclusions', {onblur:function(){render();}}));
     s.appendChild(accrSpInputs);
 
     var spouseExcl = N(S.accrual.spouseExclusions)||0;
-    var spouseAccrualGrowth = Math.max(0, N(S.accrual.spouseCurrentAssets) - spouseExcl - N(S.accrual.spouseStartVal));
+    var spouseAccrualGrowth = Math.max(0, N(S.accrual.spouseCurrentAssets) - spouseExcl - spouseStartCPI);
 
     // ── ACCRUAL RESULT
     if(clientAccrualGrowth > spouseAccrualGrowth){
@@ -4567,11 +4609,11 @@ function buildEstate() {
     if(clientTotalLiabs>0) accrRow('Less: liabilities', '('+Rfmt(clientTotalLiabs)+')');
     accrRow('Client net estate', Rfmt(clientCurrentTotal), false);
     if(clientExcl>0) accrRow('Less: inheritances/donations', '('+Rfmt(clientExcl)+')');
-    accrRow('Less: estate at marriage', '('+Rfmt(N(S.accrual.clientStartVal))+')');
+    accrRow('Less: commencement (CPI-adjusted)', '('+Rfmt(clientStartCPI)+')'+(N(S.accrual.clientStartVal)?'  ['+Rfmt(N(S.accrual.clientStartVal))+' × '+Math.round(cpiFactor*1000)/1000+']':''));
     accrRow('Client accrual (growth)', Rfmt(clientAccrualGrowth), true);
-    accrRow('Spouse current estate', Rfmt(N(S.accrual.spouseCurrentAssets)));
+    accrRow('Spouse net estate', Rfmt(N(S.accrual.spouseCurrentAssets)));
     if(spouseExcl>0) accrRow('Less: inheritances/donations', '('+Rfmt(spouseExcl)+')');
-    accrRow('Less: estate at marriage', '('+Rfmt(N(S.accrual.spouseStartVal))+')');
+    accrRow('Less: commencement (CPI-adjusted)', '('+Rfmt(spouseStartCPI)+')'+(N(S.accrual.spouseStartVal)?'  ['+Rfmt(N(S.accrual.spouseStartVal))+' × '+Math.round(cpiFactor*1000)/1000+']':''));
     accrRow('Spouse accrual (growth)', Rfmt(spouseAccrualGrowth), true);
     var diff = clientAccrualGrowth - spouseAccrualGrowth;
     accrRow('Difference', Rfmt(Math.abs(diff)), false);
@@ -4996,11 +5038,17 @@ function buildSummary() {
   var accrual = 0;
   if((S.cli.marital||'').toLowerCase().indexOf('accrual') > -1){
     var raFV = pols.reduce(function(a,p){ return POL_RA_TYPES.indexOf(p.Type)>-1 ? a + N(p.BenFundValue) : a; },0);
-    var ce = physVal + raFV;
+    var invFV_s = pols.reduce(function(a,p){ return POL_INV_TYPES.indexOf(p.Type)>-1 ? a + N(p.BenFundValue) : a; },0);
+    var ce = Math.max(0, physVal + raFV + invFV_s - physLiab);
     var se = N(S.accrual&&S.accrual.spouseCurrentAssets);
     var cs = N(S.accrual&&S.accrual.clientStartVal);
     var ss = N(S.accrual&&S.accrual.spouseStartVal);
-    accrual = Math.max(0, (Math.max(0,ce-cs) - Math.max(0,se-ss)) / 2);
+    var cex_s = N(S.accrual&&S.accrual.clientExclusions);
+    var sex_s = N(S.accrual&&S.accrual.spouseExclusions);
+    var _mdtS=S.cli.domDate?new Date(S.cli.domDate):null;
+    var _ymrS=0; if(_mdtS&&!isNaN(_mdtS.getTime())) _ymrS=Math.max(0,(new Date().getTime()-_mdtS.getTime())/(365.25*24*60*60*1000));
+    var _acfS=N(S.accrual&&S.accrual.cpiFactor)>0?N(S.accrual.cpiFactor):(_ymrS>0?Math.pow(1+(N(S.assump.cpi)||6)/100,_ymrS):1);
+    accrual = Math.max(0, (Math.max(0,ce-cex_s-Math.round(cs*_acfS)) - Math.max(0,se-sex_s-Math.round(ss*_acfS))) / 2);
   }
 
   var grossEstate = physVal + s4qPols + estPols + tpPols + bizDut;
@@ -5242,9 +5290,14 @@ function buildOverview() {
   var _accO=0;
   if((S.cli.marital||'').indexOf('accrual')>-1){
     var _raO=pols.reduce(function(a,p){return POL_RA_TYPES.indexOf(p.Type)>-1?a+N(p.BenFundValue):a;},0);
-    var _ceO=_physO+_raO,_seO=N(S.accrual&&S.accrual.spouseCurrentAssets);
+    var _invO=pols.reduce(function(a,p){return POL_INV_TYPES.indexOf(p.Type)>-1?a+N(p.BenFundValue):a;},0);
+    var _ceO=Math.max(0,_physO+_raO+_invO-_liabsO),_seO=N(S.accrual&&S.accrual.spouseCurrentAssets);
     var _csO=N(S.accrual&&S.accrual.clientStartVal),_ssO=N(S.accrual&&S.accrual.spouseStartVal);
-    _accO=Math.max(0,(Math.max(0,_ceO-_csO)-Math.max(0,_seO-_ssO))/2);
+    var _cexO=N(S.accrual&&S.accrual.clientExclusions),_sexO=N(S.accrual&&S.accrual.spouseExclusions);
+    var _mdtO=S.cli.domDate?new Date(S.cli.domDate):null;
+    var _ymrO=0; if(_mdtO&&!isNaN(_mdtO.getTime())) _ymrO=Math.max(0,(new Date().getTime()-_mdtO.getTime())/(365.25*24*60*60*1000));
+    var _acfO=N(S.accrual&&S.accrual.cpiFactor)>0?N(S.accrual.cpiFactor):(_ymrO>0?Math.pow(1+(N(S.assump.cpi)||6)/100,_ymrO):1);
+    _accO=Math.max(0,(Math.max(0,_ceO-_cexO-Math.round(_csO*_acfO))-Math.max(0,_seO-_sexO-Math.round(_ssO*_acfO)))/2);
   }
   var _grossO=_physO+_s4qO+_epO+_tpO+_bdO;
   var _netO=Math.max(0,_grossO-_liabsO-_cgtO);
@@ -5948,9 +6001,14 @@ function printFNA(sections) {
   var accrualClaim=0;
   if((S.cli.marital||'').indexOf('accrual')>-1){
     var _ra=pols.reduce(function(a,p){return POL_RA_TYPES.indexOf(p.Type)>-1?a+N(p.BenFundValue):a;},0);
-    var _ce=physAssets+_ra,_se=N(S.accrual&&S.accrual.spouseCurrentAssets);
+    var _invP=pols.reduce(function(a,p){return POL_INV_TYPES.indexOf(p.Type)>-1?a+N(p.BenFundValue):a;},0);
+    var _ce=Math.max(0,physAssets+_ra+_invP-physLiab),_se=N(S.accrual&&S.accrual.spouseCurrentAssets);
     var _cs=N(S.accrual&&S.accrual.clientStartVal),_ss=N(S.accrual&&S.accrual.spouseStartVal);
-    accrualClaim=Math.max(0,(Math.max(0,_ce-_cs)-Math.max(0,_se-_ss))/2);
+    var _cexP=N(S.accrual&&S.accrual.clientExclusions),_sexP=N(S.accrual&&S.accrual.spouseExclusions);
+    var _mdtP=S.cli.domDate?new Date(S.cli.domDate):null;
+    var _ymrP=0; if(_mdtP&&!isNaN(_mdtP.getTime())) _ymrP=Math.max(0,(new Date().getTime()-_mdtP.getTime())/(365.25*24*60*60*1000));
+    var _acfP=N(S.accrual&&S.accrual.cpiFactor)>0?N(S.accrual.cpiFactor):(_ymrP>0?Math.pow(1+(N(S.assump.cpi)||6)/100,_ymrP):1);
+    accrualClaim=Math.max(0,(Math.max(0,_ce-_cexP-Math.round(_cs*_acfP))-Math.max(0,_se-_sexP-Math.round(_ss*_acfP)))/2);
   }
 
   var grossEstate=physAssets+s4qPols+estPols+tpPols+bizDut;
