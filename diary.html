@@ -34,6 +34,27 @@ body{font-family:'DM Sans',sans-serif;background:var(--cream);color:var(--ink);m
 .date-nav .date-display::after{content:' 📅';font-size:14px;opacity:.5}
 .date-nav .date-sub{font-size:12px;color:#888;margin-top:2px}
 .date-picker-input{position:absolute;left:0;top:100%;opacity:0;pointer-events:none;width:1px;height:1px}
+.view-toggle{display:flex;gap:0;background:var(--smoke);border-radius:7px;padding:3px}
+.view-toggle button{background:none;border:none;padding:5px 12px;font-size:11px;font-weight:600;cursor:pointer;border-radius:5px;color:#888;font-family:inherit;transition:all .15s}
+.view-toggle button.active{background:var(--navy);color:#fff}
+.month-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;padding:20px;background:#fff}
+.month-grid .mh{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:#aaa;text-align:center;padding:6px 0}
+.month-cell{background:#fff;border:1.5px solid var(--mist);border-radius:8px;padding:8px;min-height:90px;cursor:pointer;transition:all .15s;display:flex;flex-direction:column;gap:4px}
+.month-cell:hover{border-color:var(--navy);box-shadow:0 2px 6px rgba(0,0,0,.06)}
+.month-cell.other-month{background:#fafafa;color:#bbb;cursor:default}
+.month-cell.other-month:hover{border-color:var(--mist);box-shadow:none}
+.month-cell.today{border-color:var(--gold);border-width:2px;background:#fef9ee}
+.month-cell .mc-date{font-size:14px;font-weight:700;color:var(--navy)}
+.month-cell.other-month .mc-date{color:#bbb}
+.month-cell .mc-count{font-size:10px;color:#888;font-weight:600}
+.month-cell .mc-appts{display:flex;flex-direction:column;gap:2px;margin-top:auto}
+.month-cell .mc-appt{font-size:9px;padding:2px 5px;border-radius:3px;background:rgba(0,0,0,.05);color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.month-cell .mc-appt.nb{background:#dcfce7;color:#166534}
+.month-cell .mc-appt.fu{background:#dbeafe;color:#1e40af}
+.month-cell .mc-appt.rev{background:#fef3c7;color:#92400e}
+.month-cell .mc-appt.prospect{background:#fce7f3;color:#9f1239}
+.month-cell .mc-appt.block{background:#e5e7eb;color:#374151}
+.month-cell .mc-more{font-size:9px;color:#888;font-style:italic}
 .day-tabs{display:flex;gap:4px}
 .day-tab{padding:6px 14px;border-radius:7px;font-size:12px;font-weight:600;cursor:pointer;border:none;font-family:inherit;background:var(--smoke);color:#888;transition:all .15s}
 .day-tab:hover{background:var(--mist)}
@@ -181,14 +202,18 @@ body{font-family:'DM Sans',sans-serif;background:var(--cream);color:var(--ink);m
 </div>
 
 <div class="date-nav">
-  <button class="nav-arrow" onclick="changeWeek(-1)">‹</button>
+  <button class="nav-arrow" onclick="navPrev()">‹</button>
   <div style="position:relative">
     <div class="date-display" id="dateDisplay" onclick="openDatePicker()" title="Click to jump to any date">Monday 30 March 2026</div>
     <div class="date-sub" id="weekDisplay">Week 14 · 30 Mar – 3 Apr 2026</div>
     <input type="date" id="datePickerInput" class="date-picker-input" onchange="jumpToDate(this.value)">
   </div>
+  <div class="view-toggle">
+    <button id="vtWeek" onclick="setView('week')">Week</button>
+    <button id="vtMonth" onclick="setView('month')">Month</button>
+  </div>
   <div class="day-tabs" id="dayTabs"></div>
-  <button class="nav-arrow" onclick="changeWeek(1)">›</button>
+  <button class="nav-arrow" onclick="navNext()">›</button>
   <button class="btn b-ghost" style="font-size:11px;padding:6px 12px" onclick="goToday()">Today</button>
 </div>
 
@@ -228,6 +253,9 @@ var currentWeekStart = getMonday(new Date());
 var currentDay = 0; // 0=Mon,...,4=Fri
 var allData = {}; // { "Clinton|2026-W14|Mon": [...slots] }
 var openSlot = null;
+var viewMode = localStorage.getItem('du_diary_view')||'week'; // 'week' or 'month'
+var monthAnchor = new Date(); // first of current month being viewed
+monthAnchor.setDate(1); monthAnchor.setHours(0,0,0,0);
 
 function setUser(u){
   currentUser=u;
@@ -335,7 +363,83 @@ function goToday(){
   var today=new Date();
   var day=today.getDay();
   currentDay=(day>=1&&day<=5)?day-1:0;
-  loadWeek();
+  // Also reset month anchor
+  monthAnchor=new Date(); monthAnchor.setDate(1); monthAnchor.setHours(0,0,0,0);
+  if(viewMode==='month') loadMonth();
+  else loadWeek();
+}
+
+function setView(v){
+  viewMode=v;
+  localStorage.setItem('du_diary_view',v);
+  if(v==='month'){
+    // Anchor month to currently displayed week
+    var d=currentDay>=0?dayDate(currentDay):dayDate(0);
+    monthAnchor=new Date(d.getFullYear(), d.getMonth(), 1);
+    loadMonth();
+  } else {
+    render();
+  }
+}
+
+function navPrev(){
+  if(viewMode==='month'){
+    monthAnchor=new Date(monthAnchor.getFullYear(), monthAnchor.getMonth()-1, 1);
+    loadMonth();
+  } else {
+    changeWeek(-1);
+  }
+}
+
+function navNext(){
+  if(viewMode==='month'){
+    monthAnchor=new Date(monthAnchor.getFullYear(), monthAnchor.getMonth()+1, 1);
+    loadMonth();
+  } else {
+    changeWeek(1);
+  }
+}
+
+// Get all weekday Mondays needed to cover the displayed month
+function monthWeeks(){
+  var first=new Date(monthAnchor);
+  var last=new Date(monthAnchor.getFullYear(), monthAnchor.getMonth()+1, 0);
+  var startMon=getMonday(first);
+  var weeks=[];
+  var cur=new Date(startMon);
+  while(cur<=last){
+    weeks.push(new Date(cur));
+    cur.setDate(cur.getDate()+7);
+  }
+  return weeks;
+}
+
+function loadMonth(){
+  var weeks=monthWeeks();
+  var pending=weeks.length;
+  if(pending===0){ render(); return; }
+  // Render immediately with whatever cached data we have
+  render();
+  weeks.forEach(function(mon){
+    var wk=getWeekKey(mon);
+    var lk='du_diary_'+currentUser+'_'+wk;
+    var local=localStorage.getItem(lk);
+    if(local){
+      try{
+        var d=JSON.parse(local);
+        Object.keys(d).forEach(function(k){ allData[k]=d[k]; });
+      }catch(e){}
+    }
+    sbGet(currentUser, wk, function(rows){
+      if(rows && rows.length && rows[0].Data){
+        var d=rows[0].Data;
+        Object.keys(d).forEach(function(k){ allData[k]=d[k]; });
+        localStorage.setItem(lk, JSON.stringify(d));
+      }
+      pending--;
+      if(pending<=0) render();
+    });
+  });
 }
 
 function openDatePicker(){
@@ -362,6 +466,11 @@ function jumpToDate(iso){
   currentWeekStart=getMonday(d);
   var newDow=d.getDay();
   currentDay=(newDow>=1&&newDow<=5)?newDow-1:0;
+  // Switch to week view if currently in month view
+  if(viewMode==='month'){
+    viewMode='week';
+    localStorage.setItem('du_diary_view','week');
+  }
   loadWeek();
 }
 
@@ -527,12 +636,30 @@ function saveCurrentUser(){
 // ── RENDER ──
 function render(){
   renderNav();
-  renderDiary();
+  if(viewMode==='month'){
+    renderMonth();
+  } else {
+    renderDiary();
+  }
   renderScoreboard();
   renderOtherUsers();
 }
 
 function renderNav(){
+  // View toggle button states
+  var vtw=document.getElementById('vtWeek'), vtm=document.getElementById('vtMonth');
+  if(vtw) vtw.className=viewMode==='week'?'active':'';
+  if(vtm) vtm.className=viewMode==='month'?'active':'';
+
+  if(viewMode==='month'){
+    // Month view: show month name in header, hide day tabs
+    var months=['January','February','March','April','May','June','July','August','September','October','November','December'];
+    document.getElementById('dateDisplay').textContent=months[monthAnchor.getMonth()]+' '+monthAnchor.getFullYear();
+    document.getElementById('weekDisplay').textContent='Month view · click any day to open';
+    document.getElementById('dayTabs').innerHTML='';
+    return;
+  }
+
   // Week display
   var monDate=dayDate(0);
   var friDate=dayDate(4);
@@ -557,6 +684,50 @@ function renderNav(){
   } else {
     document.getElementById('dateDisplay').textContent=fmtDate(dayDate(currentDay));
   }
+}
+
+function renderMonth(){
+  var col=document.getElementById('diaryCol');
+  var weeks=monthWeeks();
+  var html='<div class="month-grid">';
+  // Headers
+  ['Mon','Tue','Wed','Thu','Fri'].forEach(function(n){
+    html+='<div class="mh">'+n+'</div>';
+  });
+  weeks.forEach(function(weekMon){
+    for(var di=0; di<5; di++){
+      var d=new Date(weekMon);
+      d.setDate(d.getDate()+di);
+      var inMonth=(d.getMonth()===monthAnchor.getMonth());
+      var isT=(function(){ var t=new Date(); t.setHours(0,0,0,0); return t.getTime()===d.getTime(); })();
+      var cls='month-cell';
+      if(!inMonth) cls+=' other-month';
+      if(isT) cls+=' today';
+      var iso=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+      var key=currentUser+'|'+getWeekKey(weekMon)+'|'+getDayKey(di);
+      var slots=allData[key]||[];
+      var realAppts=slots.filter(function(s){ return s.client||s.label; });
+      html+='<div class="'+cls+'" '+(inMonth?'onclick="jumpToDate(\''+iso+'\')"':'')+'>';
+      html+='<div style="display:flex;justify-content:space-between;align-items:center">';
+      html+='<span class="mc-date">'+d.getDate()+'</span>';
+      if(realAppts.length>0) html+='<span class="mc-count">'+realAppts.length+'</span>';
+      html+='</div>';
+      if(realAppts.length>0){
+        html+='<div class="mc-appts">';
+        realAppts.slice(0,3).forEach(function(s){
+          var tp=(s.type||'block').toLowerCase();
+          var lbl=s.client||s.label||'';
+          var time=s.time?s.time+' ':'';
+          html+='<div class="mc-appt '+tp+'" title="'+esc(time+lbl)+'">'+esc(time+lbl)+'</div>';
+        });
+        if(realAppts.length>3) html+='<div class="mc-more">+'+(realAppts.length-3)+' more</div>';
+        html+='</div>';
+      }
+      html+='</div>';
+    }
+  });
+  html+='</div>';
+  col.innerHTML=html;
 }
 
 function selectPlan(){
@@ -983,7 +1154,8 @@ setUser(currentUser);
   var day=today.getDay();
   if(day>=1&&day<=5) currentDay=day-1;
 })();
-loadWeek();
+if(viewMode==='month') loadMonth();
+else loadWeek();
 </script>
 </body>
 </html>
