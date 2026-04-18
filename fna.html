@@ -161,6 +161,8 @@ table input:focus, table select:focus { outline: none; border-color: var(--gold)
     <button class="btn btn-ghost btn-sm" onclick="newClient()">New</button>
     <button class="btn btn-ghost btn-sm" onclick="refreshFromCRM()" title="Re-pull policies and personal details from CRM without losing FNA data">↻ CRM</button>
     <button class="btn btn-ghost btn-sm" onclick="persist();saveToServer()" title="Save to server" style="background:#a8b938;color:#fff;border-color:#a8b938">💾 Save</button>
+    <button class="btn btn-ghost btn-sm" onclick="lockFinalVersion()" title="Lock the current FNA as a dated, read-only version for FAIS compliance">🔒 Lock Final Version</button>
+    <button class="btn btn-ghost btn-sm" onclick="showVersionHistory()" title="View all locked FNA versions for this client">📚 Version History</button>
     <button class="btn btn-ghost btn-sm" onclick="showPrintDialog()">🖨 Print FNA</button>
     <button class="btn btn-ghost btn-sm" onclick="printAandL()" title="Print Asset & Liability Statement for loan applications">🖨 A&L</button>
   </div>
@@ -1028,7 +1030,7 @@ function saveToServer(silent) {
   var now = new Date().toISOString().slice(0,16).replace('T',' ');
   var indicator = document.getElementById('syncIndicator');
   if(indicator){ indicator.textContent = '↑ Saving...'; indicator.style.color = '#a8b938'; }
-  sbFetch('POST','/rest/v1/fnadata?on_conflict=ClientID',[{ClientID:clientId,Data:JSON.stringify(saveData),LastSaved:now,SavedBy:'Clinton Hayes'}],function(res,err){
+  sbFetch('POST','/rest/v1/fnadata?on_conflict=ClientID,Version',[{ClientID:clientId,Version:'working',Locked:false,Data:JSON.stringify(saveData),LastSaved:now,SavedBy:'Clinton Hayes'}],function(res,err){
     if(err){
       if(indicator){ indicator.textContent = '⚠ Sync failed'; indicator.style.color = '#f87171'; }
       if(!silent) status('⚠ Save failed: '+err);
@@ -1043,7 +1045,7 @@ function saveToServer(silent) {
 // Load FNA state from Supabase
 function loadFromServer(clientId, onDone) {
   if(!clientId){ if(onDone) onDone(null); return; }
-  sbFetch('GET','/rest/v1/fnadata?ClientID=eq.'+encodeURIComponent(clientId)+'&select=*&order=LastSaved.desc&limit=1',null,function(rows,err){
+  sbFetch('GET','/rest/v1/fnadata?ClientID=eq.'+encodeURIComponent(clientId)+'&Version=eq.working&select=*&order=LastSaved.desc&limit=1',null,function(rows,err){
     if(rows && rows.length && rows[0].Data){
       try {
         var serverState = typeof rows[0].Data==='string' ? JSON.parse(rows[0].Data) : rows[0].Data;
@@ -1053,6 +1055,156 @@ function loadFromServer(clientId, onDone) {
       if(onDone) onDone(null);
     }
   });
+}
+
+// ═══════════════════════════════════════════════════════════
+// FNA VERSIONING (FAIS compliance — snapshot-on-demand)
+// ═══════════════════════════════════════════════════════════
+
+// Lock the current working FNA as a dated, read-only final version.
+// Flow: 1) save current state to server  2) rename Version working→dated  3) save fresh working copy
+function lockFinalVersion() {
+  var clientId = S.cli.id;
+  if(!clientId){ alert('No client loaded — cannot lock.'); return; }
+  if(!S.cli.name || !S.cli.name.trim()){ alert('Enter the client name before locking.'); return; }
+
+  var notes = prompt('Optional note for this locked version (e.g. "Initial FNA signed", "Annual review"):','');
+  if(notes === null) return; // user cancelled
+  notes = (notes||'').trim();
+
+  var today = new Date();
+  var y = today.getFullYear();
+  var m = String(today.getMonth()+1).padStart(2,'0');
+  var d = String(today.getDate()).padStart(2,'0');
+  var baseLabel = y+'-'+m+'-'+d+' — Signed';
+  var versionLabel = baseLabel;
+
+  if(!confirm('Lock this FNA as final version "'+versionLabel+'"?\n\nThis creates a read-only snapshot for FAIS compliance. You can continue editing the working copy afterwards — the locked version cannot be changed.')) return;
+
+  var indicator = document.getElementById('syncIndicator');
+  if(indicator){ indicator.textContent = '🔒 Locking...'; indicator.style.color = '#a8b938'; }
+  status('🔒 Locking final version — do not close this tab.');
+
+  // Check for same-day label collision; if found, append (2), (3) etc.
+  sbFetch('GET','/rest/v1/fnadata?ClientID=eq.'+encodeURIComponent(clientId)+'&Version=like.'+encodeURIComponent(baseLabel+'%')+'&select=Version',null,function(existing){
+    if(existing && existing.length){
+      var n = existing.length + 1;
+      versionLabel = baseLabel + ' ('+n+')';
+    }
+    doLockSteps();
+  });
+
+  function doLockSteps() {
+
+  // Step 1: save current state so we lock the absolute latest
+  persist();
+  var saveData = {};
+  var skip = {importedPols: true};
+  Object.keys(S).forEach(function(k){ if(!skip[k]) saveData[k] = S[k]; });
+  var retIncludes = {};
+  (S.importedPols||[]).forEach(function(p){
+    if(p._retInclude || (p._retRows && p._retRows.length)){
+      var key2 = p.PolicyNo || (p.Insurer+'|'+p.Product+'|'+p.Type);
+      if(key2) retIncludes[key2] = {include:p._retInclude||false, rows:p._retRows||[]};
+    }
+  });
+  saveData.retIncludes = retIncludes;
+  var dataStr = JSON.stringify(saveData);
+  var now = new Date().toISOString().slice(0,16).replace('T',' ');
+
+  // Save the working copy one more time (fresh snapshot)
+  sbFetch('POST','/rest/v1/fnadata?on_conflict=ClientID,Version',
+    [{ClientID:clientId,Version:'working',Locked:false,Data:dataStr,LastSaved:now,SavedBy:'Clinton Hayes'}],
+  function(res1,err1){
+    if(err1){
+      if(indicator){ indicator.textContent = '⚠ Lock failed'; indicator.style.color = '#f87171'; }
+      alert('Lock failed at step 1 (save current): '+err1+'\n\nNo changes were made. Please try again or check your connection.');
+      return;
+    }
+
+    // Step 2: rename Version from 'working' to the dated label (uses PATCH on composite key)
+    sbFetch('PATCH','/rest/v1/fnadata?ClientID=eq.'+encodeURIComponent(clientId)+'&Version=eq.working',
+      {Version:versionLabel,Locked:true,Notes:notes},
+    function(res2,err2){
+      if(err2){
+        if(indicator){ indicator.textContent = '⚠ Lock failed'; indicator.style.color = '#f87171'; }
+        alert('Lock failed at step 2 (rename to '+versionLabel+'): '+err2+'\n\nThe working copy is safe. Please try again.');
+        return;
+      }
+
+      // Step 3: create a fresh working copy containing the same data
+      sbFetch('POST','/rest/v1/fnadata?on_conflict=ClientID,Version',
+        [{ClientID:clientId,Version:'working',Locked:false,Data:dataStr,LastSaved:now,SavedBy:'Clinton Hayes'}],
+      function(res3,err3){
+        if(err3){
+          if(indicator){ indicator.textContent = '⚠ Lock failed'; indicator.style.color = '#f87171'; }
+          alert('Lock succeeded but fresh working copy could not be created: '+err3+'\n\nYour locked version "'+versionLabel+'" is safe. Click Save to recreate the working copy.');
+          return;
+        }
+        if(indicator){ indicator.textContent = '✓ Locked '+versionLabel; indicator.style.color = '#86efac'; }
+        alert('✓ Locked as "'+versionLabel+'"\n\nThis version is now read-only and available in Version History.\nYou can continue editing the working copy.');
+      });
+    });
+  });
+  } // end doLockSteps
+}
+
+// Show a modal listing all locked versions for the current client.
+function showVersionHistory() {
+  var clientId = S.cli.id;
+  if(!clientId){ alert('No client loaded.'); return; }
+
+  // Build modal shell first so user sees loading state
+  var ov = document.createElement('div');
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(10,20,40,.55);z-index:9999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(2px)';
+  var box = document.createElement('div');
+  box.style.cssText = 'background:#fff;border-radius:12px;padding:24px 28px;max-width:560px;width:100%;max-height:80vh;overflow:auto;box-shadow:0 12px 48px rgba(0,0,0,.25)';
+  box.innerHTML = '<div style="font-family:Georgia,serif;font-size:17px;color:#0e413a;margin-bottom:4px">Version History</div>'
+    +'<div style="font-size:12px;color:#889;margin-bottom:16px">Locked FNA versions for '+(S.cli.name||'this client')+'</div>'
+    +'<div id="vh_list" style="font-size:13px;color:#555">Loading…</div>';
+
+  var btnRow = document.createElement('div');
+  btnRow.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;margin-top:16px';
+  var closeBtn = document.createElement('button');
+  closeBtn.textContent = 'Close';
+  closeBtn.style.cssText = 'padding:8px 18px;border-radius:7px;border:1.5px solid #ddd;background:#fff;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;color:#555';
+  closeBtn.onclick = function(){ document.body.removeChild(ov); };
+  btnRow.appendChild(closeBtn);
+  box.appendChild(btnRow);
+  ov.appendChild(box);
+  ov.addEventListener('click', function(ev){ if(ev.target===ov) document.body.removeChild(ov); });
+  document.body.appendChild(ov);
+
+  // Fetch the list
+  sbFetch('GET','/rest/v1/fnadata?ClientID=eq.'+encodeURIComponent(clientId)+'&Locked=eq.true&select=Version,LastSaved,Notes&order=LastSaved.desc',null,function(rows,err){
+    var list = document.getElementById('vh_list');
+    if(!list) return; // modal closed
+    if(err){
+      list.innerHTML = '<div style="color:#9e2a2b;padding:12px;background:#fef1f1;border-radius:6px">Could not load version history: '+err+'</div>';
+      return;
+    }
+    if(!rows || !rows.length){
+      list.innerHTML = '<div style="padding:20px;text-align:center;color:#889;font-style:italic;background:#f9f9f5;border-radius:6px">No locked versions yet.<br><br>Click <b>Lock Final Version</b> after an FNA is signed to create the first snapshot.</div>';
+      return;
+    }
+    var html = '<div style="border:1px solid #e5e5dd;border-radius:8px;overflow:hidden">';
+    rows.forEach(function(r, i){
+      var sep = i>0 ? 'border-top:1px solid #eee;' : '';
+      html += '<div style="padding:12px 14px;'+sep+'">'
+        +'<div style="font-weight:600;color:#0e413a;font-size:13px">🔒 '+escapeHtml(r.Version||'(no label)')+'</div>'
+        +'<div style="font-size:11px;color:#889;margin-top:2px">Saved '+escapeHtml(r.LastSaved||'—')+'</div>'
+        +(r.Notes ? '<div style="font-size:12px;color:#444;margin-top:6px;font-style:italic">“'+escapeHtml(r.Notes)+'”</div>' : '')
+        +'</div>';
+    });
+    html += '</div>';
+    html += '<div style="font-size:11px;color:#889;margin-top:12px;padding:8px;background:#f9f9f5;border-radius:6px">Locked versions are read-only records kept for FAIS compliance. To view a locked version\'s data, contact your administrator — direct viewing will be added in a future update.</div>';
+    list.innerHTML = html;
+  });
+}
+
+// Small HTML escaper used by showVersionHistory
+function escapeHtml(s){
+  return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
 function autoSave() {
