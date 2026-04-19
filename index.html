@@ -1248,11 +1248,13 @@ function renderProfile(){
     '<div class="tab'+(CTAB==='overview'?' on':'')+'" data-act="tab" data-tab="overview">Overview</div>'+
     '<div class="tab'+(CTAB==='policies'?' on':'')+'" data-act="tab" data-tab="policies">Policies ('+pols.filter(function(p){return p.Status!=='Replaced';}).length+')</div>'+
     (function(){var bks=[];try{bks=c.BankDetails?JSON.parse(c.BankDetails):[];}catch(e){}return '<div class="tab'+(CTAB==='banking'?' on':'')+'" data-act="tab" data-tab="banking">Banking'+(bks.length?' ('+bks.length+')':'')+'</div>';})()+
+    '<div class="tab'+(CTAB==='docs'?' on':'')+'" data-act="tab" data-tab="docs">Documents</div>'+
     '<div class="tab'+(CTAB==='roa'?' on':'')+'" data-act="tab" data-tab="roa">ROA History ('+roas.length+')</div>'+
     '</div>'+
     (CTAB==='overview'?renderOverview(c,pols,roas,ctasks):
      CTAB==='policies'?renderPolicies(c,pols):
      CTAB==='banking'?renderBanking(c):
+     CTAB==='docs'?renderDocs(c):
      renderROA(c,roas));
 }
 
@@ -1727,6 +1729,310 @@ function renderROA(c,roas){
     }).join(''))+
     '</div></div>';
 }
+
+// ══ CLIENT DOCUMENTS (compliance document storage) ═══════════════════════════
+// Schema for catalogue of required documents at client level.
+// Each item has an internal key (used in DB), a display label, which group it
+// belongs to, and whether it's Mandatory/Optional/Conditional (shown in UI).
+var CLIENT_DOC_CATALOGUE = [
+  // FICA group
+  {key:'ID',            label:'ID Document',               group:'FICA',       required:'Mandatory'},
+  {key:'PROOF_ADDRESS', label:'Proof of Address',          group:'FICA',       required:'Mandatory'},
+  {key:'PROOF_BANK',    label:'Proof of Bank',             group:'FICA',       required:'Mandatory'},
+  {key:'PROOF_SARS',    label:'Proof of SARS',             group:'FICA',       required:'Conditional',note:'SAAM mandate cases only'},
+  // Compliance group
+  {key:'ASTUTE',        label:'ASTUTE Report',             group:'Compliance', required:'Mandatory',note:'Refresh annually'},
+  {key:'TFS_CHECK',     label:'TFS Check',                 group:'Compliance', required:'Mandatory',note:'Per new business case'},
+  {key:'FICA_CHECKLIST',label:'FICA Checklist',            group:'Compliance', required:'Mandatory'},
+  {key:'FICA_RISK',     label:'FICA Client Risk Assessment',group:'Compliance',required:'Conditional',note:'Invest cases — refresh annually'},
+  // Agreements group
+  {key:'CSA',           label:'Client Service Agreement',  group:'Agreements', required:'Mandatory'},
+  {key:'WILL',          label:'Will',                      group:'Agreements', required:'Optional'},
+  // Catch-all
+  {key:'CORRESPONDENCE',label:'General Correspondence',    group:'Other',      required:'Optional',multiple:true}
+];
+
+// In-memory cache of client documents, keyed by ClientID.
+window._clientDocs = window._clientDocs || {};
+
+// Render the Documents tab for a client
+function renderDocs(c){
+  var clientId = c.ID;
+  // Kick off a load from Supabase (async) — if we already have docs cached we use them immediately
+  if(!window._clientDocs[clientId]){
+    loadClientDocs(clientId);
+  }
+  var docs = window._clientDocs[clientId] || [];
+
+  // Build by group
+  var groups = {};
+  CLIENT_DOC_CATALOGUE.forEach(function(item){
+    if(!groups[item.group]) groups[item.group] = [];
+    groups[item.group].push(item);
+  });
+
+  var html = '<div class="card"><div class="ch"><h2>📁 Client Documents</h2>'+
+    '<div style="font-size:11px;color:#667">Per-client compliance documents — FICA, ASTUTE, TFS, agreements</div>'+
+    '</div><div class="cb">';
+
+  // Overall status strip
+  var missing = CLIENT_DOC_CATALOGUE.filter(function(item){
+    if(item.required!=='Mandatory') return false;
+    return !docs.some(function(d){ return d.DocType===item.key; });
+  });
+  var statusClr = missing.length===0 ? '#2d7a3e' : '#b95900';
+  var statusTxt = missing.length===0
+    ? '✓ All mandatory documents present'
+    : '⚠ '+missing.length+' mandatory document'+(missing.length===1?'':'s')+' missing';
+  html += '<div style="margin-bottom:14px;padding:10px 14px;background:'+(missing.length===0?'#eaf5ec':'#fdf2e6')+
+    ';border-left:3px solid '+statusClr+';border-radius:4px;color:'+statusClr+';font-size:13px;font-weight:600">'+statusTxt+'</div>';
+
+  // Each group
+  Object.keys(groups).forEach(function(groupName){
+    html += '<div style="margin-bottom:18px">';
+    html += '<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:.8px;margin-bottom:6px;border-bottom:1px solid var(--mist);padding-bottom:4px">'+groupName+'</div>';
+    html += '<div style="display:flex;flex-direction:column;gap:4px">';
+
+    groups[groupName].forEach(function(item){
+      // Find matching docs
+      var matching = docs.filter(function(d){ return d.DocType===item.key; });
+
+      if(item.multiple){
+        // Multi-document row (e.g. General Correspondence)
+        html += '<div style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:#fafaf5;border-radius:6px">';
+        html += '<div style="width:20px;font-size:16px">📂</div>';
+        html += '<div style="flex:1">';
+        html += '<div style="font-size:13px;font-weight:600;color:var(--ink)">'+escHtml(item.label)+'</div>';
+        html += '<div style="font-size:11px;color:#778">'+matching.length+' file'+(matching.length===1?'':'s')+'</div>';
+        html += '</div>';
+        html += '<button class="btn b-nv sm" data-act="doc-upload" data-cid="'+clientId+'" data-dk="'+item.key+'">+ Upload</button>';
+        html += '</div>';
+        // List existing files beneath
+        if(matching.length){
+          matching.forEach(function(d){
+            html += '<div style="margin-left:30px;padding:5px 10px;font-size:12px;display:flex;align-items:center;gap:8px;color:#556">';
+            html += '<span>📄</span>';
+            html += '<span style="flex:1">'+escHtml(d.FileName||'file')+'</span>';
+            html += '<span style="color:#889;font-size:10px">'+fdate(d.UploadedAt||'')+'</span>';
+            html += '<button class="btn b-gh sm" data-act="doc-view" data-did="'+d.ID+'" style="padding:4px 10px;font-size:11px">View</button>';
+            html += '<button class="btn b-gh sm" data-act="doc-delete" data-did="'+d.ID+'" data-cid="'+clientId+'" style="padding:4px 10px;font-size:11px;color:#b23">Delete</button>';
+            html += '</div>';
+          });
+        }
+      } else {
+        // Single-slot row
+        var d = matching[0];
+        var hasDoc = !!d;
+        var dot = hasDoc ? '✅' : (item.required==='Mandatory' ? '❌' : '⬜');
+        var bg  = hasDoc ? '#eaf5ec' : (item.required==='Mandatory' ? '#fdf2e6' : '#fafaf5');
+        html += '<div style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:'+bg+';border-radius:6px">';
+        html += '<div style="width:20px;font-size:16px">'+dot+'</div>';
+        html += '<div style="flex:1">';
+        html += '<div style="font-size:13px;font-weight:600;color:var(--ink)">'+escHtml(item.label)+
+          (item.required==='Optional'?' <span style="color:#889;font-weight:400;font-size:11px">(optional)</span>':'')+
+          (item.required==='Conditional'?' <span style="color:#889;font-weight:400;font-size:11px">(conditional)</span>':'')+
+          '</div>';
+        if(hasDoc){
+          html += '<div style="font-size:11px;color:#778">'+escHtml(d.FileName||'')+' · uploaded '+fdate(d.UploadedAt||'')+
+            (d.UploadedBy?' by '+escHtml(d.UploadedBy):'')+'</div>';
+        } else if(item.note){
+          html += '<div style="font-size:11px;color:#889;font-style:italic">'+escHtml(item.note)+'</div>';
+        } else {
+          html += '<div style="font-size:11px;color:#889;font-style:italic">Not uploaded</div>';
+        }
+        html += '</div>';
+        if(hasDoc){
+          html += '<button class="btn b-gh sm" data-act="doc-view" data-did="'+d.ID+'" style="padding:4px 12px">View</button>';
+          html += '<button class="btn b-gh sm" data-act="doc-upload" data-cid="'+clientId+'" data-dk="'+item.key+'" data-replace="1" style="padding:4px 12px">Replace</button>';
+          html += '<button class="btn b-gh sm" data-act="doc-delete" data-did="'+d.ID+'" data-cid="'+clientId+'" style="padding:4px 12px;color:#b23">Delete</button>';
+        } else {
+          html += '<button class="btn b-nv sm" data-act="doc-upload" data-cid="'+clientId+'" data-dk="'+item.key+'">Upload</button>';
+        }
+        html += '</div>';
+      }
+    });
+
+    html += '</div></div>';
+  });
+
+  html += '</div></div>';
+  return html;
+}
+
+// Load all documents for a client from Supabase and re-render when ready
+function loadClientDocs(clientId){
+  sbFetch('GET', '/rest/v1/client_documents?ClientID=eq.'+encodeURIComponent(clientId)+'&select=*&order=UploadedAt.desc', null, function(rows, err){
+    if(err){
+      console.error('loadClientDocs error:', err);
+      window._clientDocs[clientId] = [];
+    } else {
+      window._clientDocs[clientId] = rows || [];
+    }
+    // Re-render if we're currently viewing this client's Docs tab
+    if(SEL && String(SEL)===String(clientId) && CTAB==='docs'){
+      render();
+    }
+  });
+}
+
+// Trigger upload for a specific client + doc type
+function openDocUpload(clientId, docKey, isReplace){
+  var cat = CLIENT_DOC_CATALOGUE.find(function(x){return x.key===docKey;});
+  if(!cat){ alert('Unknown document type: '+docKey); return; }
+  // Create a hidden file input, trigger it
+  var input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.pdf,.jpg,.jpeg,.png,.docx,.xlsx,.tiff,.tif';
+  input.style.display = 'none';
+  input.addEventListener('change', function(){
+    var file = input.files && input.files[0];
+    document.body.removeChild(input);
+    if(!file) return;
+    // Validate size (50MB)
+    if(file.size > 50*1024*1024){
+      alert('File too large (' + Math.round(file.size/1024/1024) + ' MB). Maximum is 50 MB.');
+      return;
+    }
+    uploadClientDoc(clientId, docKey, cat.label, file, isReplace);
+  });
+  document.body.appendChild(input);
+  input.click();
+}
+
+// Upload a file to Supabase Storage and create a DB record
+function uploadClientDoc(clientId, docKey, docLabel, file, isReplace){
+  // Build a safe storage path: clients/{clientId}/{docKey}_{timestamp}_{filename}
+  var safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+  var ts = Date.now();
+  var path = 'clients/'+clientId+'/'+docKey+'_'+ts+'_'+safeName;
+
+  // Show progress toast
+  toast('Uploading '+docLabel+'…','ok');
+
+  // If this is a replace, we need to find and delete the existing record (and storage file) first
+  var deletePromise = Promise.resolve();
+  if(isReplace){
+    var existing = (window._clientDocs[clientId]||[]).filter(function(d){return d.DocType===docKey;});
+    if(existing.length){
+      deletePromise = new Promise(function(res){
+        deleteDocRecord(existing[0], function(){ res(); });
+      });
+    }
+  }
+
+  deletePromise.then(function(){
+    // Step 1: upload file to Storage
+    fetch(SB_URL+'/storage/v1/object/client-documents/'+encodeURI(path), {
+      method: 'POST',
+      headers: {
+        'apikey': SB_KEY,
+        'Authorization': 'Bearer ' + SB_KEY,
+        'Content-Type': file.type || 'application/octet-stream',
+        'x-upsert': 'true'
+      },
+      body: file
+    }).then(function(r){
+      if(!r.ok){ return r.text().then(function(t){ throw new Error('Storage upload failed: '+r.status+' '+t); }); }
+      return r.json();
+    }).then(function(){
+      // Step 2: create DB row
+      var now = new Date().toISOString().replace('T',' ').slice(0,16);
+      var row = {
+        ClientID: clientId,
+        DocType: docKey,
+        Status: 'complete',
+        FilePath: path,
+        FileName: file.name,
+        FileSize: file.size,
+        MimeType: file.type || '',
+        UploadedBy: localStorage.getItem('du_user') || 'Clinton',
+        UploadedAt: now,
+        Notes: ''
+      };
+      sbFetch('POST', '/rest/v1/client_documents', [row], function(res, err){
+        if(err){
+          toast('Database save failed — file uploaded but not recorded','err');
+          console.error('DB insert error:', err);
+        } else {
+          toast('✓ '+docLabel+' uploaded','ok');
+          loadClientDocs(clientId);
+        }
+      });
+    }).catch(function(e){
+      console.error('Upload failed:', e);
+      toast('Upload failed: '+e.message,'err');
+    });
+  });
+}
+
+// Open a document (download / view in new tab via a short-lived signed URL)
+function viewClientDoc(docId){
+  var doc = null;
+  Object.keys(window._clientDocs||{}).forEach(function(cid){
+    (window._clientDocs[cid]||[]).forEach(function(d){ if(String(d.ID)===String(docId)) doc = d; });
+  });
+  if(!doc){ alert('Document not found in current view — try refreshing the page.'); return; }
+  // Generate a signed URL (valid 60 seconds) and open it
+  fetch(SB_URL+'/storage/v1/object/sign/client-documents/'+encodeURI(doc.FilePath), {
+    method: 'POST',
+    headers: {
+      'apikey': SB_KEY,
+      'Authorization': 'Bearer ' + SB_KEY,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({expiresIn: 60})
+  }).then(function(r){
+    if(!r.ok){ return r.text().then(function(t){ throw new Error('Sign URL failed: '+r.status+' '+t); }); }
+    return r.json();
+  }).then(function(d){
+    if(d && d.signedURL){
+      window.open(SB_URL+'/storage/v1'+d.signedURL, '_blank');
+    } else {
+      throw new Error('No signed URL returned');
+    }
+  }).catch(function(e){
+    console.error('View doc error:', e);
+    toast('Could not open document: '+e.message,'err');
+  });
+}
+
+// Delete a document (storage file + DB record)
+function deleteClientDoc(docId, clientId){
+  if(!confirm('Delete this document permanently? This cannot be undone.')) return;
+  var doc = null;
+  (window._clientDocs[clientId]||[]).forEach(function(d){ if(String(d.ID)===String(docId)) doc = d; });
+  if(!doc){ toast('Document not found','err'); return; }
+  deleteDocRecord(doc, function(ok){
+    if(ok){
+      toast('Document deleted','ok');
+      loadClientDocs(clientId);
+    } else {
+      toast('Delete failed','err');
+    }
+  });
+}
+
+// Internal: delete storage file + DB row. Callback(ok:boolean)
+function deleteDocRecord(doc, cb){
+  // Step 1: delete the storage file (but don't fail the whole delete if storage 404s)
+  fetch(SB_URL+'/storage/v1/object/client-documents/'+encodeURI(doc.FilePath), {
+    method: 'DELETE',
+    headers: {'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY}
+  }).then(function(){
+    // Step 2: delete the DB row
+    sbFetch('DELETE', '/rest/v1/client_documents?ID=eq.'+encodeURIComponent(doc.ID), null, function(res, err){
+      if(cb) cb(!err);
+    });
+  }).catch(function(e){
+    console.warn('Storage delete failed (continuing to DB delete):', e);
+    sbFetch('DELETE', '/rest/v1/client_documents?ID=eq.'+encodeURIComponent(doc.ID), null, function(res, err){
+      if(cb) cb(!err);
+    });
+  });
+}
+
+// Simple HTML escape used by renderDocs
+function escHtml(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
 // TASKS PAGE
 function renderTasks(){
@@ -4169,6 +4475,15 @@ document.addEventListener('click', function(e){
           var furl = 'https://hayesfinancial.github.io/Duwalcoe-Financial-Consultants/fna.html';
           if(fc) furl = buildFnaUrl(fc);
           window.open(furl,'_blank');
+          break;
+        case 'doc-upload':
+          openDocUpload(cid, el.getAttribute('data-dk'), el.getAttribute('data-replace')==='1');
+          break;
+        case 'doc-view':
+          viewClientDoc(el.getAttribute('data-did'));
+          break;
+        case 'doc-delete':
+          deleteClientDoc(el.getAttribute('data-did'), cid);
           break;
         case 'sync':           syncNow(); break;
       }
