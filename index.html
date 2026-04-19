@@ -619,6 +619,7 @@ function goPage(p){
 }
 function openClient(id){
   SEL=id; CTAB='overview'; PAGE='client'; window.CLIENT_TASK_FILTER='today';
+  window._selectedEvent = null; // Reset event detail view on client switch
   var c=DB.clients.find(function(x){return String(x.ID)===String(id);});
   if(c){
     c.LastAccessed=Date.now();
@@ -1249,12 +1250,14 @@ function renderProfile(){
     '<div class="tab'+(CTAB==='policies'?' on':'')+'" data-act="tab" data-tab="policies">Policies ('+pols.filter(function(p){return p.Status!=='Replaced';}).length+')</div>'+
     (function(){var bks=[];try{bks=c.BankDetails?JSON.parse(c.BankDetails):[];}catch(e){}return '<div class="tab'+(CTAB==='banking'?' on':'')+'" data-act="tab" data-tab="banking">Banking'+(bks.length?' ('+bks.length+')':'')+'</div>';})()+
     '<div class="tab'+(CTAB==='docs'?' on':'')+'" data-act="tab" data-tab="docs">Documents</div>'+
+    '<div class="tab'+(CTAB==='events'?' on':'')+'" data-act="tab" data-tab="events">Work Events</div>'+
     '<div class="tab'+(CTAB==='roa'?' on':'')+'" data-act="tab" data-tab="roa">ROA History ('+roas.length+')</div>'+
     '</div>'+
     (CTAB==='overview'?renderOverview(c,pols,roas,ctasks):
      CTAB==='policies'?renderPolicies(c,pols):
      CTAB==='banking'?renderBanking(c):
      CTAB==='docs'?renderDocs(c):
+     CTAB==='events'?renderEvents(c,pols):
      renderROA(c,roas));
 }
 
@@ -2033,6 +2036,690 @@ function deleteDocRecord(doc, cb){
 
 // Simple HTML escape used by renderDocs
 function escHtml(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+// ══ WORK EVENTS (Phase 3 — per-case compliance events) ═══════════════════════
+// Event types (display + internal key). Each maps to its own document checklist.
+var EVENT_TYPES = [
+  {key:'NB_RISK',   label:'New Business — Risk',   icon:'🆕', group:'new'},
+  {key:'NB_INVEST', label:'New Business — Invest', icon:'🆕', group:'new'},
+  {key:'SVC_RISK',  label:'Servicing — Risk',      icon:'🔧', group:'servicing'},
+  {key:'SVC_INVEST',label:'Servicing — Invest',    icon:'🔧', group:'servicing'},
+  {key:'REV_LIFE',  label:'Annual Review — Life',  icon:'🔄', group:'review'},
+  {key:'REV_INVEST',label:'Annual Review — Invest',icon:'🔄', group:'review'}
+];
+// NB sub-types
+var NB_SUBTYPES  = [
+  {key:'Fresh',      label:'Fresh (new cover, no replacement)'},
+  {key:'Replacement',label:'Replacement (cancels existing policy — RAR needed)'},
+  {key:'Top-up',     label:'Top-up (adds to existing policy)'}
+];
+// Servicing sub-types
+var SVC_SUBTYPES = [
+  {key:'Administrative',label:'Administrative (no advice, no ROA)'},
+  {key:'Advised',       label:'Advised (advice given — ROA required)'}
+];
+
+// Required documents per event type.
+// mandatory: must exist for the event to be "complete"
+// conditional: only required under a specific sub-type (see `onlyIf`)
+var EVENT_DOC_CHECKLISTS = {
+  NB_RISK: [
+    {key:'CSA',         label:'Client Service Agreement', required:'mandatory'},
+    {key:'ROA',         label:'ROA',                      required:'mandatory'},
+    {key:'RAR',         label:'RAR',                      required:'conditional', onlyIf:{subType:'Replacement'}, note:'Required when replacing an existing policy'},
+    {key:'SIGNED_APP',  label:'Signed Application',       required:'mandatory'},
+    {key:'SIGNED_QUOTE',label:'Signed Quote',             required:'mandatory'},
+    {key:'UNDERWRITING',label:'Underwriting Docs',        required:'optional', multiple:true, note:'Medicals, PMAs, medical reports'},
+    {key:'CANX_LETTER', label:'Cancellation Letter',      required:'conditional', onlyIf:{subType:'Replacement'}, note:'For the policy being replaced'},
+    {key:'PAIDUP_LETTER',label:'Paid-Up Letter',          required:'optional'},
+    {key:'RA_HR_LETTER',label:'RA HR Letter',             required:'optional'},
+    {key:'CONTRACT',    label:'Contract Received',        required:'mandatory', note:'Proof policy is in force'},
+    {key:'COMP_EMAIL',  label:'Compliance Email to Client',required:'mandatory'}
+  ],
+  NB_INVEST: [
+    {key:'CSA',         label:'Client Service Agreement', required:'mandatory'},
+    {key:'ROA',         label:'ROA',                      required:'mandatory'},
+    {key:'RAR',         label:'RAR',                      required:'conditional', onlyIf:{subType:'Replacement'}, note:'Required for S14 / replacements'},
+    {key:'RISK_ANAL',   label:'Risk Analyser',            required:'mandatory'},
+    {key:'FACT_FINDER', label:'Fact Finder',              required:'mandatory'},
+    {key:'SIGNED_APP',  label:'Signed Application',       required:'mandatory'},
+    {key:'SIGNED_QUOTE',label:'Signed Quote',             required:'mandatory'},
+    {key:'DUW_MANDATE', label:'Duwalcoe UT Mandate',      required:'optional'},
+    {key:'SAAM_MANDATE',label:'SAAM Mandate',             required:'optional'},
+    {key:'DMA_MANDATE', label:'DMA Mandate',              required:'optional'},
+    {key:'CONTRACT',    label:'Contract Received',        required:'mandatory'},
+    {key:'COMP_EMAIL',  label:'Compliance Email to Client',required:'mandatory'}
+  ],
+  SVC_RISK: [
+    // Administrative-only
+    {key:'AMEND_FORM',  label:'Signed Amendment Form',    required:'conditional', onlyIf:{subType:'Administrative'}},
+    {key:'INSURER_CONF',label:'Insurer Confirmation',     required:'conditional', onlyIf:{subType:'Administrative'}},
+    // Advised-only
+    {key:'ROA',         label:'ROA',                      required:'conditional', onlyIf:{subType:'Advised'}, note:'Required whenever advice is given'},
+    {key:'CLIENT_INSTR',label:"Client's Written Instruction",required:'conditional', onlyIf:{subType:'Advised'}, note:'Email / signed form showing client decision'},
+    {key:'IMPL_PAPER',  label:'Implementation Paperwork', required:'conditional', onlyIf:{subType:'Advised'}},
+    {key:'COMP_EMAIL',  label:'Compliance Email to Client',required:'conditional', onlyIf:{subType:'Advised'}}
+  ],
+  SVC_INVEST: [
+    {key:'AMEND_FORM',  label:'Signed Amendment Form',    required:'conditional', onlyIf:{subType:'Administrative'}},
+    {key:'INSURER_CONF',label:'Administrator Confirmation',required:'conditional', onlyIf:{subType:'Administrative'}},
+    {key:'ROA',         label:'ROA',                      required:'conditional', onlyIf:{subType:'Advised'}},
+    {key:'CLIENT_INSTR',label:"Client's Written Instruction",required:'conditional', onlyIf:{subType:'Advised'}},
+    {key:'IMPL_PAPER',  label:'Implementation Paperwork', required:'conditional', onlyIf:{subType:'Advised'}},
+    {key:'COMP_EMAIL',  label:'Compliance Email to Client',required:'conditional', onlyIf:{subType:'Advised'}}
+  ],
+  REV_LIFE: [
+    {key:'REVIEW_NOTES',label:'Review Notes',             required:'mandatory'},
+    {key:'FNA_UPDATE',  label:'Updated FNA',              required:'optional', note:'If material changes'},
+    {key:'OUTCOME_LTR', label:'Outcome Letter/Email to Client',required:'mandatory'}
+  ],
+  REV_INVEST: [
+    {key:'REVIEW_NOTES',label:'Review Notes',             required:'mandatory'},
+    {key:'PERF_REPORT', label:'Performance Report',       required:'mandatory'},
+    {key:'OUTCOME_LTR', label:'Outcome Letter/Email to Client',required:'mandatory'}
+  ]
+};
+
+// In-memory caches, keyed by ClientID
+window._events = window._events || {};               // ClientID -> [event rows]
+window._eventDocs = window._eventDocs || {};         // EventID -> [doc rows]
+window._eventPolicies = window._eventPolicies || {}; // EventID -> [policy link rows]
+
+// Load events for a client (and their policy links) from Supabase
+function loadEvents(clientId){
+  sbFetch('GET','/rest/v1/work_events?ClientID=eq.'+encodeURIComponent(clientId)+'&select=*&order=EventDate.desc', null, function(rows, err){
+    if(err){ console.error('loadEvents error:',err); window._events[clientId] = []; }
+    else window._events[clientId] = rows || [];
+    // Also load policy links for these events in one go
+    if(rows && rows.length){
+      var ids = rows.map(function(r){return '"'+r.ID+'"';}).join(',');
+      sbFetch('GET','/rest/v1/work_event_policies?WorkEventID=in.('+encodeURIComponent(ids)+')&select=*', null, function(links){
+        // Group by EventID
+        (rows||[]).forEach(function(r){ window._eventPolicies[r.ID] = []; });
+        (links||[]).forEach(function(l){
+          if(!window._eventPolicies[l.WorkEventID]) window._eventPolicies[l.WorkEventID] = [];
+          window._eventPolicies[l.WorkEventID].push(l);
+        });
+        if(SEL && String(SEL)===String(clientId) && CTAB==='events') render();
+      });
+    } else {
+      if(SEL && String(SEL)===String(clientId) && CTAB==='events') render();
+    }
+  });
+}
+
+// Load documents for one event
+function loadEventDocs(eventId, cb){
+  sbFetch('GET','/rest/v1/work_event_documents?WorkEventID=eq.'+encodeURIComponent(eventId)+'&select=*&order=UploadedAt.desc', null, function(rows, err){
+    if(err){ console.error('loadEventDocs error:',err); window._eventDocs[eventId] = []; }
+    else window._eventDocs[eventId] = rows || [];
+    if(cb) cb();
+    else if(SEL && CTAB==='events') render();
+  });
+}
+
+// Render the Work Events tab — timeline of all events for this client
+function renderEvents(c, pols){
+  var clientId = c.ID;
+  if(!window._events[clientId]) loadEvents(clientId);
+  var events = window._events[clientId] || [];
+
+  var html = '<div class="card"><div class="ch">'+
+    '<h2>📋 Work Events</h2>'+
+    '<button class="btn b-nv sm" data-act="new-event" data-cid="'+clientId+'">+ New Event</button>'+
+    '</div><div class="cb">';
+
+  if(window._selectedEvent){
+    // Showing a single event's detail view
+    var ev = events.find(function(e){return String(e.ID)===String(window._selectedEvent);});
+    if(ev){
+      html += renderEventDetail(ev, c, pols);
+      html += '</div></div>';
+      return html;
+    } else {
+      // Event not found in list — try reloading
+      window._selectedEvent = null;
+    }
+  }
+
+  if(events.length===0){
+    html += '<div class="empty">No work events recorded yet.<br><span style="font-size:12px;color:#889">Create an event when you start a new business case, do a review, or handle servicing.</span></div>';
+  } else {
+    events.forEach(function(ev){
+      var typeDef = EVENT_TYPES.find(function(t){return t.key===ev.EventType;});
+      var typeLabel = typeDef ? typeDef.label : ev.EventType;
+      var icon = typeDef ? typeDef.icon : '📄';
+      var subTxt = ev.EventSubType ? ' ('+ev.EventSubType+')' : '';
+      var linkedPols = window._eventPolicies[ev.ID] || [];
+
+      var statusClr = ev.Status==='complete' ? '#2d7a3e' : (ev.Status==='cancelled' ? '#888' : '#b95900');
+      var statusBg  = ev.Status==='complete' ? '#eaf5ec' : (ev.Status==='cancelled' ? '#f0f0f0' : '#fdf2e6');
+      var statusTxt = ev.Status==='complete' ? '✓ Complete' : (ev.Status==='cancelled' ? 'Cancelled' : 'In Progress');
+
+      html += '<div class="roa-card" style="cursor:pointer;border-left:3px solid '+statusClr+'" data-act="open-event" data-eid="'+ev.ID+'">';
+      html += '<div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start">';
+      html += '<div style="flex:1">';
+      html += '<div style="font-size:11px;font-weight:700;color:var(--gold);text-transform:uppercase">'+fdate(ev.EventDate||'')+'</div>';
+      html += '<div style="font-weight:700;font-size:14px;margin:3px 0">'+icon+' '+escHtml(typeLabel)+escHtml(subTxt)+'</div>';
+      if(ev.Outcome) html += '<div style="font-size:12px;color:#667;margin-bottom:4px">'+escHtml(ev.Outcome)+'</div>';
+      // Policy links summary
+      if(linkedPols.length){
+        html += '<div style="font-size:12px;color:#445;margin-top:4px">';
+        linkedPols.forEach(function(lp){
+          var pol = (pols||[]).find(function(p){return String(p.ID)===String(lp.PolicyID);});
+          var polLabel = pol ? (pol.Insurer+' '+pol.Type+(pol.PolicyNo?' #'+pol.PolicyNo:'')) : 'Policy';
+          var arrow = lp.Action==='created'?'→ Created:':lp.Action==='updated'?'→ Updated:':lp.Action==='cancelled'?'→ Cancelled:':'→ Reviewed:';
+          html += '<div style="font-size:11px;color:#556">'+arrow+' '+escHtml(polLabel)+'</div>';
+        });
+        html += '</div>';
+      }
+      // Against-advice warning
+      if(ev.ClientWithAdvice===false){
+        html += '<div style="margin-top:6px;padding:4px 8px;background:#fff4e5;border-left:3px solid #b95900;border-radius:3px;font-size:11px;color:#8a4a00;font-weight:600">⚠ Client acted against recommendation</div>';
+      }
+      html += '</div>';
+      html += '<div style="display:flex;flex-direction:column;gap:4px;align-items:flex-end">';
+      html += '<span style="background:'+statusBg+';color:'+statusClr+';padding:3px 8px;border-radius:4px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.5px">'+statusTxt+'</span>';
+      if(ev.ResponsibleUser) html += '<span style="font-size:10px;color:#889">'+escHtml(ev.ResponsibleUser)+'</span>';
+      html += '</div>';
+      html += '</div></div>';
+    });
+  }
+
+  html += '</div></div>';
+  return html;
+}
+
+// Render the detail view for one selected event (inline inside events tab)
+function renderEventDetail(ev, c, pols){
+  var typeDef = EVENT_TYPES.find(function(t){return t.key===ev.EventType;});
+  var typeLabel = typeDef ? typeDef.label : ev.EventType;
+  var icon = typeDef ? typeDef.icon : '📄';
+
+  // Load docs if not cached
+  if(!window._eventDocs[ev.ID]) loadEventDocs(ev.ID);
+  var docs = window._eventDocs[ev.ID] || [];
+
+  // Get applicable checklist (filter by sub-type)
+  var checklist = (EVENT_DOC_CHECKLISTS[ev.EventType] || []).filter(function(item){
+    if(item.onlyIf && item.onlyIf.subType){
+      return ev.EventSubType === item.onlyIf.subType;
+    }
+    return true;
+  });
+
+  // Count mandatory missing
+  var mandatoryMissing = checklist.filter(function(item){
+    if(item.required!=='mandatory') return false;
+    return !docs.some(function(d){return d.DocType===item.key;});
+  });
+
+  var html = '<div style="margin-bottom:12px"><button class="btn b-gh sm" data-act="close-event-detail">← Back to Work Events</button></div>';
+
+  // Header
+  html += '<div style="padding:14px;background:#fafaf5;border-radius:8px;margin-bottom:16px">';
+  html += '<div style="font-size:11px;color:var(--gold);font-weight:700;text-transform:uppercase">'+fdate(ev.EventDate||'')+'</div>';
+  html += '<div style="font-size:18px;font-weight:700;margin:4px 0">'+icon+' '+escHtml(typeLabel)+(ev.EventSubType?' <span style="font-weight:400;color:#667">('+escHtml(ev.EventSubType)+')</span>':'')+'</div>';
+  html += '<div style="display:flex;gap:14px;font-size:12px;color:#667;margin-top:6px">';
+  html += '<span>Status: <b>'+escHtml(ev.Status||'in_progress')+'</b></span>';
+  html += '<span>Responsible: <b>'+escHtml(ev.ResponsibleUser||'—')+'</b></span>';
+  if(ev.ClientWithAdvice===false) html += '<span style="color:#b95900;font-weight:700">⚠ Against advice</span>';
+  html += '</div>';
+  if(ev.Notes) html += '<div style="font-size:12px;color:#556;margin-top:8px;font-style:italic">'+escHtml(ev.Notes)+'</div>';
+  html += '<div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">';
+  html += '<button class="btn b-gh sm" data-act="edit-event" data-eid="'+ev.ID+'">Edit Event</button>';
+  if(ev.Status!=='complete') html += '<button class="btn b-nv sm" data-act="mark-event-complete" data-eid="'+ev.ID+'">Mark Complete</button>';
+  html += '<button class="btn b-gh sm" data-act="delete-event" data-eid="'+ev.ID+'" data-cid="'+c.ID+'" style="color:#b23">Delete Event</button>';
+  html += '</div>';
+  html += '</div>';
+
+  // Linked Policies section
+  var links = window._eventPolicies[ev.ID] || [];
+  html += '<div style="margin-bottom:18px">';
+  html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">';
+  html += '<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:.8px">Linked Policies</div>';
+  html += '<button class="btn b-gh sm" data-act="link-policy" data-eid="'+ev.ID+'" style="font-size:11px;padding:3px 10px">+ Link Policy</button>';
+  html += '</div>';
+  if(links.length===0){
+    html += '<div style="padding:8px 12px;background:#fafaf5;border-radius:4px;font-size:12px;color:#889;font-style:italic">No policies linked to this event</div>';
+  } else {
+    links.forEach(function(lp){
+      var pol = (pols||[]).find(function(p){return String(p.ID)===String(lp.PolicyID);});
+      var polLabel = pol ? (pol.Insurer+' '+pol.Type+(pol.PolicyNo?' #'+pol.PolicyNo:'')) : 'Policy '+lp.PolicyID;
+      var actionColor = lp.Action==='cancelled'?'#b23':lp.Action==='created'?'#2d7a3e':'#445';
+      html += '<div style="padding:8px 12px;background:#fafaf5;border-radius:4px;display:flex;gap:10px;align-items:center;margin-bottom:3px">';
+      html += '<span style="font-size:11px;font-weight:700;text-transform:uppercase;color:'+actionColor+';letter-spacing:.5px;min-width:80px">'+escHtml(lp.Action)+'</span>';
+      html += '<span style="flex:1;font-size:13px">'+escHtml(polLabel)+'</span>';
+      html += '<button class="btn b-gh sm" data-act="unlink-policy" data-lid="'+lp.ID+'" data-eid="'+ev.ID+'" style="font-size:11px;padding:3px 8px;color:#b23">Unlink</button>';
+      html += '</div>';
+    });
+  }
+  html += '</div>';
+
+  // Documents section with checklist
+  html += '<div style="margin-bottom:14px;padding:10px 14px;background:'+(mandatoryMissing.length===0?'#eaf5ec':'#fdf2e6')+
+    ';border-left:3px solid '+(mandatoryMissing.length===0?'#2d7a3e':'#b95900')+
+    ';border-radius:4px;font-size:13px;font-weight:600;color:'+(mandatoryMissing.length===0?'#2d7a3e':'#b95900')+'">';
+  html += (mandatoryMissing.length===0 ? '✓ All mandatory documents present' : '⚠ '+mandatoryMissing.length+' mandatory document'+(mandatoryMissing.length===1?'':'s')+' missing');
+  html += '</div>';
+
+  html += '<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:.8px;margin-bottom:6px;border-bottom:1px solid var(--mist);padding-bottom:4px">Required Documents</div>';
+
+  checklist.forEach(function(item){
+    var matching = docs.filter(function(d){return d.DocType===item.key;});
+
+    if(item.multiple){
+      html += '<div style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:#fafaf5;border-radius:6px;margin-bottom:4px">';
+      html += '<div style="width:20px;font-size:16px">📂</div>';
+      html += '<div style="flex:1">';
+      html += '<div style="font-size:13px;font-weight:600">'+escHtml(item.label)+'</div>';
+      html += '<div style="font-size:11px;color:#778">'+matching.length+' file'+(matching.length===1?'':'s')+(item.note?' · '+escHtml(item.note):'')+'</div>';
+      html += '</div>';
+      html += '<button class="btn b-nv sm" data-act="event-doc-upload" data-eid="'+ev.ID+'" data-dk="'+item.key+'">+ Upload</button>';
+      html += '</div>';
+      matching.forEach(function(d){
+        html += '<div style="margin-left:30px;padding:5px 10px;font-size:12px;display:flex;align-items:center;gap:8px;color:#556;margin-bottom:2px">';
+        html += '<span>📄</span>';
+        html += '<span style="flex:1">'+escHtml(d.FileName||'file')+'</span>';
+        html += '<span style="color:#889;font-size:10px">'+fdate(d.UploadedAt||'')+'</span>';
+        html += '<button class="btn b-gh sm" data-act="event-doc-view" data-did="'+d.ID+'" style="padding:4px 10px;font-size:11px">View</button>';
+        html += '<button class="btn b-gh sm" data-act="event-doc-delete" data-did="'+d.ID+'" data-eid="'+ev.ID+'" style="padding:4px 10px;font-size:11px;color:#b23">Delete</button>';
+        html += '</div>';
+      });
+    } else {
+      var d = matching[0];
+      var hasDoc = !!d;
+      var isMand = item.required==='mandatory';
+      var dot = hasDoc ? '✅' : (isMand ? '❌' : '⬜');
+      var bg  = hasDoc ? '#eaf5ec' : (isMand ? '#fdf2e6' : '#fafaf5');
+      html += '<div style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:'+bg+';border-radius:6px;margin-bottom:4px">';
+      html += '<div style="width:20px;font-size:16px">'+dot+'</div>';
+      html += '<div style="flex:1">';
+      html += '<div style="font-size:13px;font-weight:600">'+escHtml(item.label)+
+        (item.required==='optional'?' <span style="color:#889;font-weight:400;font-size:11px">(optional)</span>':'')+
+        (item.required==='conditional'?' <span style="color:#889;font-weight:400;font-size:11px">(required for this sub-type)</span>':'')+
+        '</div>';
+      if(hasDoc){
+        html += '<div style="font-size:11px;color:#778">'+escHtml(d.FileName||'')+' · '+fdate(d.UploadedAt||'')+
+          (d.UploadedBy?' by '+escHtml(d.UploadedBy):'')+'</div>';
+      } else if(item.note){
+        html += '<div style="font-size:11px;color:#889;font-style:italic">'+escHtml(item.note)+'</div>';
+      } else {
+        html += '<div style="font-size:11px;color:#889;font-style:italic">Not uploaded</div>';
+      }
+      html += '</div>';
+      if(hasDoc){
+        html += '<button class="btn b-gh sm" data-act="event-doc-view" data-did="'+d.ID+'" style="padding:4px 12px">View</button>';
+        html += '<button class="btn b-gh sm" data-act="event-doc-upload" data-eid="'+ev.ID+'" data-dk="'+item.key+'" data-replace="1" style="padding:4px 12px">Replace</button>';
+        html += '<button class="btn b-gh sm" data-act="event-doc-delete" data-did="'+d.ID+'" data-eid="'+ev.ID+'" style="padding:4px 12px;color:#b23">Delete</button>';
+      } else {
+        html += '<button class="btn b-nv sm" data-act="event-doc-upload" data-eid="'+ev.ID+'" data-dk="'+item.key+'">Upload</button>';
+      }
+      html += '</div>';
+    }
+  });
+
+  return html;
+}
+
+// ══ EVENT ACTIONS ════════════════════════════════════════════════════════════
+
+// Open the new event modal
+function openNewEventModal(clientId){
+  var ov = document.createElement('div');
+  ov.className = 'ov';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(10,20,40,.55);z-index:9999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(2px)';
+  var box = document.createElement('div');
+  box.className = 'modal';
+  box.style.cssText = 'background:#fff;border-radius:12px;padding:24px 28px;max-width:480px;width:100%;box-shadow:0 12px 48px rgba(0,0,0,.25)';
+  box.innerHTML =
+    '<div style="font-family:Georgia,serif;font-size:18px;color:#0e413a;margin-bottom:6px">New Work Event</div>'+
+    '<div style="font-size:12px;color:#889;margin-bottom:18px">Record a new case, review or servicing interaction</div>'+
+
+    '<div style="margin-bottom:12px"><label style="font-size:12px;font-weight:600;color:#445;display:block;margin-bottom:4px">Event Type *</label>'+
+    '<select id="ev_type" style="width:100%;padding:8px 10px;border:1.5px solid #ccc;border-radius:6px;font-size:13px;font-family:inherit">'+
+    '<option value="">— Select —</option>'+
+    EVENT_TYPES.map(function(t){return '<option value="'+t.key+'">'+t.icon+' '+escHtml(t.label)+'</option>';}).join('')+
+    '</select></div>'+
+
+    '<div style="margin-bottom:12px" id="ev_subtype_row"><label style="font-size:12px;font-weight:600;color:#445;display:block;margin-bottom:4px">Sub-type</label>'+
+    '<select id="ev_subtype" style="width:100%;padding:8px 10px;border:1.5px solid #ccc;border-radius:6px;font-size:13px;font-family:inherit">'+
+    '<option value="">— Will appear after event type selected —</option>'+
+    '</select></div>'+
+
+    '<div style="margin-bottom:12px"><label style="font-size:12px;font-weight:600;color:#445;display:block;margin-bottom:4px">Event Date *</label>'+
+    '<input id="ev_date" type="date" value="'+new Date().toISOString().slice(0,10)+'" style="width:100%;padding:8px 10px;border:1.5px solid #ccc;border-radius:6px;font-size:13px;font-family:inherit"></div>'+
+
+    '<div style="margin-bottom:12px"><label style="font-size:12px;font-weight:600;color:#445;display:block;margin-bottom:4px">Responsible</label>'+
+    '<select id="ev_responsible" style="width:100%;padding:8px 10px;border:1.5px solid #ccc;border-radius:6px;font-size:13px;font-family:inherit">'+
+    '<option value="Clinton">Clinton</option>'+
+    '<option value="Wife">Wife</option>'+
+    '<option value="Daughter">Daughter</option>'+
+    '</select></div>'+
+
+    '<div style="margin-bottom:12px"><label style="font-size:12px;font-weight:600;color:#445;display:block;margin-bottom:4px">Notes (optional)</label>'+
+    '<textarea id="ev_notes" rows="3" style="width:100%;padding:8px 10px;border:1.5px solid #ccc;border-radius:6px;font-size:13px;font-family:inherit;resize:vertical"></textarea></div>'+
+
+    '<div style="display:flex;justify-content:flex-end;gap:8px">'+
+    '<button id="ev_cancel" style="padding:8px 18px;border-radius:7px;border:1.5px solid #ddd;background:#fff;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;color:#555">Cancel</button>'+
+    '<button id="ev_create" style="padding:8px 22px;border-radius:7px;border:none;background:#0e413a;color:#fff;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">Create Event</button>'+
+    '</div>';
+
+  ov.appendChild(box);
+  document.body.appendChild(ov);
+
+  // Preselect current user as responsible
+  var cu = localStorage.getItem('du_user');
+  if(cu) document.getElementById('ev_responsible').value = cu;
+
+  // Dynamic sub-type based on event type
+  document.getElementById('ev_type').addEventListener('change', function(){
+    var t = this.value;
+    var subs = (t==='NB_RISK'||t==='NB_INVEST') ? NB_SUBTYPES :
+               (t==='SVC_RISK'||t==='SVC_INVEST') ? SVC_SUBTYPES : [];
+    var sel = document.getElementById('ev_subtype');
+    if(subs.length===0){
+      sel.innerHTML = '<option value="">(none)</option>';
+      sel.disabled = true;
+    } else {
+      sel.disabled = false;
+      sel.innerHTML = '<option value="">— Select —</option>' + subs.map(function(s){return '<option value="'+s.key+'">'+escHtml(s.label)+'</option>';}).join('');
+    }
+  });
+
+  document.getElementById('ev_cancel').onclick = function(){ document.body.removeChild(ov); };
+  document.getElementById('ev_create').onclick = function(){
+    var type = document.getElementById('ev_type').value;
+    var subtype = document.getElementById('ev_subtype').value;
+    var date = document.getElementById('ev_date').value;
+    var resp = document.getElementById('ev_responsible').value;
+    var notes = document.getElementById('ev_notes').value;
+    if(!type){ alert('Please select an event type'); return; }
+    if(!date){ alert('Please set a date'); return; }
+    var subRequired = (type==='NB_RISK'||type==='NB_INVEST'||type==='SVC_RISK'||type==='SVC_INVEST');
+    if(subRequired && !subtype){ alert('Please select a sub-type'); return; }
+
+    var row = {
+      ClientID: clientId,
+      EventType: type,
+      EventSubType: subtype || null,
+      EventDate: date,
+      Status: 'in_progress',
+      ResponsibleUser: resp,
+      Notes: notes,
+      CreatedBy: cu || 'Clinton',
+      CreatedAt: new Date().toISOString().replace('T',' ').slice(0,16)
+    };
+    sbFetch('POST','/rest/v1/work_events?select=*', [row], function(res, err){
+      if(err){
+        alert('Could not create event: '+err);
+        return;
+      }
+      document.body.removeChild(ov);
+      toast('✓ Event created','ok');
+      // Open the new event's detail view
+      if(res && res.length){ window._selectedEvent = res[0].ID; }
+      loadEvents(clientId);
+    });
+  };
+
+  // Backdrop close
+  ov.addEventListener('click', function(e){ if(e.target===ov) document.body.removeChild(ov); });
+}
+
+// Open a specific event's detail view
+function openEventDetail(eventId){
+  window._selectedEvent = eventId;
+  loadEventDocs(eventId);
+  render();
+}
+
+function closeEventDetail(){
+  window._selectedEvent = null;
+  render();
+}
+
+// Mark event complete
+function markEventComplete(eventId){
+  var clientId = SEL;
+  var ev = (window._events[clientId]||[]).find(function(e){return String(e.ID)===String(eventId);});
+  if(!ev){ return; }
+  // Check mandatory docs complete
+  var docs = window._eventDocs[eventId] || [];
+  var checklist = (EVENT_DOC_CHECKLISTS[ev.EventType] || []).filter(function(item){
+    if(item.onlyIf && item.onlyIf.subType) return ev.EventSubType === item.onlyIf.subType;
+    return true;
+  });
+  var missing = checklist.filter(function(item){
+    if(item.required!=='mandatory') return false;
+    return !docs.some(function(d){return d.DocType===item.key;});
+  });
+  if(missing.length && !confirm('⚠ '+missing.length+' mandatory document'+(missing.length===1?'':'s')+' missing:\n\n'+missing.map(function(m){return '• '+m.label;}).join('\n')+'\n\nMark complete anyway?')){
+    return;
+  }
+  sbFetch('PATCH','/rest/v1/work_events?ID=eq.'+encodeURIComponent(eventId),
+    {Status:'complete', CompletedAt: new Date().toISOString().replace('T',' ').slice(0,16)},
+    function(res, err){
+      if(err){ alert('Could not mark complete: '+err); return; }
+      toast('✓ Event marked complete','ok');
+      loadEvents(clientId);
+    });
+}
+
+// Delete an event (and its docs + links — cascade delete)
+function deleteEvent(eventId, clientId){
+  if(!confirm('Delete this event, all its linked documents, and policy links? This cannot be undone.')) return;
+  // First delete docs (and their files in storage)
+  var docs = window._eventDocs[eventId] || [];
+  var deletePromises = docs.map(function(d){
+    return fetch(SB_URL+'/storage/v1/object/client-documents/'+encodeURI(d.FilePath), {
+      method:'DELETE',
+      headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY}
+    }).catch(function(){}); // don't fail if storage already gone
+  });
+  Promise.all(deletePromises).then(function(){
+    // Delete doc records
+    sbFetch('DELETE','/rest/v1/work_event_documents?WorkEventID=eq.'+encodeURIComponent(eventId), null, function(){
+      // Delete policy links
+      sbFetch('DELETE','/rest/v1/work_event_policies?WorkEventID=eq.'+encodeURIComponent(eventId), null, function(){
+        // Finally delete the event
+        sbFetch('DELETE','/rest/v1/work_events?ID=eq.'+encodeURIComponent(eventId), null, function(res, err){
+          if(err){ alert('Delete failed: '+err); return; }
+          toast('Event deleted','ok');
+          window._selectedEvent = null;
+          loadEvents(clientId);
+        });
+      });
+    });
+  });
+}
+
+// ══ EVENT DOCUMENT UPLOAD ═══════════════════════════════════════════════════
+
+function openEventDocUpload(eventId, docKey, isReplace){
+  var clientId = SEL;
+  var ev = (window._events[clientId]||[]).find(function(e){return String(e.ID)===String(eventId);});
+  if(!ev){ alert('Event not found'); return; }
+  var checklist = EVENT_DOC_CHECKLISTS[ev.EventType] || [];
+  var cat = checklist.find(function(x){return x.key===docKey;});
+  if(!cat){ alert('Unknown document type'); return; }
+
+  var input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.pdf,.jpg,.jpeg,.png,.docx,.xlsx,.tiff,.tif';
+  input.style.display = 'none';
+  input.addEventListener('change', function(){
+    var file = input.files && input.files[0];
+    document.body.removeChild(input);
+    if(!file) return;
+    if(file.size > 50*1024*1024){ alert('File too large. Max 50 MB.'); return; }
+    uploadEventDoc(eventId, clientId, docKey, cat.label, file, isReplace);
+  });
+  document.body.appendChild(input);
+  input.click();
+}
+
+function uploadEventDoc(eventId, clientId, docKey, docLabel, file, isReplace){
+  var safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+  var ts = Date.now();
+  // Separate folder per event for storage tidiness
+  var path = 'events/'+clientId+'/'+eventId+'/'+docKey+'_'+ts+'_'+safeName;
+  toast('Uploading '+docLabel+'…','ok');
+
+  var deletePromise = Promise.resolve();
+  if(isReplace){
+    var existing = (window._eventDocs[eventId]||[]).filter(function(d){return d.DocType===docKey;});
+    if(existing.length){
+      deletePromise = new Promise(function(res){ deleteEventDocRecord(existing[0], function(){ res(); }); });
+    }
+  }
+
+  deletePromise.then(function(){
+    fetch(SB_URL+'/storage/v1/object/client-documents/'+encodeURI(path), {
+      method:'POST',
+      headers:{
+        'apikey':SB_KEY, 'Authorization':'Bearer '+SB_KEY,
+        'Content-Type': file.type || 'application/octet-stream',
+        'x-upsert':'true'
+      },
+      body: file
+    }).then(function(r){
+      if(!r.ok) return r.text().then(function(t){ throw new Error('Storage upload failed: '+r.status+' '+t); });
+      return r.json();
+    }).then(function(){
+      var row = {
+        WorkEventID: eventId,
+        DocType: docKey,
+        Status: 'complete',
+        FilePath: path,
+        FileName: file.name,
+        FileSize: file.size,
+        MimeType: file.type || '',
+        UploadedBy: localStorage.getItem('du_user') || 'Clinton',
+        UploadedAt: new Date().toISOString().replace('T',' ').slice(0,16),
+        Notes: ''
+      };
+      sbFetch('POST','/rest/v1/work_event_documents', [row], function(res, err){
+        if(err){ toast('Database save failed','err'); console.error(err); }
+        else { toast('✓ '+docLabel+' uploaded','ok'); loadEventDocs(eventId); }
+      });
+    }).catch(function(e){
+      toast('Upload failed: '+e.message,'err');
+      console.error(e);
+    });
+  });
+}
+
+function viewEventDoc(docId){
+  var doc = null;
+  Object.keys(window._eventDocs||{}).forEach(function(eid){
+    (window._eventDocs[eid]||[]).forEach(function(d){ if(String(d.ID)===String(docId)) doc = d; });
+  });
+  if(!doc){ alert('Document not found'); return; }
+  fetch(SB_URL+'/storage/v1/object/sign/client-documents/'+encodeURI(doc.FilePath), {
+    method:'POST',
+    headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json'},
+    body: JSON.stringify({expiresIn:60})
+  }).then(function(r){
+    if(!r.ok) return r.text().then(function(t){ throw new Error('Sign failed: '+r.status+' '+t); });
+    return r.json();
+  }).then(function(d){
+    if(d && d.signedURL) window.open(SB_URL+'/storage/v1'+d.signedURL,'_blank');
+    else throw new Error('No signed URL');
+  }).catch(function(e){
+    toast('Could not open: '+e.message,'err');
+  });
+}
+
+function deleteEventDoc(docId, eventId){
+  if(!confirm('Delete this document permanently?')) return;
+  var doc = (window._eventDocs[eventId]||[]).find(function(d){return String(d.ID)===String(docId);});
+  if(!doc){ return; }
+  deleteEventDocRecord(doc, function(ok){
+    if(ok){ toast('Deleted','ok'); loadEventDocs(eventId); }
+    else toast('Delete failed','err');
+  });
+}
+
+function deleteEventDocRecord(doc, cb){
+  fetch(SB_URL+'/storage/v1/object/client-documents/'+encodeURI(doc.FilePath), {
+    method:'DELETE',
+    headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY}
+  }).then(function(){
+    sbFetch('DELETE','/rest/v1/work_event_documents?ID=eq.'+encodeURIComponent(doc.ID), null, function(res, err){
+      if(cb) cb(!err);
+    });
+  }).catch(function(){
+    sbFetch('DELETE','/rest/v1/work_event_documents?ID=eq.'+encodeURIComponent(doc.ID), null, function(res, err){
+      if(cb) cb(!err);
+    });
+  });
+}
+
+// ══ POLICY LINKING ═══════════════════════════════════════════════════════════
+
+function openLinkPolicyModal(eventId){
+  var clientId = SEL;
+  var c = DB.clients.find(function(x){return String(x.ID)===String(clientId);});
+  if(!c){ return; }
+  var pols = DB.policies.filter(function(p){return String(p.ClientID)===String(clientId);});
+  if(pols.length===0){ alert('This client has no policies. Add a policy first via the Policies tab.'); return; }
+
+  var ov = document.createElement('div');
+  ov.className = 'ov';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(10,20,40,.55);z-index:9999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(2px)';
+  var box = document.createElement('div');
+  box.className = 'modal';
+  box.style.cssText = 'background:#fff;border-radius:12px;padding:24px 28px;max-width:480px;width:100%;box-shadow:0 12px 48px rgba(0,0,0,.25)';
+  box.innerHTML =
+    '<div style="font-family:Georgia,serif;font-size:18px;color:#0e413a;margin-bottom:12px">Link Policy to Event</div>'+
+    '<div style="margin-bottom:12px"><label style="font-size:12px;font-weight:600;color:#445;display:block;margin-bottom:4px">Policy *</label>'+
+    '<select id="lp_policy" style="width:100%;padding:8px 10px;border:1.5px solid #ccc;border-radius:6px;font-size:13px;font-family:inherit">'+
+    '<option value="">— Select —</option>'+
+    pols.map(function(p){
+      var lbl = (p.Insurer||'?')+' — '+(p.Type||'?')+(p.PolicyNo?' #'+p.PolicyNo:'')+(p.Status?' ['+p.Status+']':'');
+      return '<option value="'+p.ID+'">'+escHtml(lbl)+'</option>';
+    }).join('')+
+    '</select></div>'+
+    '<div style="margin-bottom:16px"><label style="font-size:12px;font-weight:600;color:#445;display:block;margin-bottom:4px">Action *</label>'+
+    '<select id="lp_action" style="width:100%;padding:8px 10px;border:1.5px solid #ccc;border-radius:6px;font-size:13px;font-family:inherit">'+
+    '<option value="created">Created — this event produced this policy</option>'+
+    '<option value="updated">Updated — this event amended this policy</option>'+
+    '<option value="cancelled">Cancelled — this event cancelled this policy</option>'+
+    '<option value="reviewed">Reviewed — this event reviewed this policy</option>'+
+    '</select></div>'+
+    '<div style="display:flex;justify-content:flex-end;gap:8px">'+
+    '<button id="lp_cancel" style="padding:8px 18px;border-radius:7px;border:1.5px solid #ddd;background:#fff;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;color:#555">Cancel</button>'+
+    '<button id="lp_save" style="padding:8px 22px;border-radius:7px;border:none;background:#0e413a;color:#fff;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">Link Policy</button>'+
+    '</div>';
+  ov.appendChild(box);
+  document.body.appendChild(ov);
+
+  document.getElementById('lp_cancel').onclick = function(){ document.body.removeChild(ov); };
+  document.getElementById('lp_save').onclick = function(){
+    var pid = document.getElementById('lp_policy').value;
+    var act = document.getElementById('lp_action').value;
+    if(!pid){ alert('Pick a policy'); return; }
+    sbFetch('POST','/rest/v1/work_event_policies', [{
+      WorkEventID: eventId, PolicyID: pid, Action: act
+    }], function(res, err){
+      if(err){ alert('Could not link: '+err); return; }
+      document.body.removeChild(ov);
+      toast('Policy linked','ok');
+      loadEvents(clientId);
+    });
+  };
+  ov.addEventListener('click', function(e){ if(e.target===ov) document.body.removeChild(ov); });
+}
+
+function unlinkPolicy(linkId, eventId){
+  if(!confirm('Remove this policy link from the event? (The policy itself is not affected.)')) return;
+  sbFetch('DELETE','/rest/v1/work_event_policies?ID=eq.'+encodeURIComponent(linkId), null, function(res, err){
+    if(err){ alert('Unlink failed: '+err); return; }
+    toast('Unlinked','ok');
+    loadEvents(SEL);
+  });
+}
 
 // TASKS PAGE
 function renderTasks(){
@@ -4469,7 +5156,7 @@ document.addEventListener('click', function(e){
         case 'upgrade-client':      upgradeToClient(id); break;
         case 'link-existing':       openLinkExistModal(id, 'Spouse'); break;
         case 'confirm-exist-link':  confirmExistLink(id); break;
-        case 'tab':            CTAB=el.getAttribute('data-tab'); render(); break;
+        case 'tab':            CTAB=el.getAttribute('data-tab'); window._selectedEvent=null; render(); break;
         case 'fna':
           var fc = SEL ? DB.clients.find(function(x){ return String(x.ID)===String(SEL); }) : null;
           var furl = 'https://hayesfinancial.github.io/Duwalcoe-Financial-Consultants/fna.html';
@@ -4484,6 +5171,39 @@ document.addEventListener('click', function(e){
           break;
         case 'doc-delete':
           deleteClientDoc(el.getAttribute('data-did'), cid);
+          break;
+        case 'new-event':
+          openNewEventModal(cid);
+          break;
+        case 'open-event':
+          openEventDetail(el.getAttribute('data-eid'));
+          break;
+        case 'close-event-detail':
+          closeEventDetail();
+          break;
+        case 'mark-event-complete':
+          markEventComplete(el.getAttribute('data-eid'));
+          break;
+        case 'delete-event':
+          deleteEvent(el.getAttribute('data-eid'), cid);
+          break;
+        case 'edit-event':
+          alert('Edit Event will be built in the next session — for now, Delete and re-create if you need to change anything.');
+          break;
+        case 'event-doc-upload':
+          openEventDocUpload(el.getAttribute('data-eid'), el.getAttribute('data-dk'), el.getAttribute('data-replace')==='1');
+          break;
+        case 'event-doc-view':
+          viewEventDoc(el.getAttribute('data-did'));
+          break;
+        case 'event-doc-delete':
+          deleteEventDoc(el.getAttribute('data-did'), el.getAttribute('data-eid'));
+          break;
+        case 'link-policy':
+          openLinkPolicyModal(el.getAttribute('data-eid'));
+          break;
+        case 'unlink-policy':
+          unlinkPolicy(el.getAttribute('data-lid'), el.getAttribute('data-eid'));
           break;
         case 'sync':           syncNow(); break;
       }
