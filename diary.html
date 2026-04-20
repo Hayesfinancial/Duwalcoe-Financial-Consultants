@@ -356,6 +356,8 @@ function changeWeek(dir){
   d.setDate(d.getDate()+dir*7);
   currentWeekStart=getMonday(d);
   loadWeek();
+  // Also ensure the (possibly new) month's full data is loaded so month total is accurate
+  ensureMonthLoaded(function(){ renderScoreboard(); });
 }
 
 function goToday(){
@@ -367,6 +369,7 @@ function goToday(){
   monthAnchor=new Date(); monthAnchor.setDate(1); monthAnchor.setHours(0,0,0,0);
   if(viewMode==='month') loadMonth();
   else loadWeek();
+  ensureMonthLoaded(function(){ renderScoreboard(); });
 }
 
 function setView(v){
@@ -401,9 +404,10 @@ function navNext(){
 }
 
 // Get all weekday Mondays needed to cover the displayed month
-function monthWeeks(){
-  var first=new Date(monthAnchor);
-  var last=new Date(monthAnchor.getFullYear(), monthAnchor.getMonth()+1, 0);
+function monthWeeks(anchor){
+  var a = anchor || monthAnchor;
+  var first=new Date(a.getFullYear(), a.getMonth(), 1);
+  var last=new Date(a.getFullYear(), a.getMonth()+1, 0);
   var startMon=getMonday(first);
   var weeks=[];
   var cur=new Date(startMon);
@@ -412,6 +416,85 @@ function monthWeeks(){
     cur.setDate(cur.getDate()+7);
   }
   return weeks;
+}
+
+// Compute total commission for the calendar month of the currently viewed week
+// (or the month anchor if in month view). Splits straddling weeks by each day's actual date.
+function getMonthCommission(){
+  // Determine which month we're displaying
+  var targetMonth, targetYear;
+  if(viewMode==='month'){
+    targetMonth = monthAnchor.getMonth();
+    targetYear  = monthAnchor.getFullYear();
+  } else {
+    // Use the Monday of the currently viewed week to decide "the month being viewed".
+    // If the week straddles, the Monday's month wins for the label — but individual days
+    // are still attributed to their own actual calendar month.
+    targetMonth = currentWeekStart.getMonth();
+    targetYear  = currentWeekStart.getFullYear();
+  }
+  var monthStart = new Date(targetYear, targetMonth, 1);
+  var total = 0;
+  // Iterate over all weeks touching this month and sum only the days whose
+  // actual calendar date falls in the target month.
+  var weeks = monthWeeks(monthStart);
+  weeks.forEach(function(mon){
+    var wk = getWeekKey(mon);
+    for(var di=0; di<5; di++){
+      var dayDate = new Date(mon);
+      dayDate.setDate(dayDate.getDate()+di);
+      // Only count if this date is actually in our target month
+      if(dayDate.getMonth()!==targetMonth || dayDate.getFullYear()!==targetYear) continue;
+      var key = currentUser+'|'+wk+'|'+getDayKey(di);
+      var slots = allData[key] || [];
+      slots.forEach(function(s){
+        if(s && s.sold) total += parseFloat(s.commission)||0;
+      });
+    }
+  });
+  return total;
+}
+
+// Ensure all weeks that touch the currently viewed month are loaded into allData,
+// so the month commission total is accurate even when only one week has been visited.
+// Uses localStorage as a fast first fill and then Supabase as source of truth.
+function ensureMonthLoaded(cb){
+  var targetMonth, targetYear;
+  if(viewMode==='month'){
+    targetMonth = monthAnchor.getMonth();
+    targetYear  = monthAnchor.getFullYear();
+  } else {
+    targetMonth = currentWeekStart.getMonth();
+    targetYear  = currentWeekStart.getFullYear();
+  }
+  var anchor = new Date(targetYear, targetMonth, 1);
+  var weeks = monthWeeks(anchor);
+  if(!weeks.length){ if(cb) cb(); return; }
+  var pending = weeks.length;
+  weeks.forEach(function(mon){
+    var wk = getWeekKey(mon);
+    // Local cache first
+    var lk = 'du_diary_'+currentUser+'_'+wk;
+    var local = localStorage.getItem(lk);
+    if(local){
+      try{
+        var d = JSON.parse(local);
+        Object.keys(d).forEach(function(k){
+          // Do not overwrite any data already loaded from the server for the current week
+          if(!allData.hasOwnProperty(k)) allData[k] = d[k];
+        });
+      }catch(e){}
+    }
+    sbGet(currentUser, wk, function(rows){
+      if(rows && rows.length && rows[0].Data){
+        var d = rows[0].Data;
+        Object.keys(d).forEach(function(k){ allData[k] = d[k]; });
+        localStorage.setItem(lk, JSON.stringify(d));
+      }
+      pending--;
+      if(pending<=0 && cb) cb();
+    });
+  });
 }
 
 function loadMonth(){
@@ -881,6 +964,18 @@ function renderScoreboard(){
   var apptPct=Math.min(100,Math.round(total/8*100));
   var commPct=Math.min(100,Math.round(commission/75000*100));
   var commCol=commission>=75000?'#86efac':commission>=50000?'var(--gold)':'#93c5fd';
+
+  // Month-to-date commission
+  var monthComm = getMonthCommission();
+  var monthNames = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  var monthLabelIdx = (viewMode==='month') ? monthAnchor.getMonth() : currentWeekStart.getMonth();
+  var monthLabelYear = (viewMode==='month') ? monthAnchor.getFullYear() : currentWeekStart.getFullYear();
+  var monthName = monthNames[monthLabelIdx];
+  // Month target: weekly target × number of working weeks touching this month
+  var monthTarget = 75000 * monthWeeks(new Date(monthLabelYear, monthLabelIdx, 1)).length;
+  var monthPct = Math.min(100,Math.round(monthComm/monthTarget*100));
+  var monthCol = monthComm>=monthTarget?'#86efac':monthComm>=monthTarget*0.66?'var(--gold)':'#93c5fd';
+
   sb.innerHTML=
     '<div class="sb-title">Appointments this week</div>'+
     '<div class="sb-count">'+total+'<span style="font-size:18px;color:rgba(255,255,255,.5)">/8</span></div>'+
@@ -893,11 +988,19 @@ function renderScoreboard(){
     '<div class="sb-item"><div class="n" style="color:#fde68a">'+prospect+'</div><div class="l">Prosp</div></div>'+
     '</div>'+
     '<div style="border-top:1px solid rgba(255,255,255,.15);padding-top:12px">'+
-    '<div class="sb-title">Commission target</div>'+
-    '<div style="font-size:30px;font-weight:700;color:'+commCol+';margin:4px 0">R '+Math.round(commission).toLocaleString('en-ZA')+'</div>'+
+    '<div class="sb-title">Commission — this week</div>'+
+    '<div style="font-size:28px;font-weight:700;color:'+commCol+';margin:4px 0">R '+Math.round(commission).toLocaleString('en-ZA')+'</div>'+
     '<div style="font-size:11px;opacity:.5;margin-bottom:6px">of R\u00a075\u202f000 weekly target</div>'+
     '<div class="sb-bar"><div class="sb-fill" style="width:'+commPct+'%;background:'+commCol+'"></div></div>'+
     '<div style="font-size:11px;opacity:.5;margin-top:4px">'+commPct+'% of target</div>'+
+    '</div>'+
+    // ── Month-to-date commission ──
+    '<div style="border-top:1px solid rgba(255,255,255,.15);padding-top:12px;margin-top:12px">'+
+    '<div class="sb-title">Commission — '+monthName+' total</div>'+
+    '<div style="font-size:28px;font-weight:700;color:'+monthCol+';margin:4px 0">R '+Math.round(monthComm).toLocaleString('en-ZA')+'</div>'+
+    '<div style="font-size:11px;opacity:.5;margin-bottom:6px">of R\u00a0'+monthTarget.toLocaleString('en-ZA').replace(/,/g,'\u202f')+' monthly target</div>'+
+    '<div class="sb-bar"><div class="sb-fill" style="width:'+monthPct+'%;background:'+monthCol+'"></div></div>'+
+    '<div style="font-size:11px;opacity:.5;margin-top:4px">'+monthPct+'% of target</div>'+
     '</div>';
 }
 
@@ -1104,7 +1207,7 @@ function syncTeamsLink(i,val){
 
 function autoSaveCommission(i, val){
   var slots=getSlots(currentUser,currentDay);
-  if(slots[i]){ slots[i].commission=parseFloat(val)||0; setSlots(currentUser,currentDay,slots); saveCurrentUser(); }
+  if(slots[i]){ slots[i].commission=parseFloat(val)||0; setSlots(currentUser,currentDay,slots); saveCurrentUser(); renderScoreboard(); }
 }
 
 function autoSaveNotes(i, val){
@@ -1156,6 +1259,8 @@ setUser(currentUser);
 })();
 if(viewMode==='month') loadMonth();
 else loadWeek();
+// Load all weeks touching the current month so the month commission total is accurate on first render
+ensureMonthLoaded(function(){ renderScoreboard(); });
 </script>
 </body>
 </html>
