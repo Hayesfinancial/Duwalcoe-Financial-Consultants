@@ -1795,16 +1795,27 @@ function renderDocs(c){
 
       if(item.multiple){
         // Multi-document row (e.g. General Correspondence)
+        // Collapse by default when 3+ files.
+        var cExpandKey = 'client::'+clientId+'::'+item.key;
+        window._expanded = window._expanded || {};
+        var cAutoCollapse = matching.length >= 3;
+        var cUserToggled = (cExpandKey in window._expanded);
+        var cIsExpanded = cUserToggled ? window._expanded[cExpandKey] : !cAutoCollapse;
+
         html += '<div style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:#fafaf5;border-radius:6px">';
         html += '<div style="width:20px;font-size:16px">📂</div>';
         html += '<div style="flex:1">';
         html += '<div style="font-size:13px;font-weight:600;color:var(--ink)">'+escHtml(item.label)+'</div>';
         html += '<div style="font-size:11px;color:#778">'+matching.length+' file'+(matching.length===1?'':'s')+'</div>';
         html += '</div>';
+        if(matching.length > 0){
+          html += '<button class="btn b-gh sm" data-act="toggle-multi" data-ekey="'+escHtml(cExpandKey)+'" style="padding:4px 10px;font-size:11px">'+
+            (cIsExpanded ? '▲ Hide' : '▼ Show ('+matching.length+')')+'</button>';
+        }
         html += '<button class="btn b-nv sm" data-act="doc-upload" data-cid="'+clientId+'" data-dk="'+item.key+'">+ Upload</button>';
         html += '</div>';
-        // List existing files beneath
-        if(matching.length){
+        // List existing files beneath (only if expanded)
+        if(cIsExpanded && matching.length){
           matching.forEach(function(d){
             html += '<div style="margin-left:30px;padding:5px 10px;font-size:12px;display:flex;align-items:center;gap:8px;color:#556">';
             html += '<span>📄</span>';
@@ -2347,23 +2358,39 @@ function renderEventDetail(ev, c, pols){
     var matching = docs.filter(function(d){return d.DocType===item.key;});
 
     if(item.multiple){
+      // Collapsibility rule: collapse by default when 3+ files to avoid long stacks.
+      // State key is unique per (event, checklist-item).
+      var expandKey = ev.ID+'::'+item.key;
+      window._expanded = window._expanded || {};
+      var autoCollapse = matching.length >= 3;
+      // If user hasn't toggled this row yet: collapsed when 3+, expanded when <3
+      var userToggled = (expandKey in window._expanded);
+      var isExpanded = userToggled ? window._expanded[expandKey] : !autoCollapse;
+
       html += '<div style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:#fafaf5;border-radius:6px;margin-bottom:4px">';
       html += '<div style="width:20px;font-size:16px">📂</div>';
       html += '<div style="flex:1">';
       html += '<div style="font-size:13px;font-weight:600">'+escHtml(item.label)+'</div>';
       html += '<div style="font-size:11px;color:#778">'+matching.length+' file'+(matching.length===1?'':'s')+(item.note?' · '+escHtml(item.note):'')+'</div>';
       html += '</div>';
+      // Show/Hide toggle when there are files (no point toggling an empty list)
+      if(matching.length > 0){
+        html += '<button class="btn b-gh sm" data-act="toggle-multi" data-ekey="'+escHtml(expandKey)+'" style="padding:4px 10px;font-size:11px">'+
+          (isExpanded ? '▲ Hide' : '▼ Show ('+matching.length+')')+'</button>';
+      }
       html += '<button class="btn b-nv sm" data-act="event-doc-upload" data-eid="'+ev.ID+'" data-dk="'+item.key+'">+ Upload</button>';
       html += '</div>';
-      matching.forEach(function(d){
-        html += '<div style="margin-left:30px;padding:5px 10px;font-size:12px;display:flex;align-items:center;gap:8px;color:#556;margin-bottom:2px">';
-        html += '<span>📄</span>';
-        html += '<span style="flex:1">'+escHtml(d.FileName||'file')+'</span>';
-        html += '<span style="color:#889;font-size:10px">'+fdate(d.UploadedAt||'')+'</span>';
-        html += '<button class="btn b-gh sm" data-act="event-doc-view" data-did="'+d.ID+'" style="padding:4px 10px;font-size:11px">View</button>';
-        html += '<button class="btn b-gh sm" data-act="event-doc-delete" data-did="'+d.ID+'" data-eid="'+ev.ID+'" style="padding:4px 10px;font-size:11px;color:#b23">Delete</button>';
-        html += '</div>';
-      });
+      if(isExpanded){
+        matching.forEach(function(d){
+          html += '<div style="margin-left:30px;padding:5px 10px;font-size:12px;display:flex;align-items:center;gap:8px;color:#556;margin-bottom:2px">';
+          html += '<span>📄</span>';
+          html += '<span style="flex:1">'+escHtml(d.FileName||'file')+'</span>';
+          html += '<span style="color:#889;font-size:10px">'+fdate(d.UploadedAt||'')+'</span>';
+          html += '<button class="btn b-gh sm" data-act="event-doc-view" data-did="'+d.ID+'" style="padding:4px 10px;font-size:11px">View</button>';
+          html += '<button class="btn b-gh sm" data-act="event-doc-delete" data-did="'+d.ID+'" data-eid="'+ev.ID+'" style="padding:4px 10px;font-size:11px;color:#b23">Delete</button>';
+          html += '</div>';
+        });
+      }
     } else {
       var d = matching[0];
       var hasDoc = !!d;
@@ -5368,6 +5395,13 @@ document.addEventListener('click', function(e){
           break;
         case 'event-toggle-na':
           toggleEventNA(el.getAttribute('data-eid'), el.getAttribute('data-dk'), el.getAttribute('data-to'));
+          break;
+        case 'toggle-multi':
+          var ek = el.getAttribute('data-ekey');
+          window._expanded = window._expanded || {};
+          // Toggle: if not set or false, set true; if true, set false
+          window._expanded[ek] = !window._expanded[ek];
+          render();
           break;
         case 'link-policy':
           openLinkPolicyModal(el.getAttribute('data-eid'));
