@@ -2523,6 +2523,82 @@ function openNewEventModal(clientId){
   ov.addEventListener('click', function(e){ if(e.target===ov) document.body.removeChild(ov); });
 }
 
+// Open the Edit Event modal — lets you change notes, outcome, date, responsible.
+// Deliberately does NOT allow changing Event Type or Sub-type because those drive
+// the checklist; changing them mid-flight would orphan uploaded documents.
+function openEditEventModal(eventId){
+  var clientId = SEL;
+  var ev = (window._events[clientId]||[]).find(function(e){return String(e.ID)===String(eventId);});
+  if(!ev){ alert('Event not found'); return; }
+
+  var ov = document.createElement('div');
+  ov.className = 'ov';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(10,20,40,.55);z-index:9999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(2px)';
+  var box = document.createElement('div');
+  box.className = 'modal';
+  box.style.cssText = 'background:#fff;border-radius:12px;padding:24px 28px;max-width:480px;width:100%;box-shadow:0 12px 48px rgba(0,0,0,.25)';
+
+  var typeDef = EVENT_TYPES.find(function(t){return t.key===ev.EventType;});
+  var typeLabel = typeDef ? typeDef.label : ev.EventType;
+  var readOnlyPill = function(lbl,val){
+    return '<div style="margin-bottom:10px"><div style="font-size:11px;font-weight:700;color:#889;text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px">'+lbl+'</div>'+
+      '<div style="padding:7px 11px;background:#fafaf5;border-radius:6px;font-size:13px;color:#556">'+escHtml(val||'—')+'</div></div>';
+  };
+
+  box.innerHTML =
+    '<div style="font-family:Georgia,serif;font-size:18px;color:#0e413a;margin-bottom:6px">Edit Work Event</div>'+
+    '<div style="font-size:12px;color:#889;margin-bottom:18px">Edit notes, outcome, date or responsible. Event Type is locked.</div>'+
+
+    readOnlyPill('Event Type', (typeDef?typeDef.icon+' ':'')+typeLabel+(ev.EventSubType?' ('+ev.EventSubType+')':''))+
+
+    '<div style="margin-bottom:12px"><label style="font-size:12px;font-weight:600;color:#445;display:block;margin-bottom:4px">Event Date *</label>'+
+    '<input id="edit_ev_date" type="date" value="'+escHtml(ev.EventDate||'')+'" style="width:100%;padding:8px 10px;border:1.5px solid #ccc;border-radius:6px;font-size:13px;font-family:inherit"></div>'+
+
+    '<div style="margin-bottom:12px"><label style="font-size:12px;font-weight:600;color:#445;display:block;margin-bottom:4px">Responsible</label>'+
+    '<select id="edit_ev_responsible" style="width:100%;padding:8px 10px;border:1.5px solid #ccc;border-radius:6px;font-size:13px;font-family:inherit">'+
+    '<option value="Clinton"'+(ev.ResponsibleUser==='Clinton'?' selected':'')+'>Clinton</option>'+
+    '<option value="Wife"'+(ev.ResponsibleUser==='Wife'?' selected':'')+'>Wife</option>'+
+    '<option value="Daughter"'+(ev.ResponsibleUser==='Daughter'?' selected':'')+'>Daughter</option>'+
+    '</select></div>'+
+
+    '<div style="margin-bottom:12px"><label style="font-size:12px;font-weight:600;color:#445;display:block;margin-bottom:4px">Outcome (short summary)</label>'+
+    '<input id="edit_ev_outcome" type="text" value="'+escHtml(ev.Outcome||'')+'" placeholder="e.g. Old Mutual Unit Trust R500/m fresh" style="width:100%;padding:8px 10px;border:1.5px solid #ccc;border-radius:6px;font-size:13px;font-family:inherit"></div>'+
+
+    '<div style="margin-bottom:16px"><label style="font-size:12px;font-weight:600;color:#445;display:block;margin-bottom:4px">Notes</label>'+
+    '<textarea id="edit_ev_notes" rows="4" style="width:100%;padding:8px 10px;border:1.5px solid #ccc;border-radius:6px;font-size:13px;font-family:inherit;resize:vertical">'+escHtml(ev.Notes||'')+'</textarea></div>'+
+
+    '<div style="display:flex;justify-content:flex-end;gap:8px">'+
+    '<button id="edit_ev_cancel" style="padding:8px 18px;border-radius:7px;border:1.5px solid #ddd;background:#fff;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;color:#555">Cancel</button>'+
+    '<button id="edit_ev_save" style="padding:8px 22px;border-radius:7px;border:none;background:#0e413a;color:#fff;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">Save Changes</button>'+
+    '</div>';
+
+  ov.appendChild(box);
+  document.body.appendChild(ov);
+
+  document.getElementById('edit_ev_cancel').onclick = function(){ document.body.removeChild(ov); };
+  document.getElementById('edit_ev_save').onclick = function(){
+    var date    = document.getElementById('edit_ev_date').value;
+    var resp    = document.getElementById('edit_ev_responsible').value;
+    var outcome = document.getElementById('edit_ev_outcome').value;
+    var notes   = document.getElementById('edit_ev_notes').value;
+    if(!date){ alert('Event date is required'); return; }
+    var patch = {
+      EventDate: date,
+      ResponsibleUser: resp,
+      Outcome: outcome,
+      Notes: notes
+    };
+    sbFetch('PATCH','/rest/v1/work_events?ID=eq.'+encodeURIComponent(eventId), patch, function(res, err){
+      if(err){ alert('Save failed: '+err); return; }
+      document.body.removeChild(ov);
+      toast('✓ Event updated','ok');
+      loadEvents(clientId);
+    });
+  };
+
+  ov.addEventListener('click', function(e){ if(e.target===ov) document.body.removeChild(ov); });
+}
+
 // Open a specific event's detail view
 function openEventDetail(eventId){
   window._selectedEvent = eventId;
@@ -5278,7 +5354,7 @@ document.addEventListener('click', function(e){
           deleteEvent(el.getAttribute('data-eid'), cid);
           break;
         case 'edit-event':
-          alert('Edit Event will be built in the next session — for now, Delete and re-create if you need to change anything.');
+          openEditEventModal(el.getAttribute('data-eid'));
           break;
         case 'event-doc-upload':
           openEventDocUpload(el.getAttribute('data-eid'), el.getAttribute('data-dk'), el.getAttribute('data-replace')==='1');
