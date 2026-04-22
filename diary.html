@@ -134,7 +134,7 @@ body{font-family:'DM Sans',sans-serif;background:var(--cream);color:var(--ink);m
 .tg-cell.occupied{cursor:default}
 .tg-cell.occupied:hover{background:transparent}
 .tg-empty{color:#ccc;font-size:11px}
-.appt-block{background:#fff;border:1.5px solid var(--mist);border-radius:8px;padding:6px 10px;margin:2px 4px 2px 0;cursor:pointer;transition:border-color .15s;overflow:hidden;display:flex;flex-direction:column;justify-content:center;min-height:0}
+.appt-block{position:relative;background:#fff;border:1.5px solid var(--mist);border-radius:8px;padding:6px 28px 6px 10px;margin:2px 4px 2px 0;cursor:pointer;transition:border-color .15s;overflow:hidden;display:flex;flex-direction:column;justify-content:center;min-height:0}
 .appt-block:hover{border-color:var(--navy)}
 .appt-block.is-open{border-color:var(--navy);border-width:2px;box-shadow:0 0 0 2px rgba(14,65,58,.12)}
 .appt-block.nb{border-left:4px solid var(--sage);background:#f0fdf4}
@@ -906,7 +906,8 @@ function renderDiary(){
 
   // Build the grid.
   // CSS grid: 2 columns (label | content), TOTAL_CELLS rows. Slot blocks span rows via grid-row.
-  var html = '<div class="time-grid" style="grid-template-rows:repeat('+TOTAL_CELLS+',26px)">';
+  // Click handling uses event delegation via data-action attributes (more robust than inline onclick).
+  var html = '<div class="time-grid" id="timeGridEl" style="grid-template-rows:repeat('+TOTAL_CELLS+',26px)">';
 
   // Label cells and background cells — one per half-hour.
   for(var c=0; c<TOTAL_CELLS; c++){
@@ -918,10 +919,9 @@ function renderDiary(){
     // Label column (col 1)
     html += '<div class="tg-label '+(isHour?'hour':'half')+'" style="grid-column:1;grid-row:'+(c+1)+'">'+labelTxt+'</div>';
     // Content column (col 2) — only render "+ add" when cell is empty.
-    // Occupied cells are covered by the slot block that spans them, so no cell is rendered underneath.
     if(occupied[c]===undefined){
       var halfTime = cellLabel(c);
-      html += '<div class="tg-cell '+(isHour?'hour':'half')+'" style="grid-column:2;grid-row:'+(c+1)+'" onclick="addSlotAtTime(\''+halfTime+'\')" title="Tap to add at '+halfTime+'"><span class="tg-empty">+ add '+halfTime+'</span></div>';
+      html += '<div class="tg-cell '+(isHour?'hour':'half')+'" style="grid-column:2;grid-row:'+(c+1)+'" data-action="addSlotAtTime" data-time="'+halfTime+'" title="Tap to add at '+halfTime+'"><span class="tg-empty">+ add '+halfTime+'</span></div>';
     }
   }
 
@@ -935,15 +935,16 @@ function renderDiary(){
     var openCls = isOpen ? ' is-open' : '';
     var startLine = span.startCell + 1;
     var endLine   = span.endCell + 1;
-    html += '<div class="appt-block '+tc+' '+howClass(s.how)+openCls+'" id="'+sid+'" style="grid-column:2;grid-row:'+startLine+' / '+endLine+'" onclick="toggleSlot(\''+sid+'\')">';
-    html += '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">';
+    html += '<div class="appt-block '+tc+' '+howClass(s.how)+openCls+'" id="'+sid+'" data-action="toggleSlot" data-sid="'+sid+'" style="grid-column:2;grid-row:'+startLine+' / '+endLine+'">';
+    html += '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;pointer-events:none">';
     html += '<span style="font-size:11px;color:#888;min-width:86px">'+(s.time||'')+'–'+(s.end||'')+'</span>';
     html += '<span class="ab-name">'+(s.client?esc(s.client):'<span style="color:#bbb;font-style:italic">tap to fill</span>')+'</span>';
     if(s.type) html += '<span style="font-size:10px;padding:1px 7px;border-radius:8px;background:rgba(0,0,0,.06)">'+s.type+'</span>';
     if(s.sold) html += '<span style="color:#166534;font-weight:700;font-size:12px">💰</span>';
     html += howBadge(s.how);
-    html += '<button class="slot-btn" style="margin-left:auto;font-size:12px" onclick="event.stopPropagation();deleteFreeSlot(event,'+i+')">🗑</button>';
     html += '</div>';
+    // Delete button is OUTSIDE the pointer-events:none wrapper so it receives its own click
+    html += '<button class="slot-btn" data-action="deleteFreeSlot" data-idx="'+i+'" style="position:absolute;top:4px;right:8px;font-size:12px;z-index:2">🗑</button>';
     html += '</div>';
   });
 
@@ -1009,6 +1010,31 @@ function renderDiary(){
 
   html += '<button class="add-slot-btn" onclick="addFreeSlot()" style="margin-top:10px">+ Add appointment / block</button>';
   col.innerHTML=html;
+
+  // Event delegation: one click handler on the grid, routed by data-action.
+  // More robust than inline onclick — works even if a cell has no direct cursor hit.
+  var gridEl = document.getElementById('timeGridEl');
+  if(gridEl){
+    gridEl.addEventListener('click', function(ev){
+      // Walk up from the click target to find the nearest element with a data-action.
+      var el = ev.target;
+      while(el && el!==gridEl && !el.hasAttribute('data-action')){
+        el = el.parentElement;
+      }
+      if(!el || el===gridEl) return;
+      var action = el.getAttribute('data-action');
+      if(action==='toggleSlot'){
+        ev.stopPropagation();
+        toggleSlot(el.getAttribute('data-sid'));
+      } else if(action==='addSlotAtTime'){
+        ev.stopPropagation();
+        addSlotAtTime(el.getAttribute('data-time'));
+      } else if(action==='deleteFreeSlot'){
+        ev.stopPropagation();
+        deleteFreeSlot(ev, parseInt(el.getAttribute('data-idx'),10));
+      }
+    });
+  }
 }
 
 
@@ -1358,6 +1384,20 @@ function esc(s){
 }
 
 // ── INIT ──
+// Global error handler — shows any uncaught JS error as a red banner at the top,
+// so silent failures can't hide. This is critical during diary grid debugging.
+window.addEventListener('error', function(ev){
+  var banner = document.getElementById('_errBanner');
+  if(!banner){
+    banner = document.createElement('div');
+    banner.id = '_errBanner';
+    banner.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#b91c1c;color:#fff;padding:8px 14px;font-family:monospace;font-size:12px;z-index:99999;white-space:pre-wrap';
+    document.body.appendChild(banner);
+  }
+  var msg = 'JS ERROR: ' + (ev.message||'unknown') + ' @ ' + (ev.filename||'?') + ':' + (ev.lineno||'?') + ':' + (ev.colno||'?');
+  banner.textContent = msg;
+  console.error('[Diary]', msg, ev.error);
+});
 setUser(currentUser);
 // Set current day to today if it's a weekday
 (function(){
