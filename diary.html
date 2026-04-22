@@ -123,16 +123,20 @@ body{font-family:'DM Sans',sans-serif;background:var(--cream);color:var(--ink);m
 /* ── ADD FREE SLOT ── */
 .add-slot-btn{width:100%;padding:10px;border:2px dashed var(--mist);background:transparent;border-radius:10px;color:#bbb;font-size:12px;cursor:pointer;font-family:inherit;transition:all .15s;margin-top:4px}
 .add-slot-btn:hover{border-color:var(--navy);color:var(--navy);background:var(--smoke)}
-.time-grid{display:flex;flex-direction:column;gap:0}
-.time-row{display:grid;grid-template-columns:52px 1fr;min-height:52px;border-bottom:1px solid var(--smoke)}
-.time-row:last-child{border-bottom:none}
-.time-row .hr-label{padding:6px 8px 0;font-size:11px;font-weight:700;color:#bbb;text-align:right;border-right:2px solid var(--mist);background:var(--smoke)}
-.time-row .hr-content{padding:4px 8px;position:relative;cursor:pointer;transition:background .15s;min-height:52px}
-.time-row .hr-content:hover{background:var(--smoke)}
-.time-row .hr-content.has-appt{cursor:default}
-.hr-content.has-appt:hover{background:#fff}
-.appt-block{background:#fff;border:1.5px solid var(--mist);border-radius:8px;padding:8px 10px;margin:2px 0;cursor:pointer;transition:border-color .15s}
+.time-grid{display:grid;grid-template-columns:52px 1fr;gap:0;border-top:1px solid var(--smoke)}
+.tg-label{padding:4px 8px 0;font-size:11px;font-weight:700;color:#bbb;text-align:right;border-right:2px solid var(--mist);background:var(--smoke);min-height:26px}
+.tg-label.half{border-top:1px dashed #eee;color:transparent}
+.tg-label.hour{border-top:1px solid var(--smoke)}
+.tg-cell{position:relative;padding:2px 8px;min-height:26px;cursor:pointer;transition:background .15s;display:flex;align-items:center}
+.tg-cell.half{border-top:1px dashed #eee}
+.tg-cell.hour{border-top:1px solid var(--smoke)}
+.tg-cell:hover{background:var(--smoke)}
+.tg-cell.occupied{cursor:default}
+.tg-cell.occupied:hover{background:transparent}
+.tg-empty{color:#ccc;font-size:11px}
+.appt-block{background:#fff;border:1.5px solid var(--mist);border-radius:8px;padding:6px 10px;margin:2px 4px 2px 0;cursor:pointer;transition:border-color .15s;overflow:hidden;display:flex;flex-direction:column;justify-content:center;min-height:0}
 .appt-block:hover{border-color:var(--navy)}
+.appt-block.is-open{border-color:var(--navy);border-width:2px;box-shadow:0 0 0 2px rgba(14,65,58,.12)}
 .appt-block.nb{border-left:4px solid var(--sage);background:#f0fdf4}
 .appt-block.fu{border-left:4px solid var(--sky);background:#eff6ff}
 .appt-block.rev{border-left:4px solid var(--gold);background:#fef9ee}
@@ -146,14 +150,8 @@ body{font-family:'DM Sans',sans-serif;background:var(--cream);color:var(--ink);m
 .appt-block .ab-meta{font-size:11px;color:#888;margin-top:2px;display:flex;gap:8px;align-items:center}
 .appt-block .ab-sold{color:#166534;font-weight:700}
 .empty-hour{color:#ccc;font-size:11px;padding:4px 0}
-/* Continuation stripe: shown in hour rows that are "covered" by an earlier slot's duration */
-.appt-cont{display:flex;align-items:center;gap:8px;padding:3px 10px;margin:2px 0;border-radius:6px;background:repeating-linear-gradient(135deg,#f3f4f6 0 8px,#e5e7eb 8px 16px);opacity:.75;cursor:pointer;border-left:3px solid #bbb;font-size:11px;min-height:28px}
-.appt-cont:hover{opacity:1}
-.appt-cont.nb{border-left-color:var(--sage)}
-.appt-cont.fu{border-left-color:var(--sky)}
-.appt-cont.rev{border-left-color:var(--gold)}
-.appt-cont.prospect{border-left-color:#f59e0b}
-.appt-cont.block{border-left-color:#888}
+.edit-panel{background:#fff;border:2px solid var(--navy);border-radius:10px;padding:14px;margin-top:14px;box-shadow:0 2px 8px rgba(0,0,0,.06)}
+.edit-panel-title{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--navy);margin-bottom:10px}
 
 /* ── SCOREBOARD ── */
 .scoreboard{background:var(--navy);color:#fff;border-radius:10px;padding:16px;margin-bottom:16px}
@@ -860,136 +858,156 @@ function renderDiary(){
   var slots=getSlots(currentUser,currentDay);
   slots.sort(function(a,b){ return (a.time||'').localeCompare(b.time||''); });
 
-  // Build hour->slot index map.
-  // hourMap[h]       = indices of slots that START in hour h
-  // continueMap[h]   = indices of slots that pass THROUGH hour h but don't start there
-  // A slot covers hour h if [start, end) overlaps [h:00, h+1:00). End time of exactly h+1:00 does NOT cover h+1.
-  var HOURS=['07','08','09','10','11','12','13','14','15','16','17','18'];
-  var hourMap={};
-  var continueMap={};
-  HOURS.forEach(function(h){ hourMap[h]=[]; continueMap[h]=[]; });
+  // ── Half-hour grid (Outlook-style). Each cell = 30 min. Slots span their real duration. ──
+  // Cell index: 0 = 07:00, 1 = 07:30, 2 = 08:00, ..., N = 18:30.
+  var START_HOUR = 7;
+  var END_HOUR   = 18;                        // last label shown is 18:30
+  var TOTAL_CELLS = (END_HOUR - START_HOUR + 1) * 2;  // 07:00..18:30 inclusive
+
   function timeToMin(t){
     if(!t||t.indexOf(':')<0) return null;
     var p=t.split(':'); var hh=parseInt(p[0],10); var mm=parseInt(p[1],10);
     if(isNaN(hh)||isNaN(mm)) return null;
     return hh*60+mm;
   }
-  function ensureHour(hh){
-    var h = (hh<10?'0':'')+hh;
-    if(!hourMap[h]){
-      hourMap[h]=[]; continueMap[h]=[];
-      if(HOURS.indexOf(h)<0){ HOURS.push(h); HOURS.sort(); }
-    }
-    return h;
+  function minToCell(m){
+    // Map minute-of-day to 30-min cell index (clamped to grid bounds).
+    var c = Math.floor((m - START_HOUR*60) / 30);
+    if(c < 0) c = 0;
+    if(c > TOTAL_CELLS) c = TOTAL_CELLS;
+    return c;
   }
+  function cellLabel(cellIdx){
+    var totalMin = START_HOUR*60 + cellIdx*30;
+    var hh = Math.floor(totalMin/60);
+    var mm = totalMin%60;
+    return (hh<10?'0':'')+hh+':'+(mm<10?'0':'')+mm;
+  }
+
+  // Compute each slot's cell-span and mark occupied cells.
+  var occupied = new Array(TOTAL_CELLS); // stores slot index that starts there, or true for "covered by a later row of a slot"
+  var slotSpans = []; // per slot: {startCell, endCell}
   slots.forEach(function(s,i){
-    var startH=(s.time||'00').substring(0,2);
-    ensureHour(parseInt(startH,10));
-    hourMap[startH].push(i);
-    // Compute continuation rows from start-hour+1 up to (but not including) the hour of end-time if end > (start-hour+1):00
-    var startMin=timeToMin(s.time);
-    var endMin=timeToMin(s.end);
-    if(startMin===null||endMin===null||endMin<=startMin) return;
-    var firstContHour = Math.floor(startMin/60)+1;    // hour immediately after the start hour
-    // A covered hour hh means endMin > hh*60 (strictly greater — exactly hh:00 does not cover hh)
-    for(var hh=firstContHour; endMin > hh*60; hh++){
-      var hKey = ensureHour(hh);
-      continueMap[hKey].push(i);
+    var sm = timeToMin(s.time);
+    var em = timeToMin(s.end);
+    if(sm===null){ slotSpans.push(null); return; }
+    if(em===null || em<=sm){ em = sm + 60; } // default to 1 hour if end missing/invalid
+    var startCell = minToCell(sm);
+    // For end: a slot ending exactly on a cell boundary does NOT cover that cell.
+    // Use Math.ceil so a 09:15 end still covers the 09:00–09:30 cell.
+    var endCell = Math.ceil((em - START_HOUR*60) / 30);
+    if(endCell <= startCell) endCell = startCell + 1;
+    if(endCell > TOTAL_CELLS) endCell = TOTAL_CELLS;
+    slotSpans.push({startCell:startCell, endCell:endCell});
+    for(var c=startCell; c<endCell; c++){
+      if(c>=0 && c<TOTAL_CELLS) occupied[c] = (c===startCell) ? i : true;
     }
   });
 
-  var html='<div class="time-grid">';
-  HOURS.forEach(function(h){
-    var idxs=hourMap[h]||[];
-    var contIdxs=continueMap[h]||[];
-    var hasAnything = idxs.length>0 || contIdxs.length>0;
-    html+='<div class="time-row">';
-    html+='<div class="hr-label">'+h+':00</div>';
-    // Continuation rows (and start-rows) must not be clickable for "+ add" — prevents accidental double-booking
-    html+='<div class="hr-content'+(hasAnything?' has-appt':'')+'" '+(hasAnything?'':'onclick="addSlotAtHour(\''+h+'\')" title="Tap to add"')+' >';
-    // 1. Render continuation stripes first (slots that started in an earlier hour and extend into this row)
-    contIdxs.forEach(function(i){
-      var s=slots[i]; var tc=(s.type||'block').toLowerCase();
-      var label = s.client ? esc(s.client) : (s.label ? esc(s.label) : (s.type||'Block'));
-      html+='<div class="appt-cont '+tc+'" onclick="toggleSlot(\'fs'+i+'\')" title="Continues from '+(s.time||'')+' until '+(s.end||'')+'">';
-      html+='<span style="font-size:10px;color:#888;min-width:86px">↳ '+(s.time||'')+'–'+(s.end||'')+'</span>';
-      html+='<span style="font-size:11px;color:#888;font-style:italic">continues: '+label+'</span>';
-      html+='</div>';
-    });
-    if(idxs.length===0 && contIdxs.length===0){
-      html+='<span class="empty-hour">+ add</span>';
-    } else if(idxs.length===0){
-      // Only continuations — no new "+ add" here (time is taken)
-    } else {
-      idxs.forEach(function(i){
-        var s=slots[i]; var tc=(s.type||'block').toLowerCase(); var sid='fs'+i; var isOpen=openSlot===sid;
-        html+='<div class="appt-block '+tc+' '+howClass(s.how)+'" id="'+sid+'">';
-        html+='<div style="display:flex;align-items:center;gap:8px;cursor:pointer" onclick="toggleSlot(\''+sid+'\')">';
-        html+='<span style="font-size:11px;color:#888;min-width:86px">'+timeLabel(s,h+':00')+'</span>';
-        html+='<span class="ab-name">'+(s.client?esc(s.client):'<span style="color:#bbb;font-style:italic">tap to fill</span>')+'</span>';
-        if(s.type) html+='<span style="font-size:10px;padding:1px 7px;border-radius:8px;background:rgba(0,0,0,.06)">'+s.type+'</span>';
-        if(s.sold) html+='<span style="color:#166534;font-weight:700;font-size:12px">💰</span>';
-        html+=howBadge(s.how);
-        html+='<button class="slot-btn" style="margin-left:auto;font-size:12px" onclick="event.stopPropagation();deleteFreeSlot(event,'+i+')">🗑</button>';
-        html+='</div>';
-        if(isOpen){
-          html+='<div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--mist)">';
-          html+='<div style="display:grid;grid-template-columns:auto auto 1fr;gap:8px;align-items:center;margin-bottom:8px">';
-          html+='<label style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:#888">Start</label>';
-          html+='<input id="fs_time_'+i+'" type="time" value="'+(s.time||h+':00')+'" style="border:1.5px solid var(--mist);border-radius:7px;padding:6px 8px;font-family:inherit;font-size:13px;width:120px">';
-          html+='<span></span>';
-          html+='<label style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:#888">End</label>';
-          html+='<input id="fs_end_'+i+'" type="time" value="'+(s.end||'')+'" style="border:1.5px solid var(--mist);border-radius:7px;padding:6px 8px;font-family:inherit;font-size:13px;width:120px">';
-          html+='<button class="btn b-ghost" type="button" style="font-size:11px;color:var(--ink);padding:6px 10px;width:max-content" onclick="setEndPlusHour('+i+')">+1 hour</button>';
-          html+='</div>';
-          html+='<label style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:#888;display:block;margin-bottom:4px">Client / Description</label>';
-          html+='<input id="fs_client_'+i+'" type="text" value="'+esc(s.client||s.label||'')+'" placeholder="Johan Smith / Admin / Gym" style="width:100%;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px;margin-bottom:8px">';
-          html+='<label style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:#888;display:block;margin-bottom:4px">Type</label>';
-          html+='<div class="type-row" style="margin-bottom:8px">';
-          ['NB','FU','REV','Prospect','Block'].forEach(function(tp){
-            var act=(s.type||'NB')===tp;
-            html+='<button class="type-btn'+(act?' active-'+tp.toLowerCase():'')+'" onclick="setFreeType('+i+',\''+tp+'\')">'+tp+'</button>';
-          });
-          html+='</div>';
-          html+='<label style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:#888;display:block;margin-bottom:4px">How / Where</label>';
-          html+='<div class="type-row" style="margin-bottom:8px">';
-          ['Address','Teams','Phone'].forEach(function(hw){
-            var act=(s.how||'Address')===hw;
-            var howCls=hw==='Teams'?'active-how-teams':(hw==='Phone'?'active-how-phone':'active-how-address');
-            html+='<button class="type-btn'+(act?' '+howCls:'')+' " onclick="setSlotHow('+i+',\''+hw+'\')" style="font-size:12px">'+hw+'</button>';
-          });
-          html+='</div>';
-          if((s.how||'Address')==='Teams'){
-            html+='<label style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:#888;display:block;margin-bottom:4px">Teams Link</label>';
-            html+='<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">';
-            html+='<input id="fs_teams_'+i+'" type="url" value="'+esc(s.teams||'')+'" placeholder="https://teams.microsoft.com/..." oninput="syncTeamsLink('+i+',this.value)" style="flex:1;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px">';
-            html+='<button class="btn b-sky" type="button" style="font-size:11px;padding:8px 10px" onclick="openTeamsLink('+i+')">Open</button>';
-            html+='</div>';
-            html+='<a class="teams-link" id="fs_teams_link_'+i+'" href="'+esc(s.teams||'#')+'" target="_blank" rel="noopener" style="'+(s.teams?'display:inline-flex':'display:none')+'">📹 Join Teams Meeting</a>';
-          }
-          html+='<label style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:#888;display:block;margin-bottom:4px">Notes</label>';
-          html+='<textarea id="fs_notes_'+i+'" placeholder="What happened? Next step?" oninput="autoSaveNotes('+i+',this.value)" style="width:100%;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px;resize:vertical;min-height:100px;margin-bottom:8px">'+(s.notes||'')+'</textarea>';
-          html+='<label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:8px;font-size:13px">';
-          html+='<input type="checkbox" id="fs_sold_'+i+'" '+(s.sold?'checked':'')+' onchange="setSold('+i+',this.checked)" style="width:16px;height:16px;accent-color:#166534">';
-          html+='<span style="font-weight:700;color:#166534">Sale closed 💰</span></label>';
-          if(s.sold) html+='<input id="fs_comm_'+i+'" type="number" value="'+(s.commission||'')+'" placeholder="Estimated commission (R)" oninput="autoSaveCommission('+i+',this.value)" style="border:2px solid #166534;border-radius:7px;padding:8px 10px;font-family:inherit;font-size:14px;font-weight:700;width:100%;margin-bottom:8px">';
-          // Move to another date
-          var _curD=dayDate(currentDay);
-          var _curIso=_curD.getFullYear()+'-'+String(_curD.getMonth()+1).padStart(2,'0')+'-'+String(_curD.getDate()).padStart(2,'0');
-          html+='<div style="background:#fef9ee;border:1px solid var(--gold2);border-radius:7px;padding:8px 10px;margin-bottom:8px">';
-          html+='<label style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:#888;display:block;margin-bottom:4px">📅 Move to another date (Mon-Fri)</label>';
-          html+='<input type="date" id="fs_movedate_'+i+'" value="'+_curIso+'" onchange="moveAppointment('+i+',this.value)" style="border:1.5px solid var(--mist);border-radius:7px;padding:6px 8px;font-family:inherit;font-size:13px;width:100%">';
-          html+='</div>';
-          html+='<div class="save-row"><button class="btn b-sage" style="font-size:11px" onclick="saveFreeSlot('+i+')">Save</button>';
-          html+='<button class="btn b-ghost" style="font-size:11px;color:var(--ink)" onclick="toggleSlot(\''+sid+'\')">Close</button></div></div>';
-        }
-        html+='</div>';
+  // Build the grid.
+  // CSS grid: 2 columns (label | content), TOTAL_CELLS rows. Slot blocks span rows via grid-row.
+  var html = '<div class="time-grid" style="grid-template-rows:repeat('+TOTAL_CELLS+',26px)">';
+
+  // Label cells and background cells — one per half-hour.
+  for(var c=0; c<TOTAL_CELLS; c++){
+    var totalMin = START_HOUR*60 + c*30;
+    var hh = Math.floor(totalMin/60);
+    var mm = totalMin%60;
+    var isHour = (mm===0);
+    var labelTxt = isHour ? ((hh<10?'0':'')+hh+':00') : '';
+    // Label column (col 1)
+    html += '<div class="tg-label '+(isHour?'hour':'half')+'" style="grid-column:1;grid-row:'+(c+1)+'">'+labelTxt+'</div>';
+    // Content column (col 2) — only render "+ add" when cell is empty.
+    // Occupied cells are covered by the slot block that spans them, so no cell is rendered underneath.
+    if(occupied[c]===undefined){
+      var halfTime = cellLabel(c);
+      html += '<div class="tg-cell '+(isHour?'hour':'half')+'" style="grid-column:2;grid-row:'+(c+1)+'" onclick="addSlotAtTime(\''+halfTime+'\')" title="Tap to add at '+halfTime+'"><span class="tg-empty">+ add '+halfTime+'</span></div>';
+    }
+  }
+
+  // Slot blocks (one per slot) — rendered in col 2, spanning their cells.
+  slots.forEach(function(s,i){
+    var span = slotSpans[i];
+    if(!span) return;
+    var sid = 'fs'+i;
+    var isOpen = openSlot===sid;
+    var tc = (s.type||'block').toLowerCase();
+    var openCls = isOpen ? ' is-open' : '';
+    var startLine = span.startCell + 1;
+    var endLine   = span.endCell + 1;
+    html += '<div class="appt-block '+tc+' '+howClass(s.how)+openCls+'" id="'+sid+'" style="grid-column:2;grid-row:'+startLine+' / '+endLine+'" onclick="toggleSlot(\''+sid+'\')">';
+    html += '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">';
+    html += '<span style="font-size:11px;color:#888;min-width:86px">'+(s.time||'')+'–'+(s.end||'')+'</span>';
+    html += '<span class="ab-name">'+(s.client?esc(s.client):'<span style="color:#bbb;font-style:italic">tap to fill</span>')+'</span>';
+    if(s.type) html += '<span style="font-size:10px;padding:1px 7px;border-radius:8px;background:rgba(0,0,0,.06)">'+s.type+'</span>';
+    if(s.sold) html += '<span style="color:#166534;font-weight:700;font-size:12px">💰</span>';
+    html += howBadge(s.how);
+    html += '<button class="slot-btn" style="margin-left:auto;font-size:12px" onclick="event.stopPropagation();deleteFreeSlot(event,'+i+')">🗑</button>';
+    html += '</div>';
+    html += '</div>';
+  });
+
+  html += '</div>'; // end .time-grid
+
+  // ── Edit panel (below the grid) — rendered only when a slot is open. ──
+  if(openSlot && openSlot.indexOf('fs')===0){
+    var i = parseInt(openSlot.substring(2),10);
+    var s = slots[i];
+    if(s){
+      var _curD=dayDate(currentDay);
+      var _curIso=_curD.getFullYear()+'-'+String(_curD.getMonth()+1).padStart(2,'0')+'-'+String(_curD.getDate()).padStart(2,'0');
+      html += '<div class="edit-panel" id="editPanel_'+i+'">';
+      html += '<div class="edit-panel-title">Editing: '+(s.time||'')+'–'+(s.end||'')+(s.client?' — '+esc(s.client):'')+'</div>';
+      html += '<div style="display:grid;grid-template-columns:auto auto 1fr;gap:8px;align-items:center;margin-bottom:8px">';
+      html += '<label style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:#888">Start</label>';
+      html += '<input id="fs_time_'+i+'" type="time" value="'+(s.time||'')+'" data-old-start="'+(s.time||'')+'" onchange="onStartTimeChange('+i+',this)" style="border:1.5px solid var(--mist);border-radius:7px;padding:6px 8px;font-family:inherit;font-size:13px;width:120px">';
+      html += '<span></span>';
+      html += '<label style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:#888">End</label>';
+      html += '<input id="fs_end_'+i+'" type="time" value="'+(s.end||'')+'" style="border:1.5px solid var(--mist);border-radius:7px;padding:6px 8px;font-family:inherit;font-size:13px;width:120px">';
+      html += '<button class="btn b-ghost" type="button" style="font-size:11px;color:var(--ink);padding:6px 10px;width:max-content" onclick="setEndPlusHour('+i+')">+1 hour</button>';
+      html += '</div>';
+      html += '<label style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:#888;display:block;margin-bottom:4px">Client / Description</label>';
+      html += '<input id="fs_client_'+i+'" type="text" value="'+esc(s.client||s.label||'')+'" placeholder="Johan Smith / Admin / Gym" style="width:100%;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px;margin-bottom:8px">';
+      html += '<label style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:#888;display:block;margin-bottom:4px">Type</label>';
+      html += '<div class="type-row" style="margin-bottom:8px">';
+      ['NB','FU','REV','Prospect','Block'].forEach(function(tp){
+        var act=(s.type||'NB')===tp;
+        html += '<button class="type-btn'+(act?' active-'+tp.toLowerCase():'')+'" onclick="setFreeType('+i+',\''+tp+'\')">'+tp+'</button>';
       });
+      html += '</div>';
+      html += '<label style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:#888;display:block;margin-bottom:4px">How / Where</label>';
+      html += '<div class="type-row" style="margin-bottom:8px">';
+      ['Address','Teams','Phone'].forEach(function(hw){
+        var act=(s.how||'Address')===hw;
+        var howCls=hw==='Teams'?'active-how-teams':(hw==='Phone'?'active-how-phone':'active-how-address');
+        html += '<button class="type-btn'+(act?' '+howCls:'')+' " onclick="setSlotHow('+i+',\''+hw+'\')" style="font-size:12px">'+hw+'</button>';
+      });
+      html += '</div>';
+      if((s.how||'Address')==='Teams'){
+        html += '<label style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:#888;display:block;margin-bottom:4px">Teams Link</label>';
+        html += '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">';
+        html += '<input id="fs_teams_'+i+'" type="url" value="'+esc(s.teams||'')+'" placeholder="https://teams.microsoft.com/..." oninput="syncTeamsLink('+i+',this.value)" style="flex:1;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px">';
+        html += '<button class="btn b-sky" type="button" style="font-size:11px;padding:8px 10px" onclick="openTeamsLink('+i+')">Open</button>';
+        html += '</div>';
+        html += '<a class="teams-link" id="fs_teams_link_'+i+'" href="'+esc(s.teams||'#')+'" target="_blank" rel="noopener" style="'+(s.teams?'display:inline-flex':'display:none')+'">📹 Join Teams Meeting</a>';
+      }
+      html += '<label style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:#888;display:block;margin-bottom:4px">Notes</label>';
+      html += '<textarea id="fs_notes_'+i+'" placeholder="What happened? Next step?" oninput="autoSaveNotes('+i+',this.value)" style="width:100%;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px;resize:vertical;min-height:100px;margin-bottom:8px">'+(s.notes||'')+'</textarea>';
+      html += '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:8px;font-size:13px">';
+      html += '<input type="checkbox" id="fs_sold_'+i+'" '+(s.sold?'checked':'')+' onchange="setSold('+i+',this.checked)" style="width:16px;height:16px;accent-color:#166534">';
+      html += '<span style="font-weight:700;color:#166534">Sale closed 💰</span></label>';
+      if(s.sold) html += '<input id="fs_comm_'+i+'" type="number" value="'+(s.commission||'')+'" placeholder="Estimated commission (R)" oninput="autoSaveCommission('+i+',this.value)" style="border:2px solid #166534;border-radius:7px;padding:8px 10px;font-family:inherit;font-size:14px;font-weight:700;width:100%;margin-bottom:8px">';
+      html += '<div style="background:#fef9ee;border:1px solid var(--gold2);border-radius:7px;padding:8px 10px;margin-bottom:8px">';
+      html += '<label style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:#888;display:block;margin-bottom:4px">📅 Move to another date (Mon-Fri)</label>';
+      html += '<input type="date" id="fs_movedate_'+i+'" value="'+_curIso+'" onchange="moveAppointment('+i+',this.value)" style="border:1.5px solid var(--mist);border-radius:7px;padding:6px 8px;font-family:inherit;font-size:13px;width:100%">';
+      html += '</div>';
+      html += '<div class="save-row"><button class="btn b-sage" style="font-size:11px" onclick="saveFreeSlot('+i+')">Save</button>';
+      html += '<button class="btn b-ghost" style="font-size:11px;color:var(--ink)" onclick="toggleSlot(\'fs'+i+'\')">Close</button></div>';
+      html += '</div>';
     }
-    html+='</div></div>';
-  });
+  }
 
-  html+='</div><button class="add-slot-btn" onclick="addFreeSlot()" style="margin-top:10px">+ Add appointment / block</button>';
+  html += '<button class="add-slot-btn" onclick="addFreeSlot()" style="margin-top:10px">+ Add appointment / block</button>';
   col.innerHTML=html;
 }
 
@@ -1161,10 +1179,51 @@ function clearStdSlot(e,time){
 }
 
 function addSlotAtHour(h){
+  // Legacy compat — delegates to addSlotAtTime with on-the-hour start.
+  addSlotAtTime(h+':00');
+}
+
+function addSlotAtTime(startTime){
+  // startTime is "HH:MM" (e.g. "08:30"). Creates a new 1-hour slot starting at that time.
   var slots=getSlots(currentUser,currentDay);
-  slots.push({time:h+':00',end:defaultEndTime(h+':00'),client:'',type:'NB',how:'Address',teams:'',notes:'',label:'',sold:false,commission:0});
+  slots.push({time:startTime,end:defaultEndTime(startTime),client:'',type:'NB',how:'Address',teams:'',notes:'',label:'',sold:false,commission:0});
   setSlots(currentUser,currentDay,slots);
   openSlot='fs'+(slots.length-1);
+  saveCurrentUser();
+  render();
+}
+
+function onStartTimeChange(i, el){
+  // When the user changes the start time: if the end time was the "auto" default for the old start
+  // (i.e. they hadn't manually set their own end), shift it by the same delta to preserve duration.
+  // Otherwise, preserve the user's explicitly-set end time.
+  var slots=getSlots(currentUser,currentDay);
+  if(!slots[i]) return;
+  var oldStart = el.getAttribute('data-old-start') || slots[i].time || '';
+  var newStart = el.value || '';
+  if(!newStart || !oldStart || newStart===oldStart){ slots[i].time=newStart; setSlots(currentUser,currentDay,slots); saveCurrentUser(); render(); return; }
+
+  function toMin(t){ var p=(t||'').split(':'); if(p.length<2) return null; var hh=parseInt(p[0],10),mm=parseInt(p[1],10); if(isNaN(hh)||isNaN(mm)) return null; return hh*60+mm; }
+  function minToTime(m){ if(m<0) m=0; if(m>=24*60) m=24*60-1; var hh=Math.floor(m/60), mm=m%60; return (hh<10?'0':'')+hh+':'+(mm<10?'0':'')+mm; }
+
+  var oldStartM = toMin(oldStart);
+  var newStartM = toMin(newStart);
+  var curEndM   = toMin(slots[i].end);
+  if(oldStartM===null || newStartM===null){ slots[i].time=newStart; setSlots(currentUser,currentDay,slots); saveCurrentUser(); render(); return; }
+
+  var delta = newStartM - oldStartM;
+  slots[i].time = newStart;
+
+  // Always shift end by the same delta to preserve duration.
+  // (If the user has an explicit end different from the +1h default, we still want to keep
+  //  the same duration when they slide the appointment earlier/later — that's what users expect.)
+  if(curEndM !== null){
+    slots[i].end = minToTime(curEndM + delta);
+  } else {
+    slots[i].end = defaultEndTime(newStart);
+  }
+  setSlots(currentUser,currentDay,slots);
+  saveCurrentUser();
   render();
 }
 
