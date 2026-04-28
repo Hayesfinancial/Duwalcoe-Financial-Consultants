@@ -880,6 +880,38 @@ function queueSmartSave() {
   } catch(e) {}
 })();
 
+// ── Policy write-back to CRM ──────────────────────────────────────────────
+// FNA-side edits to policy fields are PATCHed back to the policies table on
+// Supabase. Each (policyId, fieldName) gets its own debounce timer so that
+// editing different fields/policies don't cancel each other.
+var _polPatchTimers = {};
+function patchPolicyField(policyId, fieldName, value) {
+  if (!policyId) {
+    // Older policies imported before the ID was added to the slim object
+    console.warn('patchPolicyField: missing policyId for ' + fieldName);
+    var ind1 = document.getElementById('syncIndicator');
+    if (ind1) { ind1.textContent = '⚠ Re-open from CRM to enable saves'; ind1.style.color = '#f59e0b'; }
+    return;
+  }
+  var key = policyId + '::' + fieldName;
+  if (_polPatchTimers[key]) clearTimeout(_polPatchTimers[key]);
+  _polPatchTimers[key] = setTimeout(function(){
+    var indicator = document.getElementById('syncIndicator');
+    if (indicator) { indicator.textContent = '↑ Saving policy...'; indicator.style.color = '#a8b938'; }
+    var body = {};
+    body[fieldName] = value;
+    sbFetch('PATCH', '/rest/v1/policies?ID=eq.' + encodeURIComponent(policyId), body, function(res, err){
+      if (err) {
+        console.error('Policy PATCH failed:', fieldName, err);
+        if (indicator) { indicator.textContent = '⚠ Policy save failed'; indicator.style.color = '#f87171'; }
+      } else {
+        var t = new Date().toLocaleTimeString('en-ZA',{hour:'2-digit',minute:'2-digit'});
+        if (indicator) { indicator.textContent = '✓ Policy saved ' + t; indicator.style.color = '#86efac'; }
+      }
+    });
+  }, 800);
+}
+
 // Applies CRM policy data to state — used on fresh load and on "Refresh from CRM"
 function applyPolsFromCRM(pols) {
   S.importedPols = pols;
@@ -3785,7 +3817,10 @@ function buildPolCard(p, i) {
       var beInp=document.createElement('input'); beInp.type='text';
       beInp.value=String(p.BenEscalation||''); beInp.placeholder='e.g. 5 or CPI or Age rated';
       beInp.style.cssText='border:1.5px solid var(--mist);border-radius:6px;padding:7px 10px;font-size:13px;font-family:inherit;width:100%';
-      beInp.addEventListener('input',function(e){ S.importedPols[i].BenEscalation=e.target.value; });
+      beInp.addEventListener('input',function(e){
+        S.importedPols[i].BenEscalation=e.target.value;
+        patchPolicyField(S.importedPols[i].ID, 'BenEscalation', e.target.value);
+      });
       beWrap.appendChild(beInp);
       escRow.appendChild(beWrap);
     }
@@ -3880,7 +3915,13 @@ function buildPolCard(p, i) {
         beI.value=r.benEsc||''; beI.placeholder='%';
         beI.style.cssText='width:50px;padding:4px 5px;border:1.5px solid var(--mist);border-radius:4px;font-size:12px';
         beI.addEventListener('input',function(e){
-          try{var rows=JSON.parse(S.importedPols[i].LumpBenefits||'[]');rows[ri].benEsc=e.target.value;S.importedPols[i].LumpBenefits=JSON.stringify(rows);}catch(ex){}
+          try{
+            var rows=JSON.parse(S.importedPols[i].LumpBenefits||'[]');
+            rows[ri].benEsc=e.target.value;
+            var newJson=JSON.stringify(rows);
+            S.importedPols[i].LumpBenefits=newJson;
+            patchPolicyField(S.importedPols[i].ID, 'LumpBenefits', newJson);
+          }catch(ex){}
         });
         t5.appendChild(beI); tr.appendChild(t5);
         // Per-benefit retirement tick
