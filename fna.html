@@ -733,9 +733,34 @@ function queueSmartSave() {
     if (_lsPolsEarly) {
       var _polsEarly = JSON.parse(_lsPolsEarly);
       if (Array.isArray(_polsEarly)) {
+        // Snapshot FNA-only flags from any existing importedPols (saved state).
+        // applyPolsFromCRM replaces S.importedPols, so flags must be re-applied after.
+        var _flagSnap = {};
+        (S.importedPols||[]).forEach(function(op){
+          var k1 = op.PolicyNo;
+          var k2 = (op.Insurer||'')+'|'+(op.Product||'')+'|'+(op.Type||'');
+          var snap = {};
+          if (op._retInclude) snap.include = op._retInclude;
+          if (op._retRows && op._retRows.length) snap.rows = op._retRows;
+          if (op._retReturn !== undefined && op._retReturn !== '') snap.retReturn = op._retReturn;
+          if (Object.keys(snap).length) {
+            if (k1) _flagSnap[k1] = snap;
+            _flagSnap[k2] = snap;
+          }
+        });
         applyPolsFromCRM(_polsEarly);
-        // Reset seeded flags so beneficiaries re-seed from the new policy list
-        if (S.importedPols) S.importedPols.forEach(function(p){ p._bensSeeded = false; });
+        // Re-apply FNA-only flags onto the freshly-imported policies
+        (S.importedPols||[]).forEach(function(p){
+          var k1 = p.PolicyNo;
+          var k2 = (p.Insurer||'')+'|'+(p.Product||'')+'|'+(p.Type||'');
+          var snap = _flagSnap[k1] || _flagSnap[k2];
+          if (snap) {
+            if (snap.include) p._retInclude = snap.include;
+            if (snap.rows)    p._retRows    = snap.rows;
+            if (snap.retReturn !== undefined) p._retReturn = snap.retReturn;
+          }
+          p._bensSeeded = false;
+        });
       }
       localStorage.removeItem('du_fna_pols'); // clean up after reading
     }
@@ -771,8 +796,18 @@ function queueSmartSave() {
   if (indicator) { indicator.textContent = '↓ Loading...'; indicator.style.color = '#a8b938'; }
 
   loadFromServer(clientId, function(serverState, savedTime) {
+    // Always end by silently re-fetching live policies from Supabase. The
+    // localStorage handoff during open was the fast path; this confirms that
+    // policies reflect the current CRM state regardless of how the FNA was opened.
+    var doSilentLiveFetch = function() {
+      fetchLivePoliciesFromCRM({showStatus: false}, function(ok){
+        if (ok) { persist(); render(); }
+      });
+    };
+
     if (!serverState) {
       if (indicator) { indicator.textContent = ''; }
+      doSilentLiveFetch();
       return;
     }
     var localMetaTs = 0;
@@ -786,6 +821,7 @@ function queueSmartSave() {
         indicator.textContent = '✓ Restored local data';
         indicator.style.color = '#86efac';
       }
+      doSilentLiveFetch();
       return;
     }
     // Merge server state into S — but never overwrite importedPols (always from CRM)
@@ -813,7 +849,7 @@ function queueSmartSave() {
       });
     }
     S.importedPols = currentPols; // always use fresh CRM policies
-    // Restore _retInclude flags from saved retIncludes map
+    // Restore FNA-only flags (_retInclude, _retRows, _retReturn) from saved retIncludes map
     var retIncludes = serverState.retIncludes || {};
     if(Object.keys(retIncludes).length && S.importedPols && S.importedPols.length){
       S.importedPols.forEach(function(p){
@@ -821,7 +857,11 @@ function queueSmartSave() {
         var k2 = p.Insurer+'|'+p.Product+'|'+p.Type;
         var _ri = retIncludes[k1] || retIncludes[k2];
         if(_ri){
-          if(typeof _ri === 'object'){ p._retInclude = _ri.include||false; p._retRows = _ri.rows||[]; }
+          if(typeof _ri === 'object'){
+            p._retInclude = _ri.include||false;
+            p._retRows    = _ri.rows||[];
+            if(_ri.retReturn !== undefined && _ri.retReturn !== '') p._retReturn = _ri.retReturn;
+          }
           else { p._retInclude = true; p._retRows = []; } // legacy boolean
         }
       });
@@ -843,6 +883,7 @@ function queueSmartSave() {
       indicator.textContent = '✓ Synced ' + (savedTime ? savedTime.slice(0,16) : '');
       indicator.style.color = '#86efac';
     }
+    doSilentLiveFetch();
   });
 })();
 
@@ -879,38 +920,6 @@ function queueSmartSave() {
     }, 300);
   } catch(e) {}
 })();
-
-// ── Policy write-back to CRM ──────────────────────────────────────────────
-// FNA-side edits to policy fields are PATCHed back to the policies table on
-// Supabase. Each (policyId, fieldName) gets its own debounce timer so that
-// editing different fields/policies don't cancel each other.
-var _polPatchTimers = {};
-function patchPolicyField(policyId, fieldName, value) {
-  if (!policyId) {
-    // Older policies imported before the ID was added to the slim object
-    console.warn('patchPolicyField: missing policyId for ' + fieldName);
-    var ind1 = document.getElementById('syncIndicator');
-    if (ind1) { ind1.textContent = '⚠ Re-open from CRM to enable saves'; ind1.style.color = '#f59e0b'; }
-    return;
-  }
-  var key = policyId + '::' + fieldName;
-  if (_polPatchTimers[key]) clearTimeout(_polPatchTimers[key]);
-  _polPatchTimers[key] = setTimeout(function(){
-    var indicator = document.getElementById('syncIndicator');
-    if (indicator) { indicator.textContent = '↑ Saving policy...'; indicator.style.color = '#a8b938'; }
-    var body = {};
-    body[fieldName] = value;
-    sbFetch('PATCH', '/rest/v1/policies?ID=eq.' + encodeURIComponent(policyId), body, function(res, err){
-      if (err) {
-        console.error('Policy PATCH failed:', fieldName, err);
-        if (indicator) { indicator.textContent = '⚠ Policy save failed'; indicator.style.color = '#f87171'; }
-      } else {
-        var t = new Date().toLocaleTimeString('en-ZA',{hour:'2-digit',minute:'2-digit'});
-        if (indicator) { indicator.textContent = '✓ Policy saved ' + t; indicator.style.color = '#86efac'; }
-      }
-    });
-  }, 800);
-}
 
 // Applies CRM policy data to state — used on fresh load and on "Refresh from CRM"
 function applyPolsFromCRM(pols) {
@@ -979,10 +988,66 @@ function applyPolsFromCRM(pols) {
   S.existingCover.totalPrem  = totPrem  > 0 ? String(Math.round(totPrem))  : '';
 }
 
+// Fetch ACTIVE policies for this client live from Supabase. Used both on FNA
+// open (silent — fast-path is the localStorage handoff from the CRM) and by
+// the ↻ CRM button (with user-visible status). The policies table is keyed by
+// the CRM's internal client ID (cid URL param), NOT the SA IDNumber.
+function fetchLivePoliciesFromCRM(opts, onDone) {
+  opts = opts || {};
+  var crmClientId = (window._crmParams && window._crmParams.get('cid'))
+                    || window._crmInternalId || '';
+  if (!crmClientId) { if (onDone) onDone(false, 'no_cid'); return; }
+  if (opts.showStatus) status('↓ Fetching policies from CRM...');
+  var path = '/rest/v1/policies'
+           + '?ClientID=eq.' + encodeURIComponent(crmClientId)
+           + '&Status=eq.Active'
+           + '&select=*';
+  sbFetch('GET', path, null, function(rows, err){
+    if (err || !Array.isArray(rows)) {
+      if (opts.showStatus) status('⚠ Could not fetch policies from CRM');
+      if (onDone) onDone(false, err || 'bad_response');
+      return;
+    }
+    // Snapshot FNA-only flags from current importedPols (keyed by PolicyNo, with
+    // Insurer|Product|Type fallback). applyPolsFromCRM replaces S.importedPols, so we
+    // must re-apply these flags onto the new policy objects after the swap.
+    var flagSnap = {};
+    (S.importedPols||[]).forEach(function(op){
+      var k1 = op.PolicyNo;
+      var k2 = (op.Insurer||'')+'|'+(op.Product||'')+'|'+(op.Type||'');
+      var snap = {};
+      if (op._retInclude) snap.include = op._retInclude;
+      if (op._retRows && op._retRows.length) snap.rows = op._retRows;
+      if (op._retReturn !== undefined && op._retReturn !== '') snap.retReturn = op._retReturn;
+      if (Object.keys(snap).length) {
+        if (k1) flagSnap[k1] = snap;
+        flagSnap[k2] = snap;
+      }
+    });
+    applyPolsFromCRM(rows);
+    // Re-apply FNA-only flags onto the freshly-imported policies
+    (S.importedPols||[]).forEach(function(p){
+      var k1 = p.PolicyNo;
+      var k2 = (p.Insurer||'')+'|'+(p.Product||'')+'|'+(p.Type||'');
+      var snap = flagSnap[k1] || flagSnap[k2];
+      if (snap) {
+        if (snap.include) p._retInclude = snap.include;
+        if (snap.rows)    p._retRows    = snap.rows;
+        if (snap.retReturn !== undefined) p._retReturn = snap.retReturn;
+      }
+      p._bensSeeded = false;
+    });
+    if (opts.showStatus) {
+      if (rows.length === 0) status('✓ Refreshed from CRM — no active policies on file');
+      else status('✓ Refreshed from CRM (' + rows.length + ' active ' + (rows.length===1?'policy':'policies') + ')');
+    }
+    if (onDone) onDone(true, rows);
+  });
+}
+
 // Called by the "Refresh from CRM" button — re-applies CRM data over current state.
 // Personal details come from the URL params captured when the FNA was opened.
-// Policies are fetched LIVE from Supabase (same pattern as the planner) so this
-// works even if the CRM tab is closed or the localStorage push key has expired.
+// Policies are fetched LIVE from Supabase (works even if the CRM tab is closed).
 function refreshFromCRM() {
   if (!confirm('Refresh policies and personal details from CRM?\n\nYour FNA data (assets, needs, retirement etc) will be preserved. Only CRM fields (policies, income, personal details) will be updated.')) return;
   var params = window._crmParams;
@@ -1015,14 +1080,8 @@ function refreshFromCRM() {
     S.cli.domDate = rawDom2;
   }
 
-  // Pull live ACTIVE policies for this client direct from Supabase.
-  // The policies table is keyed by the CRM's INTERNAL client ID (ClientID column),
-  // NOT the SA IDNumber. Use the cid URL param, which the CRM passes for this purpose.
-  // Falls back to URL pols param for backwards compatibility (legacy URLs).
   var crmClientId = params.get('cid') || window._crmInternalId || '';
   var finishRefresh = function(){
-    // Reset seeded flags so beneficiaries re-seed from the current policy list
-    if (S.importedPols) S.importedPols.forEach(function(p){ p._bensSeeded = false; });
     // Reset retirement assets so they re-seed from the current policy list
     S.retAssets = [];
     persist();
@@ -1030,14 +1089,9 @@ function refreshFromCRM() {
   };
 
   if (crmClientId) {
-    status('↓ Fetching policies from CRM...');
-    var path = '/rest/v1/policies'
-             + '?ClientID=eq.' + encodeURIComponent(crmClientId)
-             + '&Status=eq.Active'
-             + '&select=*';
-    sbFetch('GET', path, null, function(rows, err){
-      if (err || !Array.isArray(rows)) {
-        // Network failure — fall back to URL pols if present, else leave policies untouched
+    fetchLivePoliciesFromCRM({showStatus: true}, function(ok, infoOrErr){
+      if (!ok) {
+        // Network failure — fall back to URL pols if present
         if (params.get('pols')) {
           try { applyPolsFromCRM(JSON.parse(decodeURIComponent(params.get('pols')))); } catch(e) {}
           finishRefresh();
@@ -1048,19 +1102,9 @@ function refreshFromCRM() {
         }
         return;
       }
-      // No active policies in CRM — clear the imported list so the FNA reflects reality
-      if (rows.length === 0) {
-        applyPolsFromCRM([]);
-        finishRefresh();
-        status('✓ Refreshed from CRM — no active policies on file');
-        return;
-      }
-      applyPolsFromCRM(rows);
       finishRefresh();
-      status('✓ Refreshed from CRM (' + rows.length + ' active ' + (rows.length===1?'policy':'policies') + ')');
     });
   } else if (params.get('pols')) {
-    // No CRM internal ID — try legacy URL fallback
     try { applyPolsFromCRM(JSON.parse(decodeURIComponent(params.get('pols')))); } catch(e) {}
     finishRefresh();
     status('✓ Refreshed from CRM');
@@ -1113,9 +1157,13 @@ function saveToServer(silent) {
   Object.keys(S).forEach(function(k){ if(!skip[k]) saveData[k] = S[k]; });
   var retIncludes = {};
   (S.importedPols||[]).forEach(function(p){
-    if(p._retInclude || (p._retRows && p._retRows.length)){
+    if(p._retInclude || (p._retRows && p._retRows.length) || (p._retReturn !== undefined && p._retReturn !== '')){
       var key2 = p.PolicyNo || (p.Insurer+'|'+p.Product+'|'+p.Type);
-      if(key2) retIncludes[key2] = {include:p._retInclude||false, rows:p._retRows||[]};
+      if(key2) retIncludes[key2] = {
+        include:   p._retInclude||false,
+        rows:      p._retRows||[],
+        retReturn: (p._retReturn !== undefined && p._retReturn !== '') ? p._retReturn : ''
+      };
     }
   });
   saveData.retIncludes = retIncludes;
@@ -1195,9 +1243,13 @@ function lockFinalVersion() {
   Object.keys(S).forEach(function(k){ if(!skip[k]) saveData[k] = S[k]; });
   var retIncludes = {};
   (S.importedPols||[]).forEach(function(p){
-    if(p._retInclude || (p._retRows && p._retRows.length)){
+    if(p._retInclude || (p._retRows && p._retRows.length) || (p._retReturn !== undefined && p._retReturn !== '')){
       var key2 = p.PolicyNo || (p.Insurer+'|'+p.Product+'|'+p.Type);
-      if(key2) retIncludes[key2] = {include:p._retInclude||false, rows:p._retRows||[]};
+      if(key2) retIncludes[key2] = {
+        include:   p._retInclude||false,
+        rows:      p._retRows||[],
+        retReturn: (p._retReturn !== undefined && p._retReturn !== '') ? p._retReturn : ''
+      };
     }
   });
   saveData.retIncludes = retIncludes;
@@ -1344,6 +1396,26 @@ function el(tag, className, textContent) {
   return e;
 }
 function div(className) { return el('div', className); }
+
+// Read-only display field for CRM-owned data — values shown but not editable.
+// Use this for any client/policy field that lives in the CRM (the source of truth).
+// `value` is shown as displayed text. `placeholder` shown when value is empty.
+function roDisp(labelTxt, value, opts) {
+  opts = opts || {};
+  var wrap = div('f');
+  if (labelTxt) { var lb = el('label'); lb.textContent = labelTxt; wrap.appendChild(lb); }
+  var box = document.createElement('div');
+  var v = (value == null || value === '') ? '' : String(value);
+  if (v) {
+    box.textContent = v;
+    box.style.cssText = 'border:1.5px solid var(--mist);border-radius:6px;padding:7px 10px;font-size:13px;font-family:inherit;background:#fafaf6;color:#1a1a1a;min-height:20px;line-height:20px;'+(opts.style||'');
+  } else {
+    box.textContent = opts.placeholder || '— from CRM —';
+    box.style.cssText = 'border:1.5px dashed var(--mist);border-radius:6px;padding:7px 10px;font-size:13px;font-family:inherit;background:transparent;color:#9a9a8a;min-height:20px;line-height:20px;font-style:italic;'+(opts.style||'');
+  }
+  wrap.appendChild(box);
+  return wrap;
+}
 
 // Text field: binds to obj[key], no render on input, optional blur callback
 function fld(labelTxt, obj, key, opts) {
@@ -1494,23 +1566,27 @@ function buildClient() {
   var s = div();
 
   s.appendChild(stitle('Personal Details'));
+  // CRM-owned fields below — to change them, edit the client in the CRM and re-import.
+  var crmHint = div('info');
+  crmHint.style.cssText = 'background:#f5f3ec;border-left:3px solid var(--gold);font-size:11px;color:#6a5f1a;margin-bottom:10px';
+  crmHint.textContent = 'ℹ Personal details below are pulled from the CRM. To change them, update the client record in the CRM and click ↻ CRM above.';
+  s.appendChild(crmHint);
+
   var r1 = g2();
-  r1.appendChild(fld('Full Name', S.cli, 'name', { placeholder: 'Client full name' }));
-  r1.appendChild(fld('ID Number', S.cli, 'id',   { placeholder: '8001015009087' }));
+  r1.appendChild(roDisp('Full Name', S.cli.name));
+  r1.appendChild(roDisp('ID Number', S.cli.id));
   s.appendChild(r1);
 
   var r2 = g3();
-  r2.appendChild(fld('Date of Birth (DD/MM/YYYY)', S.cli, 'dob', {
-    placeholder: '01/01/1980',
-    onblur: function() { render(); }
-  }));
-  r2.appendChild(sfld('Gender', S.cli, 'gender', ['', 'Male', 'Female']));
-  r2.appendChild(sfld('Smoker Status', S.cli, 'smoker', ['', 'Non-smoker', 'Smoker']));
+  r2.appendChild(roDisp('Date of Birth (DD/MM/YYYY)', S.cli.dob));
+  r2.appendChild(roDisp('Gender', S.cli.gender));
+  r2.appendChild(roDisp('Smoker Status', S.cli.smoker));
   s.appendChild(r2);
 
   var r3 = g3();
-  r3.appendChild(sfld('Education', S.cli, 'education', ['','Matric','Diploma','Degree','Post-graduate','Other']));
-  r3.appendChild(fld('Occupation', S.cli, 'occ', { placeholder: 'e.g. Engineer' }));
+  r3.appendChild(roDisp('Education', S.cli.education));
+  r3.appendChild(roDisp('Occupation', S.cli.occ));
+  // Retirement Age is an FNA-only assumption — kept editable
   r3.appendChild(sfld('Retirement Age', S.cli, 'retAge', ['55','60','63','65','67','70']));
   s.appendChild(r3);
 
@@ -1527,16 +1603,20 @@ function buildClient() {
 
   s.appendChild(stitle('Marital Status'));
   var r4 = g3();
-  r4.appendChild(sfld('Marital Status', S.cli, 'marital', [
-    '','Single','Married — COP','Married — ANC no accrual','Married — ANC with accrual',
-    'Divorced','Widowed','Life partner'
-  ]));
-  r4.appendChild(fld('Date of Marriage', S.cli, 'domDate', { type: 'date' }));
-  r4.appendChild(fld('Spouse / Partner Name', S.cli, 'spouseName', { placeholder: 'Full name' }));
+  r4.appendChild(roDisp('Marital Status', S.cli.marital));
+  // Display marriage date as DD/MM/YYYY (stored as YYYY-MM-DD)
+  var _domDisp = '';
+  if (S.cli.domDate) {
+    var _dp = String(S.cli.domDate).split(/[T-]/);
+    if (_dp.length >= 3) _domDisp = _dp[2] + '/' + _dp[1] + '/' + _dp[0];
+    else _domDisp = S.cli.domDate;
+  }
+  r4.appendChild(roDisp('Date of Marriage', _domDisp));
+  r4.appendChild(roDisp('Spouse / Partner Name', S.cli.spouseName));
   s.appendChild(r4);
 
   var r5 = g2();
-  r5.appendChild(fld('Spouse DOB (DD/MM/YYYY)', S.cli, 'spouseDob', { placeholder: '01/01/1982' }));
+  r5.appendChild(roDisp('Spouse DOB (DD/MM/YYYY)', S.cli.spouseDob));
   s.appendChild(r5);
 
   s.appendChild(stitle('Dependants'));
@@ -3329,16 +3409,13 @@ function buildPolicies() {
     s.appendChild(buildPolCard(p, i));
   });
 
-  // ── Add policy button
-  s.appendChild(addBtn('+ Add Policy / What-if Scenario', function() {
-    S.importedPols.push({
-      Insurer:'', PolicyNo:'', Type:'Life / Income Protector', Product:'',
-      Premium:'', Frequency:'Monthly',
-      BenDeath:'', BenDisability:'', BenDreadDisease:'', IncomeBenefits:'[]',
-      Beneficiary:'', BeneficiaryType:'', EstateDutiable:''
-    });
-    render();
-  }));
+  // Note for the user — policy editing/adding happens in the CRM
+  if (pols.length > 0) {
+    var crmEditNote = div('info');
+    crmEditNote.style.cssText = 'background:#f5f3ec;border-left:3px solid var(--gold);font-size:11px;color:#6a5f1a;margin-top:10px';
+    crmEditNote.textContent = 'ℹ All policy details above are pulled from the CRM. To add, edit, or remove a policy, do it in the CRM and click ↻ CRM at the top.';
+    s.appendChild(crmEditNote);
+  }
 
   // ── Premium totals + affordability projection
   var _riskTypes = pols.filter(function(p){
@@ -3439,16 +3516,13 @@ function buildPolicies() {
         tdPct.innerHTML = '<span style="font-size:11px;color:var(--sub)">' + pctToday + '%</span>';
         tr2.appendChild(tdPct);
 
-        // Esc % — editable inline
+        // Esc % — read-only display (premEsc is CRM-owned)
         var tdEsc = document.createElement('td'); tdEsc.style.textAlign='right';
-        var escInp = document.createElement('input'); escInp.type='text'; escInp.inputMode='numeric';
-        escInp.value = pol.premEsc||''; escInp.placeholder='0';
-        escInp.style.cssText='width:48px;padding:3px 5px;border:1.5px solid var(--mist);border-radius:4px;font-size:11px;text-align:right';
-        escInp.addEventListener('input',  function(e){ S.importedPols[idx].premEsc=e.target.value; });
-        escInp.addEventListener('blur',   function(e){ S.importedPols[idx].premEsc=e.target.value; render(); });
-        tdEsc.appendChild(escInp);
-        var escLabel = document.createElement('span'); escLabel.textContent=' %'; escLabel.style.fontSize='11px';
-        tdEsc.appendChild(escLabel); tr2.appendChild(tdEsc);
+        var escDisp = document.createElement('span');
+        escDisp.textContent = pol.premEsc ? pol.premEsc + '%' : '—';
+        escDisp.style.cssText='display:inline-block;padding:3px 7px;font-size:11px;color:var(--text);background:#fafaf6;border:1.5px solid var(--mist);border-radius:4px;min-width:42px;text-align:center';
+        tdEsc.appendChild(escDisp);
+        tr2.appendChild(tdEsc);
 
         // At retirement
         var tdFut = document.createElement('td'); tdFut.style.cssText='text-align:right;font-weight:700;color:'+colour;
@@ -3722,38 +3796,27 @@ function buildPolCard(p, i) {
   var card = div();
   card.style.cssText = 'background:#fff;border:1.5px solid var(--mist);border-radius:9px;padding:16px;margin-bottom:14px';
 
-  // ── Card header: insurer name + type badge + delete
+  // ── Card header: insurer name + type badge + retirement-include tick
   var ch = div();
   ch.style.cssText = 'display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px;gap:12px';
 
   var chLeft = div();
   chLeft.style.cssText = 'display:flex;flex-direction:column;gap:4px;flex:1';
 
-  // Insurer text input (large, prominent)
-  var insurerInp = document.createElement('input');
-  insurerInp.type = 'text';
-  insurerInp.value = p.Insurer || '';
-  insurerInp.placeholder = 'Insurer / Company';
-  insurerInp.style.cssText = 'border:none;border-bottom:2px solid var(--mist);border-radius:0;padding:4px 0;font-size:15px;font-weight:700;color:var(--navy);font-family:inherit;width:100%;background:transparent;outline:none';
-  insurerInp.addEventListener('input', function(e) { S.importedPols[i].Insurer = e.target.value; });
-  insurerInp.addEventListener('focus', function(e) { e.target.style.borderBottomColor = 'var(--gold)'; });
-  insurerInp.addEventListener('blur',  function(e) { e.target.style.borderBottomColor = 'var(--mist)'; });
-  chLeft.appendChild(insurerInp);
+  // Insurer (read-only — CRM is source of truth)
+  var insurerDisp = document.createElement('div');
+  insurerDisp.textContent = p.Insurer || '— Insurer —';
+  insurerDisp.style.cssText = 'border:none;border-bottom:2px solid var(--mist);border-radius:0;padding:4px 0;font-size:15px;font-weight:700;color:'+(p.Insurer?'var(--navy)':'#9a9a8a')+';font-family:inherit;width:100%;background:transparent;'+(p.Insurer?'':'font-style:italic');
+  chLeft.appendChild(insurerDisp);
 
-  // Type select (below insurer)
-  var typeSel = document.createElement('select');
-  typeSel.style.cssText = 'border:var(--border);border-radius:5px;padding:4px 8px;font-size:11px;font-weight:700;color:var(--sub);font-family:inherit;background:var(--smoke);cursor:pointer';
-  POL_TYPES.forEach(function(o) {
-    var opt = document.createElement('option');
-    opt.value = o; opt.textContent = o;
-    if (o === t) opt.selected = true;
-    typeSel.appendChild(opt);
-  });
-  typeSel.addEventListener('change', function(e) { S.importedPols[i].Type = e.target.value; render(); });
-  chLeft.appendChild(typeSel);
+  // Type (read-only badge)
+  var typeDisp = document.createElement('div');
+  typeDisp.textContent = t || '— Type —';
+  typeDisp.style.cssText = 'border:var(--border);border-radius:5px;padding:4px 8px;font-size:11px;font-weight:700;color:var(--sub);font-family:inherit;background:var(--smoke);display:inline-block;align-self:flex-start';
+  chLeft.appendChild(typeDisp);
   ch.appendChild(chLeft);
 
-  // Retirement include tick
+  // Retirement include tick (FNA-only flag — kept editable)
   var rtickLbl = document.createElement('label');
   rtickLbl.title = 'Include this policy premium in retirement planning — the premium will be capitalised as a retirement need';
   rtickLbl.style.cssText='display:flex;align-items:center;gap:5px;font-size:11px;font-weight:600;cursor:pointer;margin-left:8px;white-space:nowrap;'
@@ -3771,64 +3834,44 @@ function buildPolCard(p, i) {
   rtickLbl.appendChild(rtickInp);
   rtickLbl.appendChild(document.createTextNode('Pay in retirement'));
   ch.appendChild(rtickLbl);
-  // Delete button
-  var db = delBtn(function() { S.importedPols.splice(i, 1); render(); });
-  ch.appendChild(db);
   card.appendChild(ch);
 
-  // ── Row 1: Policy No, Product, Status
+  // ── Row 1: Policy No, Product, Status (CRM-owned, read-only)
   var r1 = g3();
-  r1.appendChild(fld('Policy / Contract No', p, 'PolicyNo'));
-  r1.appendChild(fld('Product / Plan Name',  p, 'Product'));
-  r1.appendChild(sfld('Status', p, 'Status', ['Active','Lapsed','Paid Up','Cancelled']));
+  r1.appendChild(roDisp('Policy / Contract No', p.PolicyNo));
+  r1.appendChild(roDisp('Product / Plan Name', p.Product));
+  r1.appendChild(roDisp('Status', p.Status));
   card.appendChild(r1);
 
-  // ── Row 2: Premium + Frequency + Escalations
+  // ── Row 2: Premium + Frequency (CRM-owned, read-only)
   var r2 = g3();
-  r2.appendChild(rfld('Premium / Contribution', p, 'Premium'));
-  r2.appendChild(sfld('Frequency', p, 'Frequency', ['Monthly','Quarterly','Annually','Once Off']));
+  r2.appendChild(roDisp('Premium / Contribution', p.Premium ? 'R\u202f'+(parseFloat(String(p.Premium).replace(/[^0-9.\-]/g,''))||0).toLocaleString('en-ZA') : ''));
+  r2.appendChild(roDisp('Frequency', p.Frequency));
   card.appendChild(r2);
 
   // Premium escalation + benefit escalation — risk policies and business assurance
+  // Both fields are CRM-owned: read-only display
   if (isRisk || t === 'Life / Income Protector' || isBiz) {
     var escRow = div(); escRow.style.cssText='display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;margin-top:6px;margin-bottom:4px';
 
-    // Premium escalation
-    var peWrap=div('f'); peWrap.style.minWidth='160px';
-    peWrap.appendChild(el('label','','Annual Premium Escalation'));
-    var peInp=document.createElement('input'); peInp.type='text';
-    peInp.value=String(p.PremEscalation!=null&&p.PremEscalation!==''?p.PremEscalation:(p.premEsc!=null&&p.premEsc!==''?p.premEsc:'')); peInp.placeholder='e.g. 6 or Age rated or CPI';
-    peInp.style.cssText='border:1.5px solid var(--mist);border-radius:6px;padding:7px 10px;font-size:13px;font-family:inherit;width:100%';
-    peInp.addEventListener('input',function(e){
-      S.importedPols[i].PremEscalation=e.target.value;
-      S.importedPols[i].premEsc=e.target.value;
-    });
-    peInp.addEventListener('blur',function(){render();});
-    peWrap.appendChild(peInp);
+    var _peVal = (p.PremEscalation!=null && p.PremEscalation!=='') ? p.PremEscalation : (p.premEsc||'');
+    var peWrap = roDisp('Annual Premium Escalation', _peVal);
+    peWrap.style.minWidth='160px';
     escRow.appendChild(peWrap);
 
     // Annual Cover Increase — only shown when policy has lump sum benefits
-    // For pure IP policies the in-claim escalation on each row handles this
     var _hasLump=false; try{_hasLump=(p.LumpBenefits&&JSON.parse(p.LumpBenefits).length>0);}catch(e){}
     var _hasLegacyLump=N(p.BenDeath)>0||N(p.BenDisability)>0||N(p.BenDreadDisease)>0;
     if(_hasLump||_hasLegacyLump){
-      var beWrap=div('f'); beWrap.style.minWidth='160px';
-      beWrap.appendChild(el('label','','Annual Cover Increase'));
-      var beInp=document.createElement('input'); beInp.type='text';
-      beInp.value=String(p.BenEscalation||''); beInp.placeholder='e.g. 5 or CPI or Age rated';
-      beInp.style.cssText='border:1.5px solid var(--mist);border-radius:6px;padding:7px 10px;font-size:13px;font-family:inherit;width:100%';
-      beInp.addEventListener('input',function(e){
-        S.importedPols[i].BenEscalation=e.target.value;
-        patchPolicyField(S.importedPols[i].ID, 'BenEscalation', e.target.value);
-      });
-      beWrap.appendChild(beInp);
+      var beWrap = roDisp('Annual Cover Increase', p.BenEscalation);
+      beWrap.style.minWidth='160px';
       escRow.appendChild(beWrap);
     }
 
     card.appendChild(escRow);
 
     // Warning if age rated or above income escalation
-    var peRaw=String(p.PremEscalation!=null&&p.PremEscalation!==''?p.PremEscalation:(p.premEsc!=null&&p.premEsc!==''?p.premEsc:'')).toLowerCase();
+    var peRaw=String(_peVal).toLowerCase();
     var beRaw=String(p.BenEscalation||'').toLowerCase();
     var incEsc=N(S.assump.incEsc)||6;
     var peNum=parseFloat(peRaw)||0;
@@ -3880,50 +3923,33 @@ function buildPolCard(p, i) {
         lbl.style.cssText = 'font-weight:600;font-size:12px;color:var(--text)';
         lbl.textContent = r.type + (r.label?' — '+r.label:'');
         t1.appendChild(lbl); tr.appendChild(t1);
-        // Cover
-        var t2 = document.createElement('td'); t2.style.padding='4px 6px';
-        var cRw=div('td-r'); cRw.appendChild(el('span','rp','R'));
-        var cInp=document.createElement('input'); cInp.type='text'; cInp.inputMode='numeric';
-        cInp.value=r.cover||''; cInp.placeholder='0';
-        cInp.style.cssText='width:90px;padding:4px 5px 4px 18px;border:1.5px solid var(--mist);border-radius:4px;font-size:12px';
-        cInp.addEventListener('input',function(e){
-          try{var rows=JSON.parse(S.importedPols[i].LumpBenefits||'[]');rows[ri].cover=e.target.value;S.importedPols[i].LumpBenefits=JSON.stringify(rows);}catch(ex){}
-        });
-        cRw.appendChild(cInp); t2.appendChild(cRw); tr.appendChild(t2);
-        // Premium
-        var t3 = document.createElement('td'); t3.style.padding='4px 6px';
-        var pRw=div('td-r'); pRw.appendChild(el('span','rp','R'));
-        var pInp=document.createElement('input'); pInp.type='text'; pInp.inputMode='numeric';
-        pInp.value=r.prem||''; pInp.placeholder='0';
-        pInp.style.cssText='width:80px;padding:4px 5px 4px 18px;border:1.5px solid var(--mist);border-radius:4px;font-size:12px';
-        pInp.addEventListener('input',function(e){
-          try{var rows=JSON.parse(S.importedPols[i].LumpBenefits||'[]');rows[ri].prem=e.target.value;S.importedPols[i].LumpBenefits=JSON.stringify(rows);}catch(ex){}
-        });
-        pRw.appendChild(pInp); t3.appendChild(pRw); tr.appendChild(t3);
-        // Prem Esc
-        var t4 = document.createElement('td'); t4.style.padding='4px 6px';
-        var peI=document.createElement('input'); peI.type='text'; peI.inputMode='numeric';
-        peI.value=r.premEsc||''; peI.placeholder='%';
-        peI.style.cssText='width:50px;padding:4px 5px;border:1.5px solid var(--mist);border-radius:4px;font-size:12px';
-        peI.addEventListener('input',function(e){
-          try{var rows=JSON.parse(S.importedPols[i].LumpBenefits||'[]');rows[ri].premEsc=e.target.value;S.importedPols[i].LumpBenefits=JSON.stringify(rows);}catch(ex){}
-        });
-        t4.appendChild(peI); tr.appendChild(t4);
-        // Ben Esc
-        var t5 = document.createElement('td'); t5.style.padding='4px 6px';
-        var beI=document.createElement('input'); beI.type='text'; beI.inputMode='numeric';
-        beI.value=r.benEsc||''; beI.placeholder='%';
-        beI.style.cssText='width:50px;padding:4px 5px;border:1.5px solid var(--mist);border-radius:4px;font-size:12px';
-        beI.addEventListener('input',function(e){
-          try{
-            var rows=JSON.parse(S.importedPols[i].LumpBenefits||'[]');
-            rows[ri].benEsc=e.target.value;
-            var newJson=JSON.stringify(rows);
-            S.importedPols[i].LumpBenefits=newJson;
-            patchPolicyField(S.importedPols[i].ID, 'LumpBenefits', newJson);
-          }catch(ex){}
-        });
-        t5.appendChild(beI); tr.appendChild(t5);
+        // Helper: read-only cell display
+        var roCellStyle = 'padding:4px 6px';
+        var roDispStyle = 'display:inline-block;padding:3px 7px;font-size:12px;color:var(--text);background:#fafaf6;border:1.5px solid var(--mist);border-radius:4px;min-width:50px';
+        // Cover (read-only)
+        var t2 = document.createElement('td'); t2.style.cssText = roCellStyle;
+        var cDisp = document.createElement('span');
+        cDisp.textContent = r.cover ? 'R\u202f'+(parseFloat(String(r.cover).replace(/[^0-9.\-]/g,''))||0).toLocaleString('en-ZA') : '—';
+        cDisp.style.cssText = roDispStyle;
+        t2.appendChild(cDisp); tr.appendChild(t2);
+        // Premium (read-only)
+        var t3 = document.createElement('td'); t3.style.cssText = roCellStyle;
+        var pDisp = document.createElement('span');
+        pDisp.textContent = r.prem ? 'R\u202f'+(parseFloat(String(r.prem).replace(/[^0-9.\-]/g,''))||0).toLocaleString('en-ZA') : '—';
+        pDisp.style.cssText = roDispStyle;
+        t3.appendChild(pDisp); tr.appendChild(t3);
+        // Prem Esc (read-only)
+        var t4 = document.createElement('td'); t4.style.cssText = roCellStyle;
+        var peDisp = document.createElement('span');
+        peDisp.textContent = r.premEsc ? r.premEsc + (String(r.premEsc).match(/^[0-9.]+$/)?'%':'') : '—';
+        peDisp.style.cssText = roDispStyle;
+        t4.appendChild(peDisp); tr.appendChild(t4);
+        // Ben Esc (read-only)
+        var t5 = document.createElement('td'); t5.style.cssText = roCellStyle;
+        var beDisp = document.createElement('span');
+        beDisp.textContent = r.benEsc ? r.benEsc + (String(r.benEsc).match(/^[0-9.]+$/)?'%':'') : '—';
+        beDisp.style.cssText = roDispStyle;
+        t5.appendChild(beDisp); tr.appendChild(t5);
         // Per-benefit retirement tick
         var t6 = document.createElement('td'); t6.style.padding='4px 8px;text-align:center';
         var retChk = document.createElement('input'); retChk.type='checkbox';
@@ -4002,69 +4028,50 @@ function buildPolCard(p, i) {
 
     var ipTbl = document.createElement('table');
     var ipTbody = document.createElement('tbody');
+    if (ipRows.length === 0) {
+      var emptyTr = document.createElement('tr');
+      var emptyTd = document.createElement('td');
+      emptyTd.colSpan = 3;
+      emptyTd.textContent = '— No income benefits on file in CRM —';
+      emptyTd.style.cssText = 'font-style:italic;color:#9a9a8a;font-size:12px;padding:8px 6px';
+      emptyTr.appendChild(emptyTd);
+      ipTbody.appendChild(emptyTr);
+    }
     ipRows.forEach(function(r, ri) {
       var tr = document.createElement('tr');
-      // Type
-      var t1 = document.createElement('td');
-      var tSel = document.createElement('select');
-      tSel.style.cssText = 'border:var(--border);border-radius:5px;padding:5px 7px;font-family:inherit;font-size:12px;width:100%';
-      ['Income Protection','Temporary IP','Death Income','Sickness Benefit','Hospital Income','Other'].forEach(function(o) {
-        var opt = document.createElement('option'); opt.value = o; opt.textContent = o;
-        if (r.type === o) opt.selected = true;
-        tSel.appendChild(opt);
-      });
-      tSel.addEventListener('change', function(e) {
-        try { var rows = JSON.parse(S.importedPols[i].IncomeBenefits||'[]'); rows[ri].type = e.target.value; S.importedPols[i].IncomeBenefits = JSON.stringify(rows); } catch(ex) {}
-      });
-      t1.appendChild(tSel); tr.appendChild(t1);
-      // Amount
-      var t2 = document.createElement('td');
-      var rw = div('td-r'); rw.appendChild(el('span','rp','R'));
-      var aInp = document.createElement('input'); aInp.type = 'text'; aInp.inputMode = 'numeric';
-      aInp.value = r.amount || ''; aInp.placeholder = '0';
-      aInp.addEventListener('input', function(e) {
-        try { var rows = JSON.parse(S.importedPols[i].IncomeBenefits||'[]'); rows[ri].amount = e.target.value; S.importedPols[i].IncomeBenefits = JSON.stringify(rows); } catch(ex) {}
-      });
-      rw.appendChild(aInp); t2.appendChild(rw); tr.appendChild(t2);
-      // Escalation fields - Annual Prem Inc, Annual Benefit Inc, In-Claim Inc
-      var t4 = document.createElement('td'); t4.style.cssText='padding-left:6px;min-width:240px';
+      var roCellStyle2 = 'padding:4px 6px';
+      var roDispStyle2 = 'display:inline-block;padding:3px 7px;font-size:12px;color:var(--text);background:#fafaf6;border:1.5px solid var(--mist);border-radius:4px';
+      // Type (read-only)
+      var t1 = document.createElement('td'); t1.style.cssText = roCellStyle2;
+      var typeDisp = document.createElement('span');
+      typeDisp.textContent = r.type || '—';
+      typeDisp.style.cssText = roDispStyle2 + ';font-weight:600;min-width:140px';
+      t1.appendChild(typeDisp); tr.appendChild(t1);
+      // Amount (read-only)
+      var t2 = document.createElement('td'); t2.style.cssText = roCellStyle2;
+      var amtDisp = document.createElement('span');
+      amtDisp.textContent = r.amount ? 'R\u202f'+(parseFloat(String(r.amount).replace(/[^0-9.\-]/g,''))||0).toLocaleString('en-ZA') : '—';
+      amtDisp.style.cssText = roDispStyle2;
+      t2.appendChild(amtDisp); tr.appendChild(t2);
+      // Escalation fields - Prem Inc, Ben Inc, Claim Inc (read-only)
+      var t4 = document.createElement('td'); t4.style.cssText='padding:4px 6px;min-width:240px';
       var escGrid=div(); escGrid.style.cssText='display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px';
-      function makeEscField(label, fieldKey, currentVal){
+      function makeEscDisp(label, currentVal){
         var wrap=div(); wrap.style.cssText='display:flex;flex-direction:column;gap:2px';
         var lb=el('span','',label); lb.style.cssText='font-size:9px;color:var(--sub);white-space:nowrap';
-        var inp=document.createElement('input'); inp.type='text'; inp.inputMode='numeric';
-        inp.value=currentVal||''; inp.placeholder='0%';
-        inp.style.cssText='width:100%;padding:4px 5px;border:1.5px solid var(--mist);border-radius:4px;font-size:11px;box-sizing:border-box';
-        inp.addEventListener('input',(function(fk){ return function(e){
-          try { var rows=JSON.parse(S.importedPols[i].IncomeBenefits||'[]');
-            rows[ri][fk]=e.target.value;
-            if(fk==='premEsc') rows[ri].esc=e.target.value; // keep backward compat
-            S.importedPols[i].IncomeBenefits=JSON.stringify(rows); } catch(ex){}
-        };})(fieldKey));
-        wrap.appendChild(lb); wrap.appendChild(inp); return wrap;
+        var sp=document.createElement('span');
+        sp.textContent=(currentVal!=null && currentVal!=='') ? currentVal + (String(currentVal).match(/^[0-9.]+$/)?'%':'') : '—';
+        sp.style.cssText='display:block;padding:3px 6px;border:1.5px solid var(--mist);border-radius:4px;font-size:11px;background:#fafaf6;box-sizing:border-box;text-align:center';
+        wrap.appendChild(lb); wrap.appendChild(sp); return wrap;
       }
-      escGrid.appendChild(makeEscField('Prem Inc%','premEsc',r.premEsc||r.esc));
-      escGrid.appendChild(makeEscField('Ben Inc%','benEsc',r.benEsc));
-      escGrid.appendChild(makeEscField('Claim Inc%','claimEsc',r.claimEsc));
+      escGrid.appendChild(makeEscDisp('Prem Inc%', r.premEsc||r.esc));
+      escGrid.appendChild(makeEscDisp('Ben Inc%',  r.benEsc));
+      escGrid.appendChild(makeEscDisp('Claim Inc%', r.claimEsc));
       t4.appendChild(escGrid); tr.appendChild(t4);
-      // Delete
-      var t3 = document.createElement('td');
-      t3.appendChild(delBtn(function() {
-        try { var rows = JSON.parse(S.importedPols[i].IncomeBenefits||'[]'); rows.splice(ri,1); S.importedPols[i].IncomeBenefits = JSON.stringify(rows); render(); } catch(ex) { render(); }
-      }));
-      tr.appendChild(t3);
       ipTbody.appendChild(tr);
     });
     ipTbl.appendChild(ipTbody);
     ipWrap.appendChild(ipTbl);
-    ipWrap.appendChild(addBtn('+ Add IP Benefit Row', function() {
-      try {
-        var rows = JSON.parse(S.importedPols[i].IncomeBenefits||'[]');
-        rows.push({type:'Income Protection', amount:'', premEsc:'', benEsc:'', claimEsc:'', esc:''});
-        S.importedPols[i].IncomeBenefits = JSON.stringify(rows);
-        render();
-      } catch(ex) { render(); }
-    }));
     card.appendChild(ipWrap);
   }
 
@@ -4097,57 +4104,35 @@ function buildPolCard(p, i) {
     }
 
     var rb2 = g3();
-    rb2.appendChild(rfld('Current Fund Value', p, 'BenFundValue', {onblur:function(){render();}}));
+    // Current Fund Value (read-only — from CRM)
+    rb2.appendChild(roDisp('Current Fund Value', p.BenFundValue ? 'R\u202f'+(parseFloat(String(p.BenFundValue).replace(/[^0-9.\-]/g,''))||0).toLocaleString('en-ZA') : ''));
 
     if(isCGTInv){
       var isOnceOff = (p.Frequency === 'Once Off');
       if(isOnceOff){
-        var bcReadWrap=div('f'); bcReadWrap.appendChild(el('label','','Once Off premium (base cost — auto)'));
-        var bcReadRw=div('rw'); bcReadRw.appendChild(el('span','rp','R'));
-        var bcReadInp=document.createElement('input'); bcReadInp.type='text'; bcReadInp.readOnly=true;
-        bcReadInp.value=p.Premium||''; bcReadInp.style.cssText='background:#f9f9f6;border:1.5px solid var(--mist);border-radius:6px;padding:7px 10px 7px 22px;font-size:13px;font-family:inherit;width:100%';
-        bcReadRw.appendChild(bcReadInp); bcReadWrap.appendChild(bcReadRw); rb2.appendChild(bcReadWrap);
+        rb2.appendChild(roDisp('Once Off premium (base cost — auto)', p.Premium ? 'R\u202f'+(parseFloat(String(p.Premium).replace(/[^0-9.\-]/g,''))||0).toLocaleString('en-ZA') : ''));
       } else {
-        rb2.appendChild(rfld('Once Off premium paid (base cost)', p, 'LumpSumPremium', {onblur:function(){render();}}));
+        rb2.appendChild(roDisp('Once Off premium paid (base cost)', p.LumpSumPremium ? 'R\u202f'+(parseFloat(String(p.LumpSumPremium).replace(/[^0-9.\-]/g,''))||0).toLocaleString('en-ZA') : ''));
       }
     }
 
-    rb2.appendChild(pfld('Growth Rate %', p, 'GrowthRate', {onblur:function(){render();}}));
+    rb2.appendChild(roDisp('Growth Rate %', p.GrowthRate ? p.GrowthRate + '%' : ''));
     card.appendChild(rb2);
 
     // Row: Annual Premium Increase + Maturity Age + Projected Value
     var _isMonthly2 = (p.Frequency==='Monthly'||!p.Frequency)&&N(p.Premium)>0;
     var _showMaturity = !isLA && !isPreRet; // Maturity only for endowments, flexible, investments — not RA/LA
     var rb3 = _showMaturity ? g3() : g3();
-    // Annual premium increase — for all types except LA (LA handles its own fields)
+    // Annual premium increase — for all types except LA (read-only)
     if(_isMonthly2 && !isLA){
-      var peWrap=div('f');
-      peWrap.appendChild(el('label','','Annual Premium Increase %'));
-      var peInp=document.createElement('input'); peInp.type='text'; peInp.inputMode='numeric';
-      peInp.value=String(p.PremEscalation!=null&&p.PremEscalation!==''?p.PremEscalation:(p.premEsc!=null&&p.premEsc!==''?p.premEsc:''));
-      peInp.placeholder='e.g. 6';
-      peInp.style.cssText='border:1.5px solid var(--mist);border-radius:6px;padding:7px 10px;font-size:13px;font-family:inherit;width:100%';
-      peInp.addEventListener('input',function(e){
-        S.importedPols[i].PremEscalation=e.target.value;
-        S.importedPols[i].premEsc=e.target.value;
-      });
-      peInp.addEventListener('blur',function(){render();});
-      peWrap.appendChild(peInp);
-      rb3.appendChild(peWrap);
+      var _peVal2 = (p.PremEscalation!=null && p.PremEscalation!=='') ? p.PremEscalation : (p.premEsc||'');
+      rb3.appendChild(roDisp('Annual Premium Increase %', _peVal2));
     } else if(!isLA) {
       rb3.appendChild(div());
     }
-    // Maturity age + projected value — only for endowment/flexible/investment types
+    // Maturity age (read-only)
     if(_showMaturity){
-      var maWrap=div('f');
-      maWrap.appendChild(el('label','','Maturity Age'));
-      var maInp=document.createElement('input'); maInp.type='text'; maInp.inputMode='numeric';
-      maInp.value=p.maturityAge||''; maInp.placeholder='e.g. 65';
-      maInp.style.cssText='border:1.5px solid var(--mist);border-radius:6px;padding:7px 10px;font-size:13px;font-family:inherit;width:100%';
-      maInp.addEventListener('input',function(e){ S.importedPols[i].maturityAge=e.target.value; });
-      maInp.addEventListener('blur',function(){render();});
-      maWrap.appendChild(maInp);
-      rb3.appendChild(maWrap);
+      rb3.appendChild(roDisp('Maturity Age', p.maturityAge || p.MaturityAge));
       // Projected maturity value — auto-calculated
       var _projMatVal2='';
       var _cliAge2=ageFrom(S.cli.dob);
@@ -4250,7 +4235,7 @@ function buildPolCard(p, i) {
       card.appendChild(laIncSt);
 
       var laIncRow=g3();
-      laIncRow.appendChild(rfld('Monthly Income Drawn', p, 'BenLAIncome', {onblur:function(){render();}}));
+      laIncRow.appendChild(roDisp('Monthly Income Drawn', p.BenLAIncome ? 'R\u202f'+(parseFloat(String(p.BenLAIncome).replace(/[^0-9.\-]/g,''))||0).toLocaleString('en-ZA') : ''));
       // Show bonus if present
       if(N(p.LABonus)>0){
         var bonDiv=div('f');
@@ -4264,27 +4249,21 @@ function buildPolCard(p, i) {
         grossVal.textContent='R '+Math.round(N(p.BenLAIncome)+N(p.LABonus)).toLocaleString('en-ZA')+' /pm';
         grossDiv.appendChild(grossLbl); grossDiv.appendChild(grossVal); laIncRow.appendChild(grossDiv);
       }
-      laIncRow.appendChild(pfld('Annual Drawdown Rate %', p, 'DrawdownRate', {onblur:function(){render();}}));
+      laIncRow.appendChild(roDisp('Annual Drawdown Rate %', p.DrawdownRate ? p.DrawdownRate + '%' : ''));
       laIncRow.appendChild(div()); // spacer — escalation is calculated, not entered
       card.appendChild(laIncRow);
 
-      // Taxable / non-taxable tick
-      var taxRow=div(); taxRow.style.cssText='margin-top:8px;margin-bottom:4px';
-      var taxLbl=document.createElement('label');
-      taxLbl.style.cssText='display:flex;align-items:flex-start;gap:8px;cursor:pointer;font-size:12px;color:var(--text)';
-      var taxInp=document.createElement('input'); taxInp.type='checkbox';
-      taxInp.checked=p.LAIncomeTaxable!==false; // default true (most common — deductible contributions)
-      taxInp.style.cssText='accent-color:var(--gold);width:14px;height:14px;flex-shrink:0;margin-top:1px';
-      taxInp.addEventListener('change',function(e){ S.importedPols[i].LAIncomeTaxable=e.target.checked; render(); });
-      var taxText=document.createElement('span');
-      taxText.innerHTML='<strong>Income drawing is fully taxable</strong> — contributions were deductible (standard). '
-        +'Untick if client made disallowed (non-deductible) contributions and a tax-free portion applies per SARS formula.';
-      taxLbl.appendChild(taxInp); taxLbl.appendChild(taxText); taxRow.appendChild(taxLbl);
+      // Tax treatment — read-only display (set in CRM policy form)
+      var _isFullyTaxable = p.LAIncomeTaxable !== 'No' && p.LAIncomeTaxable !== false;
+      var taxRow=div(); taxRow.style.cssText='margin-top:8px;margin-bottom:4px;font-size:12px;color:var(--text)';
+      taxRow.innerHTML = _isFullyTaxable
+        ? '<strong>Tax treatment:</strong> Income drawing is <strong>fully taxable</strong> — contributions were deductible (standard).'
+        : '<strong>Tax treatment:</strong> <strong>Partially / non-taxable</strong> — disallowed contributions; tax-free portion applies per SARS formula.';
       card.appendChild(taxRow);
 
-      // Tax treatment note — changes based on tick
+      // Tax treatment note — based on CRM setting
       var taxNote=div(); taxNote.style.cssText='font-size:11px;padding:6px 10px;border-radius:6px;margin-top:4px';
-      if(p.LAIncomeTaxable!==false){
+      if(_isFullyTaxable){
         taxNote.style.cssText+='background:#fff7ed;border:1px solid #fed7aa;color:#92400e';
         taxNote.innerHTML='⚖ <strong>Taxable:</strong> Full drawing added to gross income — taxed at marginal rate. Note in ROA.';
       } else {
@@ -4360,30 +4339,24 @@ function buildPolCard(p, i) {
     card.appendChild(laGst);
 
     var laGRow1 = g3();
-    laGRow1.appendChild(rfld('Monthly Income Guaranteed', p, 'BenLifeAnnuityIncome', {onblur:function(){render();}}));
-    laGRow1.appendChild(pfld('Annual Income Escalation %', p, 'LifeAnnuityEsc', {onblur:function(){render();}}));
-    laGRow1.appendChild(pfld('Joint Life % (spouse continuation)', p, 'LifeAnnuityJointPct', {onblur:function(){render();}}));
+    laGRow1.appendChild(roDisp('Monthly Income Guaranteed', p.BenLifeAnnuityIncome ? 'R\u202f'+(parseFloat(String(p.BenLifeAnnuityIncome).replace(/[^0-9.\-]/g,''))||0).toLocaleString('en-ZA') : ''));
+    laGRow1.appendChild(roDisp('Annual Income Escalation %', p.LifeAnnuityEsc ? p.LifeAnnuityEsc + '%' : ''));
+    laGRow1.appendChild(roDisp('Joint Life % (spouse continuation)', p.LifeAnnuityJointPct ? p.LifeAnnuityJointPct + '%' : ''));
     card.appendChild(laGRow1);
 
     var laGRow2 = g3();
-    laGRow2.appendChild(fld('Guaranteed period (years)', p, 'LifeAnnuityGuarYrs', {placeholder:'e.g. 10'}));
+    laGRow2.appendChild(roDisp('Guaranteed period (years)', p.LifeAnnuityGuarYrs));
     laGRow2.appendChild(div()); // spacer
     laGRow2.appendChild(div()); // spacer
     card.appendChild(laGRow2);
 
-    // Taxable tick — Life Annuity income is always taxable (SARS: annuity income = gross income)
-    var laGTaxRow = div(); laGTaxRow.style.cssText = 'margin-top:8px;margin-bottom:4px';
-    var laGTaxLbl = document.createElement('label');
-    laGTaxLbl.style.cssText = 'display:flex;align-items:flex-start;gap:8px;cursor:pointer;font-size:12px;color:var(--text)';
-    var laGTaxInp = document.createElement('input'); laGTaxInp.type = 'checkbox';
-    laGTaxInp.checked = p.LifeAnnuityTaxable !== false; // always taxable by default
-    laGTaxInp.style.cssText = 'accent-color:var(--gold);width:14px;height:14px;flex-shrink:0;margin-top:1px';
-    laGTaxInp.addEventListener('change', function(e){ S.importedPols[i].LifeAnnuityTaxable = e.target.checked; render(); });
-    var laGTaxText = document.createElement('span');
-    laGTaxText.innerHTML = '<strong>Income is taxable (PAYE)</strong> — annuity income forms part of gross income per SARS. '
-      + 'Only untick if there is a tax-free portion due to own non-deductible contributions (document in ROA).';
-    laGTaxLbl.appendChild(laGTaxInp); laGTaxLbl.appendChild(laGTaxText);
-    laGTaxRow.appendChild(laGTaxLbl); card.appendChild(laGTaxRow);
+    // Tax treatment — Life Annuity income is always taxable by default. Read-only display.
+    var _laGFullyTaxable = p.LifeAnnuityTaxable !== 'No' && p.LifeAnnuityTaxable !== false;
+    var laGTaxRow = div(); laGTaxRow.style.cssText = 'margin-top:8px;margin-bottom:4px;font-size:12px;color:var(--text)';
+    laGTaxRow.innerHTML = _laGFullyTaxable
+      ? '<strong>Tax treatment:</strong> Income is <strong>fully taxable (PAYE)</strong> — annuity income forms part of gross income per SARS.'
+      : '<strong>Tax treatment:</strong> <strong>Partially / non-taxable</strong> — own non-deductible contributions; tax-free portion documented in ROA.';
+    card.appendChild(laGTaxRow);
 
     // Estate treatment note
     var laGEstNote = div(); laGEstNote.style.cssText = 'font-size:11px;padding:8px 12px;margin-top:8px;border-radius:6px;background:#eff6ff;border:1px solid #bfdbfe;color:#1e40af';
@@ -4428,54 +4401,41 @@ function buildPolCard(p, i) {
   var btr = div();
   btr.style.cssText = 'display:grid;grid-template-columns:2fr 1fr 1fr;gap:14px;margin-bottom:10px';
 
-  // Beneficiary name
-  btr.appendChild(fld('Beneficiary Name', p, 'Beneficiary', { placeholder: 'e.g. Jane Hayes' }));
+  // Beneficiary name (read-only — CRM is source of truth)
+  btr.appendChild(roDisp('Beneficiary Name', p.Beneficiary));
 
-  // BeneficiaryType select with colour indicator
-  var btWrap = div('f');
-  var btLbl = el('label','','Beneficiary Type');
-  btWrap.appendChild(btLbl);
-  var btSel = document.createElement('select');
-  btSel.style.cssText = 'border:var(--border);border-radius:6px;padding:8px 10px;font-family:inherit;font-size:13px;color:var(--text);background:var(--white)';
-  ['','Spouse','Estate','Third Party'].forEach(function(o) {
-    var opt = document.createElement('option');
-    opt.value = o;
-    opt.textContent = o || '— Select —';
-    if ((p.BeneficiaryType || '') === o) opt.selected = true;
-    btSel.appendChild(opt);
-  });
-  btSel.addEventListener('change', function(e) {
-    S.importedPols[i].BeneficiaryType = e.target.value;
-    // Auto-set EstateDutiable based on type
-    if (e.target.value === 'Spouse')       { S.importedPols[i].EstateDutiable = 'No'; }
-    else if (e.target.value === 'Estate')  { S.importedPols[i].EstateDutiable = 'Yes'; }
-    else if (e.target.value === 'Third Party') { S.importedPols[i].EstateDutiable = 'No'; }
-    render();
-  });
-  btWrap.appendChild(btSel);
-  btr.appendChild(btWrap);
+  // BeneficiaryType (read-only display with colour indicator)
+  var btDispWrap = div('f');
+  btDispWrap.appendChild(el('label','','Beneficiary Type'));
+  var btDispBox = document.createElement('div');
+  var _btVal = p.BeneficiaryType || '';
+  var _btColour = _btVal === 'Spouse' ? '#166534' : _btVal === 'Estate' ? '#92400e' : _btVal === 'Third Party' ? '#1e40af' : '#9a9a8a';
+  var _btBg = _btVal === 'Spouse' ? '#f0fdf4' : _btVal === 'Estate' ? '#fff7ed' : _btVal === 'Third Party' ? '#eff6ff' : '#fafaf6';
+  if (_btVal) {
+    btDispBox.textContent = _btVal;
+    btDispBox.style.cssText = 'border:1.5px solid var(--mist);border-radius:6px;padding:7px 10px;font-size:13px;font-weight:700;background:'+_btBg+';color:'+_btColour+';min-height:20px;line-height:20px';
+  } else {
+    btDispBox.textContent = '— from CRM —';
+    btDispBox.style.cssText = 'border:1.5px dashed var(--mist);border-radius:6px;padding:7px 10px;font-size:13px;background:transparent;color:#9a9a8a;font-style:italic;min-height:20px;line-height:20px';
+  }
+  btDispWrap.appendChild(btDispBox);
+  btr.appendChild(btDispWrap);
 
-  // EstateDutiable
-  var edWrap = div('f');
-  var edLbl = el('label','','Estate Dutiable');
-  edWrap.appendChild(edLbl);
-  var edSel = document.createElement('select');
-  edSel.style.cssText = 'border:var(--border);border-radius:6px;padding:8px 10px;font-family:inherit;font-size:13px;font-weight:700';
+  // EstateDutiable (read-only display with colour indicator)
+  var edDispWrap = div('f');
+  edDispWrap.appendChild(el('label','','Estate Dutiable'));
+  var edDispBox = document.createElement('div');
   var edVal = p.EstateDutiable || '';
-  if (edVal === 'Yes') edSel.style.color = 'var(--orange)';
-  else if (edVal === 'No') edSel.style.color = 'var(--green)';
-  ['','Yes','No'].forEach(function(o) {
-    var opt = document.createElement('option');
-    opt.value = o; opt.textContent = o || '— ?';
-    if (edVal === o) opt.selected = true;
-    edSel.appendChild(opt);
-  });
-  edSel.addEventListener('change', function(e) {
-    S.importedPols[i].EstateDutiable = e.target.value;
-    e.target.style.color = e.target.value === 'Yes' ? 'var(--orange)' : e.target.value === 'No' ? 'var(--green)' : 'var(--sub)';
-  });
-  edWrap.appendChild(edSel);
-  btr.appendChild(edWrap);
+  var _edColour = edVal === 'Yes' ? '#92400e' : edVal === 'No' ? '#166534' : '#9a9a8a';
+  if (edVal) {
+    edDispBox.textContent = edVal;
+    edDispBox.style.cssText = 'border:1.5px solid var(--mist);border-radius:6px;padding:7px 10px;font-size:13px;font-weight:700;color:'+_edColour+';background:#fafaf6;min-height:20px;line-height:20px';
+  } else {
+    edDispBox.textContent = '— from CRM —';
+    edDispBox.style.cssText = 'border:1.5px dashed var(--mist);border-radius:6px;padding:7px 10px;font-size:13px;background:transparent;color:#9a9a8a;font-style:italic;min-height:20px;line-height:20px';
+  }
+  edDispWrap.appendChild(edDispBox);
+  btr.appendChild(edDispWrap);
   card.appendChild(btr);
 
   // ── Beneficiary routing explanation
@@ -4717,11 +4677,11 @@ function buildEstate() {
   polTbl.appendChild(polTbody);
   s.appendChild(polTbl);
 
-  // Beneficiary type editors on policies
+  // Beneficiary type display on policies (read-only — CRM is source of truth)
   var benEdBox=div(); benEdBox.style.cssText='background:#f8fafc;border:var(--border);border-radius:8px;padding:12px 14px;margin-bottom:16px';
-  var benEdTtl=el('div','stitle','Set Beneficiary Types'); benEdTtl.style.marginBottom='8px'; benEdBox.appendChild(benEdTtl);
+  var benEdTtl=el('div','stitle','Beneficiary Routing'); benEdTtl.style.marginBottom='8px'; benEdBox.appendChild(benEdTtl);
   var benInf2=div(); benInf2.style.cssText='font-size:11px;color:var(--sub);margin-bottom:10px';
-  benInf2.textContent='Set the beneficiary type for each policy to model how proceeds route through your estate.';
+  benInf2.textContent='Beneficiary types come from the CRM. To change them, edit the policy in the CRM and click ↻ CRM above.';
   benEdBox.appendChild(benInf2);
 
   pols.forEach(function(p,i){
@@ -4731,25 +4691,19 @@ function buildEstate() {
     var lbl=el('span','',((p.Insurer||'Policy')+(p.Product?' — '+p.Product:''))+' '+Rfmt(p.BenDeath));
     lbl.style.cssText='font-size:12px;min-width:220px';
     row.appendChild(lbl);
-    var sel=document.createElement('select');
-    sel.style.cssText='border:var(--border);border-radius:5px;padding:4px 8px;font-size:12px;font-family:inherit';
-    ['','Spouse','Estate','Third Party'].forEach(function(o){
-      var opt=document.createElement('option'); opt.value=o; opt.textContent=o||'— select —';
-      if(p.BeneficiaryType===o) opt.selected=true;
-      sel.appendChild(opt);
-    });
-    sel.addEventListener('change',function(e){
-      S.importedPols[i].BeneficiaryType=e.target.value;
-      if(e.target.value==='Spouse') S.importedPols[i].EstateDutiable='No';
-      else if(e.target.value==='Estate') S.importedPols[i].EstateDutiable='Yes';
-      else if(e.target.value==='Third Party') S.importedPols[i].EstateDutiable='Yes';
-      render();
-    });
-    row.appendChild(sel);
-    var benInp=document.createElement('input'); benInp.type='text'; benInp.placeholder='Beneficiary name';
-    benInp.value=p.Beneficiary||''; benInp.style.cssText='border:var(--border);border-radius:5px;padding:4px 8px;font-size:12px;flex:1;min-width:140px';
-    benInp.addEventListener('input',function(e){ S.importedPols[i].Beneficiary=e.target.value; });
-    row.appendChild(benInp);
+    // Beneficiary type — read-only badge
+    var btDisp = document.createElement('span');
+    var _btV = p.BeneficiaryType || '';
+    var _btC = _btV === 'Spouse' ? '#166534' : _btV === 'Estate' ? '#92400e' : _btV === 'Third Party' ? '#1e40af' : '#9a9a8a';
+    var _btB = _btV === 'Spouse' ? '#f0fdf4' : _btV === 'Estate' ? '#fff7ed' : _btV === 'Third Party' ? '#eff6ff' : '#fafaf6';
+    btDisp.textContent = _btV || '— not set —';
+    btDisp.style.cssText='display:inline-block;padding:4px 10px;font-size:12px;font-weight:700;border-radius:5px;background:'+_btB+';color:'+_btC+';border:1px solid '+_btC+'33;min-width:110px;text-align:center'+(_btV?'':';font-style:italic');
+    row.appendChild(btDisp);
+    // Beneficiary name — read-only
+    var benDisp = document.createElement('span');
+    benDisp.textContent = p.Beneficiary || '— no name —';
+    benDisp.style.cssText = 'font-size:12px;color:'+(p.Beneficiary?'var(--text)':'#9a9a8a')+';flex:1;min-width:140px;padding:4px 8px;border-radius:5px;background:#fafaf6;border:1px solid var(--mist)'+(p.Beneficiary?'':';font-style:italic');
+    row.appendChild(benDisp);
     benEdBox.appendChild(row);
   });
   s.appendChild(benEdBox);
