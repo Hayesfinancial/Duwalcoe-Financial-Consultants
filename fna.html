@@ -686,47 +686,21 @@ function queueSmartSave() {
 
   // Store the raw URL params so the "Refresh from CRM" button can re-apply them
   window._crmParams = params;
+  // Capture the CRM internal client ID (separate from S.cli.id which is the SA IDNumber).
+  // Used by refreshFromCRM() to query the policies table on Supabase.
+  if (params.get('cid')) window._crmInternalId = params.get('cid');
 
-  // Name and ID always update from URL (display only — not FNA data)
+  // ── CRM-OWNED CLIENT FIELDS — always refresh whenever the FNA is opened from
+  // the CRM (URL params present), regardless of hasSavedState. The CRM is the
+  // source of truth for client demographics and marriage details.
   if (params.get('name')) S.cli.name = decodeURIComponent(params.get('name'));
   if (params.get('id'))   S.cli.id   = params.get('id');
-
-  // POLICIES are CRM-owned data — always refresh from CRM whenever the CRM has
-  // pushed a fresh list (the presence of the du_fna_pols key IS the signal).
-  // This must run BEFORE the hasSavedState early-return so returning clients
-  // also get fresh policy data when the FNA is opened from the CRM.
-  try {
-    var _lsPolsEarly = localStorage.getItem('du_fna_pols');
-    if (_lsPolsEarly) {
-      var _polsEarly = JSON.parse(_lsPolsEarly);
-      if (Array.isArray(_polsEarly) && _polsEarly.length > 0) {
-        applyPolsFromCRM(_polsEarly);
-        // Reset seeded flags so beneficiaries re-seed from the new policy list
-        if (S.importedPols) S.importedPols.forEach(function(p){ p._bensSeeded = false; });
-      }
-      localStorage.removeItem('du_fna_pols'); // clean up after reading
-    }
-  } catch(e) {}
-
-  // If we have a saved state, DON'T overwrite adviser-entered FNA data from URL
-  // (assets, needs, retirement etc). Policies have already been refreshed above.
-  // The "↻ CRM" button lets the adviser deliberately re-pull other CRM fields.
-  if (hasSavedState) return;
-
-  // Fresh FNA — seed everything from URL params
   if (params.get('dob')) {
     var rawDob = params.get('dob');
     if (rawDob.indexOf('T') > -1) rawDob = rawDob.split('T')[0];
     var d = rawDob.split('-');
     if (d.length === 3) S.cli.dob = d[2] + '/' + d[1] + '/' + d[0];
     else S.cli.dob = rawDob;
-  }
-  if (params.get('income')) {
-    var incVal = params.get('income');
-    if (!S.incRows) S.incRows = [];
-    if (S.incRows.length === 0) S.incRows.push({ src: 'Salary / drawings', pm: '' });
-    if (!S.incRows[0].pm) S.incRows[0].pm = incVal;
-    S.cli.grossPM = incVal;
   }
   if (params.get('gender'))  S.cli.gender    = decodeURIComponent(params.get('gender'));
   if (params.get('smoker')) {
@@ -748,8 +722,39 @@ function queueSmartSave() {
     if (rawDom.indexOf('T') > -1) rawDom = rawDom.split('T')[0];
     S.cli.domDate = rawDom;
   }
-  // URL fallback only — localStorage path has already run at the top of this
-  // IIFE, regardless of hasSavedState. This handles legacy URLs containing pols=.
+
+  // POLICIES are CRM-owned data — always refresh from CRM whenever the CRM has
+  // pushed a fresh list (the presence of the du_fna_pols key IS the signal).
+  // This must run BEFORE the hasSavedState early-return so returning clients
+  // also get fresh policy data when the FNA is opened from the CRM. An empty
+  // array is also applied (clears stale policies if all were lapsed/deleted).
+  try {
+    var _lsPolsEarly = localStorage.getItem('du_fna_pols');
+    if (_lsPolsEarly) {
+      var _polsEarly = JSON.parse(_lsPolsEarly);
+      if (Array.isArray(_polsEarly)) {
+        applyPolsFromCRM(_polsEarly);
+        // Reset seeded flags so beneficiaries re-seed from the new policy list
+        if (S.importedPols) S.importedPols.forEach(function(p){ p._bensSeeded = false; });
+      }
+      localStorage.removeItem('du_fna_pols'); // clean up after reading
+    }
+  } catch(e) {}
+
+  // If we have a saved state, DON'T overwrite adviser-entered FNA data
+  // (assets, needs, retirement etc). CRM-owned fields above have already been
+  // refreshed. The "↻ CRM" button lets the adviser deliberately re-pull policies.
+  if (hasSavedState) return;
+
+  // Fresh FNA — seed remaining fields that aren't unconditionally CRM-owned
+  if (params.get('income')) {
+    var incVal = params.get('income');
+    if (!S.incRows) S.incRows = [];
+    if (S.incRows.length === 0) S.incRows.push({ src: 'Salary / drawings', pm: '' });
+    if (!S.incRows[0].pm) S.incRows[0].pm = incVal;
+    S.cli.grossPM = incVal;
+  }
+  // URL fallback only — localStorage path has already run above. Handles legacy URLs.
   if (params.get('pols')) {
     try {
       applyPolsFromCRM(JSON.parse(decodeURIComponent(params.get('pols'))));
@@ -932,11 +937,14 @@ function applyPolsFromCRM(pols) {
     if(f==='Monthly'||f==='') totPrem+=n(p.Premium);
   });
 
-  if(totDeath>0) S.existingCover.death      = String(Math.round(totDeath));
-  if(totDis>0)   S.existingCover.disability = String(Math.round(totDis));
-  if(totDD>0)    S.existingCover.dread      = String(Math.round(totDD));
-  if(totIP>0)    S.existingCover.ipPM       = String(Math.round(totIP));
-  if(totPrem>0)  S.existingCover.totalPrem  = String(Math.round(totPrem));
+  // Always reflect the current policy list — set to current total, including
+  // empty string when no policies contribute (handles the case where a policy
+  // was deleted from the CRM and totals should drop to zero).
+  S.existingCover.death      = totDeath > 0 ? String(Math.round(totDeath)) : '';
+  S.existingCover.disability = totDis   > 0 ? String(Math.round(totDis))   : '';
+  S.existingCover.dread      = totDD    > 0 ? String(Math.round(totDD))    : '';
+  S.existingCover.ipPM       = totIP    > 0 ? String(Math.round(totIP))    : '';
+  S.existingCover.totalPrem  = totPrem  > 0 ? String(Math.round(totPrem))  : '';
 }
 
 // Called by the "Refresh from CRM" button — re-applies CRM data over current state.
@@ -976,8 +984,10 @@ function refreshFromCRM() {
   }
 
   // Pull live ACTIVE policies for this client direct from Supabase.
+  // The policies table is keyed by the CRM's INTERNAL client ID (ClientID column),
+  // NOT the SA IDNumber. Use the cid URL param, which the CRM passes for this purpose.
   // Falls back to URL pols param for backwards compatibility (legacy URLs).
-  var clientId = params.get('id') || S.cli.id;
+  var crmClientId = params.get('cid') || window._crmInternalId || '';
   var finishRefresh = function(){
     // Reset seeded flags so beneficiaries re-seed from the current policy list
     if (S.importedPols) S.importedPols.forEach(function(p){ p._bensSeeded = false; });
@@ -987,10 +997,10 @@ function refreshFromCRM() {
     render();
   };
 
-  if (clientId) {
+  if (crmClientId) {
     status('↓ Fetching policies from CRM...');
     var path = '/rest/v1/policies'
-             + '?ClientID=eq.' + encodeURIComponent(clientId)
+             + '?ClientID=eq.' + encodeURIComponent(crmClientId)
              + '&Status=eq.Active'
              + '&select=*';
     sbFetch('GET', path, null, function(rows, err){
@@ -1006,18 +1016,25 @@ function refreshFromCRM() {
         }
         return;
       }
+      // No active policies in CRM — clear the imported list so the FNA reflects reality
+      if (rows.length === 0) {
+        applyPolsFromCRM([]);
+        finishRefresh();
+        status('✓ Refreshed from CRM — no active policies on file');
+        return;
+      }
       applyPolsFromCRM(rows);
       finishRefresh();
       status('✓ Refreshed from CRM (' + rows.length + ' active ' + (rows.length===1?'policy':'policies') + ')');
     });
   } else if (params.get('pols')) {
-    // No client ID — try legacy URL fallback
+    // No CRM internal ID — try legacy URL fallback
     try { applyPolsFromCRM(JSON.parse(decodeURIComponent(params.get('pols')))); } catch(e) {}
     finishRefresh();
     status('✓ Refreshed from CRM');
   } else {
     finishRefresh();
-    status('⚠ No client ID — personal details refreshed only');
+    status('⚠ No CRM client ID — re-open this FNA from the CRM to refresh policies');
   }
 }
 
