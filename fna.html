@@ -540,7 +540,13 @@ var DEFAULTS = {
   cli: {
     name: '', id: '', dob: '', gender: '', smoker: '', education: '',
     occ: '', retAge: '65', grossPM: '', nettPM: '',
-    marital: '', domDate: '', spouseName: '', spouseDob: '', spouseOcc: ''
+    // Contact
+    cell: '', email: '', telHome: '', telWork: '', taxNo: '',
+    // Address
+    address: '', poBox: '',
+    // Marital + spouse
+    marital: '', domDate: '', spouseName: '', spouseDob: '', spouseOcc: '',
+    spouseId: '', spouseCell: '', spouseEmail: ''
   },
   kids: [],
 
@@ -979,8 +985,11 @@ function applyPolsFromCRM(pols) {
 // Convert FNA-shape values to CRM-shape values for write-back.
 function fnaToCrmCli(fields) {
   var out = {};
-  // Strings pass through
-  ['Name','IDNumber','Occupation','Education','SpouseName'].forEach(function(k){
+  // Strings pass through (no translation needed)
+  ['Name','IDNumber','Occupation','Education','SpouseName',
+   'Cell','Email','TelHome','TelWork','TaxNo',
+   'Address','POBox',
+   'SpouseIDNumber','SpouseCell','SpouseEmail'].forEach(function(k){
     if (fields[k] !== undefined) out[k] = fields[k];
   });
   // DOB: DD/MM/YYYY -> YYYY-MM-DD
@@ -1030,7 +1039,20 @@ function fnaCliToFullCrmRow() {
     Anniversary:    S.cli.domDate,
     SpouseName:     S.cli.spouseName,
     SpouseDOB:      S.cli.spouseDob,
-    Income:         (S.incRows && S.incRows[0] && S.incRows[0].pm) || S.cli.grossPM || ''
+    Income:         (S.incRows && S.incRows[0] && S.incRows[0].pm) || S.cli.grossPM || '',
+    // Contact
+    Cell:           S.cli.cell        || '',
+    Email:          S.cli.email       || '',
+    TelHome:        S.cli.telHome     || '',
+    TelWork:        S.cli.telWork     || '',
+    TaxNo:          S.cli.taxNo       || '',
+    // Address
+    Address:        S.cli.address     || '',
+    POBox:          S.cli.poBox       || '',
+    // Spouse contact
+    SpouseIDNumber: S.cli.spouseId    || '',
+    SpouseCell:     S.cli.spouseCell  || '',
+    SpouseEmail:    S.cli.spouseEmail || ''
   });
 }
 
@@ -1047,18 +1069,31 @@ function patchClientFieldToCRM(fieldNameInternal, fnaValue) {
   }
   // Map FNA field name to CRM column name + value translation
   var mapping = {
-    'name':       'Name',
-    'id':         'IDNumber',
-    'dob':        'DOB',
-    'gender':     'Gender',
-    'smoker':     'Smoker',
-    'education':  'Education',
-    'occ':        'Occupation',
-    'marital':    'MaritalStatus',
-    'domDate':    'Anniversary',
-    'spouseName': 'SpouseName',
-    'spouseDob':  'SpouseDOB',
-    'grossPM':    'Income'
+    'name':         'Name',
+    'id':           'IDNumber',
+    'dob':          'DOB',
+    'gender':       'Gender',
+    'smoker':       'Smoker',
+    'education':    'Education',
+    'occ':          'Occupation',
+    'marital':      'MaritalStatus',
+    'domDate':      'Anniversary',
+    'spouseName':   'SpouseName',
+    'spouseDob':    'SpouseDOB',
+    'grossPM':      'Income',
+    // Contact
+    'cell':         'Cell',
+    'email':        'Email',
+    'telHome':      'TelHome',
+    'telWork':      'TelWork',
+    'taxNo':        'TaxNo',
+    // Address
+    'address':      'Address',
+    'poBox':        'POBox',
+    // Spouse contact
+    'spouseId':     'SpouseIDNumber',
+    'spouseCell':   'SpouseCell',
+    'spouseEmail':  'SpouseEmail'
   };
   var crmCol = mapping[fieldNameInternal];
   if (!crmCol) return;
@@ -1900,6 +1935,27 @@ function buildClient() {
     s.appendChild(inf);
   }
 
+  // ── Contact Details
+  s.appendChild(stitle('Contact Details'));
+  var rc1 = g2();
+  rc1.appendChild(bindCRM(fld('Cell Number', S.cli, 'cell', { placeholder: '082 123 4567' }), 'cell'));
+  rc1.appendChild(bindCRM(fld('Email', S.cli, 'email', { placeholder: 'name@example.com' }), 'email'));
+  s.appendChild(rc1);
+
+  var rc2 = g3();
+  rc2.appendChild(bindCRM(fld('Tel (Home)', S.cli, 'telHome', { placeholder: '021 123 4567' }), 'telHome'));
+  rc2.appendChild(bindCRM(fld('Tel (Work)', S.cli, 'telWork', { placeholder: '021 123 4567' }), 'telWork'));
+  rc2.appendChild(bindCRM(fld('Tax Number', S.cli, 'taxNo', { placeholder: 'SARS reference' }), 'taxNo'));
+  s.appendChild(rc2);
+
+  // ── Address
+  s.appendChild(stitle('Address'));
+  var rad = g2();
+  rad.appendChild(bindCRM(fld('Physical Address (FICA)', S.cli, 'address', { placeholder: 'Full address including suburb and postal code' }), 'address'));
+  rad.appendChild(bindCRM(fld('PO Box / Postal Address', S.cli, 'poBox', { placeholder: 'If different from physical' }), 'poBox'));
+  s.appendChild(rad);
+
+  // ── Marital Status (with spouse contact details)
   s.appendChild(stitle('Marital Status'));
   var r4 = g3();
   r4.appendChild(bindCRM(sfld('Marital Status', S.cli, 'marital', [
@@ -1910,9 +1966,31 @@ function buildClient() {
   r4.appendChild(bindCRM(fld('Spouse / Partner Name', S.cli, 'spouseName', { placeholder: 'Full name' }), 'spouseName'));
   s.appendChild(r4);
 
-  var r5 = g2();
+  var r5 = g3();
+  // Spouse ID Number — auto-populate Spouse DOB from SA ID on blur (only when DOB is blank)
+  var spIdWrap = fld('Spouse ID Number', S.cli, 'spouseId', { placeholder: '8001015009087' });
+  var spIdInp = spIdWrap.querySelector('input');
+  if (spIdInp) {
+    spIdInp.addEventListener('blur', function(e){
+      patchClientFieldToCRM('spouseId', S.cli.spouseId);
+      var parsedSp = parseSAId(S.cli.spouseId);
+      if (!parsedSp) return;
+      if (!S.cli.spouseDob) {
+        S.cli.spouseDob = parsedSp.dob;
+        patchClientFieldToCRM('spouseDob', parsedSp.dob);
+        render();
+      }
+    });
+  }
+  r5.appendChild(spIdWrap);
   r5.appendChild(bindCRM(fld('Spouse DOB (DD/MM/YYYY)', S.cli, 'spouseDob', { placeholder: '01/01/1982' }), 'spouseDob'));
+  r5.appendChild(div()); // spacer
   s.appendChild(r5);
+
+  var r6 = g2();
+  r6.appendChild(bindCRM(fld('Spouse Cell', S.cli, 'spouseCell', { placeholder: '082 123 4567' }), 'spouseCell'));
+  r6.appendChild(bindCRM(fld('Spouse Email', S.cli, 'spouseEmail', { placeholder: 'spouse@example.com' }), 'spouseEmail'));
+  s.appendChild(r6);
 
   s.appendChild(stitle('Dependants'));
   if (S.kids.length === 0) {
