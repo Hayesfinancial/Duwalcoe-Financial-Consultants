@@ -257,6 +257,37 @@ function yrsToRet(dob, retAge) {
   return Math.max(0, N(retAge) - a);
 }
 
+// Parse SA ID number — extracts DOB and Gender. Returns null on invalid input.
+// SA ID format: YYMMDDSSSSCAZ (13 digits).
+//   YYMMDD — date of birth
+//   SSSS   — gender code (0000-4999 female, 5000-9999 male)
+//   C      — citizenship (0 SA, 1 permanent resident)
+//   A      — usually 8 (legacy), Z — checksum
+// Year disambiguation: if YY > current 2-digit year, century = 1900s; else 2000s.
+// (In 2026: YY=26 → 2026; YY=27 → 1927.)
+function parseSAId(idNumber) {
+  var s = String(idNumber || '').replace(/\s+/g, '');
+  if (!/^\d{13}$/.test(s)) return null;
+  var yy = parseInt(s.substr(0,2), 10);
+  var mm = parseInt(s.substr(2,2), 10);
+  var dd = parseInt(s.substr(4,2), 10);
+  if (mm < 1 || mm > 12) return null;
+  if (dd < 1 || dd > 31) return null;
+  // Disambiguate century
+  var nowYY = new Date().getFullYear() % 100;
+  var century = (yy > nowYY) ? 1900 : 2000;
+  var year = century + yy;
+  // Validate the date is real (handles 31 Feb etc)
+  var probe = new Date(year, mm - 1, dd);
+  if (probe.getFullYear() !== year || probe.getMonth() !== (mm - 1) || probe.getDate() !== dd) return null;
+  // Format DOB as DD/MM/YYYY (FNA's display format)
+  var dobStr = ('0'+dd).slice(-2) + '/' + ('0'+mm).slice(-2) + '/' + year;
+  // Gender: digits 7-10 form a 4-digit number; 0-4999 = female, 5000-9999 = male
+  var genderCode = parseInt(s.substr(6,4), 10);
+  var gender = (genderCode < 5000) ? 'Female' : 'Male';
+  return { dob: dobStr, gender: gender, year: year };
+}
+
 // ── TAX TABLES 2026/2027 ──────────────────────────────────
 // Returns gross monthly amount needed to yield nettPM nett
 // Uses iterative approach: start with gross = nett / (1 - est rate), refine
@@ -873,60 +904,6 @@ function queueSmartSave() {
   });
 })();
 
-// ── Last-client recovery: if FNA opened with no client, offer a small
-// "Resume last client" link in the header (no auto-popup). This avoids
-// interrupting the new-client flow but preserves the recovery option.
-(function checkLastClient() {
-  var params = new URLSearchParams(window.location.search);
-  if (params.get('id') || params.get('cid')) return; // already loading a client
-  try {
-    var last = JSON.parse(localStorage.getItem('du_fna_lastClient') || 'null');
-    if (!last || !last.id || !last.name) return;
-    var age = Math.round((Date.now() - (last.time||0)) / 60000); // minutes
-    if (age > 10080) return; // older than 7 days — don't offer
-    var label = age < 60 ? age + ' min ago' : age < 1440 ? Math.round(age/60) + ' hrs ago' : Math.round(age/1440) + ' days ago';
-
-    // Insert a small recovery link into the header — non-intrusive.
-    setTimeout(function(){
-      var bar = document.querySelector('.toolbar') || document.querySelector('header') || document.body;
-      if (!bar) return;
-      // Don't add twice
-      if (document.getElementById('resumeLastLink')) return;
-      var link = document.createElement('button');
-      link.id = 'resumeLastLink';
-      link.type = 'button';
-      link.className = 'btn btn-ghost btn-sm';
-      link.style.cssText = 'background:#f5f3ec;color:#6a5f1a;border:1px solid #d4c896;font-size:11px;margin-left:6px';
-      link.textContent = '\u21BA Resume ' + last.name + ' (' + label + ')';
-      link.title = 'Resume the FNA you were last working on';
-      link.addEventListener('click', function(){
-        if (!confirm('Resume FNA for ' + last.name + '?\n\nThis will load the most recent saved data for this client.')) return;
-        // Try localStorage first for instant load
-        var lsKey = 'du_fna_' + last.id;
-        var lsData = localStorage.getItem(lsKey);
-        if (lsData) {
-          try {
-            S = deepMerge(JSON.parse(JSON.stringify(DEFAULTS)), JSON.parse(lsData));
-            render();
-          } catch(e) {}
-        }
-        // Then pull from server (will overwrite with latest)
-        loadFromServer(last.id, function(serverState, savedTime) {
-          if (!serverState) { status('No server data found for '+last.name); return; }
-          Object.keys(serverState).forEach(function(k) { if(k!=='importedPols') S[k] = serverState[k]; });
-          persist();
-          render();
-          status('\u2713 Loaded FNA for '+last.name+(savedTime?' (saved '+savedTime.slice(0,16)+')':''));
-        });
-        // Remove the link once used
-        var l = document.getElementById('resumeLastLink');
-        if (l && l.parentNode) l.parentNode.removeChild(l);
-      });
-      bar.appendChild(link);
-    }, 300);
-  } catch(e) {}
-})();
-
 // Applies CRM policy data to state — used on fresh load and on "Refresh from CRM"
 function applyPolsFromCRM(pols) {
   S.importedPols = pols;
@@ -1138,24 +1115,35 @@ function createNewClientInCRM(onDone) {
         if (onDone) onDone(false, err);
         return;
       }
-      // Success — store the new internal ID and update the URL (without reloading)
-      // so subsequent edits PATCH the right row.
-      window._crmInternalId = newId;
-      try {
-        var newUrl = new URL(window.location.href);
-        newUrl.searchParams.set('cid', newId);
-        if (idNum) newUrl.searchParams.set('id', idNum);
-        if (S.cli.name) newUrl.searchParams.set('name', S.cli.name);
-        window.history.replaceState({}, '', newUrl.toString());
-        // Update _crmParams snapshot so downstream code sees the new cid
-        window._crmParams = newUrl.searchParams;
-      } catch(e) {}
-      if (indicator) {
-        var t = new Date().toLocaleTimeString('en-ZA',{hour:'2-digit',minute:'2-digit'});
-        indicator.textContent = '\u2713 Client created ' + t;
-        indicator.style.color = '#86efac';
-      }
-      if (onDone) onDone(true, newId);
+      // Verify the row was actually created by reading it back.
+      sbFetch('GET', '/rest/v1/clients?ID=eq.' + encodeURIComponent(newId) + '&select=ID,Name', null, function(verifyRows, verifyErr){
+        if (verifyErr || !Array.isArray(verifyRows) || verifyRows.length === 0) {
+          // Insert appeared to succeed but row not found — flag this loudly
+          console.error('Client INSERT verification failed:', verifyErr, verifyRows);
+          if (indicator) { indicator.textContent = '\u26A0 Could not verify client creation'; indicator.style.color = '#f87171'; }
+          alert('The client may not have saved correctly. Check the CRM (click \u270B Sync Now in the CRM sidebar) before continuing. If the client is missing, try again or check the F12 console.');
+          if (onDone) onDone(false, 'verify_failed');
+          return;
+        }
+        // Verified — store the new internal ID and update the URL (without reloading)
+        window._crmInternalId = newId;
+        try {
+          var newUrl = new URL(window.location.href);
+          newUrl.searchParams.set('cid', newId);
+          if (idNum) newUrl.searchParams.set('id', idNum);
+          if (S.cli.name) newUrl.searchParams.set('name', S.cli.name);
+          window.history.replaceState({}, '', newUrl.toString());
+          window._crmParams = newUrl.searchParams;
+        } catch(e) {}
+        if (indicator) {
+          var t = new Date().toLocaleTimeString('en-ZA',{hour:'2-digit',minute:'2-digit'});
+          indicator.textContent = '\u2713 Client created ' + t;
+          indicator.style.color = '#86efac';
+        }
+        // Show a clear confirmation with next-step instructions
+        alert('\u2713 Client created in CRM:\n\n  ' + (verifyRows[0].Name||S.cli.name) + '\n\nIf the CRM is open in another tab, click "\uD83D\uDD04 Sync Now" in the CRM sidebar to see the new client. Until you do, the CRM tab is showing its old data.');
+        if (onDone) onDone(true, newId);
+      });
     });
   };
   if (!idNum) { goCreate(); return; }
@@ -1857,7 +1845,32 @@ function buildClient() {
 
   var r1 = g2();
   r1.appendChild(bindCRM(fld('Full Name', S.cli, 'name', { placeholder: 'Client full name' }), 'name'));
-  r1.appendChild(bindCRM(fld('ID Number', S.cli, 'id', { placeholder: '8001015009087' }), 'id'));
+
+  // ID Number — auto-populate DOB and Gender from SA ID on blur (only when those fields are blank)
+  var idWrap = fld('ID Number', S.cli, 'id', { placeholder: '8001015009087' });
+  var idInp = idWrap.querySelector('input');
+  if (idInp) {
+    idInp.addEventListener('blur', function(e){
+      // Save the ID itself first
+      patchClientFieldToCRM('id', S.cli.id);
+      // Try to parse the SA ID and auto-populate DOB / Gender if blank
+      var parsed = parseSAId(S.cli.id);
+      if (!parsed) return;
+      var changed = false;
+      if (!S.cli.dob) {
+        S.cli.dob = parsed.dob;
+        patchClientFieldToCRM('dob', parsed.dob);
+        changed = true;
+      }
+      if (!S.cli.gender) {
+        S.cli.gender = parsed.gender;
+        patchClientFieldToCRM('gender', parsed.gender);
+        changed = true;
+      }
+      if (changed) render();
+    });
+  }
+  r1.appendChild(idWrap);
   s.appendChild(r1);
 
   var r2 = g3();
