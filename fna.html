@@ -684,44 +684,12 @@ function queueSmartSave() {
     } catch(e) {}
   }
 
-  // Store the raw URL params so the "Refresh from CRM" button can re-apply them
+  // Store the raw URL params so the refresh-policies button can use them.
   window._crmParams = params;
   // Capture the CRM internal client ID (separate from S.cli.id which is the SA IDNumber).
-  // Used by refreshFromCRM() to query the policies table on Supabase.
+  // Used by refreshFromCRM() to query the policies table and by patchClientFieldToCRM()
+  // to PATCH the clients table.
   if (params.get('cid')) window._crmInternalId = params.get('cid');
-
-  // ── CRM-OWNED CLIENT FIELDS — always refresh whenever the FNA is opened from
-  // the CRM (URL params present), regardless of hasSavedState. The CRM is the
-  // source of truth for client demographics and marriage details.
-  if (params.get('name')) S.cli.name = decodeURIComponent(params.get('name'));
-  if (params.get('id'))   S.cli.id   = params.get('id');
-  if (params.get('dob')) {
-    var rawDob = params.get('dob');
-    if (rawDob.indexOf('T') > -1) rawDob = rawDob.split('T')[0];
-    var d = rawDob.split('-');
-    if (d.length === 3) S.cli.dob = d[2] + '/' + d[1] + '/' + d[0];
-    else S.cli.dob = rawDob;
-  }
-  if (params.get('gender'))  S.cli.gender    = decodeURIComponent(params.get('gender'));
-  if (params.get('smoker')) {
-    var sm = decodeURIComponent(params.get('smoker'));
-    S.cli.smoker = (sm === 'Yes') ? 'Smoker' : (sm === 'No') ? 'Non-smoker' : sm;
-  }
-  if (params.get('marital')) S.cli.marital   = decodeURIComponent(params.get('marital'));
-  if (params.get('occ'))     S.cli.occ       = decodeURIComponent(params.get('occ'));
-  if (params.get('edu'))     S.cli.education = decodeURIComponent(params.get('edu'));
-  if (params.get('spouse'))  S.cli.spouseName= decodeURIComponent(params.get('spouse'));
-  if (params.get('spousedob')) {
-    var rawSpDob = decodeURIComponent(params.get('spousedob'));
-    if (rawSpDob.indexOf('T') > -1) rawSpDob = rawSpDob.split('T')[0];
-    var sd = rawSpDob.split('-');
-    S.cli.spouseDob = (sd.length === 3) ? sd[2] + '/' + sd[1] + '/' + sd[0] : rawSpDob;
-  }
-  if (params.get('domdate')) {
-    var rawDom = decodeURIComponent(params.get('domdate'));
-    if (rawDom.indexOf('T') > -1) rawDom = rawDom.split('T')[0];
-    S.cli.domDate = rawDom;
-  }
 
   // POLICIES are CRM-owned data — always refresh from CRM whenever the CRM has
   // pushed a fresh list (the presence of the du_fna_pols key IS the signal).
@@ -766,12 +734,41 @@ function queueSmartSave() {
     }
   } catch(e) {}
 
-  // If we have a saved state, DON'T overwrite adviser-entered FNA data
-  // (assets, needs, retirement etc). CRM-owned fields above have already been
-  // refreshed. The "↻ CRM" button lets the adviser deliberately re-pull policies.
+  // If we have a saved state, DON'T overwrite ANY adviser-entered FNA data
+  // (client fields, assets, needs, retirement etc). The FNA is now the master
+  // for client demographics — its saved state wins. URL params are seeds only.
   if (hasSavedState) return;
 
-  // Fresh FNA — seed remaining fields that aren't unconditionally CRM-owned
+  // Fresh FNA — seed client fields and other state from URL params (one-time only)
+  if (params.get('name')) S.cli.name = decodeURIComponent(params.get('name'));
+  if (params.get('id'))   S.cli.id   = params.get('id');
+  if (params.get('dob')) {
+    var rawDob = params.get('dob');
+    if (rawDob.indexOf('T') > -1) rawDob = rawDob.split('T')[0];
+    var d = rawDob.split('-');
+    if (d.length === 3) S.cli.dob = d[2] + '/' + d[1] + '/' + d[0];
+    else S.cli.dob = rawDob;
+  }
+  if (params.get('gender'))  S.cli.gender    = decodeURIComponent(params.get('gender'));
+  if (params.get('smoker')) {
+    var sm = decodeURIComponent(params.get('smoker'));
+    S.cli.smoker = (sm === 'Yes') ? 'Smoker' : (sm === 'No') ? 'Non-smoker' : sm;
+  }
+  if (params.get('marital')) S.cli.marital   = decodeURIComponent(params.get('marital'));
+  if (params.get('occ'))     S.cli.occ       = decodeURIComponent(params.get('occ'));
+  if (params.get('edu'))     S.cli.education = decodeURIComponent(params.get('edu'));
+  if (params.get('spouse'))  S.cli.spouseName= decodeURIComponent(params.get('spouse'));
+  if (params.get('spousedob')) {
+    var rawSpDob = decodeURIComponent(params.get('spousedob'));
+    if (rawSpDob.indexOf('T') > -1) rawSpDob = rawSpDob.split('T')[0];
+    var sd = rawSpDob.split('-');
+    S.cli.spouseDob = (sd.length === 3) ? sd[2] + '/' + sd[1] + '/' + sd[0] : rawSpDob;
+  }
+  if (params.get('domdate')) {
+    var rawDom = decodeURIComponent(params.get('domdate'));
+    if (rawDom.indexOf('T') > -1) rawDom = rawDom.split('T')[0];
+    S.cli.domDate = rawDom;
+  }
   if (params.get('income')) {
     var incVal = params.get('income');
     if (!S.incRows) S.incRows = [];
@@ -796,16 +793,12 @@ function queueSmartSave() {
   if (indicator) { indicator.textContent = '↓ Loading...'; indicator.style.color = '#a8b938'; }
 
   loadFromServer(clientId, function(serverState, savedTime) {
-    // Always end by silently re-fetching live CRM data from Supabase. The
-    // localStorage handoff and URL params during open were fast-path values;
-    // these may be stale if the user updated the CRM while the FNA was open.
-    // We fetch the live client row (income, demographics, marital) AND the
-    // live active policies, then re-render.
+    // Silent post-load fetch: pull live POLICIES from Supabase (CRM owns policies).
+    // We DO NOT fetch client demographics — those are now FNA-owned and
+    // pulling them would overwrite locally-edited fields with stale CRM data.
     var doSilentLiveFetch = function() {
-      fetchLiveClientFromCRM({showStatus: false}, function(){
-        fetchLivePoliciesFromCRM({showStatus: false}, function(){
-          persist(); render();
-        });
+      fetchLivePoliciesFromCRM({showStatus: false}, function(){
+        persist(); render();
       });
     };
 
@@ -829,19 +822,16 @@ function queueSmartSave() {
       return;
     }
     // Merge server state into S — but never overwrite importedPols (always from CRM).
-    // Note: CRM-owned client fields (income, demographics, marital) will be
-    // overwritten shortly by doSilentLiveFetch from the live CRM data — we don't
-    // try to be clever about merging them from URL params here, because URL
-    // params are stale once the user updates the CRM.
+    // Note: cli now uses ALL fields from server. The FNA is the master for
+    // client demographics — its saved state is the canonical record. The CRM
+    // is updated via patchClientFieldToCRM whenever the user blurs a field.
     var currentPols = S.importedPols;
     Object.keys(serverState).forEach(function(k) {
       if (k !== 'importedPols' && k !== 'cli') S[k] = serverState[k];
     });
-    // Merge cli carefully — keep CRM-sourced fields, use server for adviser-entered fields
     if (serverState.cli) {
-      var crmFields = ['name','id','dob','gender','smoker','marital','occ','education','spouseName','spouseDob','domDate','grossPM','nettPM'];
       Object.keys(serverState.cli).forEach(function(k) {
-        if (crmFields.indexOf(k) < 0) S.cli[k] = serverState.cli[k];
+        S.cli[k] = serverState.cli[k];
       });
     }
     S.importedPols = currentPols; // always use fresh CRM policies
@@ -982,6 +972,196 @@ function applyPolsFromCRM(pols) {
   S.existingCover.dread      = totDD    > 0 ? String(Math.round(totDD))    : '';
   S.existingCover.ipPM       = totIP    > 0 ? String(Math.round(totIP))    : '';
   S.existingCover.totalPrem  = totPrem  > 0 ? String(Math.round(totPrem))  : '';
+}
+
+// ── CRM client write-back ────────────────────────────────────────────────
+// FNA is the primary capture tool for client demographics. Edits to client
+// fields write back to the CRM clients table on Supabase. Uses PATCH (partial
+// update) so that CRM-only columns (Cell, Email, Address, etc.) aren't wiped.
+
+// Convert FNA-shape values to CRM-shape values for write-back.
+function fnaToCrmCli(fields) {
+  var out = {};
+  // Strings pass through
+  ['Name','IDNumber','Occupation','Education','SpouseName'].forEach(function(k){
+    if (fields[k] !== undefined) out[k] = fields[k];
+  });
+  // DOB: DD/MM/YYYY -> YYYY-MM-DD
+  var fmtDate = function(v){
+    if (!v) return '';
+    var s = String(v).trim();
+    var m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    if (m) return m[3] + '-' + ('0'+m[2]).slice(-2) + '-' + ('0'+m[1]).slice(-2);
+    if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.split('T')[0]; // already ISO
+    return s; // pass through, server will reject malformed
+  };
+  if (fields.DOB !== undefined)       out.DOB = fmtDate(fields.DOB);
+  if (fields.SpouseDOB !== undefined) out.SpouseDOB = fmtDate(fields.SpouseDOB);
+  if (fields.Anniversary !== undefined) out.Anniversary = fmtDate(fields.Anniversary);
+  // Smoker: 'Smoker'/'Non-smoker' -> 'Yes'/'No'
+  if (fields.Smoker !== undefined) {
+    var s = String(fields.Smoker || '');
+    out.Smoker = (s === 'Smoker') ? 'Yes' : (s === 'Non-smoker') ? 'No' : s;
+  }
+  // Gender pass-through (CRM expects 'Male'/'Female'/'Other' which matches FNA)
+  if (fields.Gender !== undefined) out.Gender = fields.Gender || '';
+  // Marital: FNA em-dash -> CRM hyphen
+  if (fields.MaritalStatus !== undefined) {
+    var m = String(fields.MaritalStatus || '');
+    if (m === 'Married \u2014 ANC with accrual')    out.MaritalStatus = 'Married - ANC with accrual';
+    else if (m === 'Married \u2014 ANC no accrual') out.MaritalStatus = 'Married - ANC without accrual';
+    else if (m === 'Married \u2014 COP')            out.MaritalStatus = 'Married in COP';
+    else out.MaritalStatus = m;
+  }
+  // Income (numeric string)
+  if (fields.Income !== undefined) out.Income = String(fields.Income || '');
+  return out;
+}
+
+// Build the CRM-shape payload from current FNA state for ALL client fields.
+// Used by createNewClientInCRM.
+function fnaCliToFullCrmRow() {
+  return fnaToCrmCli({
+    Name:           S.cli.name,
+    IDNumber:       S.cli.id,
+    DOB:            S.cli.dob,
+    Gender:         S.cli.gender,
+    Smoker:         S.cli.smoker,
+    Education:      S.cli.education,
+    Occupation:     S.cli.occ,
+    MaritalStatus:  S.cli.marital,
+    Anniversary:    S.cli.domDate,
+    SpouseName:     S.cli.spouseName,
+    SpouseDOB:      S.cli.spouseDob,
+    Income:         (S.incRows && S.incRows[0] && S.incRows[0].pm) || S.cli.grossPM || ''
+  });
+}
+
+// PATCH a partial set of client fields to the CRM clients table. Debounced
+// per-field so that rapid blur events don't flood the network. Each (cid, field)
+// gets its own timer.
+var _cliPatchTimers = {};
+function patchClientFieldToCRM(fieldNameInternal, fnaValue) {
+  var crmClientId = window._crmInternalId
+                    || (window._crmParams && window._crmParams.get('cid')) || '';
+  if (!crmClientId) {
+    // No CRM record yet — caller should use createNewClientInCRM instead.
+    return;
+  }
+  // Map FNA field name to CRM column name + value translation
+  var mapping = {
+    'name':       'Name',
+    'id':         'IDNumber',
+    'dob':        'DOB',
+    'gender':     'Gender',
+    'smoker':     'Smoker',
+    'education':  'Education',
+    'occ':        'Occupation',
+    'marital':    'MaritalStatus',
+    'domDate':    'Anniversary',
+    'spouseName': 'SpouseName',
+    'spouseDob':  'SpouseDOB',
+    'grossPM':    'Income'
+  };
+  var crmCol = mapping[fieldNameInternal];
+  if (!crmCol) return;
+  var payloadInput = {}; payloadInput[crmCol] = fnaValue;
+  var body = fnaToCrmCli(payloadInput);
+
+  var key = crmClientId + '::' + crmCol;
+  if (_cliPatchTimers[key]) clearTimeout(_cliPatchTimers[key]);
+  _cliPatchTimers[key] = setTimeout(function(){
+    var indicator = document.getElementById('syncIndicator');
+    if (indicator) { indicator.textContent = '\u2191 Saving client...'; indicator.style.color = '#a8b938'; }
+    sbFetch('PATCH',
+      '/rest/v1/clients?ID=eq.' + encodeURIComponent(crmClientId),
+      body,
+      function(res, err){
+        if (err) {
+          console.error('Client PATCH failed:', crmCol, err);
+          if (indicator) { indicator.textContent = '\u26A0 Client save failed'; indicator.style.color = '#f87171'; }
+        } else {
+          var t = new Date().toLocaleTimeString('en-ZA',{hour:'2-digit',minute:'2-digit'});
+          if (indicator) { indicator.textContent = '\u2713 Client saved ' + t; indicator.style.color = '#86efac'; }
+        }
+      }
+    );
+  }, 600);
+}
+
+// Create a new client record in the CRM from the current FNA state. Called
+// when the FNA is opened with no cid (cold start) and the user clicks the
+// "Save new client to CRM" button.
+function createNewClientInCRM(onDone) {
+  if (!S.cli.name || !S.cli.name.trim()) {
+    alert('Please enter the client\'s full name before creating the CRM record.');
+    if (onDone) onDone(false, 'no_name');
+    return;
+  }
+  // Pre-flight duplicate check by IDNumber (if provided)
+  var idNum = (S.cli.id || '').trim();
+  var goCreate = function(){
+    var newId = 'new_' + Date.now();
+    var row = fnaCliToFullCrmRow();
+    row.ID = newId;
+    row.Status = 'Active';
+    row.IsLead = 'No';
+    row.Adviser = 'Clinton Hayes';
+    var indicator = document.getElementById('syncIndicator');
+    if (indicator) { indicator.textContent = '\u2191 Creating client...'; indicator.style.color = '#a8b938'; }
+    // POST with merge-duplicates is the same pattern the CRM uses for upsert
+    sbFetch('POST', '/rest/v1/clients', [row], function(res, err){
+      if (err) {
+        console.error('Client INSERT failed:', err);
+        if (indicator) { indicator.textContent = '\u26A0 Could not create client'; indicator.style.color = '#f87171'; }
+        alert('Could not create client in CRM. Check the console (F12) for details. Your FNA is still saved locally.');
+        if (onDone) onDone(false, err);
+        return;
+      }
+      // Success — store the new internal ID and update the URL (without reloading)
+      // so subsequent edits PATCH the right row.
+      window._crmInternalId = newId;
+      try {
+        var newUrl = new URL(window.location.href);
+        newUrl.searchParams.set('cid', newId);
+        if (idNum) newUrl.searchParams.set('id', idNum);
+        if (S.cli.name) newUrl.searchParams.set('name', S.cli.name);
+        window.history.replaceState({}, '', newUrl.toString());
+        // Update _crmParams snapshot so downstream code sees the new cid
+        window._crmParams = newUrl.searchParams;
+      } catch(e) {}
+      if (indicator) {
+        var t = new Date().toLocaleTimeString('en-ZA',{hour:'2-digit',minute:'2-digit'});
+        indicator.textContent = '\u2713 Client created ' + t;
+        indicator.style.color = '#86efac';
+      }
+      if (onDone) onDone(true, newId);
+    });
+  };
+  if (!idNum) { goCreate(); return; }
+  // Duplicate check
+  sbFetch('GET',
+    '/rest/v1/clients?IDNumber=eq.' + encodeURIComponent(idNum) + '&select=ID,Name',
+    null,
+    function(rows, err){
+      if (err) {
+        // Network error — proceed anyway, but warn
+        if (!confirm('Could not check for duplicate ID number due to a network error. Create client anyway?')) {
+          if (onDone) onDone(false, 'network');
+          return;
+        }
+        goCreate();
+        return;
+      }
+      if (Array.isArray(rows) && rows.length > 0) {
+        alert('A client with ID number ' + idNum + ' already exists in the CRM ('
+              + (rows[0].Name || '(no name)') + '). Open them from the CRM instead of creating a new record.');
+        if (onDone) onDone(false, 'duplicate');
+        return;
+      }
+      goCreate();
+    }
+  );
 }
 
 // Fetch the live client row from the CRM's clients table on Supabase. CRM-owned
@@ -1130,36 +1310,28 @@ function fetchLivePoliciesFromCRM(opts, onDone) {
 // the moment the user updates the client in the CRM. Live Supabase is the
 // single source of truth.
 function refreshFromCRM() {
-  if (!confirm('Refresh policies and personal details from CRM?\n\nYour FNA data (assets, needs, retirement etc) will be preserved. Only CRM fields (policies, income, personal details) will be updated.')) return;
+  if (!confirm('Refresh active policies from CRM?\n\nYour FNA data (client details, assets, needs, retirement etc) will NOT be touched. Only the policy list will be re-pulled.')) return;
   var params = window._crmParams;
   var crmClientId = (params && params.get('cid')) || window._crmInternalId || '';
   if (!crmClientId) {
-    alert('No CRM client ID found. Open this FNA from the CRM to enable refresh.');
+    alert('No CRM client ID found. If this is a new client, click "Save as new client to CRM" on the Client tab first.');
     return;
   }
 
-  status('\u2193 Fetching from CRM...');
+  status('\u2193 Fetching policies from CRM...');
 
-  // Fetch client demographics first, then policies. Both update S in-place.
-  fetchLiveClientFromCRM({showStatus: false}, function(clientOk, clientInfoOrErr){
-    fetchLivePoliciesFromCRM({showStatus: false}, function(polsOk, polsInfoOrErr){
-      // Reset retirement assets so they re-seed from the current policy list
-      S.retAssets = [];
-      persist();
-      render();
+  fetchLivePoliciesFromCRM({showStatus: false}, function(polsOk, polsInfoOrErr){
+    // Reset retirement assets so they re-seed from the current policy list
+    S.retAssets = [];
+    persist();
+    render();
 
-      // Compose a helpful status message
-      if (clientOk && polsOk) {
-        var n = Array.isArray(polsInfoOrErr) ? polsInfoOrErr.length : 0;
-        status('\u2713 Refreshed from CRM (' + n + ' active ' + (n===1?'policy':'policies') + ')');
-      } else if (clientOk && !polsOk) {
-        status('\u26A0 Client refreshed; policies fetch failed');
-      } else if (!clientOk && polsOk) {
-        status('\u26A0 Policies refreshed; client details fetch failed');
-      } else {
-        status('\u26A0 Could not reach CRM \u2014 nothing changed');
-      }
-    });
+    if (polsOk) {
+      var n = Array.isArray(polsInfoOrErr) ? polsInfoOrErr.length : 0;
+      status('\u2713 Refreshed policies from CRM (' + n + ' active ' + (n===1?'policy':'policies') + ')');
+    } else {
+      status('\u26A0 Could not fetch policies from CRM');
+    }
   });
 }
 
@@ -1615,27 +1787,63 @@ function buildClient() {
   var s = div();
 
   s.appendChild(stitle('Personal Details'));
-  // CRM-owned fields below — to change them, edit the client in the CRM and re-import.
-  var crmHint = div('info');
-  crmHint.style.cssText = 'background:#f5f3ec;border-left:3px solid var(--gold);font-size:11px;color:#6a5f1a;margin-bottom:10px';
-  crmHint.textContent = 'ℹ Personal details below are pulled from the CRM. To change them, update the client record in the CRM and click ↻ CRM above.';
-  s.appendChild(crmHint);
+  // FNA is the primary capture tool for client demographics. Edits here write
+  // back to the CRM clients table on Supabase (debounced ~600ms after blur).
+  // The orange banner shows when there's no CRM record yet — see below.
+  if (!window._crmInternalId && !(window._crmParams && window._crmParams.get('cid'))) {
+    var newCliBanner = div('info');
+    newCliBanner.style.cssText = 'background:#fff7ed;border-left:3px solid #f59e0b;font-size:11px;color:#92400e;margin-bottom:10px;padding:8px 12px';
+    newCliBanner.innerHTML = '\u26A0 <strong>No CRM record yet.</strong> Fill in at least the Full Name below, then click <strong>"Save as new client to CRM"</strong> to create the client record. Your edits won\'t persist to the CRM until you do.';
+    s.appendChild(newCliBanner);
+
+    var btnRow = div();
+    btnRow.style.cssText = 'margin:8px 0 14px;display:flex;gap:10px;align-items:center';
+    var newCliBtn = document.createElement('button');
+    newCliBtn.type = 'button';
+    newCliBtn.textContent = 'Save as new client to CRM';
+    newCliBtn.style.cssText = 'background:var(--gold);color:#fff;border:none;border-radius:6px;padding:9px 16px;font-size:13px;font-weight:700;cursor:pointer';
+    newCliBtn.addEventListener('click', function(){
+      createNewClientInCRM(function(ok){
+        if (ok) render();
+      });
+    });
+    btnRow.appendChild(newCliBtn);
+    s.appendChild(btnRow);
+  }
+
+  // Helper: bind a blur handler that writes back to CRM. Called inline.
+  var bindCRM = function(wrapper, fnaKey){
+    var inp = wrapper.querySelector('input, select');
+    if (!inp) return wrapper;
+    inp.addEventListener('blur', function(e){
+      patchClientFieldToCRM(fnaKey, S.cli[fnaKey]);
+    });
+    if (inp.tagName === 'SELECT') {
+      inp.addEventListener('change', function(e){
+        patchClientFieldToCRM(fnaKey, S.cli[fnaKey]);
+      });
+    }
+    return wrapper;
+  };
 
   var r1 = g2();
-  r1.appendChild(roDisp('Full Name', S.cli.name));
-  r1.appendChild(roDisp('ID Number', S.cli.id));
+  r1.appendChild(bindCRM(fld('Full Name', S.cli, 'name', { placeholder: 'Client full name' }), 'name'));
+  r1.appendChild(bindCRM(fld('ID Number', S.cli, 'id', { placeholder: '8001015009087' }), 'id'));
   s.appendChild(r1);
 
   var r2 = g3();
-  r2.appendChild(roDisp('Date of Birth (DD/MM/YYYY)', S.cli.dob));
-  r2.appendChild(roDisp('Gender', S.cli.gender));
-  r2.appendChild(roDisp('Smoker Status', S.cli.smoker));
+  r2.appendChild(bindCRM(fld('Date of Birth (DD/MM/YYYY)', S.cli, 'dob', {
+    placeholder: '01/01/1980',
+    onblur: function() { render(); }
+  }), 'dob'));
+  r2.appendChild(bindCRM(sfld('Gender', S.cli, 'gender', ['', 'Male', 'Female']), 'gender'));
+  r2.appendChild(bindCRM(sfld('Smoker Status', S.cli, 'smoker', ['', 'Non-smoker', 'Smoker']), 'smoker'));
   s.appendChild(r2);
 
   var r3 = g3();
-  r3.appendChild(roDisp('Education', S.cli.education));
-  r3.appendChild(roDisp('Occupation', S.cli.occ));
-  // Retirement Age is an FNA-only assumption — kept editable
+  r3.appendChild(bindCRM(sfld('Education', S.cli, 'education', ['','Matric','Diploma','Degree','Post-graduate','Other']), 'education'));
+  r3.appendChild(bindCRM(fld('Occupation', S.cli, 'occ', { placeholder: 'e.g. Engineer' }), 'occ'));
+  // Retirement Age is an FNA-only assumption — not written back to CRM
   r3.appendChild(sfld('Retirement Age', S.cli, 'retAge', ['55','60','63','65','67','70']));
   s.appendChild(r3);
 
@@ -1645,27 +1853,23 @@ function buildClient() {
   if (cliAge) {
     var inf = div('info');
     inf.textContent = 'Age: ' + cliAge + ' years' +
-      (yrs !== null ? ' · ' + yrs + ' years to retirement (age ' + S.cli.retAge + ')' : '') +
-      (S.cli.smoker ? ' · ' + S.cli.smoker : '');
+      (yrs !== null ? ' \u00B7 ' + yrs + ' years to retirement (age ' + S.cli.retAge + ')' : '') +
+      (S.cli.smoker ? ' \u00B7 ' + S.cli.smoker : '');
     s.appendChild(inf);
   }
 
   s.appendChild(stitle('Marital Status'));
   var r4 = g3();
-  r4.appendChild(roDisp('Marital Status', S.cli.marital));
-  // Display marriage date as DD/MM/YYYY (stored as YYYY-MM-DD)
-  var _domDisp = '';
-  if (S.cli.domDate) {
-    var _dp = String(S.cli.domDate).split(/[T-]/);
-    if (_dp.length >= 3) _domDisp = _dp[2] + '/' + _dp[1] + '/' + _dp[0];
-    else _domDisp = S.cli.domDate;
-  }
-  r4.appendChild(roDisp('Date of Marriage', _domDisp));
-  r4.appendChild(roDisp('Spouse / Partner Name', S.cli.spouseName));
+  r4.appendChild(bindCRM(sfld('Marital Status', S.cli, 'marital', [
+    '','Single','Married \u2014 COP','Married \u2014 ANC no accrual','Married \u2014 ANC with accrual',
+    'Divorced','Widowed','Life partner'
+  ]), 'marital'));
+  r4.appendChild(bindCRM(fld('Date of Marriage', S.cli, 'domDate', { type: 'date' }), 'domDate'));
+  r4.appendChild(bindCRM(fld('Spouse / Partner Name', S.cli, 'spouseName', { placeholder: 'Full name' }), 'spouseName'));
   s.appendChild(r4);
 
   var r5 = g2();
-  r5.appendChild(roDisp('Spouse DOB (DD/MM/YYYY)', S.cli.spouseDob));
+  r5.appendChild(bindCRM(fld('Spouse DOB (DD/MM/YYYY)', S.cli, 'spouseDob', { placeholder: '01/01/1982' }), 'spouseDob'));
   s.appendChild(r5);
 
   s.appendChild(stitle('Dependants'));
@@ -1793,7 +1997,7 @@ function buildIncome() {
 
   s.appendChild(stitle('Income Sources'));
   var incInf = div('info');
-  incInf.innerHTML = 'The <strong>first row (Salary / drawings)</strong> is pulled from the CRM and drives the PAYE calculation \u2014 to change it, edit the client\'s Income in the CRM and click \u21BB CRM. ' +
+  incInf.innerHTML = 'The <strong>first row (Salary / drawings)</strong> is the client\'s monthly gross income \u2014 changes here save back to the CRM client record automatically. ' +
     'Rental income rows (from the Assets tab) are automatically included in taxable income. ' +
     'Add other income sources below; tick the <strong>Taxable</strong> box if subject to income tax.';
   s.appendChild(incInf);
@@ -1803,16 +2007,23 @@ function buildIncome() {
   var ib = document.createElement('tbody');
   S.incRows.forEach(function(r, i) {
     var tr = document.createElement('tr');
-    var isCrmSalary = (i === 0); // first row is CRM-owned salary
+    var isCrmSalary = (i === 0); // first row maps to CRM Income column
 
-    // Source description
+    // Source description (read-only for auto rental rows; salary label is fixed)
     var t1 = document.createElement('td');
-    if (r._auto || isCrmSalary) {
-      // Auto rental rows AND the CRM-owned salary row are read-only labels
+    if (r._auto) {
       var autoLbl = document.createElement('span');
-      autoLbl.textContent = isCrmSalary ? (r.src || 'Salary / drawings') : r.src;
-      autoLbl.style.cssText = 'font-size:12px;color:'+(isCrmSalary?'var(--text)':'var(--sub)')+';'+(isCrmSalary?'font-weight:600':'font-style:italic');
+      autoLbl.textContent = r.src;
+      autoLbl.style.cssText = 'font-size:12px;color:var(--sub);font-style:italic';
       t1.appendChild(autoLbl);
+    } else if (isCrmSalary) {
+      // Salary label is fixed (it's hardwired to the CRM Income column)
+      var salLbl = document.createElement('span');
+      salLbl.textContent = r.src || 'Salary / drawings';
+      salLbl.style.cssText = 'font-size:12px;color:var(--text);font-weight:600';
+      t1.appendChild(salLbl);
+      // Ensure src is set in state
+      if (!r.src) S.incRows[i].src = 'Salary / drawings';
     } else {
       var si = document.createElement('input'); si.type = 'text'; si.value = r.src || '';
       si.placeholder = 'e.g. Investment income, spouse salary';
@@ -1821,26 +2032,25 @@ function buildIncome() {
     }
     tr.appendChild(t1);
 
-    // Amount — CRM-owned salary row is read-only display; auto rental is read-only input; others editable
+    // Amount — editable for salary (writes back to CRM Income on blur)
     var t2 = document.createElement('td');
-    if (isCrmSalary) {
-      var amtDisp = document.createElement('span');
-      amtDisp.textContent = r.pm ? 'R\u202f'+(parseFloat(String(r.pm).replace(/[^0-9.\-]/g,''))||0).toLocaleString('en-ZA') : '— from CRM —';
-      amtDisp.style.cssText = 'display:inline-block;padding:5px 10px;font-size:12px;color:'+(r.pm?'var(--text)':'#9a9a8a')+';background:#fafaf6;border:1.5px solid var(--mist);border-radius:6px;'+(r.pm?'font-weight:600':'font-style:italic');
-      t2.appendChild(amtDisp);
-    } else {
-      var rw = div('td-r'); rw.appendChild(el('span', 'rp', 'R'));
-      var vi = document.createElement('input'); vi.type = 'text'; vi.inputMode = 'numeric';
-      vi.value = r.pm || ''; vi.placeholder = '0';
-      vi.readOnly = !!r._auto; // auto rows are read-only (driven by Assets tab)
-      if (r._auto) vi.style.color = 'var(--sub)';
-      vi.addEventListener('input', function(e) { if (!S.incRows[i]._auto) S.incRows[i].pm = e.target.value; });
-      vi.addEventListener('blur', function(e) {
-        if (!S.incRows[i]._auto) S.incRows[i].pm = e.target.value;
-        render();
-      });
-      rw.appendChild(vi); t2.appendChild(rw);
-    }
+    var rw = div('td-r'); rw.appendChild(el('span', 'rp', 'R'));
+    var vi = document.createElement('input'); vi.type = 'text'; vi.inputMode = 'numeric';
+    vi.value = r.pm || ''; vi.placeholder = '0';
+    vi.readOnly = !!r._auto; // auto rows are read-only (driven by Assets tab)
+    if (r._auto) vi.style.color = 'var(--sub)';
+    vi.addEventListener('input', function(e) { if (!S.incRows[i]._auto) S.incRows[i].pm = e.target.value; });
+    vi.addEventListener('blur', function(e) {
+      if (S.incRows[i]._auto) return;
+      S.incRows[i].pm = e.target.value;
+      if (isCrmSalary) {
+        // Mirror to S.cli.grossPM and write back to CRM
+        S.cli.grossPM = e.target.value;
+        patchClientFieldToCRM('grossPM', e.target.value);
+      }
+      render();
+    });
+    rw.appendChild(vi); t2.appendChild(rw);
     tr.appendChild(t2);
 
     // Taxable checkbox (row 0 always taxable; auto rental always taxable — both locked)
