@@ -873,18 +873,34 @@ function queueSmartSave() {
   });
 })();
 
-// ── Last-client recovery: if FNA opened with no client, offer to reload last-worked client
+// ── Last-client recovery: if FNA opened with no client, offer a small
+// "Resume last client" link in the header (no auto-popup). This avoids
+// interrupting the new-client flow but preserves the recovery option.
 (function checkLastClient() {
   var params = new URLSearchParams(window.location.search);
-  if (params.get('id')) return; // client loaded from CRM — no recovery needed
+  if (params.get('id') || params.get('cid')) return; // already loading a client
   try {
     var last = JSON.parse(localStorage.getItem('du_fna_lastClient') || 'null');
     if (!last || !last.id || !last.name) return;
     var age = Math.round((Date.now() - (last.time||0)) / 60000); // minutes
     if (age > 10080) return; // older than 7 days — don't offer
     var label = age < 60 ? age + ' min ago' : age < 1440 ? Math.round(age/60) + ' hrs ago' : Math.round(age/1440) + ' days ago';
-    setTimeout(function() {
-      if (confirm('Load last-worked FNA?\n\n' + last.name + ' ('+label+')\n\nData is saved on the server. Click OK to reload.')) {
+
+    // Insert a small recovery link into the header — non-intrusive.
+    setTimeout(function(){
+      var bar = document.querySelector('.toolbar') || document.querySelector('header') || document.body;
+      if (!bar) return;
+      // Don't add twice
+      if (document.getElementById('resumeLastLink')) return;
+      var link = document.createElement('button');
+      link.id = 'resumeLastLink';
+      link.type = 'button';
+      link.className = 'btn btn-ghost btn-sm';
+      link.style.cssText = 'background:#f5f3ec;color:#6a5f1a;border:1px solid #d4c896;font-size:11px;margin-left:6px';
+      link.textContent = '\u21BA Resume ' + last.name + ' (' + label + ')';
+      link.title = 'Resume the FNA you were last working on';
+      link.addEventListener('click', function(){
+        if (!confirm('Resume FNA for ' + last.name + '?\n\nThis will load the most recent saved data for this client.')) return;
         // Try localStorage first for instant load
         var lsKey = 'du_fna_' + last.id;
         var lsData = localStorage.getItem(lsKey);
@@ -900,9 +916,13 @@ function queueSmartSave() {
           Object.keys(serverState).forEach(function(k) { if(k!=='importedPols') S[k] = serverState[k]; });
           persist();
           render();
-          status('✓ Loaded FNA for '+last.name+(savedTime?' (saved '+savedTime.slice(0,16)+')':''));
+          status('\u2713 Loaded FNA for '+last.name+(savedTime?' (saved '+savedTime.slice(0,16)+')':''));
         });
-      }
+        // Remove the link once used
+        var l = document.getElementById('resumeLastLink');
+        if (l && l.parentNode) l.parentNode.removeChild(l);
+      });
+      bar.appendChild(link);
     }, 300);
   } catch(e) {}
 })();
@@ -1591,6 +1611,15 @@ function newClient() {
   if (!confirm('Start a new blank FNA? All current data will be cleared.')) return;
   S = JSON.parse(JSON.stringify(DEFAULTS));
   activeTab = 0;
+  // Clear CRM linkage — without this, edits to the new client would PATCH
+  // back to the previous client's CRM record.
+  window._crmInternalId = null;
+  window._crmParams = new URLSearchParams('');
+  // Clear URL params so a refresh doesn't load the previous client back
+  try {
+    var freshUrl = window.location.pathname;
+    window.history.replaceState({}, '', freshUrl);
+  } catch(e) {}
   render();
 }
 function status(msg) {
