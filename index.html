@@ -4030,7 +4030,32 @@ function buildPolicyForm(p){
       html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="p3pot" value="Undecided"'+((!p.WithdrawSavingsPot||p.WithdrawSavingsPot==='Undecided')?' checked':'')+'>Undecided</label>';
       html+='</div></div>';
     } else {
-      html+='<div class="g2">'+fld('pb_matval','Maturity Value',p.BenMaturityValue,'text','oninput=""')+fld('pb_matage','Maturity Age',p.MaturityAge||p.maturityAge||'','text','oninput="invCalcMaturity()"')+'</div>';
+      // Investments use Maturity Date as primary; Maturity Age is auto-derived from client DOB.
+      // If existing policy has MaturityAge but no MaturityDate, derive the date from DOB+age (migration).
+      var _matDateInit = p.MaturityDate||'';
+      var _matAgeInit = p.MaturityAge||p.maturityAge||'';
+      if(!_matDateInit && _matAgeInit){
+        var _cMig = DB.clients.find(function(x){ return String(x.ID)===String(EPC); });
+        if(_cMig && clean(_cMig.DOB)){
+          var _dpMig = String(_cMig.DOB).split(/[T ]/)[0].split(/[-\/]/);
+          if(_dpMig.length>=3){
+            var _ageMig = parseInt(_matAgeInit,10);
+            if(!isNaN(_ageMig)){
+              var _yMig = parseInt(_dpMig[0])+_ageMig;
+              var _mMig = String(parseInt(_dpMig[1])); if(_mMig.length===1) _mMig='0'+_mMig;
+              var _dMigD = String(parseInt(_dpMig[2])); if(_dMigD.length===1) _dMigD='0'+_dMigD;
+              _matDateInit = _yMig+'-'+_mMig+'-'+_dMigD;
+            }
+          }
+        }
+      }
+      html+='<div class="g2">'+fld('pb_matval','Maturity Value',p.BenMaturityValue,'text','oninput=""')+fdp('pb_matdate','Maturity Date',_matDateInit)+'</div>';
+      // Maturity Age — read-only display, auto-derived from Maturity Date and client DOB
+      html+='<div class="g2">';
+      html+='<div class="fld"><label>Maturity Age <span style="font-size:10px;color:#889;font-weight:400">(auto from date + client DOB)</span></label>';
+      html+='<div style="padding:8px 11px;background:var(--smoke);border:1.5px solid var(--mist);border-radius:7px;font-size:13px;font-weight:700;color:var(--navy)" id="pb_matage_display">—</div>';
+      html+='<input type="hidden" id="pb_matage" value="'+(_matAgeInit||'')+'"></div>';
+      html+='<div></div></div>';
       html+='<div class="g2">';
       html+='<div class="fld"><label>Growth Rate % <span style="font-size:10px;color:#889;font-weight:400">(used for projection)</span></label>';
       html+='<div style="position:relative"><input id="pb_growrate" type="text" value="'+(p.GrowthRate||p.PremGrowthRate||p.IllustrativeRate||'')+'" placeholder="e.g. 8.5" oninput="invCalcMaturity()" ';
@@ -4490,16 +4515,49 @@ function invCalcMaturity(){
   var fv = parseFloat((document.getElementById('pb_fv')||{value:'0'}).value.replace(/[^0-9.]/g,'')||0) || 0;
   var prem = parseFloat((document.getElementById('ppm')||{value:'0'}).value.replace(/[^0-9.]/g,'')||0) || 0;
   var rate = parseFloat((document.getElementById('pb_growrate')||{value:''}).value||0)||0;
-  var ageEl = document.getElementById('pb_matage');
+  var dateEl = document.getElementById('pb_matdate');
+  var ageHidden = document.getElementById('pb_matage');
+  var ageDisplay = document.getElementById('pb_matage_display');
   var out = document.getElementById('pb_matval');
   if(!out) return;
-  if(!fv || !rate || !ageEl || !ageEl.value){ out.value=''; return; }
+
+  // Sync date picker selects → hidden input before reading
+  if(document.getElementById('pb_matdate_d')) fdpSync('pb_matdate');
+
+  if(!dateEl || !dateEl.value){
+    if(out) out.value='';
+    if(ageDisplay) ageDisplay.textContent='—';
+    if(ageHidden) ageHidden.value='';
+    return;
+  }
+
+  // Parse maturity date safely (avoid UTC shift)
+  var _mp = String(dateEl.value).split(/[T ]/)[0].split(/[-\/]/);
+  if(_mp.length<3){ out.value=''; return; }
+  var matDate = new Date(parseInt(_mp[0]), parseInt(_mp[1])-1, parseInt(_mp[2]));
+  if(isNaN(matDate)){ out.value=''; return; }
+
   var c = DB.clients.find(function(x){ return String(x.ID)===String(EPC); });
   if(!c || !clean(c.DOB)){ out.value=''; return; }
-  var currentAge = calcAge(c.DOB);
-  var matAge = parseInt(ageEl.value,10);
-  if(!currentAge || !matAge || matAge <= currentAge){ out.value=''; return; }
-  var yrs = matAge - currentAge;
+
+  // Parse DOB safely
+  var _dp = String(c.DOB).split(/[T ]/)[0].split(/[-\/]/);
+  if(_dp.length<3){ out.value=''; return; }
+  var dob = new Date(parseInt(_dp[0]), parseInt(_dp[1])-1, parseInt(_dp[2]));
+  if(isNaN(dob)){ out.value=''; return; }
+
+  var today = new Date(); today.setHours(0,0,0,0);
+  // Years from today to maturity (fractional)
+  var yrs = (matDate.getTime() - today.getTime()) / (365.25*86400000);
+
+  // Derive maturity age (whole years) from DOB → maturity date
+  var matAge = matDate.getFullYear() - dob.getFullYear();
+  if(matDate.getMonth() < dob.getMonth() || (matDate.getMonth()===dob.getMonth() && matDate.getDate() < dob.getDate())) matAge--;
+  if(ageDisplay) ageDisplay.textContent = (matAge>0 && !isNaN(matAge)) ? String(matAge) : '—';
+  if(ageHidden) ageHidden.value = (matAge>0 && !isNaN(matAge)) ? String(matAge) : '';
+
+  if(yrs<=0 || !fv || !rate){ out.value=''; return; }
+
   var r = rate / 100;
   var projected = fv * Math.pow(1+r, yrs);
 
