@@ -830,12 +830,16 @@ function queueSmartSave() {
   if (indicator) { indicator.textContent = '↓ Loading...'; indicator.style.color = '#a8b938'; }
 
   loadFromServer(clientId, function(serverState, savedTime) {
-    // Silent post-load fetch: pull live POLICIES from Supabase (CRM owns policies).
-    // We DO NOT fetch client demographics — those are now FNA-owned and
-    // pulling them would overwrite locally-edited fields with stale CRM data.
+    // Silent post-load fetch: pull live POLICIES (CRM owns policies) and live
+    // CLIENT DETAILS (fill-blanks-only — see fetchLiveClientFromCRM). The client
+    // fetch ensures CRM-only fields (cell, email, address, education etc.)
+    // populate the FNA without overwriting anything the adviser has already
+    // typed into the FNA.
     var doSilentLiveFetch = function() {
-      fetchLivePoliciesFromCRM({showStatus: false}, function(){
-        persist(); render();
+      fetchLiveClientFromCRM({showStatus: false}, function(){
+        fetchLivePoliciesFromCRM({showStatus: false}, function(){
+          persist(); render();
+        });
       });
     };
 
@@ -1216,19 +1220,19 @@ function fetchLiveClientFromCRM(opts, onDone) {
   var crmClientId = (window._crmParams && window._crmParams.get('cid'))
                     || window._crmInternalId || '';
   if (!crmClientId) { if (onDone) onDone(false, 'no_cid'); return; }
-  if (opts.showStatus) status('↓ Fetching client details from CRM...');
+  if (opts.showStatus) status('\u2193 Fetching client details from CRM...');
   var path = '/rest/v1/clients'
            + '?ID=eq.' + encodeURIComponent(crmClientId)
            + '&select=*';
   sbFetch('GET', path, null, function(rows, err){
     if (err || !Array.isArray(rows) || rows.length === 0) {
-      if (opts.showStatus) status('⚠ Could not fetch client details from CRM');
+      if (opts.showStatus) status('\u26A0 Could not fetch client details from CRM');
       if (onDone) onDone(false, err || 'not_found');
       return;
     }
     var c = rows[0];
 
-    // Format DOB and Spouse DOB as DD/MM/YYYY for display
+    // Format DOB / Spouse DOB as DD/MM/YYYY for display
     var fmtDob = function(raw){
       if (!raw) return '';
       raw = String(raw);
@@ -1238,14 +1242,11 @@ function fetchLiveClientFromCRM(opts, onDone) {
       return raw;
     };
     var fmtIso = function(raw){
-      // Anniversary stays as YYYY-MM-DD for the display formatter on the Client tab
       if (!raw) return '';
       raw = String(raw);
       if (raw.indexOf('T') > -1) raw = raw.split('T')[0];
       return raw;
     };
-
-    // Translate CRM marital status to FNA-display form (em-dash style)
     var translateMarital = function(m){
       m = m || '';
       if (m === 'Married - ANC with accrual')    return 'Married \u2014 ANC with accrual';
@@ -1260,28 +1261,51 @@ function fetchLiveClientFromCRM(opts, onDone) {
       return s;
     };
 
-    // Apply CRM-owned client fields. Empty CRM values OVERWRITE FNA values
-    // (CRM is the source of truth — blank in CRM = blank in FNA).
-    S.cli.name        = c.Name || '';
-    S.cli.id          = c.IDNumber || '';
-    S.cli.dob         = fmtDob(c.DOB);
-    S.cli.gender      = c.Gender || '';
-    S.cli.smoker      = translateSmoker(c.Smoker);
-    S.cli.occ         = c.Occupation || '';
-    S.cli.education   = c.Education || '';
-    S.cli.marital     = translateMarital(c.MaritalStatus);
-    S.cli.domDate     = fmtIso(c.Anniversary);
-    S.cli.spouseName  = c.SpouseName || '';
-    S.cli.spouseDob   = fmtDob(c.SpouseDOB);
+    // Fill-blanks-only: only copy CRM value into S.cli when the FNA field is
+    // currently empty. This lets CRM data flow in for existing clients without
+    // clobbering values the adviser has typed into the FNA.
+    // Edge case: if CRM has been blanked out and FNA still has the old value,
+    // FNA wins. That's acceptable — the adviser can manually clear the FNA field.
+    var fillIfBlank = function(fnaKey, crmValue){
+      if (S.cli[fnaKey] === undefined || S.cli[fnaKey] === null || S.cli[fnaKey] === '') {
+        S.cli[fnaKey] = crmValue || '';
+      }
+    };
 
-    // Income: store as-is (numeric string). Drives both grossPM and the first
-    // (Salary) row of incRows. Additional incRows[1+] are FNA-only and untouched.
+    // Personal
+    fillIfBlank('name',       c.Name);
+    fillIfBlank('id',         c.IDNumber);
+    fillIfBlank('dob',        fmtDob(c.DOB));
+    fillIfBlank('gender',     c.Gender);
+    fillIfBlank('smoker',     translateSmoker(c.Smoker));
+    fillIfBlank('occ',        c.Occupation);
+    fillIfBlank('education',  c.Education);
+    // Contact
+    fillIfBlank('cell',       c.Cell);
+    fillIfBlank('email',      c.Email);
+    fillIfBlank('telHome',    c.TelHome);
+    fillIfBlank('telWork',    c.TelWork);
+    fillIfBlank('taxNo',      c.TaxNo);
+    // Address
+    fillIfBlank('address',    c.Address);
+    fillIfBlank('poBox',      c.POBox);
+    // Marital + spouse
+    fillIfBlank('marital',    translateMarital(c.MaritalStatus));
+    fillIfBlank('domDate',    fmtIso(c.Anniversary));
+    fillIfBlank('spouseName', c.SpouseName);
+    fillIfBlank('spouseDob',  fmtDob(c.SpouseDOB));
+    fillIfBlank('spouseId',   c.SpouseIDNumber);
+    fillIfBlank('spouseCell', c.SpouseCell);
+    fillIfBlank('spouseEmail',c.SpouseEmail);
+
+    // Income — special case: drive both grossPM and incRows[0].pm. Only fill
+    // if the FNA's salary slot is blank.
     var incVal = (c.Income == null) ? '' : String(c.Income);
-    S.cli.grossPM = incVal;
+    if (!S.cli.grossPM) S.cli.grossPM = incVal;
     if (!S.incRows || S.incRows.length === 0) {
       S.incRows = [{ src: 'Salary / drawings', pm: incVal }];
-    } else {
-      S.incRows[0].pm  = incVal;
+    } else if (!S.incRows[0].pm) {
+      S.incRows[0].pm = incVal;
       if (!S.incRows[0].src) S.incRows[0].src = 'Salary / drawings';
     }
 
