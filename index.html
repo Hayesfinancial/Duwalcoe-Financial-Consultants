@@ -4047,15 +4047,13 @@ function buildPolicyForm(p){
   if(isRA||isInv){
     html+=sec(isRA?'Fund & Retirement Values':'Investment Values');
     html+='<div class="g2">'+fld('pb_fv','Current Fund Value',p.BenFundValue,'text',isInv?'oninput="invCalcMaturity()"':'')+fld('pb_surr2','Nett Surrender Value',p.BenSurrenderValue)+'</div>';
-    // IRR — stated (from insurer statement) if entered, else calculated
+    // IRR — Stated IRR only (from insurer statement). Auto-calculated IRR removed:
+    // it cannot account for transfer-ins, lump-sum top-ups, or withdrawals, so it
+    // produced misleading figures (e.g. 200%+ on RAs with transfer-ins). Show the
+    // Stated IRR badge for both RA and Investment when manually captured.
     (function(){
-      if(isInv && p.IllustrativeRate && parseFloat(p.IllustrativeRate)>0){
-        // Investment: use stated IRR from insurer statement
+      if((isInv||isRA) && p.IllustrativeRate && parseFloat(p.IllustrativeRate)>0){
         html += irrBadge(parseFloat(p.IllustrativeRate));
-      } else if(isRA){
-        // RA: calculate IRR (no withdrawals, calculation is accurate)
-        var irr = calcPolicyIRR(p.StartDate, p.Premium, p.Frequency, p.PremEscalation, p.BenFundValue);
-        html += irrBadge(irr);
       }
     })();
     if(isRA){
@@ -4536,7 +4534,7 @@ function irrBadge(irr){
   if(irr === null || irr === undefined) return '';
   var col = irr >= 10 ? '#166534' : irr >= 6 ? '#1e40af' : irr >= 0 ? '#92400e' : '#991b1b';
   var bg  = irr >= 10 ? '#f0fdf4' : irr >= 6 ? '#eff6ff' : irr >= 0 ? '#fffbeb' : '#fef2f2';
-  return '<div style="margin-top:6px;padding:6px 10px;background:'+bg+';border-radius:6px;font-size:12px;color:'+col+';font-weight:700">📈 Actual IRR since inception: '+irr+'% p.a.</div>';
+  return '<div style="margin-top:6px;padding:6px 10px;background:'+bg+';border-radius:6px;font-size:12px;color:'+col+';font-weight:700">📈 Stated IRR (from insurer statement): '+irr+'% p.a.</div>';
 }
 
 // ── Investment maturity value auto-calculation
@@ -5737,10 +5735,13 @@ function openPolicySchedule(cid){
     var isInv   = grp===groups.invest;
     var isBiz   = grp===groups.business;
     var col     = grp.color;
-    var s='';
+    // Wrap the section in a <tbody class="sect"> so the section header,
+    // policy rows, and section-total row stay together on the same printed
+    // page (CSS rule .sect{page-break-inside:avoid;break-inside:avoid}).
+    var s='<tbody class="sect">';
 
     // Section header
-    s+='<tr><td colspan="9" style="background:'+col+';color:#fff;padding:9px 14px;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.5px">'+grp.label+'</td></tr>';
+    s+='<tr><td colspan="8" style="background:'+col+';color:#fff;padding:9px 14px;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.5px">'+grp.label+'</td></tr>';
 
     // Column sub-header
     s+='<tr style="background:#f5f5f2;font-size:10px;color:#666;text-transform:uppercase;letter-spacing:.3px">';
@@ -5801,23 +5802,13 @@ function openPolicySchedule(cid){
       if(isBiz&&p.LoanAmount) details.push('<span style="font-size:11px;color:#888">Loan/Cover: </span><span style="font-size:12px;font-weight:600">'+R(p.LoanAmount)+'</span>');
       if(p.MaturityDate) details.push('<span style="font-size:11px;color:#888">Maturity: </span><span style="font-size:12px">'+FD(p.MaturityDate)+'</span>');
       if(isRA||isInv){
-        // IRR — one figure only, clear priority:
-        // LA: stated IRR only (calculated is inaccurate due to income drawn)
-        // Investment: stated IRR if entered, else calculated
-        // RA: calculated only (accurate — no income drawn)
-        if(p.Type==='Living Annuity'){
-          if(p.IllustrativeRate && N(p.IllustrativeRate)>0)
-            details.push('<span style="font-size:11px;color:#1e40af;font-weight:700">📈 IRR: '+p.IllustrativeRate+'% p.a.</span>');
-        } else if(isInv){
-          if(p.IllustrativeRate && N(p.IllustrativeRate)>0){
-            details.push('<span style="font-size:11px;color:#1e40af;font-weight:700">📈 IRR: '+p.IllustrativeRate+'% p.a.</span>');
-          } else {
-            var _irr = calcPolicyIRR(p.StartDate, p.Premium, p.Frequency, p.PremEscalation, p.BenFundValue);
-            if(_irr !== null && _irr !== 0) details.push('<span style="font-size:11px;color:#1e40af;font-weight:700">📈 IRR: '+_irr+'% p.a.</span>');
-          }
-        } else if(isRA){
-          var _irr = calcPolicyIRR(p.StartDate, p.Premium, p.Frequency, p.PremEscalation, p.BenFundValue);
-          if(_irr !== null && _irr !== 0) details.push('<span style="font-size:11px;color:#1e40af;font-weight:700">📈 IRR: '+_irr+'% p.a.</span>');
+        // IRR — Stated IRR only, from insurer statement (p.IllustrativeRate).
+        // Auto-calculated IRR has been removed because the data model does not
+        // capture transfer-ins, lump-sum top-ups, or withdrawals — without those,
+        // the calculator produces materially misleading figures (e.g. 200%+ on
+        // an RA where a Section 14 transfer was the bulk of the fund value).
+        if((p.Type==='Living Annuity'||isInv||isRA) && p.IllustrativeRate && N(p.IllustrativeRate)>0){
+          details.push('<span style="font-size:11px;color:#1e40af;font-weight:700">📈 IRR: '+p.IllustrativeRate+'% p.a.</span>');
         }
         // EAC
         if(p.BenEscalation && N(p.BenEscalation)>0){
@@ -5868,38 +5859,70 @@ function openPolicySchedule(cid){
 
       if(details.length){
         s+='<tr style="background:'+rowBg+'">';
-        s+='<td colspan="9" style="padding:5px 10px 10px 10px;border-bottom:2px solid #e8e4d8;font-size:12px;line-height:1.8;color:#444">';
+        s+='<td colspan="8" style="padding:5px 10px 10px 10px;border-bottom:2px solid #e8e4d8;font-size:12px;line-height:1.8;color:#444">';
         s+=details.join(' &nbsp;&nbsp;|&nbsp;&nbsp; ');
         s+='</td></tr>';
       }
     });
 
-    // Section total row
-    var sectM=0, sectTotal=0, sectFV=0;
+    // Section total row — per-column totals so each column sums its values.
+    // Risk/Biz: Death | Disability | Dread Disease | Premium /pm
+    // RA/Inv:   Fund Value | Maturity Value | Retirement Value | Premium /pm
+    // Once-off premiums are excluded from the /pm total but their fund values
+    // (for RA/Inv) are still included in the fund total.
+    var sectM=0;
+    var sectDeath=0, sectDis=0, sectDD=0;
+    var sectFV=0, sectMat=0, sectRet=0;
     grp.pols.forEach(function(p){
-      var n=N(p.Premium); sectTotal+=n;
+      var n=N(p.Premium);
       if(!isNonMonthly(p)) sectM+=n;
-      sectFV+=N(p.BenFundValue);
+      if(isRisk||isBiz){
+        sectDeath += N(p.BenDeath);
+        sectDis   += N(p.BenDisability);
+        sectDD    += N(p.BenDreadDisease);
+      } else if(isRA||isInv){
+        sectFV  += N(p.BenFundValue);
+        sectMat += N(p.BenMaturityValue);
+        sectRet += N(p.BenRetirementValue);
+      }
     });
-    s+='<tr style="background:#f0efe9;font-weight:700;font-size:13px">';
-    s+='<td colspan="7" style="padding:9px 10px;border-bottom:2px solid #ddd;color:'+col+'">Section Total</td>';
-    if(sectM>0){
-      s+='<td style="padding:9px 10px;border-bottom:2px solid #ddd;text-align:right;color:'+col+'">'+R2(sectM)+' /pm</td>';
-    } else if((isRA||isInv) && sectFV>0){
-      s+='<td style="padding:9px 10px;border-bottom:2px solid #ddd;text-align:right;color:'+col+'">Fund: '+R2(sectFV)+'</td>';
+
+    // Helper: render a totals cell — value if >0, em-dash otherwise
+    function totCell(val, color){
+      var content = val>0 ? R2(val) : '<span style="color:#bbb;font-weight:400">—</span>';
+      return '<td style="padding:9px 10px;border-bottom:2px solid #ddd;text-align:right;color:'+color+'">'+content+'</td>';
+    }
+
+    s+='<tr class="sect-total" style="background:#f0efe9;font-weight:700;font-size:13px">';
+    s+='<td colspan="3" style="padding:9px 10px;border-bottom:2px solid #ddd;color:'+col+'">Section Total</td>';
+    if(isRisk||isBiz){
+      s+=totCell(sectDeath, col);
+      s+=totCell(sectDis,   col);
+      s+=totCell(sectDD,    col);
+    } else if(isRA||isInv){
+      s+=totCell(sectFV,  col);
+      s+=totCell(sectMat, col);
+      s+=totCell(sectRet, col);
     } else {
-      s+='<td style="padding:9px 10px;border-bottom:2px solid #ddd;text-align:right;color:#aaa">Once-off</td>';
+      s+='<td colspan="3" style="padding:9px 10px;border-bottom:2px solid #ddd"></td>';
+    }
+    // Premium /pm total
+    if(sectM>0){
+      s+='<td style="padding:9px 10px;border-bottom:2px solid #ddd;text-align:right;color:'+col+'">'+R2(sectM)+'<span style="font-size:10px;font-weight:400;color:#888"> /pm</span></td>';
+    } else {
+      s+='<td style="padding:9px 10px;border-bottom:2px solid #ddd;text-align:right;color:#bbb;font-weight:400">—</td>';
     }
     s+='<td style="padding:9px 10px;border-bottom:2px solid #ddd"></td>';
     s+='</tr>';
-    s+='<tr><td colspan="9" style="padding:8px"></td></tr>';
+    s+='<tr class="sect-spacer"><td colspan="8" style="padding:8px"></td></tr>';
+    s+='</tbody>';
 
     return s;
   }
 
   // ── BUILD DOC ──
   var doc='<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Policy Schedule — '+c.Name+'</title>';
-  doc+='<style>*{box-sizing:border-box}body{font-family:Arial,sans-serif;color:#0e413a;font-size:13px;max-width:1000px;margin:0 auto;padding:24px}table{border-collapse:collapse;width:100%}@media print{.noprint{display:none!important}body{padding:10px;max-width:100%}}</style>';
+  doc+='<style>*{box-sizing:border-box}body{font-family:Arial,sans-serif;color:#0e413a;font-size:13px;max-width:1000px;margin:0 auto;padding:24px}table{border-collapse:collapse;width:100%}tbody.sect{page-break-inside:avoid;break-inside:avoid}@media print{.noprint{display:none!important}body{padding:10px;max-width:100%}tbody.sect{page-break-inside:avoid;break-inside:avoid}tr.sect-total{page-break-before:avoid;break-before:avoid}}</style>';
   doc+='</head><body>';
 
   // Header
@@ -5940,18 +5963,15 @@ function openPolicySchedule(cid){
   var _invT=['Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment','Unit Trust','Tax Free Savings'];
   var _invRaPols=allPols.filter(function(p){ return _raT.indexOf(p.Type||'')>=0||_invT.indexOf(p.Type||'')>=0; });
   if(_invRaPols.length>0){
-    var invTotalInv=0,invTotalWith=0,invTotalFV=0,invIRRs=[],invHasData=false;
+    var invTotalInv=0,invTotalWith=0,invTotalFV=0,invHasData=false;
     _invRaPols.forEach(function(p){
       var ti=N(p.TotalInvested||'0'),tw=N(p.TotalWithdrawn||'0'),fv=N(p.BenFundValue||'0');
-      var irr=parseFloat(p.IllustrativeRate||'0')||0;
       if(ti>0){invTotalInv+=ti;invTotalWith+=tw;invHasData=true;}
       if(fv>0)invTotalFV+=fv;
-      if(irr>0)invIRRs.push(irr);
     });
     var invNetInv=invTotalInv-invTotalWith;
     var invGain=invTotalFV-(invHasData?invNetInv:0);
     var invGainPct=invNetInv>0?Math.round(invGain/invNetInv*1000)/10:0;
-    var avgIRR=invIRRs.length>0?Math.round(invIRRs.reduce(function(a,b){return a+b;},0)/invIRRs.length*10)/10:0;
     var invRows=[];
     if(invHasData){
       invRows.push({lbl:'Total invested',val:'R '+Math.round(invTotalInv).toLocaleString('en-ZA')});
@@ -5963,7 +5983,9 @@ function openPolicySchedule(cid){
       var gainCol=invGain>=0?'#166534':'#991b1b';
       invRows.push({lbl:'Total gain',val:'<span style="color:'+gainCol+';font-weight:700">R '+Math.round(invGain).toLocaleString('en-ZA')+' ('+invGainPct+'% total)</span>'});
     }
-    if(avgIRR>0)invRows.push({lbl:'Average IRR',val:'<span style="color:#1e40af;font-weight:700">'+avgIRR+'% p.a.</span>'});
+    // Average IRR row removed: an unweighted mean across heterogeneous policies
+    // is not meaningful on a client document. Per-policy Stated IRRs remain
+    // visible on each policy detail row in the table.
     if(invRows.length>0)doc+=summaryBlock('Investment & Retirement Performance','#2563ab',invRows);
   }
   doc+='</div></div>';
@@ -5976,7 +5998,7 @@ function openPolicySchedule(cid){
   doc+=buildTableSection(groups.medical);
   if(groups.other.pols.length) doc+=buildTableSection(groups.other);
   if(groups.business.pols.length){
-    doc+='<tr><td colspan="9"><div style="margin:4px 0 8px;padding:9px 14px;background:#fef3c7;border:1px solid #f59e0b;border-radius:6px;font-size:12px;color:#92400e">ℹ Business assurance premiums are shown for record purposes and are excluded from personal premium totals.</div></td></tr>';
+    doc+='<tbody><tr><td colspan="8"><div style="margin:4px 0 8px;padding:9px 14px;background:#fef3c7;border:1px solid #f59e0b;border-radius:6px;font-size:12px;color:#92400e">ℹ Business assurance premiums are shown for record purposes and are excluded from personal premium totals.</div></td></tr></tbody>';
     doc+=buildTableSection(groups.business);
   }
   doc+='</table>';
