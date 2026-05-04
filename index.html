@@ -1676,38 +1676,95 @@ function renderPolicies(c,pols){
     (function(){
       var active=pols.filter(function(p){return p.Status!=='Replaced';});
       var replaced=pols.filter(function(p){return p.Status==='Replaced';});
-      function polTable(pp,showReplace){
-        return '<div style="overflow:hidden"><table class="tbl"><thead><tr>'+
-        '<th>Insurer</th><th>Product</th><th>Policy No.</th><th>Type</th><th>Inception</th><th>Age</th><th>Benefit</th><th>Premium</th><th>Status</th><th></th>'+
-        '</tr></thead><tbody>'+
-        pp.map(function(p,i){
-          var origIdx=pols.indexOf(p);
-          var ageAtInception = calcAge(c.DOB, p.StartDate);
-          return '<tr>'+
-            '<td style="font-weight:600">'+(p.Insurer||'—')+'</td>'+
-            '<td>'+(p.Product||'—')+'</td>'+
-            '<td style="font-family:monospace;font-size:12px">'+(p.PolicyNo||'—')+'</td>'+
-            '<td>'+bx('bx-sk',p.Type||'—')+'</td>'+
-            '<td style="font-size:12px">'+(clean(p.StartDate)?fdate(p.StartDate):'—')+'</td>'+
-            '<td style="font-size:12px;font-weight:700;color:var(--navy)">'+(ageAtInception!==null?ageAtInception:'—')+'</td>'+
-            '<td>'+(function(){
-              if(p.Type==='Business Assurance') return rnd(p.LoanAmount);
-              if(p.BenDeath) return rnd(p.BenDeath);
-              if(p.BenFundValue) return rnd(p.BenFundValue);
-              if(p.BenDisability) return rnd(p.BenDisability);
-              return '—';
-            })()+'</td>'+
-            '<td style="color:var(--sage);font-weight:600">'+rnd(p.Premium)+'</td>'+
-            '<td>'+bx(p.Status==='Active'?'bx-sg':p.Status==='Lapsed'?'bx-rd':'bx-gd',p.Status||'Active')+'</td>'+
-            '<td style="display:flex;gap:4px">'+
-            '<button class="btn b-gh xs" data-act="edit-policy" data-cid="'+c.ID+'" data-idx="'+origIdx+'">Edit</button>'+
-            '<button class="btn b-nv xs" data-act="pol-history" data-cid="'+c.ID+'" data-idx="'+origIdx+'">📋</button>'+
-            (showReplace?'<button class="btn b-rd xs" data-act="replace-policy" data-cid="'+c.ID+'" data-idx="'+origIdx+'">Replace</button>':'')+
-            '</td></tr>';
-        }).join('')+'</tbody></table></div>';
+
+      // Category definitions — kept aligned with the schedule's grouping so the
+      // CRM and the printed schedule are always visually consistent. Order here
+      // is also the display order in the policies card.
+      var raTypes=['Retirement Annuity','Pension Fund','Provident Fund','Pension Preservation','Provident Preservation','Living Annuity'];
+      var invTypes=['Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment','Unit Trust','Tax Free Savings'];
+      function catOf(p){
+        var t=p.Type||'';
+        if(t==='Business Assurance') return 'business';
+        if(t==='Life / Income Protector') return 'personal';
+        if(raTypes.indexOf(t)>=0) return 'ra';
+        if(invTypes.indexOf(t)>=0) return 'invest';
+        if(t==='Medical Aid') return 'medical';
+        return 'other';
       }
-      return (active.length===0?'<div class="empty cb">No policies yet</div>':polTable(active,true))+
-        (replaced.length?'<details style="margin-top:8px"><summary style="cursor:pointer;padding:10px 16px;font-size:12px;font-weight:700;color:#889;background:#f8f8f5">🔄 '+replaced.length+' Replaced Polic'+(replaced.length===1?'y':'ies')+'</summary>'+polTable(replaced,false)+'</details>':'');
+      var catMeta={
+        personal:{label:'Personal Life & Risk Cover',           color:'#0e413a'},
+        ra:      {label:'Retirement Funds & Living Annuities',  color:'#2e7d5a'},
+        invest:  {label:'Investments & Savings',                color:'#2563ab'},
+        medical: {label:'Medical Aid',                          color:'#7c3aed'},
+        business:{label:'Business Assurance',                   color:'#92400e'},
+        other:   {label:'Other',                                color:'#6b7280'}
+      };
+      var catOrder=['personal','ra','invest','medical','business','other'];
+
+      // Render one row — same markup as before, just extracted so it can be
+      // called from both the grouped active list and the flat replaced list.
+      function polRow(p,showReplace){
+        var origIdx=pols.indexOf(p);
+        var ageAtInception = calcAge(c.DOB, p.StartDate);
+        return '<tr>'+
+          '<td style="font-weight:600">'+(p.Insurer||'—')+'</td>'+
+          '<td>'+(p.Product||'—')+'</td>'+
+          '<td style="font-family:monospace;font-size:12px">'+(p.PolicyNo||'—')+'</td>'+
+          '<td>'+bx('bx-sk',p.Type||'—')+'</td>'+
+          '<td style="font-size:12px">'+(clean(p.StartDate)?fdate(p.StartDate):'—')+'</td>'+
+          '<td style="font-size:12px;font-weight:700;color:var(--navy)">'+(ageAtInception!==null?ageAtInception:'—')+'</td>'+
+          '<td>'+(function(){
+            if(p.Type==='Business Assurance') return rnd(p.LoanAmount);
+            if(p.BenDeath) return rnd(p.BenDeath);
+            if(p.BenFundValue) return rnd(p.BenFundValue);
+            if(p.BenDisability) return rnd(p.BenDisability);
+            return '—';
+          })()+'</td>'+
+          '<td style="color:var(--sage);font-weight:600">'+rnd(p.Premium)+'</td>'+
+          '<td>'+bx(p.Status==='Active'?'bx-sg':p.Status==='Lapsed'?'bx-rd':'bx-gd',p.Status||'Active')+'</td>'+
+          '<td style="display:flex;gap:4px">'+
+          '<button class="btn b-gh xs" data-act="edit-policy" data-cid="'+c.ID+'" data-idx="'+origIdx+'">Edit</button>'+
+          '<button class="btn b-nv xs" data-act="pol-history" data-cid="'+c.ID+'" data-idx="'+origIdx+'">📋</button>'+
+          (showReplace?'<button class="btn b-rd xs" data-act="replace-policy" data-cid="'+c.ID+'" data-idx="'+origIdx+'">Replace</button>':'')+
+          '</td></tr>';
+      }
+
+      // Active list — grouped by category, with a banner row per non-empty
+      // category. Within each group, policies are sorted alphabetically by
+      // Insurer (case-insensitive) so the visual order is predictable.
+      function polTableGrouped(pp){
+        var buckets={personal:[],ra:[],invest:[],medical:[],business:[],other:[]};
+        pp.forEach(function(p){ buckets[catOf(p)].push(p); });
+        // Sort each bucket alphabetically by Insurer
+        catOrder.forEach(function(k){
+          buckets[k].sort(function(a,b){
+            return String(a.Insurer||'').toLowerCase().localeCompare(String(b.Insurer||'').toLowerCase());
+          });
+        });
+        var rows='';
+        catOrder.forEach(function(k){
+          if(!buckets[k].length) return;
+          var m=catMeta[k];
+          rows += '<tr><td colspan="10" style="background:'+m.color+';color:#fff;padding:7px 12px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px">'+m.label+' &nbsp;<span style="opacity:.7;font-weight:400">('+buckets[k].length+')</span></td></tr>';
+          rows += buckets[k].map(function(p){ return polRow(p,true); }).join('');
+        });
+        return '<div style="overflow:hidden"><table class="tbl"><thead><tr>'+
+          '<th>Insurer</th><th>Product</th><th>Policy No.</th><th>Type</th><th>Inception</th><th>Age</th><th>Benefit</th><th>Premium</th><th>Status</th><th></th>'+
+          '</tr></thead><tbody>'+rows+'</tbody></table></div>';
+      }
+
+      // Replaced list — kept flat (per design decision: small list, less benefit
+      // from grouping, easier to scan a chronological history).
+      function polTableFlat(pp,showReplace){
+        return '<div style="overflow:hidden"><table class="tbl"><thead><tr>'+
+          '<th>Insurer</th><th>Product</th><th>Policy No.</th><th>Type</th><th>Inception</th><th>Age</th><th>Benefit</th><th>Premium</th><th>Status</th><th></th>'+
+          '</tr></thead><tbody>'+
+          pp.map(function(p){ return polRow(p,showReplace); }).join('')+
+          '</tbody></table></div>';
+      }
+
+      return (active.length===0?'<div class="empty cb">No policies yet</div>':polTableGrouped(active))+
+        (replaced.length?'<details style="margin-top:8px"><summary style="cursor:pointer;padding:10px 16px;font-size:12px;font-weight:700;color:#889;background:#f8f8f5">🔄 '+replaced.length+' Replaced Polic'+(replaced.length===1?'y':'ies')+'</summary>'+polTableFlat(replaced,false)+'</details>':'');
     })()+
     '</div>';
 }
