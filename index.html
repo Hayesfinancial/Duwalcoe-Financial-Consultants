@@ -656,6 +656,107 @@ function openClient(id){
 }
 function closeAll(){ document.querySelectorAll('.ov').forEach(function(o){o.classList.remove('open');}); }
 
+// ── Unsaved-changes guard ──────────────────────────────────
+// Prevents accidental data loss when a modal is dismissed (click-outside or
+// Cancel) with unsaved typing in it. Save buttons bypass this entirely —
+// they call closeAll() directly. The guard only fires on user-initiated
+// dismissal paths.
+//
+// How it works:
+//  1. snapshotModal(modalEl) is called when a modal opens, capturing every
+//     input/textarea/select value into a JSON string attached to the modal
+//     element via dataset.snapshot.
+//  2. modalIsDirty(modalEl) compares the current values to the snapshot.
+//  3. confirmCloseIfDirty() checks every open modal; if any are dirty, it
+//     shows a confirm() before allowing the close to proceed.
+function snapshotModal(modalEl){
+  if(!modalEl) return;
+  try{
+    var snap = {};
+    modalEl.querySelectorAll('input,textarea,select').forEach(function(el){
+      // Skip elements without an id or name — they're transient (e.g. the
+      // hidden file inputs we create for uploads, calendar-picker internals).
+      var key = el.id || el.name;
+      if(!key) return;
+      if(el.type==='checkbox' || el.type==='radio') snap[key] = el.checked ? '1' : '0';
+      else snap[key] = el.value || '';
+    });
+    modalEl.dataset.snapshot = JSON.stringify(snap);
+  }catch(e){
+    // If snapshot fails for any reason, don't block the modal from opening.
+    // The worst case is the dirty check returns "clean" too aggressively,
+    // which is a degraded but non-blocking outcome.
+    console.warn('snapshotModal failed:', e);
+    modalEl.dataset.snapshot = '{}';
+  }
+}
+function modalIsDirty(modalEl){
+  if(!modalEl) return false;
+  var raw = modalEl.dataset.snapshot;
+  if(!raw) return false; // Never snapshotted — assume clean rather than block users
+  var snap;
+  try{ snap = JSON.parse(raw); }catch(e){ return false; }
+  var dirty = false;
+  modalEl.querySelectorAll('input,textarea,select').forEach(function(el){
+    if(dirty) return;
+    var key = el.id || el.name;
+    if(!key) return;
+    var current = (el.type==='checkbox' || el.type==='radio') ? (el.checked?'1':'0') : (el.value||'');
+    var was = snap.hasOwnProperty(key) ? snap[key] : '';
+    // If the field is brand new (didn't exist at snapshot time) AND has a value,
+    // that's user input → dirty. If it didn't exist and is empty, that's just
+    // a re-render artifact → clean.
+    if(!snap.hasOwnProperty(key)){
+      if(current && current !== '') dirty = true;
+      return;
+    }
+    if(String(current) !== String(was)) dirty = true;
+  });
+  return dirty;
+}
+// Returns true if the close should proceed, false if the user cancelled it.
+// Checks every currently-open modal — if ANY is dirty, prompts once.
+function confirmCloseIfDirty(){
+  var openModals = document.querySelectorAll('.ov.open');
+  if(openModals.length===0) return true;
+  var anyDirty = false;
+  openModals.forEach(function(m){ if(modalIsDirty(m)) anyDirty = true; });
+  if(!anyDirty) return true;
+  return confirm('You have unsaved changes. Discard them?');
+}
+// Auto-snapshot every modal whenever it transitions into the "open" state.
+// Uses a MutationObserver on each .ov element so we don't have to remember
+// to call snapshotModal() at every open-site (there are 11+ of them and any
+// future modal would be a footgun if we relied on remembering).
+// NOTE: this runs at parse time — the .ov elements all exist in the static
+// HTML at the top of <body>, so they're reachable when this script runs.
+(function initModalSnapshotObserver(){
+  function attach(modal){
+    if(modal._snapObserver) return;
+    var obs = new MutationObserver(function(mutations){
+      mutations.forEach(function(m){
+        if(m.attributeName !== 'class') return;
+        if(modal.classList.contains('open')){
+          // Defer one tick so any opener that builds the modal HTML
+          // synchronously after add('open') has a chance to populate fields
+          // before we snapshot.
+          setTimeout(function(){ snapshotModal(modal); }, 0);
+        }
+      });
+    });
+    obs.observe(modal, {attributes:true, attributeFilter:['class']});
+    modal._snapObserver = obs;
+  }
+  function attachAll(){
+    document.querySelectorAll('.ov').forEach(attach);
+  }
+  if(document.readyState === 'loading'){
+    document.addEventListener('DOMContentLoaded', attachAll);
+  } else {
+    attachAll();
+  }
+})();
+
 // ── Concurrent edit tracking ──────────────────────────────
 var EDITING_KEY='editing_locks';
 function stampEditing(clientId){
@@ -5731,7 +5832,10 @@ document.addEventListener('mousedown', function(e){
 });
 document.addEventListener('click', function(e){
   // Close overlay on backdrop click — but NOT when the drag started inside the modal
-  if(e.target.classList.contains('ov') && !_mousedownInsideModal){closeAll();return;}
+  if(e.target.classList.contains('ov') && !_mousedownInsideModal){
+    if(!confirmCloseIfDirty()) return;
+    closeAll();return;
+  }
 
   // Walk up to find data-act or data-nav
   var el=e.target;
@@ -5741,7 +5845,10 @@ document.addEventListener('click', function(e){
     var close=el.getAttribute('data-close');
     var save=el.getAttribute('data-save');
 
-    if(close){closeAll();return;}
+    if(close){
+      if(!confirmCloseIfDirty()) return;
+      closeAll();return;
+    }
     if(save){
       if(save==='client'||save==='client-only')saveClient(false);
       else if(save==='client-fna')saveClient(true);
