@@ -2976,6 +2976,167 @@ function deleteEventDocRecord(doc, cb){
   });
 }
 
+// ══ TASK DOCUMENT UPLOAD / VIEW / DELETE ════════════════════════════════════
+// Task documents are operational chase material (emails, screenshots, supporting
+// docs for follow-ups). Stored in same Supabase Storage bucket as Work Event
+// docs but under a `tasks/` prefix, and indexed by a separate task_documents
+// table so the compliance/operational boundary stays clean.
+//
+// In-memory cache keyed by TaskID. Loaded lazily when the task log modal opens.
+window._taskDocs = window._taskDocs || {};
+
+function loadTaskDocs(taskId, cb){
+  sbFetch('GET','/rest/v1/task_documents?TaskID=eq.'+encodeURIComponent(taskId)+'&select=*&order=UploadedAt.desc', null, function(rows, err){
+    if(err){
+      console.error('loadTaskDocs failed:', err);
+      window._taskDocs[taskId] = [];
+    } else {
+      window._taskDocs[taskId] = rows || [];
+    }
+    if(cb) cb();
+    // If the task log modal is open for this task, re-render the docs section
+    if(typeof TASK_LOG_ID !== 'undefined' && String(TASK_LOG_ID)===String(taskId)){
+      renderTaskDocsSection(taskId);
+    }
+  });
+}
+
+function renderTaskDocsSection(taskId){
+  var box = document.getElementById('tlogDocsList');
+  if(!box) return;
+  var docs = window._taskDocs[taskId] || [];
+  if(docs.length===0){
+    box.innerHTML = '<div style="font-size:12px;color:#889;font-style:italic;padding:6px 0">No attachments yet — emails, screenshots, supporting docs all welcome here.</div>';
+    return;
+  }
+  box.innerHTML = docs.map(function(d){
+    var icon = '📄';
+    var mt = (d.MimeType||'').toLowerCase();
+    if(mt.indexOf('image')>=0) icon = '🖼';
+    else if(mt.indexOf('pdf')>=0) icon = '📕';
+    else if(mt.indexOf('word')>=0 || mt.indexOf('document')>=0) icon = '📘';
+    else if(mt.indexOf('sheet')>=0 || mt.indexOf('excel')>=0) icon = '📗';
+    else if(mt.indexOf('message')>=0 || (d.FileName||'').match(/\.(msg|eml)$/i)) icon = '✉️';
+    var sizeStr = '';
+    if(d.FileSize){
+      var kb = d.FileSize/1024;
+      sizeStr = kb < 1024 ? ' · '+Math.round(kb)+' KB' : ' · '+(kb/1024).toFixed(1)+' MB';
+    }
+    return '<div style="padding:6px 10px;background:#fafaf5;border-radius:5px;display:flex;gap:8px;align-items:center;margin-bottom:3px">'+
+      '<span style="font-size:14px">'+icon+'</span>'+
+      '<div style="flex:1;min-width:0">'+
+        '<div style="font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escHtml(d.FileName||'file')+'</div>'+
+        '<div style="font-size:10px;color:#889">'+escHtml(d.UploadedBy||'')+' · '+(d.UploadedAt?new Date(d.UploadedAt).toLocaleString('en-ZA',{day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}):'')+sizeStr+'</div>'+
+      '</div>'+
+      '<button class="btn b-gh xs" data-act="task-doc-view" data-did="'+d.ID+'">View</button>'+
+      '<button class="btn b-gh xs" data-act="task-doc-delete" data-did="'+d.ID+'" data-tid="'+taskId+'" style="color:#b23">Del</button>'+
+      '</div>';
+  }).join('');
+}
+
+function openTaskDocUpload(taskId){
+  var input = document.createElement('input');
+  input.type = 'file';
+  // Operational attachments: broader than Work Event docs. Accepts emails,
+  // screenshots, common office formats, plain text.
+  input.accept = '.pdf,.jpg,.jpeg,.png,.gif,.docx,.doc,.xlsx,.xls,.tiff,.tif,.msg,.eml,.txt,.csv';
+  input.style.display = 'none';
+  input.addEventListener('change', function(){
+    var file = input.files && input.files[0];
+    document.body.removeChild(input);
+    if(!file) return;
+    if(file.size > 50*1024*1024){ alert('File too large. Max 50 MB.'); return; }
+    uploadTaskDoc(taskId, file);
+  });
+  document.body.appendChild(input);
+  input.click();
+}
+
+function uploadTaskDoc(taskId, file){
+  var t = DB.tasks.find(function(x){ return String(x.ID)===String(taskId); });
+  // Storage path: tasks/{ClientName-or-_unassigned}/{taskId}/{filename}
+  // We use ClientName for human-browsability of the Supabase storage bucket;
+  // fall back to '_unassigned' if the task has no client linked.
+  var clientFolder = (t && t.ClientName ? t.ClientName : '_unassigned').replace(/[^a-zA-Z0-9._-]/g,'_');
+  var safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+  var ts = Date.now();
+  var path = 'tasks/'+clientFolder+'/'+taskId+'/'+ts+'_'+safeName;
+  toast('Uploading '+file.name+'…','ok');
+
+  fetch(SB_URL+'/storage/v1/object/client-documents/'+encodeURI(path), {
+    method:'POST',
+    headers:{
+      'apikey':SB_KEY, 'Authorization':'Bearer '+SB_KEY,
+      'Content-Type': file.type || 'application/octet-stream',
+      'x-upsert':'true'
+    },
+    body: file
+  }).then(function(r){
+    if(!r.ok) return r.text().then(function(t2){ throw new Error('Storage upload failed: '+r.status+' '+t2); });
+    return r.json();
+  }).then(function(){
+    var row = {
+      TaskID: String(taskId),
+      FilePath: path,
+      FileName: file.name,
+      FileSize: file.size,
+      MimeType: file.type || '',
+      UploadedBy: cu(),
+      UploadedAt: new Date().toISOString(),
+      Notes: ''
+    };
+    sbFetch('POST','/rest/v1/task_documents', [row], function(res, err){
+      if(err){ toast('Database save failed','err'); console.error(err); }
+      else { toast('✓ '+file.name+' attached','ok'); loadTaskDocs(taskId); }
+    });
+  }).catch(function(e){
+    toast('Upload failed: '+e.message,'err');
+    console.error(e);
+  });
+}
+
+function viewTaskDoc(docId){
+  var doc = null;
+  Object.keys(window._taskDocs||{}).forEach(function(tid){
+    (window._taskDocs[tid]||[]).forEach(function(d){ if(String(d.ID)===String(docId)) doc = d; });
+  });
+  if(!doc){ alert('Document not found'); return; }
+  fetch(SB_URL+'/storage/v1/object/sign/client-documents/'+encodeURI(doc.FilePath), {
+    method:'POST',
+    headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json'},
+    body: JSON.stringify({expiresIn:60})
+  }).then(function(r){
+    if(!r.ok) return r.text().then(function(t){ throw new Error('Sign failed: '+r.status+' '+t); });
+    return r.json();
+  }).then(function(d){
+    if(d && d.signedURL) window.open(SB_URL+'/storage/v1'+d.signedURL,'_blank');
+    else throw new Error('No signed URL');
+  }).catch(function(e){
+    toast('Could not open: '+e.message,'err');
+  });
+}
+
+function deleteTaskDoc(docId, taskId){
+  if(!confirm('Delete this attachment permanently?')) return;
+  var doc = (window._taskDocs[taskId]||[]).find(function(d){return String(d.ID)===String(docId);});
+  if(!doc){ return; }
+  fetch(SB_URL+'/storage/v1/object/client-documents/'+encodeURI(doc.FilePath), {
+    method:'DELETE',
+    headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY}
+  }).then(function(){
+    sbFetch('DELETE','/rest/v1/task_documents?ID=eq.'+encodeURIComponent(doc.ID), null, function(res, err){
+      if(err){ toast('Delete failed','err'); }
+      else { toast('Deleted','ok'); loadTaskDocs(taskId); }
+    });
+  }).catch(function(){
+    // If storage delete fails (file already gone, etc.) still try to drop the DB row
+    sbFetch('DELETE','/rest/v1/task_documents?ID=eq.'+encodeURIComponent(doc.ID), null, function(res, err){
+      if(err){ toast('Delete failed','err'); }
+      else { toast('Deleted (file already gone)','ok'); loadTaskDocs(taskId); }
+    });
+  });
+}
+
 // ══ APPLICABLE / NOT APPLICABLE TOGGLE ═══════════════════════════════════════
 // Presence of a row in work_event_checklist_na = DocType is NOT APPLICABLE
 // Absence = applicable (default). Toggle creates or deletes the row.
@@ -5370,6 +5531,18 @@ function openTaskLogModal(taskId){
         '</div>';
     }).join(''))+
     '</div></div>'+
+    // ── Attachments section ────────────────────────────────────────────────
+    // Operational chase material lives here: emails, screenshots, supporting
+    // docs. NOT for advice records — those go to Work Events (FAIS s9).
+    '<div style="margin-bottom:12px">'+
+      '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">'+
+        '<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:.6px">📎 Attachments</div>'+
+        '<button class="btn b-gh sm" data-act="task-doc-upload" data-tid="'+t.ID+'" style="padding:4px 12px;font-size:11px">+ Attach File</button>'+
+      '</div>'+
+      '<div id="tlogDocsList" style="border:1px solid var(--smoke);border-radius:6px;padding:8px;background:#fff;max-height:200px;overflow-y:auto">'+
+        '<div style="font-size:12px;color:#889;font-style:italic;padding:6px 0">Loading attachments…</div>'+
+      '</div>'+
+    '</div>'+
     '<div class="g2" style="margin-bottom:8px">'+
     '<div class="fld"><label>Update Due Date</label>'+fdp('tlogdue','',t.DueDate||'')+'</div>'+
     '<div class="fld"><label>&nbsp;</label><div style="padding-top:4px;font-size:12px;color:#889">Leave unchanged if no update needed.</div></div>'+
@@ -5393,6 +5566,9 @@ function openTaskLogModal(taskId){
     '<button class="btn b-sg sm" onclick="completeTaskFromLog()">✅ Mark Complete</button>'+
     '</div>':'');
   document.getElementById('tMod').classList.add('open');
+  // Load attachments lazily when the modal opens. The list will populate
+  // via renderTaskDocsSection once the fetch returns.
+  loadTaskDocs(taskId);
 }
 
 function toggleTaskPri(){
@@ -5672,6 +5848,15 @@ document.addEventListener('click', function(e){
           break;
         case 'event-doc-delete':
           deleteEventDoc(el.getAttribute('data-did'), el.getAttribute('data-eid'));
+          break;
+        case 'task-doc-upload':
+          openTaskDocUpload(el.getAttribute('data-tid'));
+          break;
+        case 'task-doc-view':
+          viewTaskDoc(el.getAttribute('data-did'));
+          break;
+        case 'task-doc-delete':
+          deleteTaskDoc(el.getAttribute('data-did'), el.getAttribute('data-tid'));
           break;
         case 'event-toggle-na':
           toggleEventNA(el.getAttribute('data-eid'), el.getAttribute('data-dk'), el.getAttribute('data-to'));
