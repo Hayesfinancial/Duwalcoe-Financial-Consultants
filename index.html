@@ -2006,13 +2006,13 @@ function brokerAuthStatus(clientId){
   var docs = window._clientDocs[clientId] || [];
   var forms = docs.filter(function(d){ return d.DocType === 'BROKER_AUTH'; });
   if(forms.length === 0) return {state:'none'};
-  // Find the most recent upload
+  // Find the most recent form by signed date (preferred) — fall back to
+  // upload date for legacy rows that don't have SignedDate set.
+  function effectiveDate(d){ return d.SignedDate || d.UploadedAt || 0; }
   var latest = forms.reduce(function(a, b){
-    var ad = new Date(a.UploadedAt || 0).getTime();
-    var bd = new Date(b.UploadedAt || 0).getTime();
-    return bd > ad ? b : a;
+    return new Date(effectiveDate(b)).getTime() > new Date(effectiveDate(a)).getTime() ? b : a;
   });
-  var signedAt = new Date(latest.UploadedAt || 0);
+  var signedAt = new Date(effectiveDate(latest));
   var now = new Date();
   var msPerDay = 1000*60*60*24;
   var ageDays = Math.floor((now.getTime() - signedAt.getTime()) / msPerDay);
@@ -2087,12 +2087,15 @@ function renderDocs(c){
         // Expiry status — only for items with an expiryDays rule (e.g. BROKER_AUTH).
         // Drives row colour and an inline status pill. Most catalogue items don't
         // have expiry; for those, expiryInfo stays null and the row renders neutral.
+        // Prefer SignedDate over UploadedAt — the form's clock runs from when
+        // the client actually signed it, not when the file landed in Supabase.
         var expiryInfo = null;
         if(item.expiryDays && matching.length > 0){
+          function effDate(d){ return d.SignedDate || d.UploadedAt || 0; }
           var latestDoc = matching.reduce(function(a,b){
-            return new Date(b.UploadedAt||0).getTime() > new Date(a.UploadedAt||0).getTime() ? b : a;
+            return new Date(effDate(b)).getTime() > new Date(effDate(a)).getTime() ? b : a;
           });
-          var ageDays = Math.floor((Date.now() - new Date(latestDoc.UploadedAt||0).getTime())/(1000*60*60*24));
+          var ageDays = Math.floor((Date.now() - new Date(effDate(latestDoc)).getTime())/(1000*60*60*24));
           if(ageDays >= item.expiryDays){
             expiryInfo = {expired:true, daysAgo: ageDays - item.expiryDays};
           } else {
@@ -2129,7 +2132,20 @@ function renderDocs(c){
             html += '<div style="margin-left:30px;padding:5px 10px;font-size:12px;display:flex;align-items:center;gap:8px;color:#556">';
             html += '<span>📄</span>';
             html += '<span style="flex:1">'+escHtml(d.FileName||'file')+'</span>';
-            html += '<span style="color:#889;font-size:10px">'+fdate(d.UploadedAt||'')+'</span>';
+            // For items with expiryDays: show signed date as the primary date,
+            // upload date as secondary in muted text. Otherwise just upload date.
+            if(item.expiryDays){
+              if(d.SignedDate){
+                html += '<span style="color:#556;font-size:10px;font-weight:600">Signed '+fdate(d.SignedDate)+'</span>';
+                html += '<span style="color:#889;font-size:10px;font-style:italic">uploaded '+fdate(d.UploadedAt||'')+'</span>';
+              } else {
+                // Legacy row uploaded before SignedDate existed — flag it so Tracy knows
+                html += '<span style="color:#b95900;font-size:10px;font-weight:600" title="No signed date — using upload date for expiry">⚠ no signed date</span>';
+                html += '<span style="color:#889;font-size:10px">'+fdate(d.UploadedAt||'')+'</span>';
+              }
+            } else {
+              html += '<span style="color:#889;font-size:10px">'+fdate(d.UploadedAt||'')+'</span>';
+            }
             html += '<button class="btn b-gh sm" data-act="doc-view" data-did="'+d.ID+'" style="padding:4px 10px;font-size:11px">View</button>';
             html += '<button class="btn b-gh sm" data-act="doc-delete" data-did="'+d.ID+'" data-cid="'+clientId+'" style="padding:4px 10px;font-size:11px;color:#b23">Delete</button>';
             html += '</div>';
@@ -2209,14 +2225,89 @@ function openDocUpload(clientId, docKey, isReplace){
       alert('File too large (' + Math.round(file.size/1024/1024) + ' MB). Maximum is 50 MB.');
       return;
     }
-    uploadClientDoc(clientId, docKey, cat.label, file, isReplace);
+    // For items with an expiry rule (e.g. BROKER_AUTH), prompt for the
+    // actual signed date — this drives the expiry calculation, not upload date.
+    if(cat.expiryDays){
+      promptSignedDate(cat.label, function(signedDate){
+        if(!signedDate) return; // user cancelled
+        uploadClientDoc(clientId, docKey, cat.label, file, isReplace, signedDate);
+      });
+    } else {
+      uploadClientDoc(clientId, docKey, cat.label, file, isReplace, null);
+    }
   });
   document.body.appendChild(input);
   input.click();
 }
 
-// Upload a file to Supabase Storage and create a DB record
-function uploadClientDoc(clientId, docKey, docLabel, file, isReplace){
+// Prompt the user for the date a document was signed. Used for items with
+// an expiryDays rule (e.g. BROKER_AUTH) so the expiry clock runs from the
+// signed date, not the upload date. Calls back with ISO date string
+// (YYYY-MM-DD) or null if the user cancels.
+function promptSignedDate(docLabel, callback){
+  var ov = document.createElement('div');
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(10,20,40,.55);z-index:10000;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(2px)';
+  var box = document.createElement('div');
+  box.style.cssText = 'background:#fff;border-radius:12px;padding:22px 26px;max-width:420px;width:90%;box-shadow:0 12px 48px rgba(0,0,0,.25);font-family:inherit';
+  var todayIso = new Date().toISOString().slice(0,10);
+  box.innerHTML =
+    '<div style="font-family:Georgia,serif;font-size:17px;color:#0e413a;margin-bottom:6px">When was this document signed?</div>'+
+    '<div style="font-size:12px;color:#778;margin-bottom:14px">'+escHtml(docLabel)+' — drives the expiry calculation. Enter the date the client signed the form (not the date you\'re uploading it).</div>'+
+    '<input id="_signedDateInput" type="date" max="'+todayIso+'" value="'+todayIso+'" style="width:100%;padding:9px 12px;border:1.5px solid #ccc;border-radius:6px;font-size:14px;font-family:inherit;margin-bottom:8px">'+
+    '<div id="_signedDateWarn" style="font-size:11px;color:#b95900;margin-bottom:12px;min-height:14px"></div>'+
+    '<div style="display:flex;justify-content:flex-end;gap:8px">'+
+      '<button id="_signedDateCancel" style="padding:8px 18px;border-radius:7px;border:1.5px solid #ddd;background:#fff;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;color:#555">Cancel</button>'+
+      '<button id="_signedDateOK" style="padding:8px 22px;border-radius:7px;border:none;background:#0e413a;color:#fff;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">Continue</button>'+
+    '</div>';
+  ov.appendChild(box);
+  document.body.appendChild(ov);
+
+  var inputEl = document.getElementById('_signedDateInput');
+  var warnEl = document.getElementById('_signedDateWarn');
+
+  function checkWarning(){
+    var v = inputEl.value;
+    if(!v){ warnEl.textContent = ''; return; }
+    var picked = new Date(v);
+    var today = new Date(todayIso);
+    var ageDays = Math.floor((today - picked)/(1000*60*60*24));
+    if(ageDays >= 90){
+      warnEl.textContent = '⚠ This date is '+ageDays+' days old — the form will be uploaded already expired.';
+    } else if(ageDays >= 60){
+      warnEl.textContent = 'Note: only '+(90-ageDays)+' days of validity remain.';
+    } else {
+      warnEl.textContent = '';
+    }
+  }
+  inputEl.addEventListener('input', checkWarning);
+  checkWarning();
+  setTimeout(function(){ inputEl.focus(); inputEl.select(); }, 50);
+
+  function close(result){
+    document.body.removeChild(ov);
+    callback(result);
+  }
+  document.getElementById('_signedDateCancel').addEventListener('click', function(){ close(null); });
+  document.getElementById('_signedDateOK').addEventListener('click', function(){
+    var v = inputEl.value;
+    if(!v){ alert('Please pick a date.'); return; }
+    // Block future dates (defence in depth — the max attribute should prevent this, but type=date isn't fully reliable across all browsers)
+    if(new Date(v) > new Date(todayIso)){
+      alert('Signed date cannot be in the future.');
+      return;
+    }
+    close(v);
+  });
+  // Backdrop click cancels
+  ov.addEventListener('click', function(e){ if(e.target===ov) close(null); });
+  // Enter submits
+  inputEl.addEventListener('keydown', function(e){ if(e.key==='Enter') document.getElementById('_signedDateOK').click(); });
+}
+
+// Upload a file to Supabase Storage and create a DB record.
+// signedDate (YYYY-MM-DD or null) is set for items with expiryDays so the
+// expiry clock can run from the actual signing date, not the upload date.
+function uploadClientDoc(clientId, docKey, docLabel, file, isReplace, signedDate){
   // Build a safe storage path: clients/{clientId}/{docKey}_{timestamp}_{filename}
   var safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
   var ts = Date.now();
@@ -2265,6 +2356,9 @@ function uploadClientDoc(clientId, docKey, docLabel, file, isReplace){
         UploadedAt: now,
         Notes: ''
       };
+      // Only attach SignedDate when actually provided — keeps the column null
+      // for items without an expiry rule and avoids ambiguity.
+      if(signedDate) row.SignedDate = signedDate;
       sbFetch('POST', '/rest/v1/client_documents', [row], function(res, err){
         if(err){
           toast('Database save failed — file uploaded but not recorded','err');
