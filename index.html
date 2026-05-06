@@ -1392,6 +1392,25 @@ function renderProfile(){
     '<button class="btn b-sk sm" style="background:#0e413a;color:#d4af5a;border-color:#2a3a5e" onclick="printClientConsent(\''+c.ID+'\')">📄 Policy Consent</button>'+
     '<a href="https://drive.google.com/drive/search?q='+encodeURIComponent(c.Name)+'" target="_blank" style="text-decoration:none"><button class="btn b-gh sm" style="color:#fff;border-color:#334466">📁 Drive</button></a>'+
     '</div></div>'+
+    // ── Broker Authority (ASTUTE) expired banner ───────────────────────────
+    // Shows ONLY when a previously-uploaded form has aged past 90 days.
+    // Silent when no form exists (first-time clients) and silent when valid.
+    (function(){
+      // Make sure the doc cache is populated for this client. renderDocs
+      // does this lazily when its tab opens; we trigger it here too so the
+      // banner can show even if Tracy hasn't visited the Documents tab yet.
+      if(!window._clientDocs[c.ID]){
+        loadClientDocs(c.ID);
+        return ''; // first render: no banner. After load completes the page re-renders.
+      }
+      var st = brokerAuthStatus(c.ID);
+      if(st.state !== 'expired') return '';
+      return '<div style="background:#fdecea;border:1.5px solid #c92a2a;border-radius:8px;padding:10px 16px;margin-bottom:10px;font-size:13px;font-weight:600;color:#9a1f1f;display:flex;align-items:center;gap:10px">'+
+        '<span style="font-size:18px">⚠</span>'+
+        '<span style="flex:1">Broker Authority Form (ASTUTE) expired '+st.daysAgo+' day'+(st.daysAgo===1?'':'s')+' ago — refresh before pulling new ASTUTE data.</span>'+
+        '<button class="btn b-gh sm" data-act="tab" data-tab="docs" style="padding:4px 12px;font-size:12px">Go to Documents</button>'+
+        '</div>';
+    })()+
     '<div class="tabs">'+
     '<div class="tab'+(CTAB==='overview'?' on':'')+'" data-act="tab" data-tab="overview">Overview</div>'+
     '<div class="tab'+(CTAB==='policies'?' on':'')+'" data-act="tab" data-tab="policies">Policies ('+pols.filter(function(p){return p.Status!=='Replaced';}).length+')</div>'+
@@ -1952,21 +1971,67 @@ function renderROA(c,roas){
 
 // ══ CLIENT DOCUMENTS (compliance document storage) ═══════════════════════════
 // Schema for catalogue of required documents at client level.
-// NOTE: per Clinton/wife decision (19 Apr 2026 v1.2) — only truly evergreen
-// per-relationship documents live here. Everything else (FICA, ASTUTE, TFS,
-// FICA Risk Assessment) moved into the Work Event checklist.
+// NOTE: per Clinton/Tracy decision (19 Apr 2026 v1.2) — only truly evergreen
+// per-relationship documents live here. Per-case compliance documents (FICA,
+// TFS, FICA Risk Assessment) live in Work Event checklists.
+// EXCEPTION (6 May 2026): Broker Authority Form (ASTUTE) lives at client
+// level despite being case-relevant, because it's a single mandate valid for
+// 90 days that covers ALL cases in that window — not a per-case artifact.
+// Tracked separately with expiry-rule logic (see brokerAuthStatus()).
 var CLIENT_DOC_CATALOGUE = [
   // Identity (permanent, changes only if new ID issued)
   {key:'ID',            label:'ID Document',               group:'Identity',   required:'Mandatory'},
   // Agreements (once per relationship)
   {key:'LOI',           label:'Letter of Introduction (LOI)', group:'Agreements', required:'Mandatory'},
   {key:'WILL',          label:'Will',                      group:'Agreements', required:'Optional'},
+  // ASTUTE broker authority — multi-file archive, 90-day expiry on most recent
+  {key:'BROKER_AUTH',   label:'Broker Authority Form (ASTUTE)', group:'ASTUTE', required:'Optional', multiple:true, expiryDays:90, note:'Valid for 90 days. Refresh before pulling new ASTUTE data.'},
   // Catch-all for ad-hoc correspondence at client level
   {key:'CORRESPONDENCE',label:'General Correspondence',    group:'Other',      required:'Optional',multiple:true}
 ];
 
 // In-memory cache of client documents, keyed by ClientID.
 window._clientDocs = window._clientDocs || {};
+
+// ── Broker Authority (ASTUTE) expiry helper ───────────────────────────────
+// Returns the current state of the broker authority form for a given client.
+// {state:'none'}                          — no form ever uploaded
+// {state:'valid',  daysLeft:N, signedAt} — within 90-day window
+// {state:'expired',daysAgo:N,  signedAt} — beyond 90-day window
+// "signedAt" is treated as the most recent UploadedAt — that's our best proxy
+// for "when was this form signed". If we ever want a separate signed-date
+// field we can add it later, but for now upload date == signed date in
+// practice (Tracy uploads forms shortly after the client signs them).
+function brokerAuthStatus(clientId){
+  var docs = window._clientDocs[clientId] || [];
+  var forms = docs.filter(function(d){ return d.DocType === 'BROKER_AUTH'; });
+  if(forms.length === 0) return {state:'none'};
+  // Find the most recent upload
+  var latest = forms.reduce(function(a, b){
+    var ad = new Date(a.UploadedAt || 0).getTime();
+    var bd = new Date(b.UploadedAt || 0).getTime();
+    return bd > ad ? b : a;
+  });
+  var signedAt = new Date(latest.UploadedAt || 0);
+  var now = new Date();
+  var msPerDay = 1000*60*60*24;
+  var ageDays = Math.floor((now.getTime() - signedAt.getTime()) / msPerDay);
+  var EXPIRY_DAYS = 90;
+  if(ageDays >= EXPIRY_DAYS){
+    return {state:'expired', daysAgo: ageDays - EXPIRY_DAYS, signedAt: signedAt};
+  } else {
+    return {state:'valid', daysLeft: EXPIRY_DAYS - ageDays, signedAt: signedAt};
+  }
+}
+
+// True if this event type is one where ASTUTE work would normally happen.
+// Used to decide whether to show the expired-broker-auth warning on a Work
+// Event. New Business and Servicing events involve checking existing
+// holdings; Reviews are typically against policies you've already captured.
+function eventNeedsAstute(eventType){
+  return eventType === 'NB_RISK' || eventType === 'NB_INVEST' ||
+         eventType === 'SVC_RISK' || eventType === 'SVC_INVEST';
+}
 
 // Render the Documents tab for a client
 function renderDocs(c){
@@ -1985,7 +2050,7 @@ function renderDocs(c){
   });
 
   var html = '<div class="card"><div class="ch"><h2>📁 Client Documents</h2>'+
-    '<div style="font-size:11px;color:#667">Per-client compliance documents — FICA, ASTUTE, TFS, agreements</div>'+
+    '<div style="font-size:11px;color:#667">Per-client documents — ID, LOI, Will, Broker Authority (ASTUTE)</div>'+
     '</div><div class="cb">';
 
   // Overall status strip
@@ -2019,11 +2084,38 @@ function renderDocs(c){
         var cUserToggled = (cExpandKey in window._expanded);
         var cIsExpanded = cUserToggled ? window._expanded[cExpandKey] : !cAutoCollapse;
 
-        html += '<div style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:#fafaf5;border-radius:6px">';
-        html += '<div style="width:20px;font-size:16px">📂</div>';
+        // Expiry status — only for items with an expiryDays rule (e.g. BROKER_AUTH).
+        // Drives row colour and an inline status pill. Most catalogue items don't
+        // have expiry; for those, expiryInfo stays null and the row renders neutral.
+        var expiryInfo = null;
+        if(item.expiryDays && matching.length > 0){
+          var latestDoc = matching.reduce(function(a,b){
+            return new Date(b.UploadedAt||0).getTime() > new Date(a.UploadedAt||0).getTime() ? b : a;
+          });
+          var ageDays = Math.floor((Date.now() - new Date(latestDoc.UploadedAt||0).getTime())/(1000*60*60*24));
+          if(ageDays >= item.expiryDays){
+            expiryInfo = {expired:true, daysAgo: ageDays - item.expiryDays};
+          } else {
+            expiryInfo = {expired:false, daysLeft: item.expiryDays - ageDays};
+          }
+        }
+        var rowBg = '#fafaf5';
+        if(expiryInfo){
+          rowBg = expiryInfo.expired ? '#fdecea' : '#eaf5ec';
+        }
+
+        html += '<div style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:'+rowBg+';border-radius:6px">';
+        html += '<div style="width:20px;font-size:16px">'+(expiryInfo?(expiryInfo.expired?'❌':'✅'):'📂')+'</div>';
         html += '<div style="flex:1">';
-        html += '<div style="font-size:13px;font-weight:600;color:var(--ink)">'+escHtml(item.label)+'</div>';
-        html += '<div style="font-size:11px;color:#778">'+matching.length+' file'+(matching.length===1?'':'s')+'</div>';
+        html += '<div style="font-size:13px;font-weight:600;color:var(--ink)">'+escHtml(item.label)+
+          (expiryInfo && expiryInfo.expired ? ' <span style="background:#c92a2a;color:#fff;border-radius:10px;padding:1px 8px;font-size:10px;font-weight:700;margin-left:6px">EXPIRED</span>':'')+
+          (expiryInfo && !expiryInfo.expired ? ' <span style="background:#2d7a3e;color:#fff;border-radius:10px;padding:1px 8px;font-size:10px;font-weight:700;margin-left:6px">VALID</span>':'')+
+          '</div>';
+        html += '<div style="font-size:11px;color:#778">'+matching.length+' file'+(matching.length===1?'':'s')+
+          (expiryInfo && expiryInfo.expired ? ' · expired '+expiryInfo.daysAgo+' day'+(expiryInfo.daysAgo===1?'':'s')+' ago':'')+
+          (expiryInfo && !expiryInfo.expired ? ' · expires in '+expiryInfo.daysLeft+' day'+(expiryInfo.daysLeft===1?'':'s'):'')+
+          (item.note?' · '+escHtml(item.note):'')+
+          '</div>';
         html += '</div>';
         if(matching.length > 0){
           html += '<button class="btn b-gh sm" data-act="toggle-multi" data-ekey="'+escHtml(cExpandKey)+'" style="padding:4px 10px;font-size:11px">'+
@@ -2289,7 +2381,6 @@ var EVENT_DOC_CHECKLISTS = {
     {key:'PROOF_ADDRESS', label:'Proof of Address',         required:'mandatory', note:'Must be ≤ 3 months old at case date', multiple:true},
     {key:'PROOF_BANK',    label:'Proof of Bank',            required:'mandatory', multiple:true},
     {key:'PROOF_SARS',    label:'Proof of SARS',            required:'optional',  note:'If SAAM mandate', multiple:true},
-    {key:'ASTUTE',        label:'ASTUTE Report',            required:'mandatory', multiple:true},
     {key:'TFS_CHECK',     label:'TFS Check',                required:'mandatory', note:'Fresh check per new business case', multiple:true},
     {key:'FICA_CHECKLIST',label:'FICA Checklist',           required:'mandatory', multiple:true},
     // Advice & agreements
@@ -2313,7 +2404,6 @@ var EVENT_DOC_CHECKLISTS = {
     {key:'PROOF_ADDRESS', label:'Proof of Address',         required:'mandatory', note:'Must be ≤ 3 months old at case date', multiple:true},
     {key:'PROOF_BANK',    label:'Proof of Bank',            required:'mandatory', multiple:true},
     {key:'PROOF_SARS',    label:'Proof of SARS',            required:'optional',  note:'If SAAM mandate', multiple:true},
-    {key:'ASTUTE',        label:'ASTUTE Report',            required:'mandatory', multiple:true},
     {key:'TFS_CHECK',     label:'TFS Check',                required:'mandatory', note:'Fresh check per new business case', multiple:true},
     {key:'FICA_CHECKLIST',label:'FICA Checklist',           required:'mandatory', multiple:true},
     {key:'FICA_RISK',     label:'FICA Client Risk Assessment', required:'mandatory', note:'Fresh for every investment case', multiple:true},
@@ -2340,7 +2430,6 @@ var EVENT_DOC_CHECKLISTS = {
     {key:'PROOF_ADDRESS', label:'Proof of Address',         required:'optional', note:'Refresh if > 3 months old at case date', multiple:true},
     {key:'PROOF_BANK',    label:'Proof of Bank',            required:'optional', note:'If banking details changed', multiple:true},
     {key:'PROOF_SARS',    label:'Proof of SARS',            required:'optional', multiple:true},
-    {key:'ASTUTE',        label:'ASTUTE Report',            required:'optional', note:'Refresh if needed before advice', multiple:true},
     {key:'TFS_CHECK',     label:'TFS Check',                required:'optional', multiple:true},
     {key:'FICA_CHECKLIST',label:'FICA Checklist',           required:'optional', multiple:true},
     {key:'CSA',           label:'Client Service Agreement', required:'optional', note:'If CSA updated for this servicing', multiple:true},
@@ -2368,7 +2457,6 @@ var EVENT_DOC_CHECKLISTS = {
     {key:'PROOF_ADDRESS', label:'Proof of Address',         required:'optional', note:'Refresh if > 3 months old at case date', multiple:true},
     {key:'PROOF_BANK',    label:'Proof of Bank',            required:'optional', note:'If banking details changed', multiple:true},
     {key:'PROOF_SARS',    label:'Proof of SARS',            required:'optional', multiple:true},
-    {key:'ASTUTE',        label:'ASTUTE Report',            required:'optional', note:'Refresh if needed before advice', multiple:true},
     {key:'TFS_CHECK',     label:'TFS Check',                required:'optional', multiple:true},
     {key:'FICA_CHECKLIST',label:'FICA Checklist',           required:'optional', multiple:true},
     {key:'FICA_RISK',     label:'FICA Client Risk Assessment', required:'optional', note:'Refresh if circumstances changed', multiple:true},
@@ -2561,6 +2649,18 @@ function renderEventDetail(ev, c, pols){
 
   var html = '<div style="margin-bottom:12px"><button class="btn b-gh sm" data-act="close-event-detail">← Back to Work Events</button></div>';
 
+  // Broker Authority warning — only for events where ASTUTE work would happen.
+  // Silent when no form exists (first-time client) or when valid.
+  if(eventNeedsAstute(ev.EventType)){
+    var baSt = brokerAuthStatus(c.ID);
+    if(baSt.state === 'expired'){
+      html += '<div style="background:#fdecea;border:1.5px solid #c92a2a;border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:12px;font-weight:600;color:#9a1f1f;display:flex;align-items:center;gap:10px">'+
+        '<span style="font-size:16px">⚠</span>'+
+        '<span style="flex:1">Broker Authority Form (ASTUTE) expired '+baSt.daysAgo+' day'+(baSt.daysAgo===1?'':'s')+' ago — refresh before pulling new ASTUTE data for this case.</span>'+
+        '</div>';
+    }
+  }
+
   // Header
   html += '<div style="padding:14px;background:#fafaf5;border-radius:8px;margin-bottom:16px">';
   html += '<div style="font-size:11px;color:var(--gold);font-weight:700;text-transform:uppercase">'+fdate(ev.EventDate||'')+'</div>';
@@ -2736,6 +2836,29 @@ function renderEventDetail(ev, c, pols){
       html += '</div>';
     }
   });
+
+  // ── Legacy ASTUTE uploads (defensive) ──────────────────────────────────
+  // ASTUTE was removed from Work Event checklists on 6 May 2026. If any old
+  // events still have uploaded ASTUTE files, surface them here so they're
+  // not orphaned. View/Delete only — no new uploads (this is read-only
+  // legacy access). Once Tracy/Courtney delete or migrate them, this
+  // section disappears.
+  var legacyAstute = (docs||[]).filter(function(d){ return d.DocType === 'ASTUTE'; });
+  if(legacyAstute.length > 0){
+    html += '<div style="margin-top:18px;padding:10px 14px;background:#fafafa;border:1.5px dashed #c4c4c4;border-radius:6px">';
+    html += '<div style="font-size:11px;font-weight:700;color:#778;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">⚠ Legacy ASTUTE Uploads</div>';
+    html += '<div style="font-size:11px;color:#889;margin-bottom:8px;font-style:italic">ASTUTE is now stored at client level under Documents → Broker Authority Form. These are old uploads kept here for audit access only.</div>';
+    legacyAstute.forEach(function(d){
+      html += '<div style="padding:5px 10px;font-size:12px;display:flex;align-items:center;gap:8px;color:#556;margin-bottom:2px">';
+      html += '<span>📄</span>';
+      html += '<span style="flex:1">'+escHtml(d.FileName||'file')+'</span>';
+      html += '<span style="color:#889;font-size:10px">'+fdate(d.UploadedAt||'')+'</span>';
+      html += '<button class="btn b-gh sm" data-act="event-doc-view" data-did="'+d.ID+'" style="padding:4px 10px;font-size:11px">View</button>';
+      html += '<button class="btn b-gh sm" data-act="event-doc-delete" data-did="'+d.ID+'" data-eid="'+ev.ID+'" style="padding:4px 10px;font-size:11px;color:#b23">Delete</button>';
+      html += '</div>';
+    });
+    html += '</div>';
+  }
 
   return html;
 }
