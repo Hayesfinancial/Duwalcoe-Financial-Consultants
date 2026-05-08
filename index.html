@@ -4601,7 +4601,7 @@ function buildPolicyForm(p){
     '</div>';
     // No policy-level escalation fields for risk — each benefit row has its own
   } else {
-    html+='<div class="g2">'+fld('ppm',isLifeAnn?'Purchase Price (Lump Sum)':'Premium / Contribution',p.Premium)+(function(){
+    html+='<div class="g2">'+fld('ppm',isLifeAnn?'Purchase Price (Lump Sum)':'Premium / Contribution',p.Premium,'text',isInv?'oninput="invCalcMaturity()"':'')+(function(){
       var _fOpts=['Monthly','Quarterly','Annually','Once Off','Paid Up'];
       var _fv=p.Frequency||'Monthly';
       return '<div class="fld"><label>Frequency</label><select id="pfreq" onchange="freqChanged(this)" style="border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px;width:100%">'+
@@ -4610,7 +4610,7 @@ function buildPolicyForm(p){
     })()+'</div>';
     if(!isLA && !isLifeAnn){
       html+='<div id="pEscRow" class="g2"'+(_isOnceOff?' style="display:none"':'')+'>'
-        +fld('pprem_pct','Premium Escalation %',p.PremEscalation)
+        +fld('pprem_pct','Premium Escalation %',p.PremEscalation,'text',isInv?'oninput="invCalcMaturity()"':'')
         +((isRA||isInv)?'<div></div>':fld('pben_pct','Benefit Escalation %',p.BenEscalation))
         +'</div>';
     }
@@ -4688,6 +4688,8 @@ function buildPolicyForm(p){
         }
       }
       html+='<div class="g2">'+fld('pb_matval','Maturity Value',p.BenMaturityValue,'text','oninput=""')+fdp('pb_matdate','Maturity Date',_matDateInit)+'</div>';
+      // Hint shown when maturity value cannot be calculated (e.g. past date, missing inputs)
+      html+='<div id="pb_matval_hint" style="font-size:11px;color:#b54708;margin:-4px 0 8px 0;display:none"></div>';
       // Maturity Age — read-only display, auto-derived from Maturity Date and client DOB
       html+='<div class="g2">';
       html+='<div class="fld"><label>Maturity Age <span style="font-size:10px;color:#889;font-weight:400">(auto from date + client DOB)</span></label>';
@@ -5159,6 +5161,14 @@ function invCalcMaturity(){
   var out = document.getElementById('pb_matval');
   if(!out) return;
 
+  // Helper: set inline hint message under the Maturity Value field
+  var hintEl = document.getElementById('pb_matval_hint');
+  function setHint(msg){
+    if(!hintEl) return;
+    if(msg){ hintEl.textContent = msg; hintEl.style.display = ''; }
+    else   { hintEl.textContent = '';  hintEl.style.display = 'none'; }
+  }
+
   // Sync date picker selects → hidden input before reading
   if(document.getElementById('pb_matdate_d')) fdpSync('pb_matdate');
 
@@ -5166,23 +5176,24 @@ function invCalcMaturity(){
     if(out) out.value='';
     if(ageDisplay) ageDisplay.textContent='—';
     if(ageHidden) ageHidden.value='';
+    setHint('Enter a maturity date to project the maturity value.');
     return;
   }
 
   // Parse maturity date safely (avoid UTC shift)
   var _mp = String(dateEl.value).split(/[T ]/)[0].split(/[-\/]/);
-  if(_mp.length<3){ out.value=''; return; }
+  if(_mp.length<3){ out.value=''; setHint('Maturity date is incomplete.'); return; }
   var matDate = new Date(parseInt(_mp[0]), parseInt(_mp[1])-1, parseInt(_mp[2]));
-  if(isNaN(matDate)){ out.value=''; return; }
+  if(isNaN(matDate)){ out.value=''; setHint('Maturity date is invalid.'); return; }
 
   var c = DB.clients.find(function(x){ return String(x.ID)===String(EPC); });
-  if(!c || !clean(c.DOB)){ out.value=''; return; }
+  if(!c || !clean(c.DOB)){ out.value=''; setHint('Client DOB missing — cannot derive maturity age.'); return; }
 
   // Parse DOB safely
   var _dp = String(c.DOB).split(/[T ]/)[0].split(/[-\/]/);
-  if(_dp.length<3){ out.value=''; return; }
+  if(_dp.length<3){ out.value=''; setHint('Client DOB is incomplete.'); return; }
   var dob = new Date(parseInt(_dp[0]), parseInt(_dp[1])-1, parseInt(_dp[2]));
-  if(isNaN(dob)){ out.value=''; return; }
+  if(isNaN(dob)){ out.value=''; setHint('Client DOB is invalid.'); return; }
 
   var today = new Date(); today.setHours(0,0,0,0);
   // Years from today to maturity (fractional)
@@ -5194,7 +5205,9 @@ function invCalcMaturity(){
   if(ageDisplay) ageDisplay.textContent = (matAge>0 && !isNaN(matAge)) ? String(matAge) : '—';
   if(ageHidden) ageHidden.value = (matAge>0 && !isNaN(matAge)) ? String(matAge) : '';
 
-  if(yrs<=0 || !fv || !rate){ out.value=''; return; }
+  if(yrs<=0){ out.value=''; setHint('Maturity date is in the past — projection unavailable.'); return; }
+  if(!fv){   out.value=''; setHint('Enter the Current Fund Value to project maturity.'); return; }
+  if(!rate){ out.value=''; setHint('Enter a Growth Rate % to project maturity.'); return; }
 
   var r = rate / 100;
   var projected = fv * Math.pow(1+r, yrs);
@@ -5213,6 +5226,7 @@ function invCalcMaturity(){
     }
   }
   if(out) out.value = Math.round(projected);
+  setHint('');
 }
 
 // ── RA maturity date auto-calculation
@@ -5249,6 +5263,9 @@ function freqChanged(sel){
   var hide = (f==='Once Off' || f==='Paid Up');
   var el = document.getElementById('pEscRow');
   if(el) el.style.display = hide ? 'none' : '';
+  // Recalculate maturity value if this is an investment policy
+  // (invCalcMaturity returns early if pb_matval field is absent, so safe on other types)
+  if(typeof invCalcMaturity==='function') invCalcMaturity();
 }
 
 // ── RA component auto-sum
