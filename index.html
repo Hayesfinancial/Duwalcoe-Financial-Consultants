@@ -6420,7 +6420,19 @@ function openPolicySchedule(cid){
       var incBens=[];
       try{incBens=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):[];}catch(e){}
       var rowBg = idx%2===0?'#ffffff':'#fafaf8';
-      var freq  = p.Frequency&&p.Frequency!=='Monthly'?' /'+p.Frequency.toLowerCase().charAt(0):' /pm';
+      // Premium frequency suffix. Monthly stays as compact '/pm' (most common,
+      // default). Everything else gets a full-word label so '/Once Off' doesn't
+      // truncate to a meaningless '/o', '/Lump Sum' to '/l', etc.
+      var freq = (function(){
+        var f = p.Frequency || 'Monthly';
+        if(f === 'Monthly') return ' /pm';
+        if(f === 'Quarterly') return ' /quarter';
+        if(f === 'Annually') return ' /year';
+        if(f === 'Once Off') return ' once-off';
+        if(f === 'Lump Sum') return ' lump sum';
+        if(f === 'Paid Up') return ' (paid-up)';
+        return ' /'+f.toLowerCase();
+      })();
 
       // Main data row
       s+='<tr style="background:'+rowBg+';font-size:13px">';
@@ -6433,14 +6445,11 @@ function openPolicySchedule(cid){
         s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+R(p.BenDisability)+'</td>';
         s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+R(p.BenDreadDisease)+(p.DreadDiseaseType?'<div style="font-size:10px;color:#888;font-weight:400">'+p.DreadDiseaseType+'</div>':'')+'</td>';
       } else if(isRA||isInv){
-        // Life Annuity has no fund / maturity / retirement values — instead it
-        // pays a guaranteed monthly income for life. Show that income in the
-        // "Fund Value" slot (the headline column) with a /pm tag so it reads
-        // clearly. The other two slots stay as em-dash since they don't apply.
+        // Life Annuity has no fund / maturity / retirement values — its income
+        // is shown in the detail row (it can't be summed with capital values
+        // in the Section Total).
         if(p.Type==='Life Annuity'){
-          var _laiCell = N(p.BenLifeAnnuityIncome);
-          var _laiHtml = _laiCell>0 ? R(_laiCell)+'<span style="font-size:10px;font-weight:400;color:#888"> /pm guar.</span>' : '—';
-          s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+_laiHtml+'</td>';
+          s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">—</td>';
           s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">—</td>';
           s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">—</td>';
         } else {
@@ -6502,11 +6511,17 @@ function openPolicySchedule(cid){
           // Growth rate
           if(p.PremGrowthRate) details.push('<span style="font-size:11px;color:#888">Growth rate: </span><span style="font-size:12px;font-weight:600">'+p.PremGrowthRate+'%</span>');
         }
-        // Life Annuity (guaranteed) — Income shown in the Fund Value cell above
-        // (with /pm guar. tag); escalation in the Esc % column. Detail row only
-        // adds the Guaranteed Term, since that's the one piece not in the table.
+        // Life Annuity (guaranteed) — fund/maturity/retirement columns are
+        // em-dash (no capital), so all the meaningful info goes in this detail
+        // row: guaranteed monthly income, escalation (also shown in Esc %
+        // column), and guarantee term.
         if(p.Type==='Life Annuity'){
           var _lai = N(p.BenLifeAnnuityIncome);
+          if(_lai > 0){
+            var _laStr = '<strong>'+R(_lai)+'/pm guaranteed</strong>';
+            if(p.BenEscalation && N(p.BenEscalation)>0) _laStr += ' · escalating '+p.BenEscalation+'% p.a.';
+            details.push('<span style="font-size:11px;color:#888">Income: </span><span style="font-size:12px">'+_laStr+'</span>');
+          }
           var _gy = p.LifeAnnuityGuarYrs ? String(p.LifeAnnuityGuarYrs).trim() : '';
           if(_gy && _gy !== '0' && _gy !== ''){
             details.push('<span style="font-size:11px;color:#888">Guaranteed Term: </span><span style="font-size:12px;font-weight:600">'+escHtml(_gy)+' year'+(_gy==='1'?'':'s')+'</span>');
