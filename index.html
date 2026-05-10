@@ -362,20 +362,6 @@ function syncNow() {
       if(n.ClientID) window._sharedNotes[String(n.ClientID)] = {text:n.Text||'',by:n.By||'',date:n.LastUpdated||''};
     });
 
-    // Settings — discuss board
-    var settingsRows = loaded.settings||[];
-    var discussRow = settingsRows.find(function(r){ return r.Key==='discuss'; });
-    if(discussRow && discussRow.Value){
-      try{
-        var serverPosts = JSON.parse(discussRow.Value);
-        var localPosts = [];
-        try{ localPosts = JSON.parse(localStorage.getItem('du_discuss')||'[]'); }catch(e){}
-        if(serverPosts.length >= localPosts.length){
-          localStorage.setItem('du_discuss', discussRow.Value);
-        }
-      }catch(e){}
-    }
-
     // Restore LastAccessed from local store
     DB.clients.forEach(function(c){ c.LastAccessed=null; });
     try{
@@ -387,7 +373,6 @@ function syncNow() {
     setSS('ok');
     render();
     toast('Synced — ' + DB.clients.length + ' clients','ok');
-    if(!window._discussTimer) startDiscussAutoRefresh();
   }
 
   needed.forEach(function(table){
@@ -396,27 +381,6 @@ function syncNow() {
       checkDone();
     });
   });
-}
-
-function startDiscussAutoRefresh(){
-  if(window._discussTimer) clearInterval(window._discussTimer);
-  window._discussTimer = setInterval(function(){
-    sbFetch('GET', '/rest/v1/settings?select=*&Key=eq.discuss', null, function(rows){
-      if(!rows||!rows.length) return;
-      var val = rows[0].Value||'';
-      if(!val) return;
-      try{
-        var serverPosts = JSON.parse(val);
-        var localPosts = [];
-        try{ localPosts=JSON.parse(localStorage.getItem('du_discuss')||'[]'); }catch(e){}
-        var current = localStorage.getItem('du_discuss')||'[]';
-        if(val !== current && serverPosts.length >= localPosts.length){
-          localStorage.setItem('du_discuss', val);
-          if(PAGE==='dash') render();
-        }
-      }catch(e){}
-    });
-  }, 5 * 60 * 1000);
 }
 
 // post() — maps every legacy action to a direct Supabase call
@@ -483,17 +447,6 @@ function post(data, cb){
     if(data.assignee) fields2.Assignee = data.assignee;
     if(data.dueDate)  fields2.DueDate  = data.dueDate;
     patch('tasks', data.id, fields2, cb);
-  }
-  else if(action==='saveDiscuss'){
-    sbFetch('POST', '/rest/v1/settings', [{Key:'discuss', Value:data.posts}], function(res, err){
-      try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
-      if(cb) cb(err?{ok:0}:{ok:1, posts:data.posts});
-    });
-  }
-  else if(action==='saveAppts'){
-    sbFetch('POST', '/rest/v1/appts', [{User:data.user, WeekKey:data.weekKey, Appts:data.appts}], function(res, err){
-      if(cb) cb(err?{ok:0}:{ok:1});
-    });
   }
   else if(action==='saveNote'){
     upsert('notes', {ClientID:data.clientId, Text:data.text, By:data.by, LastUpdated:new Date().toISOString().slice(0,10)}, cb);
@@ -917,36 +870,35 @@ function renderDash(){
   var recentClients = DB.clients.filter(function(c){ return c.LastAccessed; })
     .slice().sort(function(a,b){ return (b.LastAccessed||0)-(a.LastAccessed||0); }).slice(0,8);
 
-  // ── Weekly appointment circles (resets Monday, 15 total) ──
-  var weekKey = getWeekKey();
-  var localApptKey = 'du_appts_'+cu()+'_'+weekKey;
-  var appts = new Array(15).fill(false);
-  // Try local first, then fall back to server-synced data
-  var _localRaw = localStorage.getItem(localApptKey);
-  if(!_localRaw){ _localRaw = localStorage.getItem('du_appts_srv_'+cu()+'_'+weekKey)||null; }
-  try{ var _a=JSON.parse(_localRaw||'[]'); if(Array.isArray(_a)) appts=_a; }catch(e){}
-  while(appts.length<15) appts.push(false);
-
-  // ── Discussion board (shared via Apps Script) ──
-  var discuss = [];
-  try{ discuss = JSON.parse(localStorage.getItem('du_discuss')||'[]'); }catch(e){}
+  // ── Assets Under Management by provider ──
+  // Sum every active or paid-up policy that has a Fund Value populated, grouped by Insurer.
+  // For RAs with two-pot capture, use the larger of BenFundValue vs (VestedValue + NonVestedValue)
+  // so neither capture style undercounts.
+  var aumByProv = {};
+  DB.policies.forEach(function(p){
+    if(p.Status !== 'Active' && p.Status !== 'Paid Up') return;
+    var fv = parseFloat(p.BenFundValue||0)||0;
+    var vested = parseFloat(p.VestedValue||0)||0;
+    var nonVested = parseFloat(p.NonVestedValue||0)||0;
+    var twoPot = vested + nonVested;
+    var val = fv > twoPot ? fv : twoPot;
+    if(val <= 0) return;
+    var prov = (p.Insurer||'').trim() || 'Unspecified';
+    if(!aumByProv[prov]) aumByProv[prov] = {total:0, count:0};
+    aumByProv[prov].total += val;
+    aumByProv[prov].count += 1;
+  });
+  var aumRows = Object.keys(aumByProv).map(function(k){
+    return {insurer:k, total:aumByProv[k].total, count:aumByProv[k].count};
+  }).sort(function(a,b){ return b.total - a.total; });
+  var aumGrandTotal = aumRows.reduce(function(s,r){ return s + r.total; }, 0);
+  var aumPolicyCount = aumRows.reduce(function(s,r){ return s + r.count; }, 0);
 
   return '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">'+
   '<h1 style="font-family:\'DM Serif Display\',serif;font-size:22px;color:var(--navy)">Dashboard</h1>'+
   '<div style="display:flex;align-items:center;gap:10px">'+
   '<button class="btn b-gd sm" data-act="open-new-client">+ Client</button>'+
   '<button class="btn b-gh sm" data-act="open-new-lead">🎯 Lead</button>'+
-  // Appointment checkboxes inline in header
-  '<div style="display:flex;align-items:center;gap:8px;background:#fff;border:1px solid var(--smoke);border-radius:8px;padding:6px 12px">'+
-  '<span style="font-size:11px;font-weight:700;color:#aaa;letter-spacing:.3px">Appts</span>'+
-  '<span style="font-size:11px;font-weight:700;color:var(--sage)">'+appts.filter(Boolean).length+'/15</span>'+
-  '<div style="display:flex;gap:3px;flex-wrap:wrap;max-width:220px">'+
-  appts.map(function(on,i){
-    return '<input type="checkbox" title="Appt '+(i+1)+'" '+(on?'checked':'')+' onchange="toggleAppt('+i+')" style="width:14px;height:14px;cursor:pointer;accent-color:var(--sage);margin:1px">';
-  }).join('')+
-  '</div>'+
-  '<button onclick="resetAppts()" title="Reset week" style="font-size:11px;color:#ccc;background:none;border:none;cursor:pointer;padding:0">↺</button>'+
-  '</div>'+
   '<button class="btn b-gh sm" data-act="sync">🔄 Sync</button>'+
   '</div></div>'+
 
@@ -958,7 +910,7 @@ function renderDash(){
     '<div class="stat s-rd" style="padding:10px"><div class="v" style="font-size:18px">'+reviewsDue+'</div><div class="l" style="font-size:10px">Reviews Due</div></div>'+
   '</div>'+
 
-  // Main row: Tasks (left, wide) + Discussion board (right)
+  // Main row: Tasks (left, wide) + AUM by Provider (right)
   '<div style="display:grid;grid-template-columns:1.4fr 1fr;gap:12px;margin-bottom:12px">'+
 
     // LEFT: Tasks
@@ -1015,26 +967,24 @@ function renderDash(){
     })()+
     '</div></div>'+
 
-    // RIGHT: Discussion whiteboard
+    // RIGHT: Assets Under Management by provider
     '<div class="card" style="padding:0;display:flex;flex-direction:column">'+
-    '<div class="ch" style="padding:10px 16px"><h2>💬 Board</h2></div>'+
-    // Whiteboard area — lined paper feel
-    '<div style="flex:1;min-height:360px;max-height:420px;overflow-y:auto;background:#fffef5;padding:12px 16px;display:flex;flex-direction:column;gap:0;border-bottom:1px solid var(--smoke)">'+
-    (discuss.length===0?
-      '<div style="color:#ccc;font-size:13px;font-style:italic;padding-top:20px;text-align:center">Shared whiteboard — post notes, targets, follow-ups…</div>':
-      discuss.map(function(p,pi){
-        var userColor=p.by==='Clinton'?'#0e413a':p.by==='Wife'?'#2e7d5a':'#7c3aed';
-        return '<div style="display:flex;gap:6px;align-items:baseline;padding:7px 0;border-bottom:1px solid #f0ede0;line-height:1.5">'+
-          '<span style="font-size:10px;font-weight:700;color:'+userColor+';flex-shrink:0;min-width:44px">'+p.by+'</span>'+
-          '<span contenteditable="true" onblur="editDiscussPost('+pi+',this.innerText)" style="font-size:13px;color:#333;flex:1;white-space:pre-wrap;outline:none;border-radius:4px;padding:1px 3px;cursor:text" title="Click to edit">'+p.text+'</span>'+
-          '<button onclick="deleteDiscussPost('+pi+')" style="background:none;border:none;cursor:pointer;color:#ddd;font-size:12px;flex-shrink:0;padding:0 2px" title="Delete">✕</button>'+
+    '<div class="ch" style="padding:10px 16px"><h2>💼 AUM by Provider</h2>'+
+    (aumGrandTotal>0?'<div style="font-size:12px;color:#666;font-weight:600">'+rnd(aumGrandTotal)+' · '+aumPolicyCount+' '+(aumPolicyCount===1?'policy':'policies')+'</div>':'')+
+    '</div>'+
+    '<div style="flex:1;min-height:200px;max-height:480px;overflow-y:auto">'+
+    (aumRows.length===0?
+      '<div class="empty" style="padding:20px;font-size:12px">No active investment values captured yet</div>':
+      aumRows.map(function(r){
+        var pct = aumGrandTotal>0 ? Math.round((r.total/aumGrandTotal)*100) : 0;
+        return '<div class="ri" style="padding:9px 14px;display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--smoke)">'+
+          '<div style="flex:1;min-width:0">'+
+          '<div style="font-weight:600;font-size:13px;color:var(--navy);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+r.insurer+'</div>'+
+          '<div style="font-size:11px;color:#889">'+r.count+' '+(r.count===1?'policy':'policies')+(pct>0?'  ·  '+pct+'%':'')+'</div>'+
+          '</div>'+
+          '<div style="font-weight:700;font-size:13px;color:var(--navy);text-align:right;flex-shrink:0">'+rnd(r.total)+'</div>'+
           '</div>';
       }).join(''))+
-    '</div>'+
-    // Quick-add input at bottom
-    '<div style="padding:8px 12px;display:flex;gap:6px;background:#fffef5">'+
-    '<input id="boardInput" type="text" placeholder="Write something…" onkeydown="if(event.key===\'Enter\')quickPost()" style="flex:1;border:1px solid #e8e4d0;border-radius:6px;padding:6px 10px;font-size:13px;background:#fff;font-family:inherit">'+
-    '<button onclick="quickPost()" class="btn b-gd xs">Post</button>'+
     '</div></div>'+
 
   '</div>'+
@@ -1100,26 +1050,6 @@ function renderDash(){
 
   '</div>';
 }
-function quickPost(){
-  var inp=document.getElementById('boardInput');
-  if(!inp||!inp.value.trim()) return;
-  var text=inp.value.trim();
-  var discuss=[];
-  try{discuss=JSON.parse(localStorage.getItem('du_discuss')||'[]');}catch(e){}
-  discuss.unshift({text:text,by:cu(),date:new Date().toLocaleDateString('en-ZA',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})});
-  localStorage.setItem('du_discuss',JSON.stringify(discuss));
-  post({action:'saveDiscuss',posts:JSON.stringify(discuss)},function(r){
-    if(r&&r.posts){localStorage.setItem('du_discuss',r.posts);}
-    render();
-  });
-  render();
-}
-
-function getWeekKey(){
-  var d=new Date(); var day=d.getDay(); var diff=d.getDate()-(day===0?6:day-1);
-  var mon=new Date(d); mon.setDate(diff); return mon.toISOString().slice(0,10);
-}
-
 function dashSearchInput(){
   var inp = document.getElementById('dashSearch');
   var q = (inp ? inp.value||'' : '').toLowerCase().trim();
@@ -1218,54 +1148,6 @@ function toggleContacted(id, checked){
   post({action:'saveClient', client:c}, function(){
     toast(checked ? (c.Name||'Lead')+' marked as contacted ✅' : (c.Name||'Lead')+' unmarked','ok');
   });
-}
-
-function toggleAppt(i){
-  var weekKey = getWeekKey();
-  var localKey = 'du_appts_'+cu()+'_'+weekKey;
-  var appts = new Array(15).fill(false);
-  try{ var _a=JSON.parse(localStorage.getItem(localKey)||'[]'); if(Array.isArray(_a)) appts=_a; }catch(e){}
-  while(appts.length<15) appts.push(false);
-  appts[i]=!appts[i];
-  localStorage.setItem(localKey, JSON.stringify(appts));
-  post({action:'saveAppts', user:cu(), weekKey:weekKey, appts:JSON.stringify(appts)}, function(){});
-  render();
-}
-
-function resetAppts(){
-  var weekKey = getWeekKey();
-  var localKey = 'du_appts_'+cu()+'_'+weekKey;
-  var empty = JSON.stringify(new Array(15).fill(false));
-  localStorage.setItem(localKey, empty);
-  post({action:'saveAppts', user:cu(), weekKey:weekKey, appts:empty}, function(){});
-  render();
-}
-
-function editDiscussPost(idx, newText){
-  newText = (newText||'').trim();
-  var discuss=[];
-  try{discuss=JSON.parse(localStorage.getItem('du_discuss')||'[]');}catch(e){}
-  if(!discuss[idx]) return;
-  if(!newText){ deleteDiscussPost(idx); return; }
-  if(newText === discuss[idx].text) return; // no change
-  discuss[idx].text = newText;
-  localStorage.setItem('du_discuss',JSON.stringify(discuss));
-  post({action:'saveDiscuss',posts:JSON.stringify(discuss)},function(r){
-    if(r&&r.posts){localStorage.setItem('du_discuss',r.posts);}
-  });
-  // Don't re-render — contenteditable already shows the new text
-}
-
-function deleteDiscussPost(idx){
-  var discuss=[];
-  try{discuss=JSON.parse(localStorage.getItem('du_discuss')||'[]');}catch(e){}
-  discuss.splice(idx,1);
-  localStorage.setItem('du_discuss',JSON.stringify(discuss));
-  post({action:'saveDiscuss',posts:JSON.stringify(discuss)},function(r){
-    if(r&&r.posts){localStorage.setItem('du_discuss',r.posts);}
-    render();
-  });
-  render();
 }
 
 // CLIENTS PAGE
