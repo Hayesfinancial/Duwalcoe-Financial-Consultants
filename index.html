@@ -6170,6 +6170,43 @@ function openPolicySchedule(cid){
   function V(v){return (!v||v==='None')?'—':String(v);}
   function FD(v){if(!v||v==='None')return '—';var p=parseDateVal(v);if(!p.y)return String(v);var mn=['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];return (p.d||'?')+' '+(mn[parseInt(p.m,10)]||'?')+' '+p.y;}
 
+  // Projection helper for RA / Investment policies.
+  // Computes projected fund value at maturity (Investments) or retirement (RAs).
+  // Returns {value, targetDate} or {value:0, targetDate:''} if data insufficient.
+  // Uses GrowthRate, falling back to PremGrowthRate, then IllustrativeRate.
+  // For RAs without a MaturityDate, derives it from RetirementAge + client DOB.
+  // Skips Living Annuity and Life Annuity (these have their own income mechanics).
+  function projectPolicy(p){
+    if(p.Type==='Living Annuity' || p.Type==='Life Annuity') return {value:0, targetDate:''};
+    var fv = N(p.BenFundValue);
+    if(fv <= 0) return {value:0, targetDate:''};
+    var rate = N(p.GrowthRate||p.PremGrowthRate||p.IllustrativeRate);
+    if(rate <= 0) return {value:0, targetDate:''};
+    // Determine target date
+    var tgt = null;
+    if(p.MaturityDate){
+      var pd = parseDateVal(p.MaturityDate);
+      if(pd.y) tgt = new Date(+pd.y, (+pd.m||1)-1, +pd.d||1);
+    }
+    if(!tgt && p.RetirementAge && c.DOB){
+      var dp = String(c.DOB).split(/[T ]/)[0].split(/[-\/]/);
+      if(dp.length>=3){
+        var retAge = parseInt(p.RetirementAge,10);
+        if(!isNaN(retAge)){
+          tgt = new Date(+dp[0]+retAge, (+dp[1]||1)-1, +dp[2]||1);
+        }
+      }
+    }
+    if(!tgt || isNaN(tgt.getTime())) return {value:0, targetDate:''};
+    var now = new Date(); now.setHours(0,0,0,0);
+    var yrs = (tgt - now) / (365.25 * 86400000);
+    if(yrs <= 0) return {value:0, targetDate:''};
+    var projected = fv * Math.pow(1 + rate/100, yrs);
+    var mn=['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    var tgtStr = mn[tgt.getMonth()+1]+' '+tgt.getFullYear();
+    return {value:projected, targetDate:tgtStr};
+  }
+
   // Classify policies
   var raTypes=['Retirement Annuity','Pension Fund','Provident Fund','Pension Preservation','Provident Preservation','Living Annuity','Life Annuity'];
   var invTypes=['Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment','Unit Trust','Tax Free Savings'];
@@ -6215,9 +6252,7 @@ function openPolicySchedule(cid){
   });
 
   var annualPols=nonMonthly.filter(function(p){return p.Frequency==='Annually';});
-  var oncePols  =nonMonthly.filter(function(p){return p.Frequency!=='Annually';});
   var totAnnual =annualPols.reduce(function(s,p){return s+N(p.Premium);},0);
-  var totOnce   =oncePols.reduce(function(s,p){return s+N(p.Premium);},0);
 
   // Cover totals (personal only)
   var covDeath=0,covDis=0,covDD=0,covIP=0;
@@ -6291,8 +6326,8 @@ function openPolicySchedule(cid){
       s+='<td style="padding:6px 10px;border-bottom:1px solid #e0e0d8;text-align:right">Dread Disease</td>';
     } else if(isRA||isInv){
       s+='<td style="padding:6px 10px;border-bottom:1px solid #e0e0d8;text-align:right">Fund Value</td>';
-      s+='<td style="padding:6px 10px;border-bottom:1px solid #e0e0d8;text-align:right">Maturity Value</td>';
-      s+='<td style="padding:6px 10px;border-bottom:1px solid #e0e0d8;text-align:right">Retirement Value</td>';
+      s+='<td style="padding:6px 10px;border-bottom:1px solid #e0e0d8;text-align:right">Projected Value</td>';
+      s+='<td style="padding:6px 10px;border-bottom:1px solid #e0e0d8;text-align:right">Target Date</td>';
     } else {
       s+='<td colspan="3" style="padding:6px 10px;border-bottom:1px solid #e0e0d8"></td>';
     }
@@ -6331,7 +6366,7 @@ function openPolicySchedule(cid){
         s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+R(p.BenDisability)+'</td>';
         s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+R(p.BenDreadDisease)+(p.DreadDiseaseType?'<div style="font-size:10px;color:#888;font-weight:400">'+p.DreadDiseaseType+'</div>':'')+'</td>';
       } else if(isRA||isInv){
-        // Life Annuity has no fund / maturity / retirement values — its income
+        // Life Annuity has no fund / projected value — its income
         // is shown in the detail row (it can't be summed with capital values
         // in the Section Total).
         if(p.Type==='Life Annuity'){
@@ -6339,9 +6374,10 @@ function openPolicySchedule(cid){
           s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">—</td>';
           s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">—</td>';
         } else {
+          var _proj = projectPolicy(p);
           s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+R(p.BenFundValue)+'</td>';
-          s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+R(p.BenMaturityValue)+'</td>';
-          s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+R(p.BenRetirementValue)+'</td>';
+          s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+(_proj.value>0?R(_proj.value):'—')+'</td>';
+          s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600;font-size:12px">'+(_proj.targetDate||'—')+'</td>';
         }
       } else {
         s+='<td colspan="3" style="padding:9px 10px;border-bottom:1px solid #eeede8"></td>';
@@ -6422,12 +6458,11 @@ function openPolicySchedule(cid){
         }
         // Illustrative rate — already shown above in IRR block, skip here
         if(p.TotalInvested && N(p.TotalInvested)>0){
-          var _ti2=N(p.TotalInvested), _tw2=N(p.TotalWithdrawn||0), _fv2=N(p.BenFundValue||0);
-          var _net2=_ti2-_tw2, _gain2=_fv2-_net2, _pct2=_net2>0?Math.round(_gain2/_net2*1000)/10:0;
+          var _ti2=N(p.TotalInvested), _tw2=N(p.TotalWithdrawn||0);
+          var _net2=_ti2-_tw2;
           details.push('<span style="font-size:11px;color:#888">Total invested: </span><span style="font-size:12px;font-weight:600">'+R(_ti2)+'</span>');
           if(_tw2>0) details.push('<span style="font-size:11px;color:#888">Withdrawn: </span><span style="font-size:12px;font-weight:600">'+R(_tw2)+'</span>');
           details.push('<span style="font-size:11px;color:#888">Net invested: </span><span style="font-size:12px;font-weight:600">'+R(_net2)+'</span>');
-          if(_fv2>0) details.push('<span style="font-size:11px;color:'+ (_gain2>=0?'#166534':'#991b1b')+';font-weight:700">Gain: '+R(_gain2)+' ('+_pct2+'% total)</span>');
         }
       }
       if(p.RetirementDate) details.push('<span style="font-size:11px;color:#888">Retirement: </span><span style="font-size:12px">'+FD(p.RetirementDate)+'</span>');
@@ -6450,12 +6485,12 @@ function openPolicySchedule(cid){
 
     // Section total row — per-column totals so each column sums its values.
     // Risk/Biz: Death | Disability | Dread Disease | Premium /pm
-    // RA/Inv:   Fund Value | Maturity Value | Retirement Value | Premium /pm
+    // RA/Inv:   Fund Value | Projected Value | (Target Date — no total) | Premium /pm
     // Once-off premiums are excluded from the /pm total but their fund values
     // (for RA/Inv) are still included in the fund total.
     var sectM=0;
     var sectDeath=0, sectDis=0, sectDD=0;
-    var sectFV=0, sectMat=0, sectRet=0;
+    var sectFV=0, sectProj=0;
     grp.pols.forEach(function(p){
       var n=N(p.Premium);
       if(!isNonMonthly(p)) sectM+=n;
@@ -6465,8 +6500,7 @@ function openPolicySchedule(cid){
         sectDD    += N(p.BenDreadDisease);
       } else if(isRA||isInv){
         sectFV  += N(p.BenFundValue);
-        sectMat += N(p.BenMaturityValue);
-        sectRet += N(p.BenRetirementValue);
+        sectProj += projectPolicy(p).value;
       }
     });
 
@@ -6484,8 +6518,8 @@ function openPolicySchedule(cid){
       s+=totCell(sectDD,    col);
     } else if(isRA||isInv){
       s+=totCell(sectFV,  col);
-      s+=totCell(sectMat, col);
-      s+=totCell(sectRet, col);
+      s+=totCell(sectProj, col);
+      s+='<td style="padding:9px 10px;border-bottom:2px solid #ddd"></td>';
     } else {
       s+='<td colspan="3" style="padding:9px 10px;border-bottom:2px solid #ddd"></td>';
     }
@@ -6521,11 +6555,13 @@ function openPolicySchedule(cid){
   doc+='<div style="padding:14px;display:flex;flex-wrap:wrap;gap:12px">';
 
   // Cost block — personal and business SEPARATED
+  // Note: once-off / lump-sum policy values are NOT shown here. They appear
+  // in the Investment & Retirement Performance block as "Total contributions"
+  // (combined with TotalInvested where populated, to avoid double-counting).
   var premRows=[];
   if(tPersM>0)    premRows.push({lbl:'Personal monthly',  val:R2(tPersM)});
   if(tBizM>0)     premRows.push({lbl:'Business monthly',  val:R2(tBizM)});
   if(totAnnual>0) premRows.push({lbl:'Annual premiums',   val:R2(totAnnual)});
-  if(totOnce>0)   premRows.push({lbl:'Once-off / Lump sum',val:R2(totOnce)});
   if(premRows.length) doc+=summaryBlock('Cost','#0e413a',premRows);
 
   // Personal cover block
@@ -6541,35 +6577,45 @@ function openPolicySchedule(cid){
     if(bizGroups[bt]>0) doc+=summaryBlock('Business — '+bt,'#92400e',[{lbl:'Cover amount',val:R2(bizGroups[bt])}]);
   });
 
-  // Investment & retirement performance summary block
+  // Investment & retirement performance summary block.
+  // "Total contributions" unifies Premium (for once-off / lump-sum / paid-up
+  // policies) and TotalInvested (for policies with cumulative contribution
+  // tracking). For each policy we take the larger of the two so we never
+  // double-count when both are populated, and we don't miss money when only
+  // one is. Monthly-premium policies are excluded from this snapshot — the
+  // recurring premium isn't a "money in to date" figure and is already shown
+  // in the Cost block.
   var _raT=['Retirement Annuity','Pension Fund','Provident Fund','Pension Preservation','Provident Preservation','Living Annuity'];
   var _invT=['Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment','Unit Trust','Tax Free Savings'];
   var _invRaPols=allPols.filter(function(p){ return _raT.indexOf(p.Type||'')>=0||_invT.indexOf(p.Type||'')>=0; });
   if(_invRaPols.length>0){
-    var invTotalInv=0,invTotalWith=0,invTotalFV=0,invHasData=false;
+    var invTotalContrib=0, invTotalWith=0, invTotalFV=0;
     _invRaPols.forEach(function(p){
-      var ti=N(p.TotalInvested||'0'),tw=N(p.TotalWithdrawn||'0'),fv=N(p.BenFundValue||'0');
-      if(ti>0){invTotalInv+=ti;invTotalWith+=tw;invHasData=true;}
-      if(fv>0)invTotalFV+=fv;
+      var ti=N(p.TotalInvested||'0');
+      var tw=N(p.TotalWithdrawn||'0');
+      var fv=N(p.BenFundValue||'0');
+      var prem=N(p.Premium||'0');
+      var freq=p.Frequency||'Monthly';
+      var isLumpish=(freq==='Once Off'||freq==='Lump Sum'||freq==='Paid Up');
+      // Money in for this policy:
+      //   - If TotalInvested populated: use it (covers initial + top-ups)
+      //   - Else if once-off/lump-sum/paid-up: use Premium (single contribution)
+      //   - Else: 0 (monthly premium policy without cumulative tracking)
+      var moneyIn = ti>0 ? ti : (isLumpish ? prem : 0);
+      // If both ti and lumpish prem are populated, take the larger
+      // (handles the case where TotalInvested wasn't updated past the initial)
+      if(ti>0 && isLumpish && prem>ti) moneyIn = prem;
+      invTotalContrib += moneyIn;
+      invTotalWith += tw;
+      if(fv>0) invTotalFV += fv;
     });
-    var invNetInv=invTotalInv-invTotalWith;
-    var invGain=invTotalFV-(invHasData?invNetInv:0);
-    var invGainPct=invNetInv>0?Math.round(invGain/invNetInv*1000)/10:0;
+    var invNetInv = invTotalContrib - invTotalWith;
     var invRows=[];
-    if(invHasData){
-      invRows.push({lbl:'Total invested',val:'R '+Math.round(invTotalInv).toLocaleString('en-ZA')});
-      if(invTotalWith>0)invRows.push({lbl:'Total withdrawn',val:'R '+Math.round(invTotalWith).toLocaleString('en-ZA')});
-      invRows.push({lbl:'Net invested',val:'R '+Math.round(invNetInv).toLocaleString('en-ZA')});
-    }
-    if(invTotalFV>0)invRows.push({lbl:'Portfolio value',val:'R '+Math.round(invTotalFV).toLocaleString('en-ZA')});
-    if(invHasData&&invTotalFV>0){
-      var gainCol=invGain>=0?'#166534':'#991b1b';
-      invRows.push({lbl:'Total gain',val:'<span style="color:'+gainCol+';font-weight:700">R '+Math.round(invGain).toLocaleString('en-ZA')+' ('+invGainPct+'% total)</span>'});
-    }
-    // Average IRR row removed: an unweighted mean across heterogeneous policies
-    // is not meaningful on a client document. Per-policy Stated IRRs remain
-    // visible on each policy detail row in the table.
-    if(invRows.length>0)doc+=summaryBlock('Investment & Retirement Performance','#2563ab',invRows);
+    if(invTotalContrib>0) invRows.push({lbl:'Total contributions',val:'R '+Math.round(invTotalContrib).toLocaleString('en-ZA')});
+    if(invTotalWith>0)    invRows.push({lbl:'Total withdrawn',    val:'R '+Math.round(invTotalWith).toLocaleString('en-ZA')});
+    if(invTotalContrib>0 && invTotalWith>0) invRows.push({lbl:'Net invested',val:'R '+Math.round(invNetInv).toLocaleString('en-ZA')});
+    if(invTotalFV>0)      invRows.push({lbl:'Portfolio value',    val:'R '+Math.round(invTotalFV).toLocaleString('en-ZA')});
+    if(invRows.length>0) doc+=summaryBlock('Investment & Retirement Performance','#2563ab',invRows);
   }
   doc+='</div></div>';
 
