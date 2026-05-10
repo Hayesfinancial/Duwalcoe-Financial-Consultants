@@ -874,6 +874,9 @@ function renderDash(){
   // Sum every active or paid-up policy that has a Fund Value populated, grouped by Insurer.
   // Excludes policies belonging to Inactive/Cancelled clients and to Leads —
   // we only want AUM for live, serviceable client relationships.
+  // Also excludes policies the user has flagged as not under their management
+  // (CountsForAUM='No'). Unset is treated as 'Yes' so existing data is included
+  // by default; user opts out of specific policies via the form checkbox.
   // For RAs with two-pot capture, use the larger of BenFundValue vs (VestedValue + NonVestedValue)
   // so neither capture style undercounts.
   var aumByProv = {};
@@ -881,6 +884,8 @@ function renderDash(){
     if(p.Status !== 'Active' && p.Status !== 'Paid Up') return;
     var owner = DB.clients.find(function(x){ return String(x.ID)===String(p.ClientID); });
     if(!owner || !isActiveClient(owner)) return;
+    var aumFlag = (p.CountsForAUM===undefined||p.CountsForAUM==='') ? 'Yes' : p.CountsForAUM;
+    if(aumFlag !== 'Yes') return;
     var fv = parseFloat(p.BenFundValue||0)||0;
     var vested = parseFloat(p.VestedValue||0)||0;
     var nonVested = parseFloat(p.NonVestedValue||0)||0;
@@ -4453,6 +4458,24 @@ function buildPolicyForm(p){
   html+=fs('pst','Status',['Active','Lapsed','Paid Up','Cancelled'],p.Status||'Active');
   html+='<div></div></div>';
 
+  // SERVICING FLAGS — Advisor of Record and AUM inclusion
+  // Default to 'Yes' for unset (existing data migration: panel stays useful;
+  // user opts out the exceptions). Linked: ticking AOR auto-ticks AUM,
+  // unticking AOR auto-unticks AUM. AUM can be manually edited after to
+  // break the link (e.g. risk policies, collateralised assets).
+  var _aor = (p.AdvisorOfRecord===undefined||p.AdvisorOfRecord==='') ? 'Yes' : p.AdvisorOfRecord;
+  var _aum = (p.CountsForAUM===undefined||p.CountsForAUM==='') ? 'Yes' : p.CountsForAUM;
+  html+='<div style="display:flex;gap:24px;margin:8px 0 4px 0;padding:10px 12px;background:#f8f7f1;border:1px solid var(--smoke);border-radius:7px;align-items:center;flex-wrap:wrap">';
+  html+='<label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;font-weight:600;color:var(--navy)">'+
+    '<input type="checkbox" id="pb_aor" '+(_aor==='Yes'?'checked':'')+
+    ' onchange="(function(el){var aum=document.getElementById(\'pb_aum\');if(aum){aum.checked=el.checked;}})(this)"'+
+    ' style="width:16px;height:16px;cursor:pointer;accent-color:var(--sage)">Advisor of Record</label>';
+  html+='<label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;font-weight:600;color:var(--navy)">'+
+    '<input type="checkbox" id="pb_aum" '+(_aum==='Yes'?'checked':'')+
+    ' style="width:16px;height:16px;cursor:pointer;accent-color:var(--sage)">Counts for AUM</label>';
+  html+='<span style="font-size:11px;color:#889;font-style:italic">Untick AOR for policies you have captured but do not service. Untick AUM only if you want to exclude this policy from your AUM dashboard while remaining advisor of record.</span>';
+  html+='</div>';
+
   // BUSINESS ASSURANCE
   if(isBiz){
     html+=sec('Business Assurance');
@@ -5307,6 +5330,8 @@ function collectPolicyForm(){
   return {
     Insurer:g('pi'),Product:g('pp'),PolicyNo:g('pn'),Type:g('pt'),
     StartDate:g('psd'),ClientIsOwner:getR('pisowner'),Owner:g('pown'),Status:g('pst'),EstateDutiable:getR('pestate'),
+    AdvisorOfRecord:(document.getElementById('pb_aor')?(document.getElementById('pb_aor').checked?'Yes':'No'):'Yes'),
+    CountsForAUM:(document.getElementById('pb_aum')?(document.getElementById('pb_aum').checked?'Yes':'No'):'Yes'),
     BizType:g('pbiztype'),LifeAssuredType:(document.getElementById('plifeassured_type')?document.getElementById('plifeassured_type').value:''),LifeAssured:g('plifeassured'),LoanAmount:g('ploanamt'),KeyPosition:g('pkeypos'),
     Premium:g('ppm'),Frequency:g('pfreq'),
     // For risk policies escalations live on rows; use first lump row for policy-level field
