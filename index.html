@@ -903,6 +903,19 @@ function renderDash(){
   var aumGrandTotal = aumRows.reduce(function(s,r){ return s + r.total; }, 0);
   var aumPolicyCount = aumRows.reduce(function(s,r){ return s + r.count; }, 0);
 
+  // ── Wills tracking ──
+  // "Wills under my name" = HasWill=Yes AND WillThroughMe=Yes, among active clients only.
+  // The dashboard tile shows wills-through-me / total-active so the gap is visible.
+  // NULL/undefined/empty values are treated as "no" — same migration pattern as AUM/AOR.
+  var willsThroughMe = 0;
+  var willsAnyKind = 0;
+  active.forEach(function(c){
+    if(c.HasWill==='Yes'){
+      willsAnyKind++;
+      if(c.WillThroughMe==='Yes') willsThroughMe++;
+    }
+  });
+
   return '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">'+
   '<h1 style="font-family:\'DM Serif Display\',serif;font-size:22px;color:var(--navy)">Dashboard</h1>'+
   '<div style="display:flex;align-items:center;gap:10px">'+
@@ -912,11 +925,12 @@ function renderDash(){
   '</div></div>'+
 
   // Stats bar
-  '<div class="g4" style="margin-bottom:12px">'+
+  '<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:14px;margin-bottom:12px">'+
     '<div class="stat s-gd" style="cursor:pointer;padding:10px" data-act="go-clients"><div class="v" style="font-size:18px">'+active.length+'</div><div class="l" style="font-size:10px">Active Clients</div></div>'+
     '<div class="stat s-sg" style="padding:10px"><div class="v" style="font-size:18px">'+up.filter(function(u){return u.days<=30;}).length+'</div><div class="l" style="font-size:10px">Reminders (30d)</div></div>'+
     '<div class="stat s-sk" style="padding:10px"><div class="v" style="font-size:18px">'+open.length+'</div><div class="l" style="font-size:10px">Open Tasks</div></div>'+
     '<div class="stat s-rd" style="padding:10px"><div class="v" style="font-size:18px">'+reviewsDue+'</div><div class="l" style="font-size:10px">Reviews Due</div></div>'+
+    '<div class="stat s-gd" style="cursor:pointer;padding:10px" data-act="go-clients-no-will" title="Click to see active clients without a will"><div class="v" style="font-size:18px">📜 '+willsThroughMe+'<span style="font-size:11px;color:#889;font-weight:400"> / '+active.length+'</span></div><div class="l" style="font-size:10px">Wills (mine)</div></div>'+
   '</div>'+
 
   // Main row: Tasks (left, wide) + AUM by Provider (right)
@@ -1175,9 +1189,11 @@ function renderClients(){
   });
   var isLeads    = window.CLIENT_LIST_FILTER === 'leads';
   var isInactive = window.CLIENT_LIST_FILTER === 'inactive';
+  var isNoWill   = window.CLIENT_LIST_FILTER === 'nowill';
   var filtered = base.filter(function(c){
     if(isLeads)    return c.IsLead==='Yes';
     if(isInactive) return c.IsLead!=='Yes' && (c.Status==='Inactive'||c.Status==='Cancelled');
+    if(isNoWill)   return c.IsLead!=='Yes' && c.Status!=='Inactive' && c.Status!=='Cancelled' && c.HasWill!=='Yes';
     return c.IsLead!=='Yes' && c.Status!=='Inactive' && c.Status!=='Cancelled';
   });
   var list=SRCH?filtered.filter(function(c){
@@ -1190,13 +1206,15 @@ function renderClients(){
   var clientCount  = base.filter(function(c){ return c.IsLead!=='Yes' && c.Status!=='Inactive' && c.Status!=='Cancelled'; }).length;
   var leadCount    = base.filter(function(c){ return c.IsLead==='Yes'; }).length;
   var inactiveCount= base.filter(function(c){ return c.IsLead!=='Yes' && (c.Status==='Inactive'||c.Status==='Cancelled'); }).length;
-  var pageLabel = isLeads ? 'Leads' : isInactive ? 'Inactive' : 'Clients';
+  var noWillCount  = base.filter(function(c){ return c.IsLead!=='Yes' && c.Status!=='Inactive' && c.Status!=='Cancelled' && c.HasWill!=='Yes'; }).length;
+  var pageLabel = isLeads ? 'Leads' : isInactive ? 'Inactive' : isNoWill ? 'Clients without a Will' : 'Clients';
   return '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">'+
     '<h1 style="font-family:\'DM Serif Display\',serif;font-size:22px;color:var(--navy)">'+pageLabel+' ('+list.length+')</h1>'+
     '<div style="display:flex;gap:6px;align-items:center">'+
     '<div style="display:flex;gap:0;border:1.5px solid var(--mist);border-radius:8px;overflow:hidden">'+
-    '<button class="btn xs" data-act="client-list-filter" data-filter="clients" style="border-radius:0;border:none;'+(!isLeads&&!isInactive?'background:var(--navy);color:#fff':'background:#f5f7fa;color:#889')+';padding:5px 14px;font-weight:700">👥 Clients ('+clientCount+')</button>'+
+    '<button class="btn xs" data-act="client-list-filter" data-filter="clients" style="border-radius:0;border:none;'+(!isLeads&&!isInactive&&!isNoWill?'background:var(--navy);color:#fff':'background:#f5f7fa;color:#889')+';padding:5px 14px;font-weight:700">👥 Clients ('+clientCount+')</button>'+
     '<button class="btn xs" data-act="client-list-filter" data-filter="leads" style="border-radius:0;border:none;border-left:1.5px solid var(--mist);'+(isLeads?'background:var(--navy);color:#fff':'background:#f5f7fa;color:#889')+';padding:5px 14px;font-weight:700">🎯 Leads ('+leadCount+')</button>'+
+    (noWillCount>0?'<button class="btn xs" data-act="client-list-filter" data-filter="nowill" style="border-radius:0;border:none;border-left:1.5px solid var(--mist);'+(isNoWill?'background:#92400e;color:#fff':'background:#f5f7fa;color:#889')+';padding:5px 14px;font-weight:700" title="Active clients without a will captured">📜 No Will ('+noWillCount+')</button>':'')+
     (inactiveCount>0?'<button class="btn xs" data-act="client-list-filter" data-filter="inactive" style="border-radius:0;border:none;border-left:1.5px solid var(--mist);'+(isInactive?'background:var(--rose);color:#fff':'background:#f5f7fa;color:#889')+';padding:5px 14px;font-weight:700">\u{1F4A4} Inactive ('+inactiveCount+')</button>':'')+
     '</div>'+
     (isLeads ? btn('btn b-gd','open-new-lead','+ New Lead') : (!isInactive ? btn('btn b-gd','open-new-client','+ New Client') : ''))+
@@ -3797,6 +3815,34 @@ function openClientModal(id, isLead){
     fdp('fr','Review Date',c.ReviewDate||'')+
     '</div>'+
 
+    // SECTION: Will / Estate Planning
+    // Captures whether client has a will, when it was last drafted/reviewed,
+    // who the attorney is, and whether it was placed via this practice.
+    // 'Through me' is the key field for revenue tracking — only wills placed
+    // via this practice generate referral commission.
+    (function(){
+      var hw = c.HasWill||'';
+      var showFields = (hw==='Yes') ? 'block' : 'none';
+      return '<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:1px;padding:4px 0 8px;border-bottom:2px solid var(--gold);margin:18px 0 14px">Will / Estate Planning</div>'+
+        '<div class="fld"><label>Does client have a will?</label>'+
+        '<div style="display:flex;gap:16px;margin-top:6px">'+
+        '<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="fhaswill" value="Yes" '+(hw==='Yes'?'checked':'')+' onchange="(function(){var w=document.getElementById(\'fwilldetails\');if(w)w.style.display=\'block\';})()">Yes</label>'+
+        '<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="fhaswill" value="No" '+(hw==='No'?'checked':'')+' onchange="(function(){var w=document.getElementById(\'fwilldetails\');if(w)w.style.display=\'none\';})()">No</label>'+
+        '<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="fhaswill" value="" '+(hw===''?'checked':'')+' onchange="(function(){var w=document.getElementById(\'fwilldetails\');if(w)w.style.display=\'none\';})()">Not yet asked</label>'+
+        '</div></div>'+
+        '<div id="fwilldetails" style="display:'+showFields+';margin-top:10px">'+
+        '<div class="g3">'+
+        fdp('fwilldate','Date of Will',c.WillDate||'')+
+        fld('fwillatt','Attorney / Firm',c.WillAttorney||'')+
+        '<div class="fld"><label>Placed through me?</label>'+
+        '<div style="display:flex;gap:16px;margin-top:6px">'+
+        '<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="fwillthrough" value="Yes" '+(c.WillThroughMe==='Yes'?'checked':'')+'>Yes</label>'+
+        '<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="fwillthrough" value="No" '+(c.WillThroughMe!=='Yes'?'checked':'')+'>No</label>'+
+        '</div></div>'+
+        '</div>'+
+        '</div>';
+    })()+
+
     // SECTION: Spouse
     '<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:1px;padding:4px 0 8px;border-bottom:2px solid var(--gold);margin:18px 0 14px">Spouse / Partner</div>'+
     '<div class="g3">'+
@@ -4272,6 +4318,7 @@ function saveClient(openFNA){
   var c={ID:id,Name:name,MaidenName:g('fmdn')||'',CallingName:g('fcn')||name.split(' ')[0]||name,Title:g('fttl'),IDNumber:g('fi'),DOB:g('fd'),Cell:g('fc'),Email:g('fe'),
     Occupation:g('fo'),Employer:g('fem'),Income:g('finc')||'',TaxNo:g('ftx'),
     Anniversary:g('fann'),MaritalStatus:g('fmar'),Status:g('fst'),ReviewDate:g('fr'),
+    HasWill:getRadio('fhaswill')||'',WillDate:g('fwilldate')||'',WillAttorney:g('fwillatt')||'',WillThroughMe:getRadio('fwillthrough')||'',
     Gender:getRadio('fgen')||g('fgen'),Smoker:getRadio('fsm')||g('fsm'),
     Education:g('fedu'),Qualification:g('fqual'),TelHome:g('ftelh'),TelWork:g('ftelw'),
     SpouseName:g('fspname'),SpouseIDNumber:g('fspid'),SpouseDOB:g('fspdob'),SpouseCell:g('fspcell'),SpouseEmail:g('fspemail'),
@@ -6069,6 +6116,7 @@ document.addEventListener('click', function(e){
         case 'toggle-contacted': toggleContacted(id, el.checked); break;
         case 'client-list-filter': window.CLIENT_LIST_FILTER=el.getAttribute('data-filter'); render(); break;
         case 'go-clients':     goPage('clients'); break;
+        case 'go-clients-no-will': window.CLIENT_LIST_FILTER='nowill'; goPage('clients'); break;
         case 'open-new-policy':openPolicyModal(cid); break;
         case 'edit-policy':    openPolicyModal(cid,parseInt(idx)); break;
         case 'pol-history':    openPolicyHistory(cid,parseInt(idx)); break;
