@@ -5831,6 +5831,52 @@ function buildSummary() {
   var liqNeeds = physLiab + manLiab + Math.round(estateDutyShare) + Math.round(execFees) + Math.round(accrualDed);
   var liqGap = liqProvisions - liqNeeds;
 
+  // ── Life Cover Structuring calcs (used by card + Structuring box below) ──
+  var spouseIncCap=0, estateIncCap=0;
+  var tpByName = {};  // { name -> { incCap: n, polCover: n } }
+  (S.deathIncome||[]).forEach(function(r){
+    var c = calcIncomeNeed(r); if(!c) return;
+    var bt = r.benTo || 'Spouse';
+    if(bt==='Spouse') spouseIncCap += c;
+    else if(bt==='Estate') estateIncCap += c;
+    else if(bt==='Third Party'){
+      var nm = (r.benName||'').trim() || 'Unnamed third party';
+      if(!tpByName[nm]) tpByName[nm] = {incCap:0, polCover:0};
+      tpByName[nm].incCap += c;
+    }
+  });
+  (S.deathCapital||[]).forEach(function(r){
+    var amt = N(r.amt); if(!amt) return;
+    var bt = r.benTo || 'Spouse';
+    if(bt==='Spouse') spouseIncCap += amt;
+    else if(bt==='Estate') estateIncCap += amt;
+    else if(bt==='Third Party'){
+      var nm = (r.benName||'').trim() || 'Unnamed third party';
+      if(!tpByName[nm]) tpByName[nm] = {incCap:0, polCover:0};
+      tpByName[nm].incCap += amt;
+    }
+  });
+  pols.forEach(function(p){
+    if(p.Type==='Business Assurance') return;
+    if((p.BeneficiaryType||'')!=='Third Party') return;
+    var amt = N(p.BenDeath); if(!amt) return;
+    var nm = (p.Beneficiary||'').trim() || 'Unnamed third party';
+    if(!tpByName[nm]) tpByName[nm] = {incCap:0, polCover:0};
+    tpByName[nm].polCover += amt;
+  });
+  var estPayNeed = physLiab + manLiab + estateIncCap;
+  if(S.scope.estate){ estPayNeed += cgt + estateDutyShare + Math.round(execFees) + Math.round(accrualDed); }
+  var estPayHave = estPols + liquidCash;
+  var estPayGap = Math.max(0, estPayNeed - estPayHave);
+  var spouseNeed = spouseIncCap;
+  var spouseHave = s4qPols;
+  var spouseGap = Math.max(0, spouseNeed - spouseHave);
+  var tpTotalGap = 0;
+  Object.keys(tpByName).forEach(function(nm){
+    tpTotalGap += Math.max(0, tpByName[nm].incCap - tpByName[nm].polCover);
+  });
+  var newCoverToSell = estPayGap + spouseGap + tpTotalGap;
+
   var retirementNeed = 0, retirementHave = 0, retirementGap = null;
   var monthlyAtRet = 0, rentalAtRet = 0, otherIncomeAtRet = 0, netGapPM = 0, retLumps = 0;
   if(S.scope.retirement && yrsToRet !== null){
@@ -5890,7 +5936,7 @@ function buildSummary() {
   var cards = div('cards');
   cards.appendChild(card('Net worth', Rfmt(netWorth), 'Assets less liabilities', netWorth>=0?'ok':'bad'));
   cards.appendChild(card('Monthly cash flow', (monthlySurplus>=0?'+ ':'− ')+Rfmt(Math.abs(monthlySurplus)), 'Nett income less expenses', monthlySurplus>=0?'ok':'bad'));
-  cards.appendChild(card('Estate cash for bills', resultText(liqGap), 'Cash available vs cash needed', liqGap>=0?'ok':'bad'));
+  cards.appendChild(card('Estate-payable cover gap', estPayGap>0?'Shortfall '+Rfmt(estPayGap):'Covered', 'New cover needed payable to estate', estPayGap>0?'bad':'ok'));
   cards.appendChild(card('Retirement capital', retirementGap===null?'Not modelled':resultText(retirementGap), retirementGap===null?'Retirement not in scope':'Projected capital vs required capital', retirementGap!==null&&retirementGap>=0?'ok':retirementGap===null?'':'bad'));
   s.appendChild(cards);
 
@@ -5937,24 +5983,54 @@ function buildSummary() {
     addLine(estateBox,'Net estate before accrual / s.4(q)',Rfmt(netEstate),true,'#1d4ed8');
     grid.appendChild(estateBox);
 
-    var cashBox = tinyBox('Estate Cash Need');
-    addLine(cashBox,'Bond and finance',Rfmt(bondLiabs + vehLiabs));
-    if(otherLiabs>0) addLine(cashBox,'Other liabilities',Rfmt(otherLiabs));
-    if(manLiab>0) addLine(cashBox,'Manual death liabilities',Rfmt(manLiab));
-    if(estateDutyShare>0) addLine(cashBox,'Estate duty (estate share)',Rfmt(estateDutyShare));
-    if(execFees>0) addLine(cashBox,'Executor fees',Rfmt(execFees));
-    if(accrualDed>0) addLine(cashBox,'Accrual payable',Rfmt(accrualDed));
-    addLine(cashBox,'Total cash required',Rfmt(liqNeeds),true);
-    addLine(cashBox,'Liquid estate cash',Rfmt(liqProvisions),true,'#1d4ed8');
-    addLine(cashBox,'Liquidity result',resultText(liqGap),true,resultTone(liqGap));
-    if(liqGap<0){
-      addLine(cashBox,'Estate-payable cover required',Rfmt(Math.abs(Math.round(liqGap))),true,'#b91c1c');
-    }
-    grid.appendChild(cashBox);
+    // ── Life Cover Structuring (calculations already hoisted above) ──
+
+    var strBox = tinyBox('Life Cover Structuring');
+    // Estate-payable section
+    addLine(strBox,'ESTATE-PAYABLE','',true);
+    if(physLiab>0)        addLine(strBox,'Bonds, vehicle finance, other liabs',Rfmt(physLiab));
+    if(manLiab>0)         addLine(strBox,'Manual death liabilities',Rfmt(manLiab));
+    if(cgt>0)             addLine(strBox,'CGT on death',Rfmt(cgt));
+    if(estateDutyShare>0) addLine(strBox,'Estate duty (estate share)',Rfmt(estateDutyShare));
+    if(execFees>0)        addLine(strBox,'Executor fees',Rfmt(Math.round(execFees)));
+    if(accrualDed>0)      addLine(strBox,'Accrual payable to spouse',Rfmt(Math.round(accrualDed)));
+    if(estateIncCap>0)    addLine(strBox,'Tagged needs (paid via estate)',Rfmt(estateIncCap));
+    addLine(strBox,'Need',Rfmt(estPayNeed),true);
+    if(estPols>0)    addLine(strBox,'Less: existing estate-payable policies', '('+Rfmt(estPols)+')');
+    if(liquidCash>0) addLine(strBox,'Less: liquid estate cash', '('+Rfmt(liquidCash)+')');
+    addLine(strBox,'New estate-payable cover to sell',Rfmt(estPayGap),true,estPayGap>0?'#b91c1c':'#166534');
+
+    // Spouse-direct section
+    addLine(strBox,'\u00a0','');
+    addLine(strBox,'SPOUSE-DIRECT (s.4(q))','',true);
+    if(spouseIncCap>0) addLine(strBox,'Income & capital needs (spouse-tagged)',Rfmt(spouseIncCap));
+    addLine(strBox,'Need',Rfmt(spouseNeed),true);
+    if(s4qPols>0) addLine(strBox,'Less: existing spouse-direct policies', '('+Rfmt(s4qPols)+')');
+    addLine(strBox,'New spouse-direct cover to sell',Rfmt(spouseGap),true,spouseGap>0?'#b91c1c':'#166534');
+
+    // Third-party sections (one per named beneficiary)
+    Object.keys(tpByName).forEach(function(nm){
+      var t = tpByName[nm];
+      if(t.incCap===0 && t.polCover===0) return;
+      var tpGap = Math.max(0, t.incCap - t.polCover);
+      addLine(strBox,'\u00a0','');
+      addLine(strBox,'THIRD PARTY \u2014 '+nm.toUpperCase(),'',true);
+      if(t.incCap>0)   addLine(strBox,'Need (capital + capitalised income)',Rfmt(t.incCap));
+      if(t.polCover>0) addLine(strBox,'Less: existing cover','('+Rfmt(t.polCover)+')');
+      addLine(strBox,'New '+nm+' cover to sell',Rfmt(tpGap),true,tpGap>0?'#b91c1c':'#166534');
+    });
+
+    // Bottom line
+    addLine(strBox,'\u00a0','');
+    addLine(strBox,'TOTAL NEW LIFE COVER TO SELL',Rfmt(newCoverToSell),true,newCoverToSell>0?'#b91c1c':'#166534');
+
+    grid.appendChild(strBox);
     s.appendChild(grid);
-    note(liqGap>=0
-      ? 'The estate is currently <strong>liquid</strong>. Liquid assets and estate-policy proceeds cover the estimated cash calls — no estate-payable cover is required for liquidity. Family-directed cover (to spouse / third parties) makes up the balance of the life cover need above.'
-      : 'Of the total life cover need above, <strong>'+Rfmt(Math.abs(Math.round(liqGap)))+'</strong> must be structured as <strong>estate-payable cover</strong> (policy proceeds paid into the estate) to settle estate liabilities, duty, fees'+(accrualDed>0?' and accrual':'')+'. The balance can be paid direct to beneficiaries via section 4(q) or third-party nomination.', liqGap>=0?'green':'red');
+
+    // Closing note
+    note(newCoverToSell>0
+      ? 'The total new life cover to sell is <strong>'+Rfmt(newCoverToSell)+'</strong>. Each bucket above is a separate structuring instruction \u2014 the buckets cannot substitute for one another. Estate-payable cover must be paid into the estate; spouse-direct and third-party cover must be ceded or nominated to the named recipient.'
+      : 'No new life cover required \u2014 existing cover meets the need in each bucket. Confirm beneficiary nominations on existing policies match this structure.', newCoverToSell>0?'red':'green');
   }
 
   if(S.scope.retirement){
@@ -6203,9 +6279,8 @@ function buildOverview() {
     if(S.scope.ip)          sRow('Income protection /pm',_ipHaveO,N(S.ipGrossPM||S.ipNettPM));
   }
   if(S.scope.estate&&_totalEstCostO>0){
-    sCatRow('Estate');
-    sRow('Estate liquidity',_liqProvO,_liqNeedO);
-    sRow('\u2514 Estate duty: '+Rfmt(Math.round(_dutyO))+(Math.round(_execO)>0?' + Executor: '+Rfmt(Math.round(_execO)):''),0,0,true);
+    sCatRow('Estate (context)');
+    sRow('\u2514 Estate duty: '+Rfmt(Math.round(_dutyO))+(Math.round(_execO)>0?' + Executor: '+Rfmt(Math.round(_execO)):'')+' (already in life cover need above)',0,0,true);
   }
   if(S.scope.retirement&&_retGapO!==null){
     sCatRow('Retirement (age '+_retAgeO+')');
@@ -7353,11 +7428,10 @@ function printFNA(sections) {
     if(S.scope.ip&&N(S.ipGrossPM||S.ipNettPM)) h+=sumRowP('Income protection',N(S.ipGrossPM||S.ipNettPM),ipHaveP,false,true);
   }
 
-  // Estate liquidity
+  // Estate context (duty and exec fees are already inside the Life cover need above)
   if(S.scope.estate&&liqNeedP>0){
-    h+=sumCatP('Estate');
-    h+=sumRowP('Liquidity (liquid provisions vs all obligations)',liqNeedP,liqProvsP);
-    h+=sumRowP('\u2514 Estate duty: '+r(Math.round(estateDuty))+(Math.round(execFees)>0?' + Executor: '+r(Math.round(execFees)):''),0,0,true);
+    h+=sumCatP('Estate (context)');
+    h+=sumRowP('\u2514 Estate duty: '+r(Math.round(estateDuty))+(Math.round(execFees)>0?' + Executor: '+r(Math.round(execFees)):'')+' (already in life cover need above)',0,0,true);
   }
 
   // Retirement
