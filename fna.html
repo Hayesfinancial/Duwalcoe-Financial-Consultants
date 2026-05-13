@@ -597,16 +597,16 @@ var DEFAULTS = {
     { desc: 'Funeral costs',                 amt: '' }
   ],
   // Death — income needs (each capitalised separately)
-  // desc, nettPM, grossPM(calc), years, esc, drawdown, capitalised(calc), notes
+  // desc, nettPM, grossPM(calc), years, esc, drawdown, capitalised(calc), notes, benTo, benName
   deathIncome: [
-    { desc: 'Spouse living expenses', nettPM: '', grossPM: '', years: '20', esc: '', drawdown: '', notes: '' },
-    { desc: 'Medical aid for spouse',  nettPM: '', grossPM: '', years: '20', esc: '', drawdown: '', notes: '' }
+    { desc: 'Spouse living expenses', nettPM: '', grossPM: '', years: '20', esc: '', drawdown: '', notes: '', benTo: 'Spouse', benName: '' },
+    { desc: 'Medical aid for spouse',  nettPM: '', grossPM: '', years: '20', esc: '', drawdown: '', notes: '', benTo: 'Spouse', benName: '' }
   ],
   // Death — once-off capital needs
   deathCapital: [
-    { desc: 'Children education fund', amt: '' },
-    { desc: 'Emergency / liquidity fund', amt: '' },
-    { desc: 'Other capital bequest', amt: '' }
+    { desc: 'Children education fund', amt: '', benTo: 'Spouse', benName: '' },
+    { desc: 'Emergency / liquidity fund', amt: '', benTo: 'Spouse', benName: '' },
+    { desc: 'Other capital bequest', amt: '', benTo: 'Spouse', benName: '' }
   ],
   deathNotes: '',
 
@@ -2899,6 +2899,38 @@ function buildIncomeNeedRow(parent, r, i, arrayKey) {
   var ei = document.createElement('input'); ei.type='text'; ei.value=r.esc||''; ei.placeholder=S.assump.cpi;
   ei.addEventListener('blur',function(e){ S[arrayKey][i].esc=e.target.value; render(); }); epw.insertBefore(ei,epw.firstChild); ef.appendChild(epw); rg1.appendChild(ef);
   card.appendChild(rg1);
+
+  // Beneficiary tag — only on death income rows (not disability)
+  if (arrayKey === 'deathIncome') {
+    var benRow = div(); benRow.style.cssText = 'display:grid;grid-template-columns:1fr 1fr 2fr;gap:10px;margin-top:10px;padding-top:10px;border-top:1px dashed var(--mist)';
+
+    var bf = div('f'); bf.appendChild(el('label','','Pays to'));
+    var bsel = document.createElement('select');
+    [{v:'Spouse',l:'Spouse / family (s.4(q))'},{v:'Third Party',l:'Third party / trust'},{v:'Estate',l:'Estate'}].forEach(function(o){
+      var opt = document.createElement('option'); opt.value = o.v; opt.textContent = o.l;
+      if ((r.benTo || 'Spouse') === o.v) opt.selected = true;
+      bsel.appendChild(opt);
+    });
+    bsel.addEventListener('change', function(e){
+      S[arrayKey][i].benTo = e.target.value;
+      if (e.target.value !== 'Third Party') S[arrayKey][i].benName = '';
+      render();
+    });
+    bf.appendChild(bsel); benRow.appendChild(bf);
+
+    // Beneficiary name — only shown for Third Party
+    if ((r.benTo || 'Spouse') === 'Third Party') {
+      var nmf = div('f'); nmf.appendChild(el('label','','Beneficiary name'));
+      var nmi = document.createElement('input'); nmi.type='text'; nmi.value = r.benName || ''; nmi.placeholder = 'e.g. Sarah\'s education trust';
+      nmi.addEventListener('input', function(e){ S[arrayKey][i].benName = e.target.value; });
+      nmf.appendChild(nmi); benRow.appendChild(nmf);
+    } else {
+      benRow.appendChild(div());
+    }
+    benRow.appendChild(div()); // spacer column
+    card.appendChild(benRow);
+  }
+
   var gross = N(r.grossPM) || grossFromNett(r.nettPM);
   if (gross > 0 && N(r.years) > 0) {
     var cap = calcIncomeNeed(r);
@@ -3061,19 +3093,47 @@ function buildNeeds() {
     s.appendChild(stitle('Income replacement needs'));
     var inf2=div('info'); inf2.textContent='Monthly income the family needs. Enter nett — the system grosses up for tax.'; s.appendChild(inf2);
     S.deathIncome.forEach(function(r,i){ buildIncomeNeedRow(s,r,i,'deathIncome'); });
-    var ab2=addBtn('+ Add income need',function(){S.deathIncome.push({desc:'',nettPM:'',grossPM:'',years:'',esc:'',drawdown:''});render();}); s.appendChild(ab2);
+    var ab2=addBtn('+ Add income need',function(){S.deathIncome.push({desc:'',nettPM:'',grossPM:'',years:'',esc:'',drawdown:'',benTo:'Spouse',benName:''});render();}); s.appendChild(ab2);
 
     s.appendChild(stitle('Capital requirements'));
     var inf3=div('info'); inf3.textContent='Lump sums needed — education, emergency fund, bequests.'; s.appendChild(inf3);
     S.deathCapital.forEach(function(r,i){
+      var card=div(); card.style.cssText='background:#fff;border:var(--border);border-radius:8px;padding:12px;margin-bottom:10px';
       var row=g3();
       row.appendChild(fld('Description',r,'desc',{placeholder:'e.g. Education fund'}));
       row.appendChild(rfld('Amount',r,'amt',{onblur:function(){render();}}));
       row.appendChild(div());
       var del=delBtn(function(){S.deathCapital.splice(i,1);render();}); var dw=div('f'); dw.appendChild(del); row.appendChild(dw);
-      s.appendChild(row);
+      card.appendChild(row);
+
+      // Beneficiary tag — same pattern as income rows
+      var benRow=div(); benRow.style.cssText='display:grid;grid-template-columns:1fr 1fr 2fr;gap:10px;margin-top:6px;padding-top:10px;border-top:1px dashed var(--mist)';
+      var bf=div('f'); bf.appendChild(el('label','','Pays to'));
+      var bsel=document.createElement('select');
+      [{v:'Spouse',l:'Spouse / family (s.4(q))'},{v:'Third Party',l:'Third party / trust'},{v:'Estate',l:'Estate'}].forEach(function(o){
+        var opt=document.createElement('option'); opt.value=o.v; opt.textContent=o.l;
+        if((r.benTo||'Spouse')===o.v) opt.selected=true;
+        bsel.appendChild(opt);
+      });
+      bsel.addEventListener('change',function(e){
+        S.deathCapital[i].benTo=e.target.value;
+        if(e.target.value!=='Third Party') S.deathCapital[i].benName='';
+        render();
+      });
+      bf.appendChild(bsel); benRow.appendChild(bf);
+      if((r.benTo||'Spouse')==='Third Party'){
+        var nmf=div('f'); nmf.appendChild(el('label','','Beneficiary name'));
+        var nmi=document.createElement('input'); nmi.type='text'; nmi.value=r.benName||''; nmi.placeholder='e.g. Sarah\'s education trust';
+        nmi.addEventListener('input',function(e){ S.deathCapital[i].benName=e.target.value; });
+        nmf.appendChild(nmi); benRow.appendChild(nmf);
+      } else {
+        benRow.appendChild(div());
+      }
+      benRow.appendChild(div());
+      card.appendChild(benRow);
+      s.appendChild(card);
     });
-    var ab3=addBtn('+ Add capital need',function(){S.deathCapital.push({desc:'',amt:''});render();}); s.appendChild(ab3);
+    var ab3=addBtn('+ Add capital need',function(){S.deathCapital.push({desc:'',amt:'',benTo:'Spouse',benName:''});render();}); s.appendChild(ab3);
 
     // Summary — auto + manual liabilities combined
     var autoTotal2=(autoLiabs||[]).reduce(function(a,r){return a+r.amt;},0);
