@@ -676,17 +676,8 @@ var DEFAULTS = {
 var S = JSON.parse(JSON.stringify(DEFAULTS));
 
 var _fnaEditTimer = null;
-// Returns the best available key to use for THIS FNA on the server.
-// Priority: CRM internal client/lead ID (window._crmInternalId, from ?cid=) → SA ID (S.cli.id) → null.
-// This is the single source of truth — saveToServer, loadFromServer, etc. all use this.
-// Using the CRM ID means brand-new leads (no SA ID yet) still save reliably.
-function fnaKey() {
-  if (window._crmInternalId) return String(window._crmInternalId);
-  if (S && S.cli && S.cli.id) return String(S.cli.id);
-  return null;
-}
 function fnaStateKey() {
-  return 'du_fna_' + (fnaKey() || (S.cli.name || '').replace(/\s+/g,'_') || 'draft');
+  return 'du_fna_' + (S.cli.id || (S.cli.name || '').replace(/\s+/g,'_') || 'draft');
 }
 function fnaMetaKey() {
   return fnaStateKey() + '_meta';
@@ -718,23 +709,10 @@ function queueSmartSave() {
     try { S = deepMerge(JSON.parse(JSON.stringify(DEFAULTS)), JSON.parse(saved)); hasSavedState = true; } catch(e) {}
   } else {
     try {
-      // Try localStorage in the SAME order persist() writes — fnaKey() prefers
-      // cid (CRM internal ID), then id (SA ID), then name. We must mirror that
-      // here or we'll fail to restore from localStorage on reload.
       var lsKey = null;
-      var lsSaved = null;
-      if (params.get('cid')) {
-        lsKey = 'du_fna_' + params.get('cid');
-        lsSaved = localStorage.getItem(lsKey);
-      }
-      if (!lsSaved && params.get('id')) {
-        lsKey = 'du_fna_' + params.get('id');
-        lsSaved = localStorage.getItem(lsKey);
-      }
-      if (!lsSaved && params.get('name')) {
-        lsKey = 'du_fna_' + decodeURIComponent(params.get('name')).replace(/\s+/g,'_');
-        lsSaved = localStorage.getItem(lsKey);
-      }
+      if (params.get('id')) lsKey = 'du_fna_' + params.get('id');
+      else if (params.get('name')) lsKey = 'du_fna_' + decodeURIComponent(params.get('name')).replace(/\s+/g,'_');
+      var lsSaved = lsKey ? localStorage.getItem(lsKey) : null;
       if (lsSaved) {
         S = deepMerge(JSON.parse(JSON.stringify(DEFAULTS)), JSON.parse(lsSaved));
         hasSavedState = true;
@@ -846,17 +824,12 @@ function queueSmartSave() {
 // After initial load — try to pull FNA state from server
 // Runs after render() so the page is visible while waiting
 (function tryServerLoad() {
-  var urlParams = new URLSearchParams(window.location.search);
-  // Prefer CRM internal id (cid) — that's what new saves use.
-  // Fall back to SA ID (id) for legacy FNAs that were saved before this fix.
-  var primaryKey = urlParams.get('cid') || urlParams.get('id');
-  var legacyKey = urlParams.get('id'); // SA ID — try this if primary lookup fails
-  if (!primaryKey && !legacyKey) return;
-  var clientId = primaryKey || legacyKey;
+  var clientId = (new URLSearchParams(window.location.search)).get('id');
+  if (!clientId) return;
   var indicator = document.getElementById('syncIndicator');
   if (indicator) { indicator.textContent = '↓ Loading...'; indicator.style.color = '#a8b938'; }
 
-  var handleServerData = function(serverState, savedTime) {
+  loadFromServer(clientId, function(serverState, savedTime) {
     // Silent post-load fetch: pull live POLICIES (CRM owns policies) and live
     // CLIENT DETAILS (fill-blanks-only — see fetchLiveClientFromCRM). The client
     // fetch ensures CRM-only fields (cell, email, address, education etc.)
@@ -938,17 +911,6 @@ function queueSmartSave() {
       indicator.style.color = '#86efac';
     }
     doSilentLiveFetch();
-  };
-
-  // Try primary key first (CRM ID). If it returns nothing AND a different legacy key
-  // (SA ID) is available, try that too — covers existing FNAs that were saved by SA ID.
-  loadFromServer(primaryKey, function(serverState, savedTime) {
-    if (!serverState && legacyKey && legacyKey !== primaryKey) {
-      clientId = legacyKey;
-      loadFromServer(legacyKey, handleServerData);
-    } else {
-      handleServerData(serverState, savedTime);
-    }
   });
 })();
 
@@ -1473,10 +1435,9 @@ function persist() {
 
 // Save FNA state to Supabase
 function saveToServer(silent) {
-  var clientId = fnaKey();
+  var clientId = S.cli.id;
   if (!clientId) {
-    // No CRM ID and no SA ID — this should be extremely rare. Show LOUD persistent warning.
-    showSyncFailure('⚠ CANNOT SAVE — no client ID. Re-open this FNA from the CRM.');
+    if(!silent) status('⚠ No client ID — cannot sync to server');
     return;
   }
   var saveData = {};
@@ -1496,55 +1457,17 @@ function saveToServer(silent) {
   saveData.retIncludes = retIncludes;
   var now = new Date().toISOString().slice(0,16).replace('T',' ');
   var indicator = document.getElementById('syncIndicator');
-  if(indicator){ indicator.textContent = '↑ Saving...'; indicator.style.color = '#a8b938'; indicator.style.background=''; indicator.style.padding=''; }
+  if(indicator){ indicator.textContent = '↑ Saving...'; indicator.style.color = '#a8b938'; }
   sbFetch('POST','/rest/v1/fnadata?on_conflict=ClientID,Version',[{ClientID:clientId,Version:'working',Locked:false,Data:JSON.stringify(saveData),LastSaved:now,SavedBy:'Clinton Hayes'}],function(res,err){
     if(err){
-      // LOUD failure — sticky red banner, no auto-clear
-      showSyncFailure('⚠ SAVE FAILED — '+err+'. Your data is in localStorage but NOT on the server. Check your connection and click 💾 Save again.');
+      if(indicator){ indicator.textContent = '⚠ Sync failed'; indicator.style.color = '#f87171'; }
+      if(!silent) status('⚠ Save failed: '+err);
     } else {
       var t = new Date().toLocaleTimeString('en-ZA',{hour:'2-digit',minute:'2-digit'});
-      if(indicator){ indicator.textContent = '✓ Synced '+t; indicator.style.color = '#86efac'; indicator.style.background=''; indicator.style.padding=''; indicator.style.fontWeight=''; indicator.style.borderRadius=''; }
-      // Clear any stuck red failure banner
-      var bar = document.getElementById('statusBar');
-      if(bar && bar.style.background === 'rgb(192, 57, 43)') { bar.style.display = 'none'; }
+      if(indicator){ indicator.textContent = '✓ Synced '+t; indicator.style.color = '#86efac'; }
       if(!silent) status('✓ Saved at '+t);
     }
   });
-}
-
-// Show a sticky, impossible-to-miss save-failure banner.
-// Stays on screen until the next successful save clears it.
-function showSyncFailure(msg) {
-  var indicator = document.getElementById('syncIndicator');
-  if(indicator){
-    indicator.textContent = msg;
-    indicator.style.color = '#fff';
-    indicator.style.background = '#c0392b';
-    indicator.style.padding = '4px 10px';
-    indicator.style.borderRadius = '4px';
-    indicator.style.fontWeight = '600';
-    indicator.style.fontSize = '12px';
-  }
-  // Also show a visible status bar message that doesn't auto-clear
-  var bar = document.getElementById('statusBar');
-  if(bar){
-    bar.style.display = 'block';
-    bar.style.position = 'fixed';
-    bar.style.bottom = '60px';
-    bar.style.left = '50%';
-    bar.style.transform = 'translateX(-50%)';
-    bar.style.background = '#c0392b';
-    bar.style.color = '#fff';
-    bar.style.padding = '12px 24px';
-    bar.style.borderRadius = '6px';
-    bar.style.fontSize = '14px';
-    bar.style.fontWeight = '600';
-    bar.style.zIndex = '9999';
-    bar.style.boxShadow = '0 6px 24px rgba(0,0,0,.3)';
-    bar.textContent = msg;
-  }
-  // Browser-level alert ONLY on the user-initiated save (not silent autosaves) —
-  // we add this hint by checking the call site below.
 }
 
 // Load FNA state from Supabase
@@ -1569,12 +1492,9 @@ function loadFromServer(clientId, onDone) {
 // Lock the current working FNA as a dated, read-only final version.
 // Flow: 1) save current state to server  2) rename Version working→dated  3) save fresh working copy
 function lockFinalVersion() {
-  var clientId = fnaKey();
+  var clientId = S.cli.id;
   if(!clientId){ alert('No client loaded — cannot lock.'); return; }
   if(!S.cli.name || !S.cli.name.trim()){ alert('Enter the client name before locking.'); return; }
-  if(!S.cli.id || !S.cli.id.trim()){
-    if(!confirm('This client has no SA ID number captured yet. Lock anyway?\n\nFAIS best practice is to capture the SA ID before locking a final FNA.')) return;
-  }
 
   var notes = prompt('Optional note for this locked version (e.g. "Initial FNA signed", "Annual review"):','');
   if(notes === null) return; // user cancelled
@@ -1663,7 +1583,7 @@ function lockFinalVersion() {
 
 // Show a modal listing all locked versions for the current client.
 function showVersionHistory() {
-  var clientId = fnaKey();
+  var clientId = S.cli.id;
   if(!clientId){ alert('No client loaded.'); return; }
 
   // Build modal shell first so user sees loading state
@@ -1750,32 +1670,8 @@ function newClient() {
   render();
 }
 function status(msg) {
-  // Show a temporary toast (top right) instead of writing to an invisible status bar.
-  // For sync FAILURES, use showSyncFailure() which is sticky and red.
-  var bar = document.getElementById('statusBar');
-  if(!bar) return;
-  // Reset any previous failure styling if this is a normal success message
-  bar.style.position = 'fixed';
-  bar.style.top = '60px';
-  bar.style.right = '20px';
-  bar.style.bottom = '';
-  bar.style.left = '';
-  bar.style.transform = '';
-  bar.style.background = '#0e413a';
-  bar.style.color = '#fff';
-  bar.style.padding = '10px 18px';
-  bar.style.borderRadius = '6px';
-  bar.style.fontSize = '13px';
-  bar.style.fontWeight = '600';
-  bar.style.zIndex = '9999';
-  bar.style.boxShadow = '0 4px 16px rgba(0,0,0,.18)';
-  bar.style.display = 'block';
-  bar.textContent = msg;
-  clearTimeout(window._statusBarTimer);
-  window._statusBarTimer = setTimeout(function () {
-    var b = document.getElementById('statusBar');
-    if(b) b.style.display = 'none';
-  }, 3000);
+  document.getElementById('statusBar').textContent = msg;
+  setTimeout(function () { document.getElementById('statusBar').textContent = 'FSP No: 9978 · Clinton Hayes · clinton@duwalcoe.co.za'; }, 3000);
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -1895,7 +1791,7 @@ function txfld(labelTxt, obj, key) {
   var wrap = div('f');
   if (labelTxt) { var lb = el('label'); lb.textContent = labelTxt; wrap.appendChild(lb); }
   var ta = document.createElement('textarea');
-  ta.value = obj[key] || '';
+  ta.value = obj[key] || ''; ta.placeholder = 'Notes...';
   ta.addEventListener('input', function (e) { obj[key] = e.target.value; });
   wrap.appendChild(ta);
   return wrap;
@@ -2007,10 +1903,10 @@ function buildClient() {
   };
 
   var r1 = g2();
-  r1.appendChild(bindCRM(fld('Full Name', S.cli, 'name', {}), 'name'));
+  r1.appendChild(bindCRM(fld('Full Name', S.cli, 'name', { placeholder: 'Client full name' }), 'name'));
 
   // ID Number — auto-populate DOB and Gender from SA ID on blur (only when those fields are blank)
-  var idWrap = fld('ID Number', S.cli, 'id', {});
+  var idWrap = fld('ID Number', S.cli, 'id', { placeholder: '8001015009087' });
   var idInp = idWrap.querySelector('input');
   if (idInp) {
     idInp.addEventListener('blur', function(e){
@@ -2038,6 +1934,7 @@ function buildClient() {
 
   var r2 = g3();
   r2.appendChild(bindCRM(fld('Date of Birth (DD/MM/YYYY)', S.cli, 'dob', {
+    placeholder: '01/01/1980',
     onblur: function() { render(); }
   }), 'dob'));
   r2.appendChild(bindCRM(sfld('Gender', S.cli, 'gender', ['', 'Male', 'Female']), 'gender'));
@@ -2045,8 +1942,8 @@ function buildClient() {
   s.appendChild(r2);
 
   var r3 = g3();
-  r3.appendChild(bindCRM(sfld('Education', S.cli, 'education', ['','School - no matric','Matric','Diploma / Certificate','Degree','Post Graduate','Other']), 'education'));
-  r3.appendChild(bindCRM(fld('Occupation', S.cli, 'occ', {}), 'occ'));
+  r3.appendChild(bindCRM(sfld('Education', S.cli, 'education', ['','Matric','Diploma','Degree','Post-graduate','Other']), 'education'));
+  r3.appendChild(bindCRM(fld('Occupation', S.cli, 'occ', { placeholder: 'e.g. Engineer' }), 'occ'));
   // Retirement Age is an FNA-only assumption — not written back to CRM
   r3.appendChild(sfld('Retirement Age', S.cli, 'retAge', ['55','60','63','65','67','70']));
   s.appendChild(r3);
@@ -2065,21 +1962,21 @@ function buildClient() {
   // ── Contact Details
   s.appendChild(stitle('Contact Details'));
   var rc1 = g2();
-  rc1.appendChild(bindCRM(fld('Cell Number', S.cli, 'cell', {}), 'cell'));
-  rc1.appendChild(bindCRM(fld('Email', S.cli, 'email', {}), 'email'));
+  rc1.appendChild(bindCRM(fld('Cell Number', S.cli, 'cell', { placeholder: '082 123 4567' }), 'cell'));
+  rc1.appendChild(bindCRM(fld('Email', S.cli, 'email', { placeholder: 'name@example.com' }), 'email'));
   s.appendChild(rc1);
 
   var rc2 = g3();
-  rc2.appendChild(bindCRM(fld('Tel (Home)', S.cli, 'telHome', {}), 'telHome'));
-  rc2.appendChild(bindCRM(fld('Tel (Work)', S.cli, 'telWork', {}), 'telWork'));
-  rc2.appendChild(bindCRM(fld('Tax Number', S.cli, 'taxNo', {}), 'taxNo'));
+  rc2.appendChild(bindCRM(fld('Tel (Home)', S.cli, 'telHome', { placeholder: '021 123 4567' }), 'telHome'));
+  rc2.appendChild(bindCRM(fld('Tel (Work)', S.cli, 'telWork', { placeholder: '021 123 4567' }), 'telWork'));
+  rc2.appendChild(bindCRM(fld('Tax Number', S.cli, 'taxNo', { placeholder: 'SARS reference' }), 'taxNo'));
   s.appendChild(rc2);
 
   // ── Address
   s.appendChild(stitle('Address'));
   var rad = g2();
-  rad.appendChild(bindCRM(fld('Physical Address (FICA)', S.cli, 'address', {}), 'address'));
-  rad.appendChild(bindCRM(fld('PO Box / Postal Address', S.cli, 'poBox', {}), 'poBox'));
+  rad.appendChild(bindCRM(fld('Physical Address (FICA)', S.cli, 'address', { placeholder: 'Full address including suburb and postal code' }), 'address'));
+  rad.appendChild(bindCRM(fld('PO Box / Postal Address', S.cli, 'poBox', { placeholder: 'If different from physical' }), 'poBox'));
   s.appendChild(rad);
 
   // ── Marital Status (with spouse contact details)
@@ -2090,12 +1987,12 @@ function buildClient() {
     'Divorced','Widowed','Life partner'
   ]), 'marital'));
   r4.appendChild(bindCRM(fld('Date of Marriage', S.cli, 'domDate', { type: 'date' }), 'domDate'));
-  r4.appendChild(bindCRM(fld('Spouse / Partner Name', S.cli, 'spouseName', {}), 'spouseName'));
+  r4.appendChild(bindCRM(fld('Spouse / Partner Name', S.cli, 'spouseName', { placeholder: 'Full name' }), 'spouseName'));
   s.appendChild(r4);
 
   var r5 = g3();
   // Spouse ID Number — auto-populate Spouse DOB from SA ID on blur (only when DOB is blank)
-  var spIdWrap = fld('Spouse ID Number', S.cli, 'spouseId', {});
+  var spIdWrap = fld('Spouse ID Number', S.cli, 'spouseId', { placeholder: '8001015009087' });
   var spIdInp = spIdWrap.querySelector('input');
   if (spIdInp) {
     spIdInp.addEventListener('blur', function(e){
@@ -2110,13 +2007,13 @@ function buildClient() {
     });
   }
   r5.appendChild(spIdWrap);
-  r5.appendChild(bindCRM(fld('Spouse DOB (DD/MM/YYYY)', S.cli, 'spouseDob', {}), 'spouseDob'));
+  r5.appendChild(bindCRM(fld('Spouse DOB (DD/MM/YYYY)', S.cli, 'spouseDob', { placeholder: '01/01/1982' }), 'spouseDob'));
   r5.appendChild(div()); // spacer
   s.appendChild(r5);
 
   var r6 = g2();
-  r6.appendChild(bindCRM(fld('Spouse Cell', S.cli, 'spouseCell', {}), 'spouseCell'));
-  r6.appendChild(bindCRM(fld('Spouse Email', S.cli, 'spouseEmail', {}), 'spouseEmail'));
+  r6.appendChild(bindCRM(fld('Spouse Cell', S.cli, 'spouseCell', { placeholder: '082 123 4567' }), 'spouseCell'));
+  r6.appendChild(bindCRM(fld('Spouse Email', S.cli, 'spouseEmail', { placeholder: 'spouse@example.com' }), 'spouseEmail'));
   s.appendChild(r6);
 
   s.appendChild(stitle('Dependants'));
@@ -2133,14 +2030,14 @@ function buildClient() {
   S.kids.forEach(function (k, i) {
     var tr = document.createElement('tr');
     function ktd(inp) { var td = document.createElement('td'); td.appendChild(inp); tr.appendChild(td); }
-    var ni = document.createElement('input'); ni.type = 'text'; ni.value = k.name || '';
+    var ni = document.createElement('input'); ni.type = 'text'; ni.value = k.name || ''; ni.placeholder = 'Name';
     ni.addEventListener('input', function (e) { S.kids[i].name = e.target.value; }); ktd(ni);
     var ai = document.createElement('input'); ai.type = 'text'; ai.value = k.age || ''; ai.style.width = '50px';
     ai.addEventListener('input', function (e) { S.kids[i].age = e.target.value; }); ktd(ai);
     var ds = document.createElement('select');
     [['Y','Yes'],['N','No'],['','—']].forEach(function(o){ var op=document.createElement('option'); op.value=o[0]; op.textContent=o[1]; if(k.dep===o[0]) op.selected=true; ds.appendChild(op); });
     ds.style.width='70px'; ds.addEventListener('change', function(e){ S.kids[i].dep=e.target.value; }); ktd(ds);
-    var no = document.createElement('input'); no.type='text'; no.value=k.notes||'';
+    var no = document.createElement('input'); no.type='text'; no.value=k.notes||''; no.placeholder='e.g. studying';
     no.addEventListener('input',function(e){S.kids[i].notes=e.target.value;}); ktd(no);
     var dtd = document.createElement('td'); dtd.appendChild(delBtn(function(){S.kids.splice(i,1);render();})); tr.appendChild(dtd);
     kb.appendChild(tr);
@@ -2193,6 +2090,7 @@ function buildScope() {
   var notesWrap = div();
   var nta = document.createElement('textarea'); nta.className = 'f';
   nta.style.cssText = 'width:100%;border:var(--border);border-radius:7px;padding:10px 12px;font-family:inherit;font-size:13px;min-height:90px;resize:vertical';
+  nta.placeholder = 'e.g. "I want to make sure my family is taken care of. I want to retire comfortably at 65."';
   nta.value = S.whyHere || '';
   nta.addEventListener('input', function(e) { S.whyHere = e.target.value; });
   notesWrap.appendChild(nta); s.appendChild(notesWrap);
@@ -2272,6 +2170,7 @@ function buildIncome() {
       if (!r.src) S.incRows[i].src = 'Salary / drawings';
     } else {
       var si = document.createElement('input'); si.type = 'text'; si.value = r.src || '';
+      si.placeholder = 'e.g. Investment income, spouse salary';
       si.addEventListener('input', function(e) { S.incRows[i].src = e.target.value; });
       t1.appendChild(si);
     }
@@ -2430,7 +2329,7 @@ function buildAssets() {
     // Row 1: Description, Market Value, Bond Outstanding
     var r1=g3();
     var df=div('f'); df.appendChild(el('label','','Description'));
-    var di=document.createElement('input'); di.type='text'; di.value=p.desc||'';
+    var di=document.createElement('input'); di.type='text'; di.value=p.desc||''; di.placeholder='e.g. Primary residence';
     di.addEventListener('input',function(e){S.props[i].desc=e.target.value;}); df.appendChild(di); r1.appendChild(df);
     r1.appendChild(rfld('Market Value', p, 'val', {onblur:function(){render();}}));
     r1.appendChild(rfld('Bond Outstanding', p, 'bond'));
@@ -2441,7 +2340,7 @@ function buildAssets() {
     r2.appendChild(rfld('Bond Payment /pm', p, 'bondPM'));
     r2.appendChild(rfld('Rental Income /pm', p, 'rental'));
     r2.appendChild(rfld('Base Cost (CGT)', p, 'baseCost', {onblur:function(){render();}}));
-    r2.appendChild(fld('Date Acquired', p, 'dateBought', {}));
+    r2.appendChild(fld('Date Acquired', p, 'dateBought', {placeholder:'DD/MM/YYYY or year'}));
     card.appendChild(r2);
 
     // Row 3: Ticks + growth rate + deathBenType
@@ -2589,7 +2488,7 @@ function buildAssets() {
     // Row 1: Description, Market Value, Finance, delete
     var row=div(); row.style.cssText='display:grid;grid-template-columns:2fr 1fr 1fr 36px;gap:12px;align-items:end';
     var df=div('f'); df.appendChild(el('label','','Description'));
-    var di=document.createElement('input'); di.type='text'; di.value=v.desc||'';
+    var di=document.createElement('input'); di.type='text'; di.value=v.desc||''; di.placeholder='e.g. Toyota Fortuner';
     di.addEventListener('input',function(e){S.vehicles[i].desc=e.target.value;}); df.appendChild(di); row.appendChild(df);
     row.appendChild(rfld('Market Value', v, 'val', {onblur:function(){render();}}));
     row.appendChild(rfld('Finance Outstanding', v, 'finance'));
@@ -2611,7 +2510,7 @@ function buildAssets() {
 
     var dbFld=div('f'); dbFld.style.minWidth='120px';
     dbFld.appendChild(el('label','','Date Acquired'));
-    var dbInp=document.createElement('input'); dbInp.type='text'; dbInp.value=v.dateBought||'';
+    var dbInp=document.createElement('input'); dbInp.type='text'; dbInp.value=v.dateBought||''; dbInp.placeholder='DD/MM/YYYY or year';
     dbInp.style.cssText='border:1.5px solid var(--mist);border-radius:6px;padding:7px 10px;font-size:13px;font-family:inherit;width:100%';
     dbInp.addEventListener('input',function(e){S.vehicles[i].dateBought=e.target.value;});
     dbFld.appendChild(dbInp); vr2.appendChild(dbFld);
@@ -2677,7 +2576,7 @@ function buildAssets() {
     // Row 1: Description, Value, Type, delete
     var row=div(); row.style.cssText='display:grid;grid-template-columns:2fr 1fr 1fr 36px;gap:12px;align-items:end';
     var df=div('f'); df.appendChild(el('label','','Description'));
-    var di=document.createElement('input'); di.type='text'; di.value=a.desc||'';
+    var di=document.createElement('input'); di.type='text'; di.value=a.desc||''; di.placeholder='e.g. Listed shares, farm, business';
     di.addEventListener('input',function(e){S.otherAssets[i].desc=e.target.value;}); df.appendChild(di); row.appendChild(df);
     row.appendChild(rfld('Current Value', a, 'val', {onblur:function(){render();}}));
     var typeOpts=['Bank / Cash Savings','Investment','Business Interest','Farm / Agricultural','Inheritance','Personal','Other'];
@@ -2717,7 +2616,7 @@ function buildAssets() {
 
     var adbFld=div('f'); adbFld.style.minWidth='120px';
     adbFld.appendChild(el('label','','Date Acquired'));
-    var adbInp=document.createElement('input'); adbInp.type='text'; adbInp.value=a.dateBought||'';
+    var adbInp=document.createElement('input'); adbInp.type='text'; adbInp.value=a.dateBought||''; adbInp.placeholder='DD/MM/YYYY or year';
     adbInp.style.cssText='border:1.5px solid var(--mist);border-radius:6px;padding:7px 10px;font-size:13px;font-family:inherit;width:100%';
     adbInp.addEventListener('input',function(e){S.otherAssets[i].dateBought=e.target.value;});
     adbFld.appendChild(adbInp); ar1.appendChild(adbFld);
@@ -2779,29 +2678,19 @@ function buildAssets() {
     var role=a.retirementRole||'Not included';
 
     if(role==='Sold at retirement — proceeds to retirement'){
-      // Auto-populate retirementSaleProceeds from Current Value so downstream
-      // calculations (retirement projection, capital available, etc.) use the
-      // asset's current value as the sale figure. No manual entry — keeps it
-      // consistent with what you typed at the top of this asset card.
-      var _curVal = N(a.val) || 0;
-      if (String(a.retirementSaleProceeds || '') !== String(_curVal)) {
-        S.otherAssets[i].retirementSaleProceeds = _curVal ? String(_curVal) : '';
-      }
-
       var spFld=div('f'); spFld.style.minWidth='150px';
-      spFld.appendChild(el('label','','Sale proceeds (= Current Value)'));
+      spFld.appendChild(el('label','','Expected sale proceeds'));
       var spRw=div('rw'); spRw.appendChild(el('span','rp','R'));
-      var spInp=document.createElement('input'); spInp.type='text';
-      spInp.value = _curVal ? Rfmt(_curVal).replace(/^R\s*/,'') : '';
-      spInp.readOnly = true;
-      spInp.style.cssText='border:1.5px solid var(--mist);border-radius:7px;padding:7px 10px 7px 22px;font-size:13px;font-family:inherit;width:100%;background:#f9f9f6;color:var(--sub)';
+      var spInp=document.createElement('input'); spInp.type='text'; spInp.inputMode='numeric';
+      spInp.value=a.retirementSaleProceeds||''; spInp.placeholder='0';
+      spInp.style.cssText='border:1.5px solid var(--mist);border-radius:7px;padding:7px 10px 7px 22px;font-size:13px;font-family:inherit;width:100%';
+      spInp.addEventListener('input',function(e){S.otherAssets[i].retirementSaleProceeds=e.target.value;});
       spRw.appendChild(spInp); spFld.appendChild(spRw); ar2.appendChild(spFld);
-
-      if(yrsToRet && _curVal > 0){
+      if(yrsToRet&&N(a.retirementSaleProceeds)>0){
         var gr=N(a.growthRate)>0?N(a.growthRate):N(S.assump.growth)||9;
-        var projProceeds=Math.round(_curVal*Math.pow(1+gr/100,yrsToRet));
+        var projProceeds=Math.round(N(a.retirementSaleProceeds)*Math.pow(1+gr/100,yrsToRet));
         var spInfo=div('info'); spInfo.style.cssText='font-size:11px;padding:5px 9px;margin-top:0;align-self:flex-end';
-        spInfo.textContent='Projected at retirement (@ '+gr+'% growth, '+yrsToRet+' yrs): '+Rfmt(projProceeds);
+        spInfo.textContent='Projected at retirement (@ '+gr+'% growth): '+Rfmt(projProceeds);
         ar2.appendChild(spInfo);
       }
     }
@@ -2924,7 +2813,7 @@ function buildAssets() {
   S.liabilities.forEach(function(l,i){
     var row=div(); row.style.cssText='display:grid;grid-template-columns:2fr 1fr 1fr auto 36px;gap:12px;align-items:end;background:#fff;border:var(--border);border-radius:7px;padding:12px;margin-bottom:8px';
     var df=div('f'); df.appendChild(el('label','','Description'));
-    var di=document.createElement('input'); di.type='text'; di.value=l.desc||'';
+    var di=document.createElement('input'); di.type='text'; di.value=l.desc||''; di.placeholder='e.g. Personal loan, credit card';
     di.addEventListener('input',function(e){S.liabilities[i].desc=e.target.value;}); df.appendChild(di); row.appendChild(df);
     row.appendChild(rfld('Outstanding Balance', l, 'bal'));
     row.appendChild(rfld('Monthly Payment',     l, 'pmt'));
@@ -2975,7 +2864,7 @@ function buildIncomeNeedRow(parent, r, i, arrayKey) {
   var card = div(); card.style.cssText = 'background:#fff;border:var(--border);border-radius:8px;padding:14px;margin-bottom:10px';
   var ch = div(); ch.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-bottom:10px';
   var df = div('f'); df.appendChild(el('label','','Description'));
-  var di = document.createElement('input'); di.type = 'text'; di.value = r.desc || '';
+  var di = document.createElement('input'); di.type = 'text'; di.value = r.desc || ''; di.placeholder = 'e.g. Spouse living expenses';
   di.addEventListener('input', function(e){ S[arrayKey][i].desc = e.target.value; }); df.appendChild(di);
   ch.appendChild(df);
   // Capital badge — shows immediately in the header for quick reference
@@ -3003,7 +2892,7 @@ function buildIncomeNeedRow(parent, r, i, arrayKey) {
   ginp.addEventListener('blur',function(e){ S[arrayKey][i].grossPM=e.target.value; render(); });
   grw.appendChild(ginp); gf.appendChild(grw); rg1.appendChild(gf);
   var yf = div('f'); yf.appendChild(el('label','','Years'));
-  var yi = document.createElement('input'); yi.type='text'; yi.inputMode='numeric'; yi.value=r.years||'';
+  var yi = document.createElement('input'); yi.type='text'; yi.inputMode='numeric'; yi.value=r.years||''; yi.placeholder='e.g. 20';
   yi.addEventListener('blur',function(e){ S[arrayKey][i].years=e.target.value; render(); }); yf.appendChild(yi); rg1.appendChild(yf);
   var ef = div('f'); ef.appendChild(el('label','','Esc % (blank=CPI)'));
   var epw = div('pw'); epw.appendChild(el('span','pp','%'));
@@ -3032,7 +2921,7 @@ function buildIncomeNeedRow(parent, r, i, arrayKey) {
     // Beneficiary name — only shown for Third Party
     if ((r.benTo || 'Spouse') === 'Third Party') {
       var nmf = div('f'); nmf.appendChild(el('label','','Beneficiary name'));
-      var nmi = document.createElement('input'); nmi.type='text'; nmi.value = r.benName || '';
+      var nmi = document.createElement('input'); nmi.type='text'; nmi.value = r.benName || ''; nmi.placeholder = 'e.g. Sarah\'s education trust';
       nmi.addEventListener('input', function(e){ S[arrayKey][i].benName = e.target.value; });
       nmf.appendChild(nmi); benRow.appendChild(nmf);
     } else {
@@ -3193,7 +3082,7 @@ function buildNeeds() {
     s.appendChild(manInf);
     S.deathLiabs.forEach(function(r,i){
       var row=g3();
-      row.appendChild(fld('Description',r,'desc',{}));
+      row.appendChild(fld('Description',r,'desc',{placeholder:'e.g. Personal loan, income tax'}));
       row.appendChild(rfld('Amount',r,'amt',{onblur:function(){render();}}));
       row.appendChild(div());
       var del=delBtn(function(){S.deathLiabs.splice(i,1);render();}); var dw=div('f'); dw.appendChild(del); row.appendChild(dw);
@@ -3211,7 +3100,7 @@ function buildNeeds() {
     S.deathCapital.forEach(function(r,i){
       var card=div(); card.style.cssText='background:#fff;border:var(--border);border-radius:8px;padding:12px;margin-bottom:10px';
       var row=g3();
-      row.appendChild(fld('Description',r,'desc',{}));
+      row.appendChild(fld('Description',r,'desc',{placeholder:'e.g. Education fund'}));
       row.appendChild(rfld('Amount',r,'amt',{onblur:function(){render();}}));
       row.appendChild(div());
       var del=delBtn(function(){S.deathCapital.splice(i,1);render();}); var dw=div('f'); dw.appendChild(del); row.appendChild(dw);
@@ -3234,7 +3123,7 @@ function buildNeeds() {
       bf.appendChild(bsel); benRow.appendChild(bf);
       if((r.benTo||'Spouse')==='Third Party'){
         var nmf=div('f'); nmf.appendChild(el('label','','Beneficiary name'));
-        var nmi=document.createElement('input'); nmi.type='text'; nmi.value=r.benName||'';
+        var nmi=document.createElement('input'); nmi.type='text'; nmi.value=r.benName||''; nmi.placeholder='e.g. Sarah\'s education trust';
         nmi.addEventListener('input',function(e){ S.deathCapital[i].benName=e.target.value; });
         nmf.appendChild(nmi); benRow.appendChild(nmf);
       } else {
@@ -3317,7 +3206,7 @@ function buildNeeds() {
       }
       S.disCapital.forEach(function(r,i){
         var row=g3();
-        row.appendChild(fld('Description',r,'desc',{}));
+        row.appendChild(fld('Description',r,'desc',{placeholder:'e.g. Adapt home / vehicle'}));
         row.appendChild(rfld('Amount',r,'amt',{onblur:function(){render();}}));
         row.appendChild(div());
         var del=delBtn(function(){S.disCapital.splice(i,1);render();}); var dw=div('f'); dw.appendChild(del); row.appendChild(dw);
@@ -3421,7 +3310,7 @@ function buildRetirement() {
     var card=div(); card.style.cssText='background:#fff;border:var(--border);border-radius:8px;padding:12px 14px;margin-bottom:8px';
     var ch=div(); ch.style.cssText='display:flex;justify-content:space-between;align-items:center;margin-bottom:8px';
     var df=div('f'); df.appendChild(el('label','','Description'));
-    var di=document.createElement('input'); di.type='text'; di.value=r.desc||'';
+    var di=document.createElement('input'); di.type='text'; di.value=r.desc||''; di.placeholder='e.g. Monthly living expenses';
     di.addEventListener('input',function(e){S.retNeeds[i].desc=e.target.value;});
     df.appendChild(di); ch.appendChild(df);
     if(!r._isPremRow){
@@ -3492,7 +3381,7 @@ function buildRetirement() {
   if(!S.retLumps) S.retLumps=[];
   S.retLumps.forEach(function(r,i){
     var row=g3();
-    row.appendChild(fld('Description',r,'desc',{}));
+    row.appendChild(fld('Description',r,'desc',{placeholder:'e.g. Pay off bond at retirement'}));
     row.appendChild(rfld('Amount (today\'s rands)',r,'amt',{onblur:function(){render();}}));
     row.appendChild(div());
     var dw=div('f'); dw.appendChild(delBtn(function(){S.retLumps.splice(i,1);render();})); row.appendChild(dw);
@@ -3547,7 +3436,7 @@ function buildRetirement() {
     var card=div(); card.style.cssText='background:#fff;border:var(--border);border-radius:8px;padding:12px 14px;margin-bottom:8px';
     var ch=div(); ch.style.cssText='display:flex;justify-content:space-between;align-items:center;margin-bottom:8px';
     var df=div('f'); df.appendChild(el('label','','Fund description'));
-    var di=document.createElement('input'); di.type='text'; di.value=r.desc||'';
+    var di=document.createElement('input'); di.type='text'; di.value=r.desc||''; di.placeholder='e.g. Sygnia RA';
     di.addEventListener('input',function(e){S.retAssets[i].desc=e.target.value;}); df.appendChild(di); ch.appendChild(df);
     ch.appendChild(delBtn(function(){S.retAssets.splice(i,1);render();})); card.appendChild(ch);
     var rg=g4();
@@ -3559,7 +3448,7 @@ function buildRetirement() {
     // Maturity / contributions end age
     var mf=div('f'); mf.appendChild(el('label','','Contributions end at age (optional — e.g. endowment maturity)'));
     var mi=document.createElement('input'); mi.type='text'; mi.inputMode='numeric';
-    mi.value=r.maturityAge||'';
+    mi.value=r.maturityAge||''; mi.placeholder='e.g. 50 (leave blank = contributions to retirement)';
     mi.style.cssText='border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px;width:100%;box-sizing:border-box';
     mi.addEventListener('input',function(e){S.retAssets[i].maturityAge=e.target.value;});
     mi.addEventListener('blur',function(){render();});
@@ -6466,9 +6355,9 @@ function buildROATab() {
   }
 
   // Section A
-  roaSec('A. Client Objectives', 'objectives', '', 70);
-  roaSec('A. Financial Situation', 'situation', '', 70);
-  roaSec('A. Current Product Experience', 'experience', '', 70);
+  roaSec('A. Client Objectives', 'objectives', 'e.g. Ensure family is financially secure. Plan for retirement at 65. Review estate structures.', 70);
+  roaSec('A. Financial Situation', 'situation', 'e.g. Farmer, income from CC. Assets held in family trust. Married ANC with accrual.', 70);
+  roaSec('A. Current Product Experience', 'experience', 'e.g. Existing life and disability cover with Liberty and Sanlam. Sygnia RA and TFS.', 70);
 
   // Section B — fully editable needs table
   s.appendChild(stitle('B. Needs & Goals Identified'));
@@ -6545,6 +6434,9 @@ function buildROATab() {
       inp.type = 'text';
       inp.value = row[key] || '';
       inp.style.cssText = 'width:100%;border:none;border-bottom:1px solid var(--mist);padding:4px 2px;font-size:11px;font-family:inherit;background:transparent';
+      if (key === 'addressed') {
+        inp.placeholder = 'Yes / Partially / Later / No';
+      }
       inp.addEventListener('input', function(e){ r.needsRows[ni][key] = e.target.value; S.roa = r; });
       td.appendChild(inp);
       tr.appendChild(td);
@@ -6560,18 +6452,24 @@ function buildROATab() {
   var cInf = div('info');
   cInf.innerHTML = 'Record companies and quotes considered. The existing policy schedule is shown in the generated document as context.';
   s.appendChild(cInf);
-  roaSec('', 'products', '', 80);
+  roaSec('', 'products', 'e.g. Sanlam quoted R1 800/pm for R5m life cover. Liberty quoted R2 100/pm. Client selected Sanlam.', 80);
 
   // Section D
-  roaSec('D. Recommendation & Motivation', 'recommendation', '', 120);
+  roaSec('D. Recommendation & Motivation', 'recommendation',
+    'e.g. Recommended increasing life cover by R5m to address shortfall. Retained existing Sanlam policies. '
+    + 'Increased RA contribution to R3 000/pm. Client acknowledged age-rated premium risk on trust policy.', 120);
 
   // Section E
-  roaSec('E. Important Information Highlighted to Client', 'important', '', 90);
+  roaSec('E. Important Information Highlighted to Client', 'important',
+    'e.g. Advised on age-rated premium escalation and long-term affordability. Explained estate duty implications of policy beneficiary routing. '
+    + 'Discussed s.4(q) deduction and accrual claim.', 90);
 
   // Section F
-  roaSec('F. Products / Advice Client Elected Not to Take', 'declined', '', 70);
+  roaSec('F. Products / Advice Client Elected Not to Take', 'declined',
+    'e.g. Client declined offshore investment at this stage — to be reviewed at next annual review. '
+    + 'Client declined additional dread disease cover citing affordability.', 70);
 
-  roaSec('Additional Comments', 'comments', '', 60);
+  roaSec('Additional Comments', 'comments', 'Any additional notes...', 60);
 
   var brow = div(); brow.style.cssText = 'display:flex;gap:12px;margin-top:20px;flex-wrap:wrap';
   var b1 = document.createElement('button'); b1.className = 'btn btn-gold'; b1.textContent = 'Generate ROA Document';
@@ -6663,7 +6561,7 @@ function generateROA() {
   h+='<div><div class="lbl">Marital Status</div><div class="val">'+esc(S.cli.marital||'—')+'</div></div>';
   h+='<div><div class="lbl">Gross Monthly Income</div><div class="val">'+(S.cli.grossPM?rfmt(S.cli.grossPM)+' /pm':'—')+'</div></div>';
   h+='<div><div class="lbl">Smoker</div><div class="val">'+esc(S.cli.smoker||'—')+'</div></div>';
-  h+='<div><div class="lbl">Education</div><div class="val">'+esc(S.cli.education||'—')+'</div></div>';
+  h+='<div><div class="lbl">Education</div><div class="val">'+esc(S.cli.edu||'—')+'</div></div>';
   h+='<div><div class="lbl">Spouse</div><div class="val">'+esc(S.cli.spouse||'—')+'</div></div>';
   h+='</div>';
   h+='<table><tr><th style="width:22%">Item</th><th>Detail</th></tr>';
