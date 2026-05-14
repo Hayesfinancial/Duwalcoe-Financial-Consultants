@@ -167,6 +167,16 @@ table input:focus, table select:focus { outline: none; border-color: var(--gold)
     <button class="btn btn-ghost btn-sm" onclick="printAandL()" title="Print Asset & Liability Statement for loan applications">🖨 A&L</button>
   </div>
 </div>
+<!-- SaveGuard banners — sit between header and tab bar -->
+<div id="sgFailBanner" style="display:none;background:#dc2626;color:#fff;padding:10px 14px;font-size:13px;font-weight:600;border-bottom:2px solid #991b1b;line-height:1.4">
+  <span style="display:inline-block;vertical-align:middle">⚠ SAVE FAILED — your latest changes are NOT on the server.</span>
+  <span id="sgFailDetail" style="display:inline-block;vertical-align:middle;margin-left:8px;font-weight:400;opacity:0.9"></span>
+  <button onclick="sgManualRetry()" style="margin-left:12px;background:#fff;color:#dc2626;border:none;padding:4px 10px;border-radius:3px;font-weight:700;cursor:pointer;font-size:12px">Retry now</button>
+  <span id="sgRetryStatus" style="margin-left:8px;font-size:11px;font-weight:400;opacity:0.9"></span>
+</div>
+<div id="sgNoIdBanner" style="display:none;background:#fbbf24;color:#1f2937;padding:8px 14px;font-size:12px;font-weight:600;border-bottom:2px solid #d97706;line-height:1.4">
+  💾 FNA is saving locally (in this browser). Enter an ID number on the Client tab to enable server sync.
+</div>
 <div class="tabbar" id="tabBar"></div>
 <div class="content" id="content"></div>
 <div id="statusBar" style="display:none"></div>
@@ -1433,13 +1443,77 @@ function persist() {
   }
 }
 
-// Save FNA state to Supabase
-function saveToServer(silent) {
-  var clientId = S.cli.id;
-  if (!clientId) {
-    if(!silent) status('⚠ No client ID — cannot sync to server');
-    return;
-  }
+// ═══════════════════════════════════════════════════════════
+// SAVEGUARD — data-loss protection for FNA saves
+// ═══════════════════════════════════════════════════════════
+// Goals:
+//   1. NEVER lose adviser-entered data, even if S.cli.id is blank,
+//      even if Supabase is unreachable, even if the tab is closed.
+//   2. Make save state IMPOSSIBLE TO MISS — persistent red banner
+//      on failure, yellow banner when local-only (no ID number).
+//   3. Auto-retry failed saves in the background every 30 seconds.
+//   4. Block tab close with beforeunload if there is unsaved server state.
+//
+// Storage:
+//   - localStorage 'du_fna_unsaved_<clientId>' holds the last failed
+//     payload so it survives a browser/PC crash and can be replayed.
+//   - In-memory _sgPending holds the same for active retry.
+// ═══════════════════════════════════════════════════════════
+
+var _sgPending = null;       // { clientId, payload, firstFailedAt, lastAttemptAt, attempts }
+var _sgRetryTimer = null;    // setInterval handle for background retry
+var _sgInFlight = false;     // true while a fetch is mid-flight (prevents pile-up)
+var _sgSuccessAt = 0;        // timestamp of last successful save
+
+// Show / hide the red failure banner. Idempotent.
+function sgShowFailBanner(detail) {
+  var b = document.getElementById('sgFailBanner');
+  if (!b) return;
+  b.style.display = 'block';
+  var d = document.getElementById('sgFailDetail');
+  if (d) d.textContent = detail || '';
+}
+function sgHideFailBanner() {
+  var b = document.getElementById('sgFailBanner');
+  if (b) b.style.display = 'none';
+  var s = document.getElementById('sgRetryStatus');
+  if (s) s.textContent = '';
+}
+
+// Show / hide the yellow "saving locally only" banner.
+function sgShowNoIdBanner() {
+  var b = document.getElementById('sgNoIdBanner');
+  if (b) b.style.display = 'block';
+}
+function sgHideNoIdBanner() {
+  var b = document.getElementById('sgNoIdBanner');
+  if (b) b.style.display = 'none';
+}
+
+// Persist the pending payload to localStorage so it survives a crash.
+function sgStashUnsaved() {
+  if (!_sgPending) return;
+  try {
+    localStorage.setItem(
+      'du_fna_unsaved_' + _sgPending.clientId,
+      JSON.stringify(_sgPending)
+    );
+  } catch(e) {}
+}
+function sgClearUnsaved(clientId) {
+  try { localStorage.removeItem('du_fna_unsaved_' + clientId); } catch(e) {}
+}
+
+// Manual retry button — fires immediately.
+function sgManualRetry() {
+  if (!_sgPending) { sgHideFailBanner(); return; }
+  var s = document.getElementById('sgRetryStatus');
+  if (s) s.textContent = '(retrying now…)';
+  sgFlushPending(false);
+}
+
+// Build the save payload from the current state. Pure function — no side effects.
+function sgBuildPayload(clientId) {
   var saveData = {};
   var skip = {importedPols: true};
   Object.keys(S).forEach(function(k){ if(!skip[k]) saveData[k] = S[k]; });
@@ -1456,18 +1530,127 @@ function saveToServer(silent) {
   });
   saveData.retIncludes = retIncludes;
   var now = new Date().toISOString().slice(0,16).replace('T',' ');
+  return {
+    ClientID: clientId,
+    Version: 'working',
+    Locked: false,
+    Data: JSON.stringify(saveData),
+    LastSaved: now,
+    SavedBy: 'Clinton Hayes'
+  };
+}
+
+// The single low-level POST. Updates banners & in-flight state.
+// Used both by the initial save and by retries.
+function sgFlushPending(silent) {
+  if (!_sgPending) return;
+  if (_sgInFlight) return; // a retry is already running; don't pile up
+  _sgInFlight = true;
+
   var indicator = document.getElementById('syncIndicator');
   if(indicator){ indicator.textContent = '↑ Saving...'; indicator.style.color = '#a8b938'; }
-  sbFetch('POST','/rest/v1/fnadata?on_conflict=ClientID,Version',[{ClientID:clientId,Version:'working',Locked:false,Data:JSON.stringify(saveData),LastSaved:now,SavedBy:'Clinton Hayes'}],function(res,err){
-    if(err){
-      if(indicator){ indicator.textContent = '⚠ Sync failed'; indicator.style.color = '#f87171'; }
-      if(!silent) status('⚠ Save failed: '+err);
+
+  var attempt = _sgPending; // snapshot — _sgPending may be replaced mid-flight
+
+  sbFetch('POST','/rest/v1/fnadata?on_conflict=ClientID,Version', [attempt.payload], function(res, err){
+    _sgInFlight = false;
+    if (err) {
+      attempt.attempts = (attempt.attempts||0) + 1;
+      attempt.lastAttemptAt = Date.now();
+      if (!attempt.firstFailedAt) attempt.firstFailedAt = attempt.lastAttemptAt;
+      // _sgPending may have been overwritten by a fresh save while we were in flight.
+      // Only mirror our attempt counters back if it's still the same payload.
+      if (_sgPending && _sgPending.payload === attempt.payload) {
+        _sgPending.attempts = attempt.attempts;
+        _sgPending.firstFailedAt = attempt.firstFailedAt;
+        _sgPending.lastAttemptAt = attempt.lastAttemptAt;
+      }
+      sgStashUnsaved();
+      var when = new Date(attempt.firstFailedAt).toLocaleTimeString('en-ZA',{hour:'2-digit',minute:'2-digit'});
+      sgShowFailBanner('Unsaved since ' + when + ' · ' + attempt.attempts + ' attempt(s) · ' + String(err).slice(0,120));
+      if (indicator) { indicator.textContent = '⚠ Sync failed — retrying'; indicator.style.color = '#f87171'; }
+      if (!silent) status('⚠ Save failed — will retry. Your data is safe in this browser.');
+      sgStartRetryLoop();
     } else {
+      // Success — but only clear if _sgPending is still the same attempt we tried.
+      // If a fresh save replaced it mid-flight, leave that fresh one to retry/succeed on its own.
+      if (_sgPending && _sgPending.payload === attempt.payload) {
+        sgClearUnsaved(_sgPending.clientId);
+        _sgPending = null;
+        sgHideFailBanner();
+        sgStopRetryLoop();
+      }
+      _sgSuccessAt = Date.now();
       var t = new Date().toLocaleTimeString('en-ZA',{hour:'2-digit',minute:'2-digit'});
-      if(indicator){ indicator.textContent = '✓ Synced '+t; indicator.style.color = '#86efac'; }
-      if(!silent) status('✓ Saved at '+t);
+      if (indicator) { indicator.textContent = '✓ Synced '+t; indicator.style.color = '#86efac'; }
+      if (!silent) status('✓ Saved at '+t);
     }
   });
+}
+
+function sgStartRetryLoop() {
+  if (_sgRetryTimer) return;
+  _sgRetryTimer = setInterval(function(){
+    if (!_sgPending) { sgStopRetryLoop(); return; }
+    sgFlushPending(true);
+  }, 30000); // every 30 seconds
+}
+function sgStopRetryLoop() {
+  if (_sgRetryTimer) { clearInterval(_sgRetryTimer); _sgRetryTimer = null; }
+}
+
+// Recover an unsaved payload from a previous session, if one exists for this client.
+// Called from init after S.cli.id is established.
+function sgRecoverUnsaved() {
+  var clientId = S.cli.id;
+  if (!clientId) return;
+  try {
+    var raw = localStorage.getItem('du_fna_unsaved_' + clientId);
+    if (!raw) return;
+    var rec = JSON.parse(raw);
+    if (!rec || !rec.payload) return;
+    // We have a previously-failed save for this client. Queue it for retry.
+    // Do NOT overwrite S — the recovered payload is older than current S anyway
+    // (since the user opened the FNA again, persist() has likely run).
+    // Instead, build a fresh payload from current S and queue THAT for retry,
+    // because current S already contains everything the failed save had plus
+    // any newer edits (persist() runs before every saveToServer call).
+    _sgPending = {
+      clientId: clientId,
+      payload: sgBuildPayload(clientId),
+      firstFailedAt: rec.firstFailedAt || Date.now(),
+      lastAttemptAt: 0,
+      attempts: rec.attempts || 0
+    };
+    sgStashUnsaved();
+    var when = new Date(_sgPending.firstFailedAt).toLocaleTimeString('en-ZA',{hour:'2-digit',minute:'2-digit'});
+    sgShowFailBanner('Recovered unsaved changes from previous session (' + when + ')');
+    sgFlushPending(true); // try immediately
+  } catch(e) {}
+}
+
+// Public entry point. Replaces the previous saveToServer.
+// If S.cli.id is blank, persist() (already called by the caller) has saved
+// locally; we show the yellow banner and stop here — NO data loss.
+function saveToServer(silent) {
+  var clientId = S.cli.id;
+  if (!clientId) {
+    // No SA ID yet. localStorage has the data (via persist()). Make this VISIBLE.
+    sgShowNoIdBanner();
+    var indicator = document.getElementById('syncIndicator');
+    if (indicator) { indicator.textContent = '💾 Local only'; indicator.style.color = '#d97706'; }
+    if (!silent) status('💾 Saved locally — enter ID number to enable server sync');
+    return;
+  }
+  sgHideNoIdBanner();
+  _sgPending = {
+    clientId: clientId,
+    payload: sgBuildPayload(clientId),
+    firstFailedAt: _sgPending ? _sgPending.firstFailedAt : 0,
+    lastAttemptAt: 0,
+    attempts: _sgPending ? _sgPending.attempts : 0
+  };
+  sgFlushPending(silent);
 }
 
 // Load FNA state from Supabase
@@ -7709,6 +7892,7 @@ function printAandL() {
 
 // INIT
 render();
+sgRecoverUnsaved(); // SaveGuard: replay any unsaved server payload from a previous session
 setInterval(autoSave, 60000);
 document.addEventListener('visibilitychange', function(){ if(document.hidden) autoSave(); });
 document.addEventListener('input', function(e){
@@ -7724,7 +7908,17 @@ document.addEventListener('change', function(e){
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') queueSmartSave();
 }, true);
 window.addEventListener('pagehide', function(){ persist(); saveToServer(true); });
-window.addEventListener('beforeunload', function(){ persist(); });
+window.addEventListener('beforeunload', function(e){
+  persist();
+  // SaveGuard: warn before close if there are unsaved server changes.
+  // Modern browsers ignore the custom message but still show their default prompt.
+  if (_sgPending) {
+    var msg = 'You have FNA changes that have not yet been saved to the server. Are you sure you want to leave?';
+    e.preventDefault();
+    e.returnValue = msg;
+    return msg;
+  }
+});
 </script>
 </body>
 </html>
