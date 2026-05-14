@@ -428,6 +428,18 @@ function post(data, cb){
   else if(action==='saveFamMember'){
     upsert('familylinks', data.member, cb);
   }
+  else if(action==='updateFamMember'){
+    // PATCH all editable fields on an existing familylinks row.
+    var m = data.member || {};
+    patch('familylinks', m.ID, {
+      Name: m.Name||'',
+      IDNumber: m.IDNumber||'',
+      DOB: m.DOB||'',
+      Cell: m.Cell||'',
+      Email: m.Email||'',
+      Type: m.Type||''
+    }, cb);
+  }
   else if(action==='upgradeFamMember'){
     patch('familylinks', data.id, {IsClient:'Yes', ClientID:data.clientId}, cb);
   }
@@ -1350,10 +1362,26 @@ function openFamModal(cid, type){
   FAM_CLIENT = cid;
   FAM_TYPE = type || 'Spouse';
   var c = DB.clients.find(function(x){ return String(x.ID)===String(cid); });
-  document.getElementById('famModT').textContent = 'Add ' + FAM_TYPE + ' for ' + (c?c.Name:'');
-  // Pre-fill spouse fields from client record if available
+  // If editing an existing spouse, prefer the live DB.links row over c.Spouse* (which
+  // can be stale and is the legacy storage). For new entries, fall back to c.Spouse*.
+  var existing = null;
+  if(FAM_TYPE === 'Spouse'){
+    existing = DB.links.find(function(l){
+      return String(l.PrincipalID)===String(cid) && l.Type==='Spouse';
+    });
+  }
+  var titleVerb = existing ? 'Edit' : 'Add';
+  document.getElementById('famModT').textContent = titleVerb + ' ' + FAM_TYPE + ' for ' + (c?c.Name:'');
+  // Pre-fill spouse fields
   var preN='', preId='', preDob='', preCell='', preEmail='';
-  if(type==='Spouse' && c){
+  if(existing){
+    preN     = existing.Name     || '';
+    preId    = existing.IDNumber || '';
+    preDob   = existing.DOB      || '';
+    preCell  = existing.Cell     || '';
+    preEmail = existing.Email    || '';
+    if(!preDob && preId.length >= 6) preDob = dobFromID(preId);
+  } else if(type==='Spouse' && c){
     preN     = c.SpouseName  || '';
     preId    = c.SpouseIDNumber || '';
     preDob   = c.SpouseDOB   || '';
@@ -1380,23 +1408,48 @@ function saveFamMember(){
   var idnum = document.getElementById('fam_id') ? document.getElementById('fam_id').value.trim() : '';
   var cell = document.getElementById('fam_cell') ? document.getElementById('fam_cell').value.trim() : '';
   var email = document.getElementById('fam_email') ? document.getElementById('fam_email').value.trim() : '';
-  var memId = 'fam_' + Date.now();
-  var link = {
-    ID: memId,
-    PrincipalID: FAM_CLIENT,
-    Name: name,
-    IDNumber: idnum,
-    DOB: dob,
-    Cell: cell,
-    Email: email,
-    Type: FAM_TYPE,
-    IsClient: 'No',
-    ClientID: ''
-  };
-  DB.links.push(link);
+
+  // Spouse is one-per-client. If one already exists in DB.links, update that
+  // row in place instead of creating a duplicate. Children can legitimately
+  // stack, so the duplicate guard only applies to Type === 'Spouse'.
+  var existing = null;
+  if(FAM_TYPE === 'Spouse'){
+    existing = DB.links.find(function(l){
+      return String(l.PrincipalID) === String(FAM_CLIENT) && l.Type === 'Spouse';
+    });
+  }
+
+  var link;
+  if(existing){
+    existing.Name = name;
+    existing.IDNumber = idnum;
+    existing.DOB = dob;
+    existing.Cell = cell;
+    existing.Email = email;
+    // Preserve IsClient / ClientID — don't reset an upgraded spouse back to non-client.
+    link = existing;
+  } else {
+    var memId = 'fam_' + Date.now();
+    link = {
+      ID: memId,
+      PrincipalID: FAM_CLIENT,
+      Name: name,
+      IDNumber: idnum,
+      DOB: dob,
+      Cell: cell,
+      Email: email,
+      Type: FAM_TYPE,
+      IsClient: 'No',
+      ClientID: ''
+    };
+    DB.links.push(link);
+  }
+
   closeAll();
   render();
-  post({action:'saveFamMember', member:link}, function(){ toast(FAM_TYPE + ' saved','ok'); });
+  post({action: existing ? 'updateFamMember' : 'saveFamMember', member:link}, function(){
+    toast(FAM_TYPE + (existing ? ' updated' : ' saved'), 'ok');
+  });
 }
 
 function upgradeToClient(linkId){
@@ -1559,10 +1612,11 @@ function renderOverview(c,pols,roas,ctasks){
       _virtual:true
     }].concat(famMembers);
   }
+  var hasSpouse = famMembers.some(function(m){ return m.Type==='Spouse'; });
   var familyHtml='<div class="card" style="margin-bottom:16px">'+
     '<div class="ch"><h2>👨‍👩‍👧 Family</h2>'+
     '<div style="display:flex;gap:8px">'+
-    '<button class="btn b-gd xs" data-act="add-spouse" data-id="'+c.ID+'">+ Spouse</button>'+
+    '<button class="btn b-gd xs" data-act="add-spouse" data-id="'+c.ID+'">'+(hasSpouse?'✎ Edit Spouse':'+ Spouse')+'</button>'+
     '<button class="btn b-sk xs" data-act="add-child" data-id="'+c.ID+'">+ Child</button>'+
     '<button class="btn b-gh xs" data-act="link-existing" data-id="'+c.ID+'">🔗 Link Existing</button>'+
     '</div></div>'+
@@ -4410,7 +4464,7 @@ function saveClient(openFNA){
       existing.DOB  = g('fspdob')||existing.DOB||'';
       existing.Cell = g('fspcell')||existing.Cell||'';
       existing.Email= g('fspemail')||existing.Email||'';
-      post({action:'saveFamMember', member:existing});
+      post({action:'updateFamMember', member:existing});
     }
   }
 
