@@ -676,8 +676,17 @@ var DEFAULTS = {
 var S = JSON.parse(JSON.stringify(DEFAULTS));
 
 var _fnaEditTimer = null;
+// Returns the best available key to use for THIS FNA on the server.
+// Priority: CRM internal client/lead ID (window._crmInternalId, from ?cid=) → SA ID (S.cli.id) → null.
+// This is the single source of truth — saveToServer, loadFromServer, etc. all use this.
+// Using the CRM ID means brand-new leads (no SA ID yet) still save reliably.
+function fnaKey() {
+  if (window._crmInternalId) return String(window._crmInternalId);
+  if (S && S.cli && S.cli.id) return String(S.cli.id);
+  return null;
+}
 function fnaStateKey() {
-  return 'du_fna_' + (S.cli.id || (S.cli.name || '').replace(/\s+/g,'_') || 'draft');
+  return 'du_fna_' + (fnaKey() || (S.cli.name || '').replace(/\s+/g,'_') || 'draft');
 }
 function fnaMetaKey() {
   return fnaStateKey() + '_meta';
@@ -824,12 +833,17 @@ function queueSmartSave() {
 // After initial load — try to pull FNA state from server
 // Runs after render() so the page is visible while waiting
 (function tryServerLoad() {
-  var clientId = (new URLSearchParams(window.location.search)).get('id');
-  if (!clientId) return;
+  var urlParams = new URLSearchParams(window.location.search);
+  // Prefer CRM internal id (cid) — that's what new saves use.
+  // Fall back to SA ID (id) for legacy FNAs that were saved before this fix.
+  var primaryKey = urlParams.get('cid') || urlParams.get('id');
+  var legacyKey = urlParams.get('id'); // SA ID — try this if primary lookup fails
+  if (!primaryKey && !legacyKey) return;
+  var clientId = primaryKey || legacyKey;
   var indicator = document.getElementById('syncIndicator');
   if (indicator) { indicator.textContent = '↓ Loading...'; indicator.style.color = '#a8b938'; }
 
-  loadFromServer(clientId, function(serverState, savedTime) {
+  var handleServerData = function(serverState, savedTime) {
     // Silent post-load fetch: pull live POLICIES (CRM owns policies) and live
     // CLIENT DETAILS (fill-blanks-only — see fetchLiveClientFromCRM). The client
     // fetch ensures CRM-only fields (cell, email, address, education etc.)
@@ -911,6 +925,17 @@ function queueSmartSave() {
       indicator.style.color = '#86efac';
     }
     doSilentLiveFetch();
+  };
+
+  // Try primary key first (CRM ID). If it returns nothing AND a different legacy key
+  // (SA ID) is available, try that too — covers existing FNAs that were saved by SA ID.
+  loadFromServer(primaryKey, function(serverState, savedTime) {
+    if (!serverState && legacyKey && legacyKey !== primaryKey) {
+      clientId = legacyKey;
+      loadFromServer(legacyKey, handleServerData);
+    } else {
+      handleServerData(serverState, savedTime);
+    }
   });
 })();
 
@@ -1435,9 +1460,10 @@ function persist() {
 
 // Save FNA state to Supabase
 function saveToServer(silent) {
-  var clientId = S.cli.id;
+  var clientId = fnaKey();
   if (!clientId) {
-    if(!silent) status('⚠ No client ID — cannot sync to server');
+    // No CRM ID and no SA ID — this should be extremely rare. Show LOUD persistent warning.
+    showSyncFailure('⚠ CANNOT SAVE — no client ID. Re-open this FNA from the CRM.');
     return;
   }
   var saveData = {};
@@ -1457,17 +1483,55 @@ function saveToServer(silent) {
   saveData.retIncludes = retIncludes;
   var now = new Date().toISOString().slice(0,16).replace('T',' ');
   var indicator = document.getElementById('syncIndicator');
-  if(indicator){ indicator.textContent = '↑ Saving...'; indicator.style.color = '#a8b938'; }
+  if(indicator){ indicator.textContent = '↑ Saving...'; indicator.style.color = '#a8b938'; indicator.style.background=''; indicator.style.padding=''; }
   sbFetch('POST','/rest/v1/fnadata?on_conflict=ClientID,Version',[{ClientID:clientId,Version:'working',Locked:false,Data:JSON.stringify(saveData),LastSaved:now,SavedBy:'Clinton Hayes'}],function(res,err){
     if(err){
-      if(indicator){ indicator.textContent = '⚠ Sync failed'; indicator.style.color = '#f87171'; }
-      if(!silent) status('⚠ Save failed: '+err);
+      // LOUD failure — sticky red banner, no auto-clear
+      showSyncFailure('⚠ SAVE FAILED — '+err+'. Your data is in localStorage but NOT on the server. Check your connection and click 💾 Save again.');
     } else {
       var t = new Date().toLocaleTimeString('en-ZA',{hour:'2-digit',minute:'2-digit'});
-      if(indicator){ indicator.textContent = '✓ Synced '+t; indicator.style.color = '#86efac'; }
+      if(indicator){ indicator.textContent = '✓ Synced '+t; indicator.style.color = '#86efac'; indicator.style.background=''; indicator.style.padding=''; indicator.style.fontWeight=''; indicator.style.borderRadius=''; }
+      // Clear any stuck red failure banner
+      var bar = document.getElementById('statusBar');
+      if(bar && bar.style.background === 'rgb(192, 57, 43)') { bar.style.display = 'none'; }
       if(!silent) status('✓ Saved at '+t);
     }
   });
+}
+
+// Show a sticky, impossible-to-miss save-failure banner.
+// Stays on screen until the next successful save clears it.
+function showSyncFailure(msg) {
+  var indicator = document.getElementById('syncIndicator');
+  if(indicator){
+    indicator.textContent = msg;
+    indicator.style.color = '#fff';
+    indicator.style.background = '#c0392b';
+    indicator.style.padding = '4px 10px';
+    indicator.style.borderRadius = '4px';
+    indicator.style.fontWeight = '600';
+    indicator.style.fontSize = '12px';
+  }
+  // Also show a visible status bar message that doesn't auto-clear
+  var bar = document.getElementById('statusBar');
+  if(bar){
+    bar.style.display = 'block';
+    bar.style.position = 'fixed';
+    bar.style.bottom = '60px';
+    bar.style.left = '50%';
+    bar.style.transform = 'translateX(-50%)';
+    bar.style.background = '#c0392b';
+    bar.style.color = '#fff';
+    bar.style.padding = '12px 24px';
+    bar.style.borderRadius = '6px';
+    bar.style.fontSize = '14px';
+    bar.style.fontWeight = '600';
+    bar.style.zIndex = '9999';
+    bar.style.boxShadow = '0 6px 24px rgba(0,0,0,.3)';
+    bar.textContent = msg;
+  }
+  // Browser-level alert ONLY on the user-initiated save (not silent autosaves) —
+  // we add this hint by checking the call site below.
 }
 
 // Load FNA state from Supabase
@@ -1492,9 +1556,12 @@ function loadFromServer(clientId, onDone) {
 // Lock the current working FNA as a dated, read-only final version.
 // Flow: 1) save current state to server  2) rename Version working→dated  3) save fresh working copy
 function lockFinalVersion() {
-  var clientId = S.cli.id;
+  var clientId = fnaKey();
   if(!clientId){ alert('No client loaded — cannot lock.'); return; }
   if(!S.cli.name || !S.cli.name.trim()){ alert('Enter the client name before locking.'); return; }
+  if(!S.cli.id || !S.cli.id.trim()){
+    if(!confirm('This client has no SA ID number captured yet. Lock anyway?\n\nFAIS best practice is to capture the SA ID before locking a final FNA.')) return;
+  }
 
   var notes = prompt('Optional note for this locked version (e.g. "Initial FNA signed", "Annual review"):','');
   if(notes === null) return; // user cancelled
@@ -1583,7 +1650,7 @@ function lockFinalVersion() {
 
 // Show a modal listing all locked versions for the current client.
 function showVersionHistory() {
-  var clientId = S.cli.id;
+  var clientId = fnaKey();
   if(!clientId){ alert('No client loaded.'); return; }
 
   // Build modal shell first so user sees loading state
@@ -1670,8 +1737,32 @@ function newClient() {
   render();
 }
 function status(msg) {
-  document.getElementById('statusBar').textContent = msg;
-  setTimeout(function () { document.getElementById('statusBar').textContent = 'FSP No: 9978 · Clinton Hayes · clinton@duwalcoe.co.za'; }, 3000);
+  // Show a temporary toast (top right) instead of writing to an invisible status bar.
+  // For sync FAILURES, use showSyncFailure() which is sticky and red.
+  var bar = document.getElementById('statusBar');
+  if(!bar) return;
+  // Reset any previous failure styling if this is a normal success message
+  bar.style.position = 'fixed';
+  bar.style.top = '60px';
+  bar.style.right = '20px';
+  bar.style.bottom = '';
+  bar.style.left = '';
+  bar.style.transform = '';
+  bar.style.background = '#0e413a';
+  bar.style.color = '#fff';
+  bar.style.padding = '10px 18px';
+  bar.style.borderRadius = '6px';
+  bar.style.fontSize = '13px';
+  bar.style.fontWeight = '600';
+  bar.style.zIndex = '9999';
+  bar.style.boxShadow = '0 4px 16px rgba(0,0,0,.18)';
+  bar.style.display = 'block';
+  bar.textContent = msg;
+  clearTimeout(window._statusBarTimer);
+  window._statusBarTimer = setTimeout(function () {
+    var b = document.getElementById('statusBar');
+    if(b) b.style.display = 'none';
+  }, 3000);
 }
 
 // ═══════════════════════════════════════════════════════════
