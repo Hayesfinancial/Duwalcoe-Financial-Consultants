@@ -1592,9 +1592,9 @@ function renderOverview(c,pols,roas,ctasks){
   var tBiz=recurringBiz.reduce(function(s,p){return s+parseFloat(p.Premium||0);},0);
   var tLump=nonMonthlyPols.reduce(function(s,p){return s+parseFloat(p.Premium||0);},0);
   var tDeath=activePols.filter(function(p){return p.Type!=='Business Assurance';}).reduce(function(s,p){return s+parseFloat(p.BenDeath||0);},0);
-  var tDis=activePols.reduce(function(s,p){return s+parseFloat(p.BenDisability||0);},0);
-  var tDD=activePols.reduce(function(s,p){return s+parseFloat(p.BenDreadDisease||0);},0);
-  var tBizCover=activePols.filter(function(p){return p.Type==='Business Assurance';}).reduce(function(s,p){return s+parseFloat(p.LoanAmount||0)+parseFloat(p.BenDeath||0);},0);
+  var tDis=activePols.filter(function(p){return p.Type!=='Business Assurance';}).reduce(function(s,p){return s+parseFloat(p.BenDisability||0);},0);
+  var tDD=activePols.filter(function(p){return p.Type!=='Business Assurance';}).reduce(function(s,p){return s+parseFloat(p.BenDreadDisease||0);},0);
+  var tBizCover=activePols.filter(function(p){return p.Type==='Business Assurance';}).reduce(function(s,p){return s+parseFloat(p.BenDeath||0)+parseFloat(p.BenDisability||0)+parseFloat(p.BenDreadDisease||0);},0);
   var famMembers=famFor(c.ID);
   // If SpouseName on client record but not yet in DB.links, show them as a virtual entry
   if(clean(c.SpouseName) && !famMembers.find(function(m){return m.Type==='Spouse';})){
@@ -1816,7 +1816,7 @@ function renderPolicies(c,pols){
           '<td style="font-size:12px">'+(clean(p.StartDate)?fdate(p.StartDate):'—')+'</td>'+
           '<td style="font-size:12px;font-weight:700;color:var(--navy)">'+(ageAtInception!==null?ageAtInception:'—')+'</td>'+
           '<td>'+(function(){
-            if(p.Type==='Business Assurance') return rnd(p.LoanAmount);
+            if(p.Type==='Business Assurance') return rnd(p.BenDeath);
             // Life Annuity has no fund value — its "benefit" is the guaranteed
             // monthly income. Show that with a /pm tag so the column reads clearly.
             if(p.Type==='Life Annuity' && p.BenLifeAnnuityIncome) return rnd(p.BenLifeAnnuityIncome)+'<span style="font-size:10px;color:#888"> /pm</span>';
@@ -4604,7 +4604,7 @@ function buildPolicyForm(p){
     html+='<div id="pla_other" style="flex:1;display:'+(laType==='Other'?'block':'none')+'">';
     html+='<input id="plifeassured" type="text" value="'+(p.LifeAssured||'')+'" placeholder="Full name of life assured" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px">';
     html+='</div></div></div>';
-    html+='<div class="g2" style="margin-top:10px">'+fld('ploanamt','Loan / Business Cover Amount',p.LoanAmount)+fld('pkeypos','Key Person Position',p.KeyPosition)+'</div>';
+    html+='<div class="g2" style="margin-top:10px">'+fld('pkeypos','Key Person Position',p.KeyPosition)+'<div></div></div>';
     // Estate Dutiable: Contingent Liability = Yes, Buy & Sell and Keyman = No
     var estDefault = p.EstateDutiable || (p.BizType==='Contingent Liability'?'Yes':'No');
     html+='<div class="fld" style="margin-top:10px"><label>Estate Dutiable</label>';
@@ -4616,7 +4616,7 @@ function buildPolicyForm(p){
 
   // PREMIUM
   html+=sec('Premium');
-  if(isRisk){
+  if(isRisk||isBiz){
     // Risk policies: premium is auto-summed from benefit rows — show read-only total
     // Hidden input keeps the value for collectPolicyForm
     html+='<div class="g2">'+
@@ -4652,12 +4652,19 @@ function buildPolicyForm(p){
   }
 
   // RISK COVER
-  if(isRisk){
+  if(isRisk||isBiz){
     // Seed POL_LUMP_ROWS from legacy single fields if rows are empty
     if(POL_LUMP_ROWS.length===0){
       if(p.BenDeath) POL_LUMP_ROWS.push({type:'Life Cover',label:'',cover:p.BenDeath,prem:'',premEsc:'',benEsc:''});
       if(p.BenDisability) POL_LUMP_ROWS.push({type:'Capital Disability',label:'',cover:p.BenDisability,prem:'',premEsc:'',benEsc:''});
       if(p.BenDreadDisease) POL_LUMP_ROWS.push({type:'Dread Disease / Severe Illness',label:p.DreadDiseaseNotes||'',cover:p.BenDreadDisease,prem:'',premEsc:'',benEsc:''});
+      // Legacy migration: older business policies stored cover in p.LoanAmount.
+      // Seed it as Life Cover on first open if no Life Cover row exists yet.
+      // Saved record is not mutated — only the editor view. On Save Policy the
+      // figure persists as BenDeath naturally via collectPolicyForm().
+      if(isBiz && p.LoanAmount && !POL_LUMP_ROWS.some(function(r){return r.type==='Life Cover';})){
+        POL_LUMP_ROWS.push({type:'Life Cover',label:'',cover:p.LoanAmount,prem:'',premEsc:'',benEsc:''});
+      }
     }
     html+=sec('Risk Cover — Lump Sums');
     html+='<div style="font-size:11px;color:#889;margin-bottom:8px">One row per benefit. Each benefit can have its own cover, premium and escalation.</div>';
@@ -5448,7 +5455,7 @@ function collectPolicyForm(){
     StartDate:g('psd'),ClientIsOwner:getR('pisowner'),Owner:g('pown'),Status:g('pst'),EstateDutiable:getR('pestate'),
     AdvisorOfRecord:(document.getElementById('pb_aor')?(document.getElementById('pb_aor').checked?'Yes':'No'):'Yes'),
     CountsForAUM:(document.getElementById('pb_aum')?(document.getElementById('pb_aum').checked?'Yes':'No'):'Yes'),
-    BizType:g('pbiztype'),LifeAssuredType:(document.getElementById('plifeassured_type')?document.getElementById('plifeassured_type').value:''),LifeAssured:g('plifeassured'),LoanAmount:g('ploanamt'),KeyPosition:g('pkeypos'),
+    BizType:g('pbiztype'),LifeAssuredType:(document.getElementById('plifeassured_type')?document.getElementById('plifeassured_type').value:''),LifeAssured:g('plifeassured'),LoanAmount:'',KeyPosition:g('pkeypos'),
     Premium:g('ppm'),Frequency:g('pfreq'),
     // For risk policies escalations live on rows; use first lump row for policy-level field
     // For other types read the single escalation fields as before
@@ -6405,12 +6412,16 @@ function openPolicySchedule(cid){
     });
   });
 
-  // Business by BizType
+  // Business by BizType — mirrors the personal cover structure (death/dis/dd/ip)
+  // so each BizType block can render the same row layout as Personal Cover.
   var bizGroups={};
   groups.business.pols.forEach(function(p){
     var bt=p.BizType||'Business Assurance';
-    if(!bizGroups[bt])bizGroups[bt]=0;
-    bizGroups[bt]+=N(p.LoanAmount||0)+N(p.BenDeath||0);
+    if(!bizGroups[bt]) bizGroups[bt]={death:0,dis:0,dd:0,ip:0};
+    bizGroups[bt].death += N(p.BenDeath);
+    bizGroups[bt].dis   += N(p.BenDisability);
+    bizGroups[bt].dd    += N(p.BenDreadDisease);
+    try{var ib=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):[];ib.forEach(function(r){bizGroups[bt].ip+=N(r.amount);});}catch(e){}
   });
 
   function R2(n){return n>0?'R\u00a0'+Math.round(n).toLocaleString('en-ZA'):null;}
@@ -6539,7 +6550,7 @@ function openPolicySchedule(cid){
       if(p.ClientIsOwner==='No'&&p.Owner) details.push('<span style="font-size:11px;color:#888">Owner: </span><span style="font-size:12px">'+p.Owner+'</span>');
       if(p.Insured&&p.Insured!==c.Name) details.push('<span style="font-size:11px;color:#888">Insured: </span><span style="font-size:12px">'+p.Insured+'</span>');
       if(isBiz&&p.BizType) details.push('<span style="font-size:11px;color:#888">Type: </span><span style="font-size:12px;font-weight:600;color:#92400e">'+p.BizType+'</span>');
-      if(isBiz&&p.LoanAmount) details.push('<span style="font-size:11px;color:#888">Loan/Cover: </span><span style="font-size:12px;font-weight:600">'+R(p.LoanAmount)+'</span>');
+      if(isBiz&&p.KeyPosition) details.push('<span style="font-size:11px;color:#888">Position: </span><span style="font-size:12px;font-weight:600">'+p.KeyPosition+'</span>');
       if(p.MaturityDate) details.push('<span style="font-size:11px;color:#888">Maturity: </span><span style="font-size:12px">'+FD(p.MaturityDate)+'</span>');
       if(isRA||isInv){
         // IRR — Stated IRR only, from insurer statement (p.IllustrativeRate).
@@ -6714,9 +6725,15 @@ function openPolicySchedule(cid){
   if(covIP>0)    covRows.push({lbl:'Income protection /pm',val:R2(covIP)});
   if(covRows.length) doc+=summaryBlock('Personal Cover','#2e7d5a',covRows);
 
-  // Business blocks
+  // Business blocks — same row layout as Personal Cover, one block per BizType
   Object.keys(bizGroups).forEach(function(bt){
-    if(bizGroups[bt]>0) doc+=summaryBlock('Business — '+bt,'#92400e',[{lbl:'Cover amount',val:R2(bizGroups[bt])}]);
+    var bg=bizGroups[bt];
+    var bizRows=[];
+    if(bg.death>0) bizRows.push({lbl:'Life cover',           val:R2(bg.death)});
+    if(bg.dis>0)   bizRows.push({lbl:'Capital disability',   val:R2(bg.dis)});
+    if(bg.dd>0)    bizRows.push({lbl:'Dread disease',        val:R2(bg.dd)});
+    if(bg.ip>0)    bizRows.push({lbl:'Income protection /pm',val:R2(bg.ip)});
+    if(bizRows.length) doc+=summaryBlock('Business — '+bt,'#92400e',bizRows);
   });
 
   // Investment & retirement performance summary block.
