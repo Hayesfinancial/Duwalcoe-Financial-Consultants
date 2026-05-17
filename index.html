@@ -1591,10 +1591,10 @@ function renderOverview(c,pols,roas,ctasks){
   var tPers=recurringPers.reduce(function(s,p){return s+parseFloat(p.Premium||0);},0);
   var tBiz=recurringBiz.reduce(function(s,p){return s+parseFloat(p.Premium||0);},0);
   var tLump=nonMonthlyPols.reduce(function(s,p){return s+parseFloat(p.Premium||0);},0);
-  var tDeath=activePols.filter(function(p){return p.Type!=='Business Assurance';}).reduce(function(s,p){return s+parseFloat(p.BenDeath||0);},0);
-  var tDis=activePols.filter(function(p){return p.Type!=='Business Assurance';}).reduce(function(s,p){return s+parseFloat(p.BenDisability||0);},0);
-  var tDD=activePols.filter(function(p){return p.Type!=='Business Assurance';}).reduce(function(s,p){return s+parseFloat(p.BenDreadDisease||0);},0);
-  var tBizCover=activePols.filter(function(p){return p.Type==='Business Assurance';}).reduce(function(s,p){return s+parseFloat(p.BenDeath||0)+parseFloat(p.BenDisability||0)+parseFloat(p.BenDreadDisease||0);},0);
+  var tDeath=activePols.filter(function(p){return p.Type!=='Business Assurance';}).reduce(function(s,p){return s+lumpSum(p,'Life Cover','BenDeath');},0);
+  var tDis=activePols.filter(function(p){return p.Type!=='Business Assurance';}).reduce(function(s,p){return s+lumpSum(p,'Capital Disability','BenDisability');},0);
+  var tDD=activePols.filter(function(p){return p.Type!=='Business Assurance';}).reduce(function(s,p){return s+lumpSum(p,'Dread Disease / Severe Illness','BenDreadDisease');},0);
+  var tBizCover=activePols.filter(function(p){return p.Type==='Business Assurance';}).reduce(function(s,p){return s+lumpSum(p,'Life Cover','BenDeath')+lumpSum(p,'Capital Disability','BenDisability')+lumpSum(p,'Dread Disease / Severe Illness','BenDreadDisease');},0);
   var famMembers=famFor(c.ID);
   // If SpouseName on client record but not yet in DB.links, show them as a virtual entry
   if(clean(c.SpouseName) && !famMembers.find(function(m){return m.Type==='Spouse';})){
@@ -4017,9 +4017,13 @@ function buildFnaUrl(c){
       Type:            p.Type||'',
       Premium:         p.Premium||'',
       Frequency:       p.Frequency||'',
-      BenDeath:        p.BenDeath||'',
-      BenDisability:   p.BenDisability||'',
-      BenDreadDisease: p.BenDreadDisease||'',
+      // Self-healing: send SUM of all matching lump rows from LumpBenefits JSON,
+      // falling back to the legacy single field for old policies without JSON.
+      // Avoids FNA under-counting multi-row policies that haven't been re-saved
+      // since the .find()-was-broken legacy single-field write was fixed.
+      BenDeath:        (function(){ var v=lumpSum(p,'Life Cover','BenDeath'); return v?String(v):''; })(),
+      BenDisability:   (function(){ var v=lumpSum(p,'Capital Disability','BenDisability'); return v?String(v):''; })(),
+      BenDreadDisease: (function(){ var v=lumpSum(p,'Dread Disease / Severe Illness','BenDreadDisease'); return v?String(v):''; })(),
       IncomeBenefits:  p.IncomeBenefits||'',
       BenFundValue:    p.BenFundValue||'',
       LoanAmount:      p.LoanAmount||'',
@@ -5167,6 +5171,44 @@ function calcPolicyIRR(startDateStr, premium, frequency, premEsc, fundValue){
 
 function N(v){var n=parseFloat(String(v||'0').replace(/[^0-9.-]/g,''));return isNaN(n)?0:n;}
 
+// ── Cover aggregation helpers ────────────────────────────────────────────
+// Lump benefits within a policy are ADDITIVE — a Discovery policy with two
+// Life Cover rows of R270k + R200k = R470k death cover. The legacy single
+// field (BenDeath/BenDisability/BenDreadDisease) historically held only the
+// first row's amount, so reading the policy via those fields under-counts.
+// lumpSum() reads the LumpBenefits JSON array and sums all matching rows.
+// Falls back to the legacy single field only when no JSON is present (very
+// old policies). legacyKey = the single-field name to fall back to.
+function lumpSum(p, matchType, legacyKey){
+  if(p && p.LumpBenefits){
+    try{
+      var rows=JSON.parse(p.LumpBenefits);
+      if(rows && rows.length){
+        var tot=0;
+        rows.forEach(function(r){ if(r.type===matchType) tot+=N(r.cover); });
+        return tot;
+      }
+    }catch(e){}
+  }
+  return N(p?p[legacyKey]:0);
+}
+// Income benefits within a policy are NOT additive — multiple rows describe
+// phases of one continuous income stream (e.g. Limited 2yr → Extended to 65).
+// Return the max amount, not the sum.
+function incomeMax(p){
+  if(p && p.IncomeBenefits){
+    try{
+      var rows=JSON.parse(p.IncomeBenefits);
+      if(rows && rows.length){
+        var mx=0;
+        rows.forEach(function(r){ var a=N(r.amount); if(a>mx) mx=a; });
+        return mx;
+      }
+    }catch(e){}
+  }
+  return 0;
+}
+
 function irrBadge(irr){
   if(irr === null || irr === undefined) return '';
   var col = irr >= 10 ? '#166534' : irr >= 6 ? '#1e40af' : irr >= 0 ? '#92400e' : '#991b1b';
@@ -5470,12 +5512,16 @@ function collectPolicyForm(){
       if(r) return r.value.trim();
       return POL_LUMP_ROWS.length?String(POL_LUMP_ROWS[0].benEsc||''):'';
     })(),
-    // Legacy single fields — populated from first matching row for FNA compatibility
-    BenDeath:(function(){ var r=POL_LUMP_ROWS.find(function(x){return x.type==='Life Cover';}); return r?r.cover:''; })(),
-    BenDisability:(function(){ var r=POL_LUMP_ROWS.find(function(x){return x.type==='Capital Disability';}); return r?r.cover:''; })(),
-    BenDreadDisease:(function(){ var r=POL_LUMP_ROWS.find(function(x){return x.type==='Dread Disease / Severe Illness';}); return r?r.cover:''; })(),
+    // Legacy single fields — populated by SUMMING all matching lump rows.
+    // Multiple Life Cover rows on one policy are additive (e.g. bond cover +
+    // personal cover = total death cover). Was using .find() = first-row-only,
+    // which silently under-counted multi-row policies. Same rule for
+    // Capital Disability and Dread Disease.
+    BenDeath:(function(){ var s=0; POL_LUMP_ROWS.forEach(function(x){if(x.type==='Life Cover')s+=N(x.cover);}); return s?String(s):''; })(),
+    BenDisability:(function(){ var s=0; POL_LUMP_ROWS.forEach(function(x){if(x.type==='Capital Disability')s+=N(x.cover);}); return s?String(s):''; })(),
+    BenDreadDisease:(function(){ var s=0; POL_LUMP_ROWS.forEach(function(x){if(x.type==='Dread Disease / Severe Illness')s+=N(x.cover);}); return s?String(s):''; })(),
     DreadDiseaseType:'Lump Sum',
-    DreadDiseaseNotes:(function(){ var r=POL_LUMP_ROWS.find(function(x){return x.type==='Dread Disease / Severe Illness';}); return r?r.label:''; })(),
+    DreadDiseaseNotes:(function(){ var labels=POL_LUMP_ROWS.filter(function(x){return x.type==='Dread Disease / Severe Illness' && x.label;}).map(function(x){return x.label;}); return labels.join(' · '); })(),
     LumpBenefits:JSON.stringify(POL_LUMP_ROWS),
     BenSurrenderValue:g('pb_surr')||g('pb_surr2'),
     BenFundValue:g('pb_fv'),BenMaturityValue:g('pb_matval'),
@@ -6404,28 +6450,31 @@ function openPolicySchedule(cid){
   var totAnnual =annualPols.reduce(function(s,p){return s+N(p.Premium);},0);
 
   // Cover totals (personal only).
-  // Income Protection per policy: take MAX of rows, not sum. Multiple income
-  // benefit rows on one policy describe phases of a single income stream
-  // (e.g. Limited 2yr → Extended to age 65), not additive concurrent benefits.
+  // Lump benefits: SUM all matching rows per policy (multi-row policies are
+  // additive). Income benefits: MAX of rows per policy (phases of one stream).
+  // Reads directly from LumpBenefits/IncomeBenefits JSON via lumpSum/incomeMax
+  // helpers — self-healing for any policy still carrying stale legacy fields.
   var covDeath=0,covDis=0,covDD=0,covIP=0;
   personalGroups.forEach(function(g){
     g.pols.forEach(function(p){
-      covDeath+=N(p.BenDeath); covDis+=N(p.BenDisability); covDD+=N(p.BenDreadDisease);
-      try{var ib=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):[];var polMax=0;ib.forEach(function(r){var amt=N(r.amount);if(amt>polMax)polMax=amt;});covIP+=polMax;}catch(e){}
+      covDeath += lumpSum(p,'Life Cover','BenDeath');
+      covDis   += lumpSum(p,'Capital Disability','BenDisability');
+      covDD    += lumpSum(p,'Dread Disease / Severe Illness','BenDreadDisease');
+      covIP    += incomeMax(p);
     });
   });
 
   // Business by BizType — mirrors the personal cover structure (death/dis/dd/ip)
   // so each BizType block can render the same row layout as Personal Cover.
-  // IP per policy uses MAX of rows (phases of one stream), matching personal logic.
+  // Same aggregation rules: lump sums add, income max.
   var bizGroups={};
   groups.business.pols.forEach(function(p){
     var bt=p.BizType||'Business Assurance';
     if(!bizGroups[bt]) bizGroups[bt]={death:0,dis:0,dd:0,ip:0};
-    bizGroups[bt].death += N(p.BenDeath);
-    bizGroups[bt].dis   += N(p.BenDisability);
-    bizGroups[bt].dd    += N(p.BenDreadDisease);
-    try{var ib=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):[];var polMax=0;ib.forEach(function(r){var amt=N(r.amount);if(amt>polMax)polMax=amt;});bizGroups[bt].ip+=polMax;}catch(e){}
+    bizGroups[bt].death += lumpSum(p,'Life Cover','BenDeath');
+    bizGroups[bt].dis   += lumpSum(p,'Capital Disability','BenDisability');
+    bizGroups[bt].dd    += lumpSum(p,'Dread Disease / Severe Illness','BenDreadDisease');
+    bizGroups[bt].ip    += incomeMax(p);
   });
 
   function R2(n){return n>0?'R\u00a0'+Math.round(n).toLocaleString('en-ZA'):null;}
@@ -6534,9 +6583,12 @@ function openPolicySchedule(cid){
                  + rows.map(function(r){return escHtml(r.label)+': '+R(r.cover);}).join('<br>')
                  + '</div>';
         }
-        s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+R(p.BenDeath)+lumpBreakdown(['Life Cover'])+'</td>';
-        s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+R(p.BenDisability)+lumpBreakdown(['Capital Disability'])+'</td>';
-        s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+R(p.BenDreadDisease)+lumpBreakdown(['Dread Disease / Severe Illness'])+'</td>';
+        // Use lumpSum() to compute the aggregate directly from LumpBenefits JSON
+        // — self-healing: multi-row policies show correct sums even if the legacy
+        // BenDeath/etc. field is stale (was first-row-only before recent fix).
+        s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+R(lumpSum(p,'Life Cover','BenDeath'))+lumpBreakdown(['Life Cover'])+'</td>';
+        s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+R(lumpSum(p,'Capital Disability','BenDisability'))+lumpBreakdown(['Capital Disability'])+'</td>';
+        s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+R(lumpSum(p,'Dread Disease / Severe Illness','BenDreadDisease'))+lumpBreakdown(['Dread Disease / Severe Illness'])+'</td>';
       } else if(isRA||isInv){
         // Life Annuity has no fund / projected value — its income
         // is shown in the detail row (it can't be summed with capital values
@@ -6667,9 +6719,9 @@ function openPolicySchedule(cid){
       var n=N(p.Premium);
       if(!isNonMonthly(p)) sectM+=n;
       if(isRisk||isBiz){
-        sectDeath += N(p.BenDeath);
-        sectDis   += N(p.BenDisability);
-        sectDD    += N(p.BenDreadDisease);
+        sectDeath += lumpSum(p,'Life Cover','BenDeath');
+        sectDis   += lumpSum(p,'Capital Disability','BenDisability');
+        sectDD    += lumpSum(p,'Dread Disease / Severe Illness','BenDreadDisease');
       } else if(isRA||isInv){
         sectFV  += N(p.BenFundValue);
         sectProj += projectPolicy(p).value;
