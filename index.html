@@ -6403,17 +6403,21 @@ function openPolicySchedule(cid){
   var annualPols=nonMonthly.filter(function(p){return p.Frequency==='Annually';});
   var totAnnual =annualPols.reduce(function(s,p){return s+N(p.Premium);},0);
 
-  // Cover totals (personal only)
+  // Cover totals (personal only).
+  // Income Protection per policy: take MAX of rows, not sum. Multiple income
+  // benefit rows on one policy describe phases of a single income stream
+  // (e.g. Limited 2yr → Extended to age 65), not additive concurrent benefits.
   var covDeath=0,covDis=0,covDD=0,covIP=0;
   personalGroups.forEach(function(g){
     g.pols.forEach(function(p){
       covDeath+=N(p.BenDeath); covDis+=N(p.BenDisability); covDD+=N(p.BenDreadDisease);
-      try{var ib=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):[];ib.forEach(function(r){covIP+=N(r.amount);});}catch(e){}
+      try{var ib=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):[];var polMax=0;ib.forEach(function(r){var amt=N(r.amount);if(amt>polMax)polMax=amt;});covIP+=polMax;}catch(e){}
     });
   });
 
   // Business by BizType — mirrors the personal cover structure (death/dis/dd/ip)
   // so each BizType block can render the same row layout as Personal Cover.
+  // IP per policy uses MAX of rows (phases of one stream), matching personal logic.
   var bizGroups={};
   groups.business.pols.forEach(function(p){
     var bt=p.BizType||'Business Assurance';
@@ -6421,7 +6425,7 @@ function openPolicySchedule(cid){
     bizGroups[bt].death += N(p.BenDeath);
     bizGroups[bt].dis   += N(p.BenDisability);
     bizGroups[bt].dd    += N(p.BenDreadDisease);
-    try{var ib=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):[];ib.forEach(function(r){bizGroups[bt].ip+=N(r.amount);});}catch(e){}
+    try{var ib=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):[];var polMax=0;ib.forEach(function(r){var amt=N(r.amount);if(amt>polMax)polMax=amt;});bizGroups[bt].ip+=polMax;}catch(e){}
   });
 
   function R2(n){return n>0?'R\u00a0'+Math.round(n).toLocaleString('en-ZA'):null;}
@@ -6515,9 +6519,24 @@ function openPolicySchedule(cid){
       s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;font-size:12px">'+FD(p.StartDate)+'</td>';
 
       if(isRisk||isBiz){
-        s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+R(p.BenDeath)+'</td>';
-        s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+R(p.BenDisability)+'</td>';
-        s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+R(p.BenDreadDisease)+(p.DreadDiseaseType?'<div style="font-size:10px;color:#888;font-weight:400">'+p.DreadDiseaseType+'</div>':'')+'</td>';
+        // Per-row label breakdown: pull LumpBenefits JSON and list labelled rows
+        // of the matching type under the aggregate figure. Falls back gracefully
+        // for legacy policies with no LumpBenefits — those just show the bare
+        // aggregate figure as before. Behaviour unchanged for single-row /
+        // unlabelled policies.
+        var _lumps=[]; try{ _lumps=p.LumpBenefits?JSON.parse(p.LumpBenefits):[]; }catch(e){}
+        function lumpBreakdown(matchTypes){
+          var rows=_lumps.filter(function(r){return matchTypes.indexOf(r.type)>-1 && N(r.cover)>0 && r.label;});
+          if(rows.length===0) return '';
+          // Only show breakdown when there's more than one labelled row, OR
+          // when the single row has a meaningful label worth surfacing.
+          return '<div style="font-size:10px;color:#888;font-weight:400;margin-top:2px;line-height:1.4">'
+                 + rows.map(function(r){return escHtml(r.label)+': '+R(r.cover);}).join('<br>')
+                 + '</div>';
+        }
+        s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+R(p.BenDeath)+lumpBreakdown(['Life Cover'])+'</td>';
+        s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+R(p.BenDisability)+lumpBreakdown(['Capital Disability'])+'</td>';
+        s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+R(p.BenDreadDisease)+lumpBreakdown(['Dread Disease / Severe Illness'])+'</td>';
       } else if(isRA||isInv){
         // Life Annuity has no fund / projected value — its income
         // is shown in the detail row (it can't be summed with capital values
