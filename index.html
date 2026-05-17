@@ -4953,21 +4953,45 @@ function getKnownBeneficiaries(){
   return names;
 }
 
-// Estate duty category label
+// Estate duty category label.
+// s4(q) of the Estate Duty Act exempts inheritance by a *legally married* spouse —
+// so Spouse alone gets the green non-dutiable tag. Life Partner inheritance is
+// dutiable (a long-term cohabitant is not a "spouse" for s4(q) purposes despite
+// being a factual dependant for s37C of the Pension Funds Act). Children,
+// parents, dependants and other third parties are also dutiable, apportioned to
+// their share of the policy proceeds. Estate-as-beneficiary means proceeds form
+// part of the deceased estate (dutiable, executor's fees apply). Trusts depend
+// on structure — flagged neutrally because the answer is case-specific.
 function estDutyLabel(type){
-  if(type==='Spouse')      return {label:'4(q) — not dutiable', color:'#2e7d32'};
-  if(type==='Estate')      return {label:'Dutiable — estate expenses', color:'#b45309'};
-  return                          {label:'Dutiable — apportionable', color:'#c62828'};
+  if(type==='Spouse')        return {label:'4(q) — not dutiable', color:'#2e7d32'};
+  if(type==='Life Partner')  return {label:'Dutiable — no 4(q) abatement', color:'#c62828'};
+  if(type==='Child')         return {label:'Dutiable — apportionable', color:'#c62828'};
+  if(type==='Parent')        return {label:'Dutiable — apportionable', color:'#c62828'};
+  if(type==='Dependant')     return {label:'Dutiable — apportionable', color:'#c62828'};
+  if(type==='Trust')         return {label:'Depends on trust structure', color:'#667085'};
+  if(type==='Estate')        return {label:'Dutiable — estate expenses', color:'#b45309'};
+  if(type==='Other')         return {label:'Dutiable — apportionable', color:'#c62828'};
+  // Legacy "Third Party" tag — still dutiable, but flag generic
+  if(type==='Third Party')   return {label:'Dutiable — re-tag for accuracy', color:'#c62828'};
+  return                            {label:'Dutiable — apportionable', color:'#c62828'};
 }
 
 function renderPolBens(){
   if(POL_BENS.length===0) return '<div style="font-size:12px;color:#aaa;padding:6px 0">No beneficiaries added yet.</div>';
-  // 3 estate duty categories only
-  var benTypes=['Spouse','Estate','Third Party'];
+  // Expanded type list. "Third Party" retained for back-compat when a saved
+  // policy still has the legacy tag — the editor shows a nudge in that case so
+  // the user can pick a more specific category. New beneficiaries default to
+  // "Other" rather than "Third Party" so the data stays clean going forward.
+  var benTypes=['Spouse','Life Partner','Child','Parent','Dependant','Trust','Estate','Other'];
   var known = getKnownBeneficiaries();
 
   return POL_BENS.map(function(b,i){
-    var duty = estDutyLabel(b.type||'Third Party');
+    var savedType = b.type||'Other';
+    // If a legacy "Third Party" tag exists, keep it in the dropdown so we
+    // don't silently mutate the value, but flag it for re-tagging.
+    var typeOptions = benTypes.slice();
+    if(savedType==='Third Party') typeOptions.unshift('Third Party');
+    var duty = estDutyLabel(savedType);
     // Build name datalist for autocomplete
     var listId = 'ben_names_'+i;
     var datalist = '<datalist id="'+listId+'">'+known.map(function(k){
@@ -4976,9 +5000,17 @@ function renderPolBens(){
 
     // Auto-fill button if spouse selected and spouse name known
     var autoFill = '';
-    if(b.type==='Spouse' && known.length>0 && known[0].type==='Spouse'){
+    if(savedType==='Spouse' && known.length>0 && known[0].type==='Spouse'){
       autoFill = '<button type="button" onclick="POL_BENS['+i+'].name=\''+known[0].name+'\';document.getElementById(\'polBensWrap\').innerHTML=renderPolBens()" '+
         'style="background:var(--navy);color:#fff;border:none;border-radius:6px;padding:7px 10px;cursor:pointer;font-size:11px;white-space:nowrap;flex-shrink:0">Auto-fill</button>';
+    }
+
+    // Legacy "Third Party" nudge — non-blocking prompt to re-tag with a more
+    // specific category. Disappears once the user picks anything else.
+    var legacyNudge = '';
+    if(savedType==='Third Party'){
+      legacyNudge = '<div style="font-size:10px;color:#92400e;background:#fffbeb;border:1px solid #fcd34d;border-radius:5px;padding:4px 8px;margin-top:6px">'+
+        '⚠ "Third Party" is generic — pick a specific category (Life Partner, Child, etc.) for accurate estate-duty analysis.</div>';
     }
 
     return '<div style="background:var(--smoke);border-radius:8px;padding:10px 12px;margin-bottom:8px">'+
@@ -4986,8 +5018,8 @@ function renderPolBens(){
       '<div style="display:flex;gap:8px;align-items:center">'+
       // Type dropdown
       '<select onchange="POL_BENS['+i+'].type=this.value;if(this.value===\'Spouse\'){var k=getKnownBeneficiaries();if(k.length&&k[0].type===\'Spouse\')POL_BENS['+i+'].name=k[0].name;}document.getElementById(\'polBensWrap\').innerHTML=renderPolBens()" '+
-        'style="border:1.5px solid var(--mist);border-radius:7px;padding:7px 10px;font-family:inherit;font-size:13px;min-width:130px">'+
-      benTypes.map(function(o){return '<option value="'+o+'"'+(( b.type||'Third Party')===o?' selected':'')+'>'+o+'</option>';}).join('')+
+        'style="border:1.5px solid var(--mist);border-radius:7px;padding:7px 10px;font-family:inherit;font-size:13px;min-width:140px">'+
+      typeOptions.map(function(o){return '<option value="'+o+'"'+(savedType===o?' selected':'')+'>'+o+'</option>';}).join('')+
       '</select>'+
       // Name input with datalist autocomplete
       '<input type="text" value="'+(b.name||'')+'" list="'+listId+'" placeholder="Beneficiary name" '+
@@ -5000,6 +5032,7 @@ function renderPolBens(){
       '<button type="button" onclick="POL_BENS.splice('+i+',1);document.getElementById(\'polBensWrap\').innerHTML=renderPolBens()" '+
         'style="background:var(--rose);color:#fff;border:none;border-radius:6px;padding:6px 10px;cursor:pointer;font-size:12px;font-weight:700;flex-shrink:0">✕</button>'+
       '</div>'+
+      legacyNudge+
       // Estate duty indicator
       '<div style="font-size:11px;font-weight:600;color:'+duty.color+';margin-top:6px;padding-left:2px">⚖ '+duty.label+'</div>'+
       '</div>';
@@ -5007,7 +5040,7 @@ function renderPolBens(){
 }
 
 function addPolBen(){
-  POL_BENS.push({type:'Third Party',name:'',pct:''});
+  POL_BENS.push({type:'Other',name:'',pct:''});
   document.getElementById('polBensWrap').innerHTML=renderPolBens();
 }
 
@@ -6464,6 +6497,110 @@ function openPolicySchedule(cid){
     });
   });
 
+  // ── BY BENEFICIARY roll-up ─────────────────────────────────────────────
+  // Group beneficiary entitlements across all non-business policies so the
+  // client can see "what does each named beneficiary receive on my death".
+  //
+  // Buckets per beneficiary:
+  //   death  — % share of Life Cover lump rows on personal risk policies
+  //   inv    — % share of fund value on Investment / TFS / Endowment policies
+  //   ret    — % share of fund value on RA / Pension / Provident / Pres / LA
+  //
+  // Deliberately excluded:
+  //   - Disability, Dread Disease, Income Protection (pay to insured, not beneficiary)
+  //   - All Business Assurance policies (proceeds pay to business, not personal beneficiary)
+  //
+  // Grouping is by exact name string (case-insensitive, trimmed). A fuzzy
+  // duplicate detector flags possible typos/variants (e.g. "M Beattie" vs
+  // "Michelle Beattie") as a warning — never auto-merged.
+  var _raTypesB =['Retirement Annuity','Pension Fund','Provident Fund','Pension Preservation','Provident Preservation','Living Annuity'];
+  var _invTypesB=['Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment','Unit Trust','Tax Free Savings'];
+  var benMap={}; // key: normalised name; value: {displayName, types:[...], death, inv, ret, policyCount, policiesSeen:Set}
+  function normName(s){ return String(s||'').toLowerCase().replace(/\s+/g,' ').replace(/[.,]/g,'').trim(); }
+  personalGroups.forEach(function(g){
+    g.pols.forEach(function(p){
+      var bens=[]; try{ bens=p.Beneficiaries?JSON.parse(p.Beneficiaries):[]; }catch(e){}
+      if(!bens.length) return;
+      var t = p.Type||'';
+      var isRiskP = (t==='Life / Income Protector' || t==='');
+      var isInvP  = _invTypesB.indexOf(t)>=0;
+      var isRaP   = _raTypesB.indexOf(t)>=0;
+      if(!isRiskP && !isInvP && !isRaP) return; // skip Medical etc.
+      var polDeath = isRiskP ? lumpSum(p,'Life Cover','BenDeath') : 0;
+      var polFV    = (isInvP||isRaP) ? N(p.BenFundValue) : 0;
+      bens.forEach(function(b){
+        if(!b.name || !String(b.name).trim()) return;
+        var pct = N(b.pct) / 100;
+        if(pct<=0 || pct>1) pct = 1; // empty/garbage % treated as 100%
+        var key = normName(b.name);
+        if(!benMap[key]){
+          benMap[key] = {displayName:String(b.name).trim(), types:[], death:0, inv:0, ret:0, policyIds:{}};
+        }
+        var entry = benMap[key];
+        // Track types seen for this beneficiary (for the mode/conflict check)
+        var typ = b.type||'Other';
+        if(entry.types.indexOf(typ)<0) entry.types.push(typ);
+        if(isRiskP) entry.death += polDeath * pct;
+        if(isInvP)  entry.inv   += polFV    * pct;
+        if(isRaP)   entry.ret   += polFV    * pct;
+        entry.policyIds[p.ID||p.PolicyNo||(p.Insurer+'-'+p.Product)] = true;
+      });
+    });
+  });
+  // Build sorted list of beneficiaries (by total entitlement, descending)
+  var benList = Object.keys(benMap).map(function(k){
+    var e=benMap[k];
+    e._total = e.death + e.inv + e.ret;
+    e._policyCount = Object.keys(e.policyIds).length;
+    return e;
+  }).sort(function(a,b){return b._total-a._total;});
+
+  // Fuzzy duplicate detection — Levenshtein distance ≤ 2 between normalised
+  // names OR shared surname + same first-letter-of-first-name. Suggestions
+  // only — never auto-merge.
+  function levenshtein(a,b){
+    if(a===b) return 0;
+    var m=a.length, n=b.length;
+    if(!m) return n; if(!n) return m;
+    var prev=new Array(n+1), cur=new Array(n+1), i, j;
+    for(j=0;j<=n;j++) prev[j]=j;
+    for(i=1;i<=m;i++){
+      cur[0]=i;
+      for(j=1;j<=n;j++){
+        var cost = a.charAt(i-1)===b.charAt(j-1) ? 0 : 1;
+        cur[j] = Math.min(cur[j-1]+1, prev[j]+1, prev[j-1]+cost);
+      }
+      for(j=0;j<=n;j++) prev[j]=cur[j];
+    }
+    return prev[n];
+  }
+  function surnameToken(n){ var parts=normName(n).split(' '); return parts.length>1?parts[parts.length-1]:n; }
+  function firstInitial(n){ var parts=normName(n).split(' '); return parts[0]?parts[0].charAt(0):''; }
+  var benDupes=[]; // [{a:'M Beattie', b:'Michelle Beattie'}]
+  for(var ia=0; ia<benList.length; ia++){
+    for(var ib=ia+1; ib<benList.length; ib++){
+      var na=benList[ia].displayName, nb=benList[ib].displayName;
+      var nan=normName(na), nbn=normName(nb);
+      if(nan===nbn) continue; // shouldn't happen post-grouping, but defensive
+      var dist = levenshtein(nan, nbn);
+      var sameSurname = surnameToken(na)===surnameToken(nb) && surnameToken(na).length>2;
+      var sameInitial = firstInitial(na)===firstInitial(nb);
+      if(dist<=2 || (sameSurname && sameInitial)){
+        benDupes.push({a:na, b:nb});
+      }
+    }
+  }
+  // Count policies still using legacy "Third Party" tag for re-tag warning
+  var legacyTagCount = 0;
+  personalGroups.forEach(function(g){
+    g.pols.forEach(function(p){
+      var bens=[]; try{ bens=p.Beneficiaries?JSON.parse(p.Beneficiaries):[]; }catch(e){}
+      if(bens.some(function(b){return b.type==='Third Party';})) legacyTagCount++;
+    });
+  });
+  // End beneficiary roll-up calculation block.
+
+
   // Business by BizType — mirrors the personal cover structure (death/dis/dd/ip)
   // so each BizType block can render the same row layout as Personal Cover.
   // Same aggregation rules: lump sums add, income max.
@@ -6498,9 +6635,24 @@ function openPolicySchedule(cid){
   function benDisplay(bens){
     if(!bens.length) return '—';
     return bens.map(function(b){
-      var t=b.type||'Third Party';
-      var col=t==='Spouse'?'#2e7d32':t==='Estate'?'#b45309':'#c62828';
-      var tag=t==='Spouse'?'4(q)':t==='Estate'?'Estate':'3rd Party';
+      var t=b.type||'Other';
+      // Colour: green only for legally-married Spouse (s4(q) abatement).
+      // Trust = grey (case-specific). Estate = amber (estate-pathed).
+      // Everything else dutiable apportionable = red.
+      var col;
+      if(t==='Spouse')      col='#2e7d32';
+      else if(t==='Trust')  col='#667085';
+      else if(t==='Estate') col='#b45309';
+      else                  col='#c62828';
+      // Short tag for the schedule. Spouse → 4(q); Estate → Estate; Trust → Trust;
+      // legacy "Third Party" → 3rd Party (keeps the old visual for not-yet-retagged
+      // policies); everything else → the type name as-is (Life Partner / Child / etc.)
+      var tag;
+      if(t==='Spouse')           tag='4(q)';
+      else if(t==='Estate')      tag='Estate';
+      else if(t==='Trust')       tag='Trust';
+      else if(t==='Third Party') tag='3rd Party';
+      else                       tag=t;
       return '<span style="color:'+col+';font-weight:600">'+(b.name||t)+(b.pct?' ('+b.pct+'%)':'')+'</span>'+
              '<span style="color:'+col+';font-size:10px"> ['+tag+']</span>';
     }).join(' &nbsp;·&nbsp; ');
@@ -6848,6 +7000,69 @@ function openPolicySchedule(cid){
     if(invRows.length>0) doc+=summaryBlock('Investment & Retirement Performance','#2563ab',invRows);
   }
   doc+='</div></div>';
+
+  // ── BY BENEFICIARY — ON DEATH ──
+  // Full-width section. Shows what each named beneficiary receives if the
+  // client dies today: Death lump-sum cover + Investment fund value + RA/LA
+  // fund value. Disability/Dread/IP deliberately excluded (those pay to the
+  // insured while alive). Business Assurance excluded (proceeds pay to
+  // business, not personal beneficiary).
+  if(benList.length>0){
+    doc+='<div style="border:2px solid #2e7d5a;border-radius:10px;margin-bottom:24px;overflow:hidden">';
+    doc+='<div style="background:#2e7d5a;color:#fff;padding:9px 16px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.8px">By Beneficiary — On Death</div>';
+    doc+='<table style="width:100%;border-collapse:collapse;font-size:13px">';
+    // Column header
+    doc+='<thead><tr style="background:#f5f5f2;font-size:10px;color:#666;text-transform:uppercase;letter-spacing:.3px">';
+    doc+='<th style="text-align:left;padding:8px 12px;border-bottom:1px solid #e0e0d8">Beneficiary</th>';
+    doc+='<th style="text-align:right;padding:8px 12px;border-bottom:1px solid #e0e0d8">Death cover</th>';
+    doc+='<th style="text-align:right;padding:8px 12px;border-bottom:1px solid #e0e0d8">Investment value</th>';
+    doc+='<th style="text-align:right;padding:8px 12px;border-bottom:1px solid #e0e0d8">Retirement value <span style="text-transform:none;font-size:9px;color:#888">§37C</span></th>';
+    doc+='<th style="text-align:right;padding:8px 12px;border-bottom:1px solid #e0e0d8">Policies</th>';
+    doc+='</tr></thead><tbody>';
+    benList.forEach(function(e, idx){
+      var rowBg = idx%2===0?'#ffffff':'#fafaf8';
+      // Type tag — use the most common type; if multiple, flag mixed
+      var typeTag, typeCol;
+      if(e.types.length===1){
+        var tt = e.types[0];
+        if(tt==='Spouse'){ typeTag='Spouse'; typeCol='#2e7d32'; }
+        else if(tt==='Estate'){ typeTag='Estate'; typeCol='#b45309'; }
+        else if(tt==='Trust'){ typeTag='Trust'; typeCol='#667085'; }
+        else if(tt==='Third Party'){ typeTag='3rd Party'; typeCol='#c62828'; }
+        else { typeTag=tt; typeCol='#c62828'; }
+      } else {
+        typeTag='⚠ mixed types: '+e.types.join(', '); typeCol='#92400e';
+      }
+      doc+='<tr style="background:'+rowBg+'">';
+      doc+='<td style="padding:9px 12px;border-bottom:1px solid #eeede8">'+
+           '<div style="font-weight:700;color:#0e413a">'+escHtml(e.displayName)+'</div>'+
+           '<div style="font-size:10px;color:'+typeCol+';font-weight:600;margin-top:1px">'+typeTag+'</div>'+
+           '</td>';
+      doc+='<td style="padding:9px 12px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+(e.death>0?'R '+Math.round(e.death).toLocaleString('en-ZA'):'<span style="color:#bbb;font-weight:400">—</span>')+'</td>';
+      doc+='<td style="padding:9px 12px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+(e.inv>0?'R '+Math.round(e.inv).toLocaleString('en-ZA'):'<span style="color:#bbb;font-weight:400">—</span>')+'</td>';
+      doc+='<td style="padding:9px 12px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+(e.ret>0?'R '+Math.round(e.ret).toLocaleString('en-ZA'):'<span style="color:#bbb;font-weight:400">—</span>')+'</td>';
+      doc+='<td style="padding:9px 12px;border-bottom:1px solid #eeede8;text-align:right;color:#555">'+e._policyCount+'</td>';
+      doc+='</tr>';
+    });
+    doc+='</tbody></table>';
+    // Footnotes & warnings
+    var warnings=[];
+    if(benDupes.length>0){
+      var dupeStr = benDupes.map(function(d){return '"'+escHtml(d.a)+'" / "'+escHtml(d.b)+'"';}).join(' &nbsp;·&nbsp; ');
+      warnings.push('⚠ <strong>Possible duplicate beneficiaries</strong> — name typed differently on different policies: '+dupeStr+'. If same person, fix the typo so totals consolidate.');
+    }
+    if(legacyTagCount>0){
+      warnings.push('⚠ <strong>'+legacyTagCount+' polic'+(legacyTagCount===1?'y':'ies')+'</strong> still use the legacy "Third Party" beneficiary tag. Re-tag with a specific category (Life Partner, Child, Parent, Other) for accurate estate-duty analysis.');
+    }
+    if(warnings.length>0){
+      doc+='<div style="padding:10px 14px;background:#fffbeb;border-top:1px solid #fcd34d;font-size:11px;color:#92400e;line-height:1.6">'+warnings.join('<br>')+'</div>';
+    }
+    // §37C footnote
+    doc+='<div style="padding:8px 14px;background:#f5f5f2;border-top:1px solid #e0e0d8;font-size:10px;color:#888;line-height:1.5">'+
+         '<strong>§37C</strong> — Retirement fund proceeds (RA, Pension, Provident, Preservation, Living Annuity) are distributed by trustees in terms of Section 37C of the Pension Funds Act. Nominations are guidance; trustees must consider all financial dependants and may apportion differently. Disability, Dread Disease and Income Protection pay to the insured (not beneficiaries) and are not shown here.'+
+         '</div>';
+    doc+='</div>';
+  }
 
   // ── POLICY TABLE ──
   doc+='<table>';
