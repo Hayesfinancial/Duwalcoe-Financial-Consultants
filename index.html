@@ -6794,6 +6794,29 @@ function openPolicySchedule(cid){
 
   function buildTableSection(grp){
     if(!grp.pols.length) return '';
+    // Order within section: insurer alphabetical, then inception date oldest
+    // first. Tiebreaker: policy number lexicographic (keeps order stable when
+    // two policies share insurer + same inception date). Policies missing a
+    // parseable inception date sort to the end of their insurer block (using
+    // '9999' as the y+m+d key) rather than the start, so the chronological
+    // story isn't disrupted by un-dated entries.
+    grp.pols.sort(function(a,b){
+      var ia=(a.Insurer||'').toLowerCase();
+      var ib=(b.Insurer||'').toLowerCase();
+      if(ia<ib) return -1;
+      if(ia>ib) return 1;
+      var da=parseDateVal(a.StartDate);
+      var db=parseDateVal(b.StartDate);
+      var ka=da.y?(da.y+(da.m||'00')+(da.d||'00')):'99999999';
+      var kb=db.y?(db.y+(db.m||'00')+(db.d||'00')):'99999999';
+      if(ka<kb) return -1;
+      if(ka>kb) return 1;
+      var pa=String(a.PolicyNo||'');
+      var pb=String(b.PolicyNo||'');
+      if(pa<pb) return -1;
+      if(pa>pb) return 1;
+      return 0;
+    });
     var isRisk  = grp===groups.personal;
     var isRA    = grp===groups.ra;
     var isInv   = grp===groups.invest;
@@ -6903,22 +6926,14 @@ function openPolicySchedule(cid){
       // Detail row — beneficiaries, income benefits, notes, owner
       var details=[];
       if(bens.length) details.push('<span style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.3px">Beneficiary: </span>'+benDisplay(bens));
-      // Payer display — pull from structured fields first (PayerType/PayerName),
-      // fall back to legacy Payer text for un-migrated policies. Only show
-      // when the payer is *not* the client (so personal Client-paid policies
-      // stay clean).
+      // Payer display — always shown for consistency across every policy.
+      // Uses the same resolvedPayer logic as the Cost block so the per-policy
+      // line agrees with the totals. Client-paid policies show the client's
+      // name; Company/Third Party show the named payer; un-migrated policies
+      // with no PayerType and no typed Payer fall back to "(unallocated)".
       (function(){
-        var pt = p.PayerType||'';
-        var name = '';
-        if(pt==='Client'){ return; /* don't show — it's the client themselves */ }
-        if(pt==='Third Party' || pt==='Company'){
-          name = (p.PayerName||'').trim() || (pt==='Company'?'Company':'Third party');
-        } else if(p.Payer && p.Payer.trim() && p.Payer.trim()!==c.Name){
-          // Legacy path — typed Payer text, no structured PayerType yet.
-          name = p.Payer.trim();
-        }
-        if(!name) return;
-        details.push('<span style="font-size:11px;color:#888">Payer: </span><span style="font-size:12px">'+escHtml(name)+'</span>');
+        var rp = resolvedPayer(p);
+        details.push('<span style="font-size:11px;color:#888">Payer: </span><span style="font-size:12px">'+escHtml(rp.name)+'</span>');
       })();
       if(p.ClientIsOwner==='No'&&p.Owner) details.push('<span style="font-size:11px;color:#888">Owner: </span><span style="font-size:12px">'+p.Owner+'</span>');
       if(p.Insured&&p.Insured!==c.Name) details.push('<span style="font-size:11px;color:#888">Insured: </span><span style="font-size:12px">'+p.Insured+'</span>');
