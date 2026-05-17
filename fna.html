@@ -224,6 +224,48 @@ var DUTY_RATE1 = 0.20;
 var DUTY_RATE2 = 0.25;
 var EXEC_RATE  = 0.04025;   // Executor fees 3.5% + VAT
 
+// ── Beneficiary type helpers ─────────────────────────────────────────────
+// The CRM uses an expanded 8-type list: Spouse, Life Partner, Child, Parent,
+// Dependant, Trust, Estate, Other — plus legacy "Third Party" retained on
+// un-retagged policies. These helpers centralise the legal mapping so each
+// site of conditional logic doesn't have to enumerate.
+//
+// s4(q) abatement only applies to a *legally married* Spouse. A Life Partner
+// is a factual dependant for s37C purposes but NOT a spouse for s4(q). So
+// only "Spouse" returns true here.
+function isS4qSpouse(type){
+  return type === 'Spouse';
+}
+// Anything that routes through the deceased estate (executor fees, dutiable
+// as estate property). Trust is treated case-by-case — defaults to false here
+// because a properly-structured trust nomination is paid outside the estate.
+function isEstatePathed(type){
+  return type === 'Estate';
+}
+// Dutiable-but-not-via-estate: a third-party-style nomination where the
+// policy proceeds are deemed property of the estate (s3(3) of the Estate
+// Duty Act) and the duty is apportioned to the beneficiary. Covers
+// Life Partner, Child, Parent, Dependant, Trust, Other, and the legacy
+// "Third Party" tag.
+function isDutiableNonSpouse(type){
+  if(!type) return false;
+  if(type === 'Spouse') return false;
+  if(type === 'Estate') return false;
+  return true; // Life Partner / Child / Parent / Dependant / Trust / Other / Third Party
+}
+// Display palette for the read-only Beneficiary Type chip on policy cards.
+function benTypePalette(type){
+  if(type === 'Spouse')        return {fg:'#166534', bg:'#f0fdf4'}; // green — 4(q)
+  if(type === 'Estate')        return {fg:'#92400e', bg:'#fff7ed'}; // amber — estate
+  if(type === 'Trust')         return {fg:'#475569', bg:'#f1f5f9'}; // grey — case-specific
+  if(type === 'Third Party')   return {fg:'#1e40af', bg:'#eff6ff'}; // blue — legacy
+  // Life Partner / Child / Parent / Dependant / Other — all dutiable apportionable
+  if(type)                     return {fg:'#7f1d1d', bg:'#fef2f2'}; // red
+  return                              {fg:'#9a9a8a', bg:'#fafaf6'}; // empty
+}
+// Standard 8-type list for asset/need dropdowns.
+var BEN_TYPE_OPTIONS = ['Estate','Spouse','Life Partner','Child','Parent','Dependant','Trust','Other'];
+
 function N(v) { return parseFloat(String(v || '').replace(/[^0-9.\-]/g, '')) || 0; }
 function updateSurplus(){
   var el=document.getElementById('fna_surplus_field');
@@ -2543,7 +2585,11 @@ function buildAssets() {
     dbtFld.appendChild(el('label','','On death, falls to'));
     var dbtSel=document.createElement('select');
     dbtSel.style.cssText='border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-size:12px;font-family:inherit';
-    ['Estate','Spouse','Third Party'].forEach(function(o){
+    // 8-type list per CRM alignment. Legacy "Third Party" preserved so old
+    // data isn't silently mutated when the editor opens.
+    var _propTypeOpts = BEN_TYPE_OPTIONS.slice();
+    if((p.deathBenType||'')==='Third Party') _propTypeOpts.push('Third Party');
+    _propTypeOpts.forEach(function(o){
       var opt=document.createElement('option'); opt.value=o; opt.textContent=o;
       if((p.deathBenType||'Estate')===o) opt.selected=true;
       dbtSel.appendChild(opt);
@@ -2700,7 +2746,9 @@ function buildAssets() {
     vdbtFld.appendChild(el('label','','On death, falls to'));
     var vdbtSel=document.createElement('select');
     vdbtSel.style.cssText='border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-size:12px;font-family:inherit;width:100%';
-    ['Estate','Spouse','Third Party'].forEach(function(o){
+    var _vehTypeOpts = BEN_TYPE_OPTIONS.slice();
+    if((v.deathBenType||'')==='Third Party') _vehTypeOpts.push('Third Party');
+    _vehTypeOpts.forEach(function(o){
       var opt=document.createElement('option'); opt.value=o; opt.textContent=o;
       if((v.deathBenType||'Estate')===o) opt.selected=true;
       vdbtSel.appendChild(opt);
@@ -2806,7 +2854,9 @@ function buildAssets() {
     adbtFld.appendChild(el('label','','On death, falls to'));
     var adbtSel=document.createElement('select');
     adbtSel.style.cssText='border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-size:12px;font-family:inherit;width:100%';
-    ['Estate','Spouse','Third Party'].forEach(function(o){
+    var _othTypeOpts = BEN_TYPE_OPTIONS.slice();
+    if((a.deathBenType||'')==='Third Party') _othTypeOpts.push('Third Party');
+    _othTypeOpts.forEach(function(o){
       var opt=document.createElement('option'); opt.value=o; opt.textContent=o;
       if((a.deathBenType||'Estate')===o) opt.selected=true;
       adbtSel.appendChild(opt);
@@ -3086,20 +3136,37 @@ function buildIncomeNeedRow(parent, r, i, arrayKey) {
 
     var bf = div('f'); bf.appendChild(el('label','','Pays to'));
     var bsel = document.createElement('select');
-    [{v:'Spouse',l:'Spouse / family (s.4(q))'},{v:'Third Party',l:'Third party / trust'},{v:'Estate',l:'Estate'}].forEach(function(o){
+    // Expanded 8-type list aligned with CRM. The labels reflect estate-duty
+    // treatment so the adviser is reminded which categories qualify for 4(q).
+    var _needIncOpts = [
+      {v:'Spouse',l:'Spouse — 4(q) abatement'},
+      {v:'Life Partner',l:'Life Partner — no 4(q)'},
+      {v:'Child',l:'Child'},
+      {v:'Parent',l:'Parent'},
+      {v:'Dependant',l:'Dependant'},
+      {v:'Trust',l:'Trust'},
+      {v:'Estate',l:'Estate'},
+      {v:'Other',l:'Other'}
+    ];
+    if((r.benTo||'')==='Third Party') _needIncOpts.push({v:'Third Party',l:'Third Party (legacy)'});
+    _needIncOpts.forEach(function(o){
       var opt = document.createElement('option'); opt.value = o.v; opt.textContent = o.l;
       if ((r.benTo || 'Spouse') === o.v) opt.selected = true;
       bsel.appendChild(opt);
     });
     bsel.addEventListener('change', function(e){
       S[arrayKey][i].benTo = e.target.value;
-      if (e.target.value !== 'Third Party') S[arrayKey][i].benName = '';
+      // Clear free-text name when the type goes back to a "well-known" category
+      // (Spouse uses the spouse from Client tab; Estate has no named beneficiary).
+      // Keep name for Life Partner / Child / Parent / Dependant / Trust / Other / Third Party.
+      if (e.target.value === 'Spouse' || e.target.value === 'Estate') S[arrayKey][i].benName = '';
       render();
     });
     bf.appendChild(bsel); benRow.appendChild(bf);
 
-    // Beneficiary name — only shown for Third Party
-    if ((r.benTo || 'Spouse') === 'Third Party') {
+    // Beneficiary name — shown for any type where a specific person/entity is named
+    var _showName = !(r.benTo === 'Spouse' || r.benTo === 'Estate' || !r.benTo);
+    if (_showName) {
       var nmf = div('f'); nmf.appendChild(el('label','','Beneficiary name'));
       var nmi = document.createElement('input'); nmi.type='text'; nmi.value = r.benName || '';
       nmi.addEventListener('input', function(e){ S[arrayKey][i].benName = e.target.value; });
@@ -3200,7 +3267,9 @@ function buildNeeds() {
         if(p.Type==='Business Assurance'){if(p.EstateDutiable==='Yes')_bd+=N(p.LoanAmount)||N(p.BenDeath);return;}
         var b=N(p.BenDeath);if(!b)return;
         var bt=p.BeneficiaryType||'';
-        if(bt==='Spouse')_s4q+=b;else if(bt==='Estate')_ep+=b;else if(bt==='Third Party')_tp+=b;
+        if(isS4qSpouse(bt))_s4q+=b;
+        else if(bt==='Estate')_ep+=b;
+        else if(isDutiableNonSpouse(bt))_tp+=b;
       });
       var _acc=0;
       if((S.cli.marital||'').indexOf('accrual')>-1){
@@ -3290,18 +3359,30 @@ function buildNeeds() {
       var benRow=div(); benRow.style.cssText='display:grid;grid-template-columns:1fr 1fr 2fr;gap:10px;margin-top:6px;padding-top:10px;border-top:1px dashed var(--mist)';
       var bf=div('f'); bf.appendChild(el('label','','Pays to'));
       var bsel=document.createElement('select');
-      [{v:'Spouse',l:'Spouse / family (s.4(q))'},{v:'Third Party',l:'Third party / trust'},{v:'Estate',l:'Estate'}].forEach(function(o){
+      var _needCapOpts = [
+        {v:'Spouse',l:'Spouse — 4(q) abatement'},
+        {v:'Life Partner',l:'Life Partner — no 4(q)'},
+        {v:'Child',l:'Child'},
+        {v:'Parent',l:'Parent'},
+        {v:'Dependant',l:'Dependant'},
+        {v:'Trust',l:'Trust'},
+        {v:'Estate',l:'Estate'},
+        {v:'Other',l:'Other'}
+      ];
+      if((r.benTo||'')==='Third Party') _needCapOpts.push({v:'Third Party',l:'Third Party (legacy)'});
+      _needCapOpts.forEach(function(o){
         var opt=document.createElement('option'); opt.value=o.v; opt.textContent=o.l;
         if((r.benTo||'Spouse')===o.v) opt.selected=true;
         bsel.appendChild(opt);
       });
       bsel.addEventListener('change',function(e){
         S.deathCapital[i].benTo=e.target.value;
-        if(e.target.value!=='Third Party') S.deathCapital[i].benName='';
+        if(e.target.value==='Spouse' || e.target.value==='Estate') S.deathCapital[i].benName='';
         render();
       });
       bf.appendChild(bsel); benRow.appendChild(bf);
-      if((r.benTo||'Spouse')==='Third Party'){
+      var _showNameC = !(r.benTo === 'Spouse' || r.benTo === 'Estate' || !r.benTo);
+      if(_showNameC){
         var nmf=div('f'); nmf.appendChild(el('label','','Beneficiary name'));
         var nmi=document.createElement('input'); nmi.type='text'; nmi.value=r.benName||'';
         nmi.addEventListener('input',function(e){ S.deathCapital[i].benName=e.target.value; });
@@ -5173,11 +5254,17 @@ function buildPolCard(p, i) {
         var primaryBen = bensArr[0];
         if (!p.BeneficiaryType && primaryBen.type) p.BeneficiaryType = primaryBen.type;
         if (!p.Beneficiary && primaryBen.name)     p.Beneficiary     = primaryBen.name;
-        // Auto-set EstateDutiable from type if not set
+        // Auto-set EstateDutiable from type if not set.
+        // Rule: only legally-married Spouse qualifies for s4(q) (EstateDutiable='No').
+        // Everything else — Life Partner, Child, Parent, Dependant, Trust, Other,
+        // Estate, and the legacy "Third Party" tag — is dutiable. Either deemed
+        // property under s3(3) (life policies paid to non-spouse), executor-pathed
+        // (Estate), or directly in the estate.
+        // NB: this fixes a pre-existing inconsistency where Third Party was set to
+        // 'No' here but 'Yes' in the second seed block below.
         if (!p.EstateDutiable) {
-          if (p.BeneficiaryType === 'Spouse')        p.EstateDutiable = 'No';
-          else if (p.BeneficiaryType === 'Estate')   p.EstateDutiable = 'Yes';
-          else if (p.BeneficiaryType === 'Third Party') p.EstateDutiable = 'No';
+          if (isS4qSpouse(p.BeneficiaryType)) p.EstateDutiable = 'No';
+          else                                p.EstateDutiable = 'Yes';
         }
         p._bensSeeded = true;
       }
@@ -5199,8 +5286,11 @@ function buildPolCard(p, i) {
   btDispWrap.appendChild(el('label','','Beneficiary Type'));
   var btDispBox = document.createElement('div');
   var _btVal = p.BeneficiaryType || '';
-  var _btColour = _btVal === 'Spouse' ? '#166534' : _btVal === 'Estate' ? '#92400e' : _btVal === 'Third Party' ? '#1e40af' : '#9a9a8a';
-  var _btBg = _btVal === 'Spouse' ? '#f0fdf4' : _btVal === 'Estate' ? '#fff7ed' : _btVal === 'Third Party' ? '#eff6ff' : '#fafaf6';
+  // Palette handles all 8 new types (Spouse, Life Partner, Child, Parent,
+  // Dependant, Trust, Estate, Other) plus the legacy "Third Party" tag.
+  var _btPal = benTypePalette(_btVal);
+  var _btColour = _btPal.fg;
+  var _btBg = _btPal.bg;
   if (_btVal) {
     btDispBox.textContent = _btVal;
     btDispBox.style.cssText = 'border:1.5px solid var(--mist);border-radius:6px;padding:7px 10px;font-size:13px;font-weight:700;background:'+_btBg+';color:'+_btColour+';min-height:20px;line-height:20px';
@@ -5239,9 +5329,14 @@ function buildPolCard(p, i) {
     } else if (bt === 'Estate') {
       routeInf.style.cssText += ';background:#fff7ed;color:#92400e;border:1px solid #fed7aa';
       routeInf.innerHTML = '⚖ <strong>Routed to Estate:</strong> This benefit forms part of the dutiable estate. Estate duty and executor fees will apply.';
-    } else if (bt === 'Third Party') {
-      routeInf.style.cssText += ';background:#eff6ff;color:#1e40af;border:1px solid #bfdbfe';
-      routeInf.innerHTML = '→ <strong>Third Party:</strong> Paid direct to named beneficiary — outside estate. No estate duty on this benefit.';
+    } else if (bt === 'Trust') {
+      routeInf.style.cssText += ';background:#f1f5f9;color:#475569;border:1px solid #cbd5e1';
+      routeInf.innerHTML = '→ <strong>Routed to Trust:</strong> Deemed property under s.3(3) — dutiable for estate duty unless the trust nomination meets specific exemptions. Bypasses executor fees. Check trust deed and structure.';
+    } else if (bt && bt !== 'Spouse' && bt !== 'Estate') {
+      // Life Partner / Child / Parent / Dependant / Other / legacy Third Party
+      routeInf.style.cssText += ';background:#fef2f2;color:#7f1d1d;border:1px solid #fecaca';
+      var routeLabel = bt === 'Third Party' ? 'Third Party (legacy tag)' : bt;
+      routeInf.innerHTML = '→ <strong>Routed to '+routeLabel+':</strong> Paid direct to the named beneficiary, but <strong>deemed property under s.3(3)</strong> of the Estate Duty Act — included in the gross estate and apportioned for duty. No s.4(q) abatement (only legally-married spouse qualifies). Bypasses executor fees.';
     }
     card.appendChild(routeInf);
   }
@@ -5327,9 +5422,9 @@ function buildEstate() {
         amount: N(val),
         note: (benType||'Estate')==='Spouse'
           ? 'Included in gross estate; deducted later under s.4(q) if left to spouse.'
-          : ((benType||'Estate')==='Third Party'
-              ? 'Physical asset included in gross estate; route shown for planning context.'
-              : 'Included in gross estate as a physical estate asset.')
+          : ((benType||'Estate')==='Estate'
+              ? 'Included in gross estate as a physical estate asset.'
+              : 'Included in gross estate; routed to '+(benType||'beneficiary')+' for planning context (no s.4(q) deduction).')
       });
       if(N(liab)>0){
         preDutyLiabilityItems.push({
@@ -5363,7 +5458,7 @@ function buildEstate() {
   polInf.innerHTML='Policies are routed based on the beneficiary type set on each policy card. '+
     '<strong>Spouse</strong> = s.4(q) deduction (not dutiable) · '+
     '<strong>Estate</strong> = dutiable, executor administers · '+
-    '<strong>Third Party/Trust</strong> = deemed property (dutiable) · '+
+    '<strong>Life Partner / Child / Parent / Dependant / Trust / Other</strong> = deemed property (dutiable, apportioned to beneficiary) · '+
     '<strong>Business Assurance</strong> = outside estate (unless marked dutiable)';
   s.appendChild(polInf);
 
@@ -5388,10 +5483,10 @@ function buildEstate() {
         if(bens&&bens.length>0){
           if(!p.BeneficiaryType && bens[0].type) p.BeneficiaryType = bens[0].type;
           if(!p.Beneficiary && bens[0].name)     p.Beneficiary     = bens[0].name;
+          // Same rule as primary seed: Spouse → No, everything else → Yes.
           if(!p.EstateDutiable){
-            if(p.BeneficiaryType==='Spouse')       p.EstateDutiable='No';
-            else if(p.BeneficiaryType==='Estate')  p.EstateDutiable='Yes';
-            else if(p.BeneficiaryType==='Third Party') p.EstateDutiable='Yes';
+            if(isS4qSpouse(p.BeneficiaryType)) p.EstateDutiable='No';
+            else                               p.EstateDutiable='Yes';
           }
           p._bensSeeded=true;
         }
@@ -5450,15 +5545,17 @@ function buildEstate() {
         note: 'Falls into the estate and is administered by the executor.'
       });
       polRow(p.Insurer,p.Product,'Estate','Estate',ben,'Dutiable — executor administers','#dc2626');
-    } else if(bt==='Third Party'){
+    } else if(isDutiableNonSpouse(bt)){
+      // Life Partner, Child, Parent, Dependant, Trust, Other, or the legacy
+      // "Third Party" tag — all treated as deemed property for estate duty.
       thirdPartyPols+=ben;
       grossEstateItems.push({
         component: (p.Insurer||'Policy') + (p.Product ? ' — ' + p.Product : ''),
-        category: 'Third party / trust deemed property',
+        category: bt+' deemed property',
         amount: ben,
         note: 'Paid direct, but still treated as deemed property for estate duty.'
       });
-      polRow(p.Insurer,p.Product,p.Beneficiary||'Third Party','Third Party',ben,'Deemed property — dutiable','#f59e0b');
+      polRow(p.Insurer,p.Product,p.Beneficiary||bt,bt,ben,'Deemed property — dutiable','#f59e0b');
     } else {
       polRow(p.Insurer,p.Product,p.Beneficiary||'—',bt||'—',ben,'Set beneficiary type on policy card','#9ca3af');
     }
@@ -5484,8 +5581,9 @@ function buildEstate() {
     // Beneficiary type — read-only badge
     var btDisp = document.createElement('span');
     var _btV = p.BeneficiaryType || '';
-    var _btC = _btV === 'Spouse' ? '#166534' : _btV === 'Estate' ? '#92400e' : _btV === 'Third Party' ? '#1e40af' : '#9a9a8a';
-    var _btB = _btV === 'Spouse' ? '#f0fdf4' : _btV === 'Estate' ? '#fff7ed' : _btV === 'Third Party' ? '#eff6ff' : '#fafaf6';
+    var _pal2 = benTypePalette(_btV);
+    var _btC = _pal2.fg;
+    var _btB = _pal2.bg;
     btDisp.textContent = _btV || '— not set —';
     btDisp.style.cssText='display:inline-block;padding:4px 10px;font-size:12px;font-weight:700;border-radius:5px;background:'+_btB+';color:'+_btC+';border:1px solid '+_btC+'33;min-width:110px;text-align:center'+(_btV?'':';font-style:italic');
     row.appendChild(btDisp);
@@ -5827,7 +5925,10 @@ function buildEstate() {
     if(dutyOnThirdParty>0){
       b1b.row('Payable by third party / trust beneficiaries', Rfmt(Math.round(dutyOnThirdParty)), true);
       pols.forEach(function(p){
-        if((p.BeneficiaryType||'')==='Third Party'&&N(p.BenDeath)>0&&p.Type!=='Business Assurance'){
+        // Anything other than Spouse or Estate counts as "third party" for the
+        // s3(3) apportionment purpose — Life Partner, Child, Parent, Dependant,
+        // Trust, Other, and the legacy "Third Party" tag.
+        if(isDutiableNonSpouse(p.BeneficiaryType||'')&&N(p.BenDeath)>0&&p.Type!=='Business Assurance'){
           b1b.sub((p.Insurer||'Policy')+(p.Product?' \u2014 '+p.Product:'')+' \u00b7 '+Rfmt(p.BenDeath), 'Duty: '+Rfmt(Math.round(apportionDuty(N(p.BenDeath)))));
         }
       });
@@ -5977,9 +6078,10 @@ function buildEstate() {
     benRow('Estate (executor administered)',Rfmt(estatePols),(estNote||'')+' \u2014 funds duty, executor fees, bequests','#fcd34d');
   }
 
-  // Third party policies
+  // Third party policies (any non-Spouse, non-Estate beneficiary — Life Partner,
+  // Child, Parent, Dependant, Trust, Other, or the legacy "Third Party" tag).
   pols.forEach(function(p){
-    if((p.BeneficiaryType||'')==='Third Party'&&N(p.BenDeath)>0&&p.Type!=='Business Assurance'){
+    if(isDutiableNonSpouse(p.BeneficiaryType||'')&&N(p.BenDeath)>0&&p.Type!=='Business Assurance'){
       var dutyOwed=Math.round(apportionDuty(N(p.BenDeath)));
       var note=(p.Insurer||'')+(p.Product?' \u2014 '+p.Product:'')+' \u00b7 Deemed property \u00b7 Duty share: '+Rfmt(dutyOwed);
       benRow((p.Beneficiary||'Third party')+' \u2014 '+Rfmt(p.BenDeath)+' (direct)',Rfmt(N(p.BenDeath)-dutyOwed)+' net',note,'#ccd6f6');
@@ -6075,7 +6177,9 @@ function buildSummary() {
     if(p.Type==='Business Assurance'){ if(p.EstateDutiable==='Yes') bizDut += N(p.LoanAmount)||N(p.BenDeath); return; }
     var b=N(p.BenDeath); if(!b) return;
     var bt=p.BeneficiaryType||'';
-    if(bt==='Spouse') s4qPols += b; else if(bt==='Estate') estPols += b; else if(bt==='Third Party') tpPols += b;
+    if(isS4qSpouse(bt)) s4qPols += b;
+    else if(bt==='Estate') estPols += b;
+    else if(isDutiableNonSpouse(bt)) tpPols += b;
   });
   (S.props||[]).forEach(function(p){ if((p.deathBenType||'Estate')==='Spouse') s4qAssets += N(p.val)-N(p.bond); });
   (S.vehicles||[]).forEach(function(v){ if((v.deathBenType||'Estate')==='Spouse') s4qAssets += N(v.val)-N(v.finance); });
@@ -6152,7 +6256,8 @@ function buildSummary() {
     var bt = r.benTo || 'Spouse';
     if(bt==='Spouse') spouseIncCap += c;
     else if(bt==='Estate') estateIncCap += c;
-    else if(bt==='Third Party'){
+    else {
+      // Any non-Spouse, non-Estate type — group by name for per-beneficiary view.
       var nm = (r.benName||'').trim() || 'Unnamed third party';
       if(!tpByName[nm]) tpByName[nm] = {incCap:0, polCover:0};
       tpByName[nm].incCap += c;
@@ -6163,7 +6268,10 @@ function buildSummary() {
     var bt = r.benTo || 'Spouse';
     if(bt==='Spouse') spouseIncCap += amt;
     else if(bt==='Estate') estateIncCap += amt;
-    else if(bt==='Third Party'){
+    else {
+      // Any non-Spouse, non-Estate type (Life Partner, Child, Parent, Dependant,
+      // Trust, Other, legacy Third Party) is grouped by name for the per-beneficiary
+      // breakdown below.
       var nm = (r.benName||'').trim() || 'Unnamed third party';
       if(!tpByName[nm]) tpByName[nm] = {incCap:0, polCover:0};
       tpByName[nm].incCap += amt;
@@ -6171,7 +6279,7 @@ function buildSummary() {
   });
   pols.forEach(function(p){
     if(p.Type==='Business Assurance') return;
-    if((p.BeneficiaryType||'')!=='Third Party') return;
+    if(!isDutiableNonSpouse(p.BeneficiaryType||'')) return;
     var amt = N(p.BenDeath); if(!amt) return;
     var nm = (p.Beneficiary||'').trim() || 'Unnamed third party';
     if(!tpByName[nm]) tpByName[nm] = {incCap:0, polCover:0};
@@ -6413,7 +6521,9 @@ function buildOverview() {
     if(p.Type==='Business Assurance'){if(p.EstateDutiable==='Yes')_bdO+=N(p.LoanAmount)||N(p.BenDeath);return;}
     var b=N(p.BenDeath);if(!b)return;
     var bt=p.BeneficiaryType||'';
-    if(bt==='Spouse')_s4qO+=b;else if(bt==='Estate')_epO+=b;else if(bt==='Third Party')_tpO+=b;
+    if(isS4qSpouse(bt))_s4qO+=b;
+    else if(bt==='Estate')_epO+=b;
+    else if(isDutiableNonSpouse(bt))_tpO+=b;
   });
   var _accO=0;
   if((S.cli.marital||'').indexOf('accrual')>-1){
@@ -7127,7 +7237,9 @@ function printFNA(sections) {
     if(p.Type==='Business Assurance'){if(p.EstateDutiable==='Yes')bizDut+=N(p.LoanAmount)||N(p.BenDeath);return;}
     var b=N(p.BenDeath);if(!b)return;
     var bt=p.BeneficiaryType||'';
-    if(bt==='Spouse')s4qPols+=b;else if(bt==='Estate')estPols+=b;else if(bt==='Third Party')tpPols+=b;
+    if(isS4qSpouse(bt)) s4qPols+=b;
+    else if(bt==='Estate') estPols+=b;
+    else if(isDutiableNonSpouse(bt)) tpPols+=b;
   });
   (S.props||[]).forEach(function(p){if((p.deathBenType||'Estate')==='Spouse')s4qAssets+=N(p.val)-N(p.bond);});
   (S.vehicles||[]).forEach(function(v){if((v.deathBenType||'Estate')==='Spouse')s4qAssets+=N(v.val)-N(v.finance);});
@@ -7639,7 +7751,11 @@ function printFNA(sections) {
       var amt=p.Type==='Business Assurance'?(N(p.LoanAmount)||N(p.BenDeath)):N(p.BenDeath);
       if(!amt&&!N(p.BenFundValue)) return;
       var bt=p.BeneficiaryType||'';
-      var dutyShare=(bt==='Third Party'||bt==='Estate'||(p.Type==='Business Assurance'&&p.EstateDutiable==='Yes'))?r(apDuty(amt)):'&mdash;';
+      // Dutiable if: (a) deemed-property non-spouse type (Life Partner, Child, etc.),
+      // (b) Estate beneficiary, (c) Business Assurance flagged as estate dutiable.
+      // Only Spouse-tagged personal policies and non-dutiable business policies
+      // show '—' (no duty share).
+      var dutyShare=(isDutiableNonSpouse(bt)||bt==='Estate'||(p.Type==='Business Assurance'&&p.EstateDutiable==='Yes'))?r(apDuty(amt)):'&mdash;';
       h+='<tr>'
         +td('<strong>'+e(p.Insurer||'&mdash;')+'</strong><br><span style="font-size:9px;color:#666">'+e(p.Product||'')+'</span>')
         +td(r(amt||p.BenFundValue),true)
