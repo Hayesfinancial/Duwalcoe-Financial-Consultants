@@ -4968,25 +4968,158 @@ function buildPolCard(p, i) {
     card.appendChild(bstBiz);
     var rbBiz = g3();
     rbBiz.appendChild(sfld('Business Type', p, 'BizType', ['','Buy & Sell','Keyman','Contingent Liability']));
-    var bizType = p.BizType || '';
-    if(bizType === 'Contingent Liability'){
-      // Contingent liability — only the loan/debt amount matters
-      rbBiz.appendChild(rfld('Loan / Debt Amount (cover)', p, 'LoanAmount'));
-      rbBiz.appendChild(div()); // spacer
-    } else {
-      // Buy & Sell / Keyman — death benefit is the cover amount
-      rbBiz.appendChild(rfld('Death Benefit', p, 'BenDeath'));
-      if(bizType === 'Keyman'){
-        rbBiz.appendChild(rfld('Disability Benefit', p, 'BenDisability'));
-      } else {
-        rbBiz.appendChild(div());
-      }
-    }
+    rbBiz.appendChild(div()); // spacer
+    rbBiz.appendChild(div()); // spacer
     card.appendChild(rbBiz);
+
     var bizNote = div('info');
     bizNote.style.cssText = 'font-size:11px;padding:6px 10px;margin-top:-4px;background:#eff6ff;border-color:#bfdbfe;color:#1e40af';
     bizNote.innerHTML = '<strong>Buy &amp; Sell</strong> pays to co-shareholder · <strong>Keyman</strong> pays to business · <strong>Contingent Liability</strong> settles business debt. None form part of personal estate.';
     card.appendChild(bizNote);
+
+    // ── Business Benefits — read-only, mirrors personal Benefits section
+    // Source of truth is the CRM (p.LumpBenefits, p.IncomeBenefits). To edit
+    // benefit detail, capture in the CRM Policy Editor and reload the FNA.
+    var bizBenSt = el('div','stitle','Benefits');
+    bizBenSt.style.marginTop = '10px';
+    card.appendChild(bizBenSt);
+
+    var bizLumpRows = [];
+    try { bizLumpRows = p.LumpBenefits ? JSON.parse(p.LumpBenefits) : []; } catch(e) { bizLumpRows = []; }
+
+    // Legacy fallback — old business policies stored cover in single fields
+    // (LoanAmount, BenDeath, BenDisability). If no LumpBenefits JSON, build
+    // display rows from those so old policies aren't blank in the FNA.
+    if (bizLumpRows.length === 0) {
+      if (N(p.BenDeath) > 0)        bizLumpRows.push({type:'Life Cover',                   cover:p.BenDeath,        prem:'', premEsc:'', benEsc:''});
+      if (N(p.BenDisability) > 0)   bizLumpRows.push({type:'Capital Disability',           cover:p.BenDisability,   prem:'', premEsc:'', benEsc:''});
+      if (N(p.BenDreadDisease) > 0) bizLumpRows.push({type:'Dread Disease / Severe Illness',cover:p.BenDreadDisease, prem:'', premEsc:'', benEsc:''});
+      // Legacy LoanAmount — only show if no Life Cover row already covers it
+      if (N(p.LoanAmount) > 0 && !bizLumpRows.some(function(r){return r.type==='Life Cover';})) {
+        bizLumpRows.push({type:'Life Cover', label:'(legacy Loan / Cover)', cover:p.LoanAmount, prem:'', premEsc:'', benEsc:''});
+      }
+    }
+
+    if (bizLumpRows.length > 0) {
+      var bizLumpSt = el('div','','Lump Sum Benefits');
+      bizLumpSt.style.cssText = 'font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--sub);display:block;margin-bottom:4px;margin-top:8px';
+      card.appendChild(bizLumpSt);
+
+      var bizLumpTbl = document.createElement('table');
+      bizLumpTbl.style.cssText = 'width:100%;border-collapse:collapse;font-size:12px';
+      var bizLhdr = document.createElement('tr');
+      ['Type / Label','Cover','Premium','Prem Esc %','Ben Esc %'].forEach(function(h){
+        var th = document.createElement('th');
+        th.textContent = h;
+        th.style.cssText = 'text-align:left;font-size:10px;color:var(--sub);font-weight:700;padding:3px 6px;border-bottom:1px solid var(--mist)';
+        bizLhdr.appendChild(th);
+      });
+      bizLumpTbl.appendChild(bizLhdr);
+
+      var bizLtbody = document.createElement('tbody');
+      bizLumpRows.forEach(function(r){
+        var tr = document.createElement('tr');
+        var roCellStyleB = 'padding:4px 6px';
+        var roDispStyleB = 'display:inline-block;padding:3px 7px;font-size:12px;color:var(--text);background:#fafaf6;border:1.5px solid var(--mist);border-radius:4px;min-width:50px';
+        // Type + label
+        var tt1 = document.createElement('td'); tt1.style.padding='4px 6px';
+        var tlbl = document.createElement('div');
+        tlbl.style.cssText = 'font-weight:600;font-size:12px;color:var(--text)';
+        tlbl.textContent = (r.type||'') + (r.label?' — '+r.label:'');
+        tt1.appendChild(tlbl); tr.appendChild(tt1);
+        // Cover
+        var tt2 = document.createElement('td'); tt2.style.cssText = roCellStyleB;
+        var cD = document.createElement('span');
+        cD.textContent = r.cover ? 'R\u202f'+(parseFloat(String(r.cover).replace(/[^0-9.\-]/g,''))||0).toLocaleString('en-ZA') : '—';
+        cD.style.cssText = roDispStyleB;
+        tt2.appendChild(cD); tr.appendChild(tt2);
+        // Premium
+        var tt3 = document.createElement('td'); tt3.style.cssText = roCellStyleB;
+        var pD = document.createElement('span');
+        pD.textContent = r.prem ? 'R\u202f'+(parseFloat(String(r.prem).replace(/[^0-9.\-]/g,''))||0).toLocaleString('en-ZA') : '—';
+        pD.style.cssText = roDispStyleB;
+        tt3.appendChild(pD); tr.appendChild(tt3);
+        // Prem Esc
+        var tt4 = document.createElement('td'); tt4.style.cssText = roCellStyleB;
+        var peD = document.createElement('span');
+        peD.textContent = r.premEsc ? r.premEsc + (String(r.premEsc).match(/^[0-9.]+$/)?'%':'') : '—';
+        peD.style.cssText = roDispStyleB;
+        tt4.appendChild(peD); tr.appendChild(tt4);
+        // Ben Esc
+        var tt5 = document.createElement('td'); tt5.style.cssText = roCellStyleB;
+        var beD = document.createElement('span');
+        beD.textContent = r.benEsc ? r.benEsc + (String(r.benEsc).match(/^[0-9.]+$/)?'%':'') : '—';
+        beD.style.cssText = roDispStyleB;
+        tt5.appendChild(beD); tr.appendChild(tt5);
+        bizLtbody.appendChild(tr);
+      });
+      bizLumpTbl.appendChild(bizLtbody);
+      card.appendChild(bizLumpTbl);
+    } else {
+      var noBizLump = div();
+      noBizLump.style.cssText = 'font-style:italic;color:#9a9a8a;font-size:12px;padding:8px 6px;margin-top:8px';
+      noBizLump.textContent = '— No lump sum benefits on file in CRM —';
+      card.appendChild(noBizLump);
+    }
+
+    // ── Business Income Benefits — read-only (Momentum Business Income
+    // Protection is captured here; sometimes marketed as a form of Keyman cover)
+    var bizIpWrap = div();
+    bizIpWrap.style.cssText = 'margin-top:8px';
+    var bizIpLbl = el('label','','Business Income / Monthly Benefit');
+    bizIpLbl.style.cssText = 'font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--sub);display:block;margin-bottom:4px';
+    bizIpWrap.appendChild(bizIpLbl);
+
+    var bizIpRows = [];
+    try { bizIpRows = p.IncomeBenefits ? JSON.parse(p.IncomeBenefits) : []; } catch(e) { bizIpRows = []; }
+
+    var bizIpTbl = document.createElement('table');
+    var bizIpTbody = document.createElement('tbody');
+    if (bizIpRows.length === 0) {
+      var empTrB = document.createElement('tr');
+      var empTdB = document.createElement('td');
+      empTdB.colSpan = 3;
+      empTdB.textContent = '— No income benefits on file in CRM —';
+      empTdB.style.cssText = 'font-style:italic;color:#9a9a8a;font-size:12px;padding:8px 6px';
+      empTrB.appendChild(empTdB);
+      bizIpTbody.appendChild(empTrB);
+    }
+    bizIpRows.forEach(function(r){
+      var tr = document.createElement('tr');
+      var roCellStyleB2 = 'padding:4px 6px';
+      var roDispStyleB2 = 'display:inline-block;padding:3px 7px;font-size:12px;color:var(--text);background:#fafaf6;border:1.5px solid var(--mist);border-radius:4px';
+      // Type
+      var x1 = document.createElement('td'); x1.style.cssText = roCellStyleB2;
+      var tDB = document.createElement('span');
+      tDB.textContent = r.type || '—';
+      tDB.style.cssText = roDispStyleB2 + ';font-weight:600;min-width:140px';
+      x1.appendChild(tDB); tr.appendChild(x1);
+      // Amount
+      var x2 = document.createElement('td'); x2.style.cssText = roCellStyleB2;
+      var aD = document.createElement('span');
+      aD.textContent = r.amount ? 'R\u202f'+(parseFloat(String(r.amount).replace(/[^0-9.\-]/g,''))||0).toLocaleString('en-ZA') : '—';
+      aD.style.cssText = roDispStyleB2;
+      x2.appendChild(aD); tr.appendChild(x2);
+      // Escalation triple
+      var x4 = document.createElement('td'); x4.style.cssText='padding:4px 6px;min-width:240px';
+      var eg = div(); eg.style.cssText='display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px';
+      function mkEscB(label, currentVal){
+        var w = div(); w.style.cssText='display:flex;flex-direction:column;gap:2px';
+        var lb = el('span','',label); lb.style.cssText='font-size:9px;color:var(--sub);white-space:nowrap';
+        var sp = document.createElement('span');
+        sp.textContent = (currentVal!=null && currentVal!=='') ? currentVal + (String(currentVal).match(/^[0-9.]+$/)?'%':'') : '—';
+        sp.style.cssText = 'display:block;padding:3px 6px;border:1.5px solid var(--mist);border-radius:4px;font-size:11px;background:#fafaf6;box-sizing:border-box;text-align:center';
+        w.appendChild(lb); w.appendChild(sp); return w;
+      }
+      eg.appendChild(mkEscB('Prem Inc%', r.premEsc||r.esc));
+      eg.appendChild(mkEscB('Ben Inc%',  r.benEsc));
+      eg.appendChild(mkEscB('Claim Inc%', r.claimEsc));
+      x4.appendChild(eg); tr.appendChild(x4);
+      bizIpTbody.appendChild(tr);
+    });
+    bizIpTbl.appendChild(bizIpTbody);
+    bizIpWrap.appendChild(bizIpTbl);
+    card.appendChild(bizIpWrap);
   }
 
   // ── Life (Guaranteed) Annuity section
