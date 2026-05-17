@@ -4046,7 +4046,11 @@ function buildFnaUrl(c){
       TotalWithdrawn:   p.TotalWithdrawn||'',
       IncludeInRetirement: p.IncludeInRetirement||'',
       RetirementAge:    p.RetirementAge||'',
-      LumpBenefits:     p.LumpBenefits||''
+      LumpBenefits:     p.LumpBenefits||'',
+      // Structured payer fields — for future FNA consumption (Cost / liquidity views)
+      PayerType:        p.PayerType||'',
+      PayerName:        p.PayerName||'',
+      Payer:            p.Payer||''
     };
   });
   // Policies go via localStorage (not URL) — avoids HTTP 414 for clients with many policies.
@@ -4889,7 +4893,45 @@ function buildPolicyForm(p){
   var insuredVal = p.Insured || clientForInsured.Name || '';
   html+='<div class="g2">';
   html+='<div class="fld"><label>Life Assured / Insured</label><div style="padding:8px 11px;background:var(--smoke);border:1.5px solid var(--mist);border-radius:7px;font-size:13px;color:var(--ink)">'+insuredVal+'</div><input type="hidden" id="pins" value="'+insuredVal+'"></div>';
-  html+=fld('ppay','Payer',p.Payer);
+  // PAYER — structured (PayerType / PayerName). Legacy `Payer` free-text
+  // field preserved as read-only reference if present but PayerType unset.
+  // Defaults: personal policies → Client, Business Assurance → Company.
+  var payerTypeDefault = isBiz ? 'Company' : 'Client';
+  var savedPayerType = p.PayerType || '';
+  var effectivePayerType = savedPayerType || payerTypeDefault;
+  // Build company-name autocomplete from PayerName values on this client's
+  // other policies, plus typed legacy Payer values — so "Avatar" and
+  // "Avatar Solutions" can be reconciled at the next save.
+  var _allClientPols = DB.policies.filter(function(x){return String(x.ClientID)===String(EPC) && x.ID!==p.ID;});
+  var _payerNameSuggestions = {};
+  _allClientPols.forEach(function(x){
+    if(x.PayerName) _payerNameSuggestions[x.PayerName.trim()]=true;
+    if(x.Payer && x.Payer!==(c&&c.Name||'')) _payerNameSuggestions[x.Payer.trim()]=true;
+  });
+  var _payerSugList = Object.keys(_payerNameSuggestions).filter(function(n){return n && n.length>0;});
+  var _payerDatalistHtml = '<datalist id="ppayname_list">'+_payerSugList.map(function(n){return '<option value="'+n.replace(/"/g,'&quot;')+'"></option>';}).join('')+'</datalist>';
+
+  var _showPayerName = (effectivePayerType==='Third Party' || effectivePayerType==='Company');
+  var _payerNameVal = p.PayerName || '';
+  // Legacy nudge: if there's an old typed Payer with no structured PayerType,
+  // show it as a reference so the user can re-enter it into PayerName.
+  var _legacyPayerNudge = '';
+  if(!savedPayerType && p.Payer && p.Payer.trim() && p.Payer.trim()!==(c&&c.Name||'').trim()){
+    _legacyPayerNudge = '<div style="grid-column:1/-1;font-size:11px;color:#92400e;background:#fffbeb;border:1px solid #fcd34d;border-radius:5px;padding:6px 10px;margin-top:4px">'+
+      '⚠ Legacy Payer text on file: <strong>'+p.Payer.replace(/</g,'&lt;')+'</strong>. Pick a category above and (if Third Party or Company) re-enter the name. The legacy text will be cleared on save once structured.'+
+      '</div>';
+  }
+  html+='<div style="display:grid;grid-template-columns:1fr 2fr;gap:10px;align-items:end">';
+  html+='<div class="fld"><label>Premium Paid By</label>'+
+    '<select id="ppaytype" onchange="onPayerTypeChange()" style="border:1.5px solid var(--mist);border-radius:7px;padding:8px 11px;font-family:inherit;font-size:13px;background:#fff">'+
+    ['Client','Third Party','Company'].map(function(o){return '<option value="'+o+'"'+(effectivePayerType===o?' selected':'')+'>'+o+'</option>';}).join('')+
+    '</select></div>';
+  html+='<div class="fld" id="ppayname_wrap" style="'+(_showPayerName?'':'display:none')+'"><label id="ppayname_lbl">'+(effectivePayerType==='Company'?'Company name':'Third party name')+'</label>'+
+    _payerDatalistHtml+
+    '<input type="text" id="ppayname" list="ppayname_list" value="'+_payerNameVal.replace(/"/g,'&quot;')+'" placeholder="'+(effectivePayerType==='Company'?'e.g. Avatar Solutions':'e.g. co-shareholder name')+'" style="border:1.5px solid var(--mist);border-radius:7px;padding:8px 11px;font-family:inherit;font-size:13px">'+
+    '</div>';
+  html+=_legacyPayerNudge;
+  html+='</div>';
   html+='</div>';
   html+=sec('Beneficiaries');
   html+='<div style="font-size:11px;color:#889;margin-bottom:6px">'+
@@ -5097,6 +5139,26 @@ function lumpRowDelete(i){
 function addLumpRow(){
   POL_LUMP_ROWS.push({type:'Life Cover',label:'',cover:'',prem:'',premEsc:'',benEsc:''});
   document.getElementById('lumpRowsWrap').innerHTML=renderLumpRows();
+}
+
+// Toggle the payer-name field visibility + label/placeholder based on PayerType.
+// Client → no name needed (it's the client). Third Party / Company → show name field.
+function onPayerTypeChange(){
+  var sel = document.getElementById('ppaytype');
+  if(!sel) return;
+  var v = sel.value;
+  var wrap = document.getElementById('ppayname_wrap');
+  var lbl  = document.getElementById('ppayname_lbl');
+  var inp  = document.getElementById('ppayname');
+  if(!wrap) return;
+  if(v==='Client'){
+    wrap.style.display='none';
+    if(inp) inp.value='';
+  } else {
+    wrap.style.display='';
+    if(lbl) lbl.textContent = (v==='Company'?'Company name':'Third party name');
+    if(inp) inp.placeholder = (v==='Company'?'e.g. Avatar Solutions':'e.g. co-shareholder name');
+  }
 }
 
 function renderIncomeRows(){
@@ -5569,7 +5631,25 @@ function collectPolicyForm(){
     BenLifeAnnuityIncome:g('pb_lifann_inc'),LifeAnnuityGuarYrs:g('pb_lifann_guaryrs'),
     BenEscalation:g('pb_eac')||g('pben_pct'),
     LAIncomeTaxable:(function(){var el=document.querySelector('input[name="platax"]:checked');return el?el.value:'Yes';})(),
-    Insured:g('pins'),Payer:g('ppay'),
+    Insured:g('pins'),
+    // Structured payer. Once PayerType is captured, the legacy free-text Payer
+    // field is cleared on save (mirrors the LoanAmount migration pattern). The
+    // per-policy detail row on the schedule reads PayerName first, falls back
+    // to Payer text for unmigrated policies.
+    PayerType:g('ppaytype'),
+    PayerName:(function(){
+      var t=g('ppaytype');
+      // Only persist PayerName for Third Party / Company; Client uses client's own name implicitly.
+      if(t==='Third Party' || t==='Company') return g('ppayname');
+      return '';
+    })(),
+    Payer:(function(){
+      // If structured (PayerType set), legacy text is cleared on save.
+      // If unstructured (PayerType blank — shouldn't happen since dropdown
+      // always picks something, but defensive), keep whatever is in the
+      // typed Payer field (which no longer exists in the editor — so blank).
+      return g('ppaytype') ? '' : '';
+    })(),
     Notes:g('pnt'),
     Beneficiaries:JSON.stringify(POL_BENS),
     IncomeBenefits:JSON.stringify(POL_INCOME_ROWS)
@@ -6482,6 +6562,55 @@ function openPolicySchedule(cid){
   var annualPols=nonMonthly.filter(function(p){return p.Frequency==='Annually';});
   var totAnnual =annualPols.reduce(function(s,p){return s+N(p.Premium);},0);
 
+  // ── PAYER-KEYED COST PRECALC ────────────────────────────────────────────
+  // The Cost block in Portfolio Summary now groups by who pays the premium,
+  // not by policy type. PayerType field on each policy: Client / Third Party
+  // / Company. Migration: policies without PayerType set fall back to
+  // pragmatic defaults — Business Assurance → Company (typed Payer or blank
+  // PayerName), personal → Client. The intent is for un-migrated data to
+  // produce sensible totals immediately, and for the legacy typed Payer
+  // text to surface a name where one exists.
+  //
+  // The Cost block answers a different question from the dashboard tiles
+  // below: "whose cash flow funds these premiums?" vs "what type of policy
+  // is this?". Business Assurance policies the client doesn't pay for
+  // (the common case) appear under the company that pays them, not under
+  // the client.
+  var costByPayer = { client:0, others:{} }; // others: { 'Avatar Solutions': total, ... }
+  var costNonMonthlyByPayer = { client:0, others:{} };
+  function resolvedPayer(p){
+    var pt = p.PayerType||'';
+    if(!pt){
+      // Legacy fallback — no PayerType set on the policy yet.
+      // If the typed Payer text names someone other than the client, that
+      // overrides the policy-type default (so a personal policy with typed
+      // Payer "HC Rhodes" stays under HC Rhodes in the Cost block, not Client).
+      var typedPayer = (p.Payer||'').trim();
+      var clientName = (c.Name||'').trim();
+      if(typedPayer && typedPayer!==clientName){
+        return {key:'others', name:typedPayer};
+      }
+      // No typed payer override — use policy-type default.
+      if(p.Type==='Business Assurance') pt='Company';
+      else pt='Client';
+    }
+    if(pt==='Client') return {key:'client', name:c.Name||'Client'};
+    // Third Party / Company — name from structured PayerName or legacy Payer text.
+    var nm = (p.PayerName||p.Payer||'').trim() || '(unallocated)';
+    return {key:'others', name:nm};
+  }
+  allPols.forEach(function(p){
+    var prem = N(p.Premium);
+    if(prem<=0) return;
+    var r = resolvedPayer(p);
+    var bucket = isNonMonthly(p) ? costNonMonthlyByPayer : costByPayer;
+    if(r.key==='client') bucket.client += prem;
+    else {
+      if(!bucket.others[r.name]) bucket.others[r.name]=0;
+      bucket.others[r.name] += prem;
+    }
+  });
+
   // Cover totals (personal only).
   // Lump benefits: SUM all matching rows per policy (multi-row policies are
   // additive). Income benefits: MAX of rows per policy (phases of one stream).
@@ -6620,6 +6749,11 @@ function openPolicySchedule(cid){
     var s='<div style="flex:1;min-width:200px;border:1px solid #e8e4d8;border-radius:8px;overflow:hidden">';
     s+='<div style="background:'+color+';color:#fff;padding:8px 14px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px">'+title+'</div>';
     rows.forEach(function(r){
+      // header row — small uppercase sub-group label, no value column
+      if(r.header){
+        s+='<div style="padding:6px 14px 2px 14px;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:#999;background:#fafaf6">'+r.lbl+'</div>';
+        return;
+      }
       if(!r.val)return;
       s+='<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 14px;border-bottom:1px solid #f0f0ec">';
       s+='<span style="font-size:12px;color:#667">'+r.lbl+'</span>';
@@ -6769,7 +6903,23 @@ function openPolicySchedule(cid){
       // Detail row — beneficiaries, income benefits, notes, owner
       var details=[];
       if(bens.length) details.push('<span style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.3px">Beneficiary: </span>'+benDisplay(bens));
-      if(p.Payer&&p.Payer!==c.Name) details.push('<span style="font-size:11px;color:#888">Payer: </span><span style="font-size:12px">'+p.Payer+'</span>');
+      // Payer display — pull from structured fields first (PayerType/PayerName),
+      // fall back to legacy Payer text for un-migrated policies. Only show
+      // when the payer is *not* the client (so personal Client-paid policies
+      // stay clean).
+      (function(){
+        var pt = p.PayerType||'';
+        var name = '';
+        if(pt==='Client'){ return; /* don't show — it's the client themselves */ }
+        if(pt==='Third Party' || pt==='Company'){
+          name = (p.PayerName||'').trim() || (pt==='Company'?'Company':'Third party');
+        } else if(p.Payer && p.Payer.trim() && p.Payer.trim()!==c.Name){
+          // Legacy path — typed Payer text, no structured PayerType yet.
+          name = p.Payer.trim();
+        }
+        if(!name) return;
+        details.push('<span style="font-size:11px;color:#888">Payer: </span><span style="font-size:12px">'+escHtml(name)+'</span>');
+      })();
       if(p.ClientIsOwner==='No'&&p.Owner) details.push('<span style="font-size:11px;color:#888">Owner: </span><span style="font-size:12px">'+p.Owner+'</span>');
       if(p.Insured&&p.Insured!==c.Name) details.push('<span style="font-size:11px;color:#888">Insured: </span><span style="font-size:12px">'+p.Insured+'</span>');
       if(isBiz&&p.BizType) details.push('<span style="font-size:11px;color:#888">Type: </span><span style="font-size:12px;font-weight:600;color:#92400e">'+p.BizType+'</span>');
@@ -6930,14 +7080,28 @@ function openPolicySchedule(cid){
   doc+='<div style="background:#a8b938;color:#fff;padding:9px 16px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.8px">Portfolio Summary</div>';
   doc+='<div style="padding:14px;display:flex;flex-wrap:wrap;gap:12px">';
 
-  // Cost block — personal and business SEPARATED
-  // Note: once-off / lump-sum policy values are NOT shown here. They appear
-  // in the Investment & Retirement Performance block as "Total contributions"
-  // (combined with TotalInvested where populated, to avoid double-counting).
+  // Cost block — payer-keyed (who pays the premium), NOT policy-type-keyed.
+  // The Cost block answers "whose cash flow funds these premiums?". Annual
+  // / once-off frequencies bubble up into a separate annual line as before
+  // (using the payer-keyed precalc), so once-off Investment premiums and
+  // annual premiums still show.
   var premRows=[];
-  if(tPersM>0)    premRows.push({lbl:'Personal monthly',  val:R2(tPersM)});
-  if(tBizM>0)     premRows.push({lbl:'Business monthly',  val:R2(tBizM)});
-  if(totAnnual>0) premRows.push({lbl:'Annual premiums',   val:R2(totAnnual)});
+  var clientHasMonthly = costByPayer.client>0;
+  var otherNames = Object.keys(costByPayer.others).sort(function(a,b){return costByPayer.others[b]-costByPayer.others[a];});
+  if(clientHasMonthly){
+    premRows.push({header:true,lbl:(c.Name||'Client')});
+    premRows.push({lbl:'Monthly premium', val:R2(costByPayer.client)});
+  }
+  if(otherNames.length){
+    premRows.push({header:true,lbl:'Cover paid on your behalf'});
+    otherNames.forEach(function(nm){
+      premRows.push({lbl:nm, val:R2(costByPayer.others[nm])});
+    });
+  }
+  if(totAnnual>0){
+    premRows.push({header:true,lbl:'Other frequencies'});
+    premRows.push({lbl:'Annual premiums', val:R2(totAnnual)});
+  }
   if(premRows.length) doc+=summaryBlock('Cost','#0e413a',premRows);
 
   // Personal cover block
