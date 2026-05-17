@@ -5632,23 +5632,17 @@ function collectPolicyForm(){
     BenEscalation:g('pb_eac')||g('pben_pct'),
     LAIncomeTaxable:(function(){var el=document.querySelector('input[name="platax"]:checked');return el?el.value:'Yes';})(),
     Insured:g('pins'),
-    // Structured payer. Once PayerType is captured, the legacy free-text Payer
-    // field is cleared on save (mirrors the LoanAmount migration pattern). The
-    // per-policy detail row on the schedule reads PayerName first, falls back
-    // to Payer text for unmigrated policies.
+    // Structured payer (new fields). The legacy `Payer` free-text field is
+    // intentionally NOT collected here — it's preserved from the old record
+    // by savePolicy() so that legacy data survives a save where the user
+    // hasn't explicitly migrated. Schedule display reads PayerName first,
+    // falls back to Payer for un-migrated policies.
     PayerType:g('ppaytype'),
     PayerName:(function(){
       var t=g('ppaytype');
       // Only persist PayerName for Third Party / Company; Client uses client's own name implicitly.
       if(t==='Third Party' || t==='Company') return g('ppayname');
       return '';
-    })(),
-    Payer:(function(){
-      // If structured (PayerType set), legacy text is cleared on save.
-      // If unstructured (PayerType blank — shouldn't happen since dropdown
-      // always picks something, but defensive), keep whatever is in the
-      // typed Payer field (which no longer exists in the editor — so blank).
-      return g('ppaytype') ? '' : '';
     })(),
     Notes:g('pnt'),
     Beneficiaries:JSON.stringify(POL_BENS),
@@ -5912,6 +5906,11 @@ function savePolicy(){
   pol.ReplacedBy=oldPol?oldPol.ReplacedBy:(window.REPLACING_POL_ID||'');
   pol.ReplacedDate=oldPol?oldPol.ReplacedDate:'';
   pol.ReplacedPolicyNo=oldPol?oldPol.ReplacedPolicyNo:(window.REPLACING_POL_NO||'');
+  // Preserve legacy Payer text from the existing record. It's archival —
+  // structured PayerType/PayerName are the new source of truth, but Payer
+  // is kept so un-migrated policies don't silently lose their typed payer
+  // text when re-saved. collectPolicyForm intentionally doesn't collect this.
+  pol.Payer = oldPol ? (oldPol.Payer||'') : '';
   if(!oldPol&&window.REPLACING_POL_ID){window.REPLACING_POL_ID=null;window.REPLACING_POL_NO=null;}
   // Keep existing history, don't overwrite
   pol.ReviewHistory=oldPol?(oldPol.ReviewHistory||''):'';
@@ -6600,6 +6599,11 @@ function openPolicySchedule(cid){
     return {key:'others', name:nm};
   }
   allPols.forEach(function(p){
+    // Business Assurance is deliberately excluded from the personal Cost block.
+    // Those premiums aren't the client's cash flow — the company owns, pays
+    // and benefits. Business cover totals appear in their own "Business —
+    // Keyman / Buy & Sell" Portfolio Summary blocks further down.
+    if(p.Type==='Business Assurance') return;
     var prem = N(p.Premium);
     if(prem<=0) return;
     var r = resolvedPayer(p);
