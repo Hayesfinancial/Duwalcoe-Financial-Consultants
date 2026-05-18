@@ -6735,15 +6735,47 @@ function openPolicySchedule(cid){
   personalGroups.forEach(function(g){
     g.pols.forEach(function(p){
       var bens=[]; try{ bens=p.Beneficiaries?JSON.parse(p.Beneficiaries):[]; }catch(e){}
-      if(!bens.length) return;
       var t = p.Type||'';
       var isRiskP = (t==='Life / Income Protector' || t==='');
       var isInvP  = _invTypesB.indexOf(t)>=0;
       var isRaP   = _raTypesB.indexOf(t)>=0;
       if(!isRiskP && !isInvP && !isRaP) return; // skip Medical etc.
+
+      // Filter to entries with a real name (defensive — drops blank rows that may
+      // exist if someone added a beneficiary slot without filling it in).
+      var validBens = bens.filter(function(b){return b.name && String(b.name).trim();});
+
+      // ── No nominations captured? Apply policy-type-specific default ──
+      // Investment policies (Endowment / Flexible / Unit Trust / TFS / Offshore):
+      //   Proceeds fall to the deceased estate by default — show as 100% Estate.
+      //
+      // Retirement funds (RA / Pension / Provident / Preservation / Living Annuity):
+      //   Section 37C of the Pension Funds Act governs distribution — trustees
+      //   investigate dependants and apportion at their discretion. Nominations
+      //   are guidance, not binding. Defaulting these to "Estate" would be
+      //   legally incorrect, so we show them under "Trustees (§37C)" instead,
+      //   making the planning gap visible without misrepresenting the law.
+      //   Capturing a real nomination on the policy moves it from the Trustees
+      //   bucket to the named beneficiary's row.
+      //
+      // Risk policies (Life / Income Protector):
+      //   Skipped here — Clinton's practice always nominates beneficiaries
+      //   explicitly on every risk policy ("Estate" is captured as an explicit
+      //   type when applicable). An empty risk policy is a data-entry omission,
+      //   not a default, and should not be silently bucketed.
+      if(validBens.length === 0){
+        if(isInvP){
+          validBens = [{type:'Estate', name:'Estate', pct:'100'}];
+        } else if(isRaP){
+          validBens = [{type:'Trustees', name:'Trustees (§37C)', pct:'100'}];
+        } else {
+          return; // Risk — leave unnominated policies off the rollup
+        }
+      }
+
       var polDeath = isRiskP ? lumpSum(p,'Life Cover','BenDeath') : 0;
       var polFV    = (isInvP||isRaP) ? N(p.BenFundValue) : 0;
-      bens.forEach(function(b){
+      validBens.forEach(function(b){
         if(!b.name || !String(b.name).trim()) return;
         var pct = N(b.pct) / 100;
         if(pct<=0 || pct>1) pct = 1; // empty/garbage % treated as 100%
@@ -7363,6 +7395,7 @@ function openPolicySchedule(cid){
         if(tt==='Spouse'){ typeTag='Spouse'; typeCol='#2e7d32'; }
         else if(tt==='Estate'){ typeTag='Estate'; typeCol='#b45309'; }
         else if(tt==='Trust'){ typeTag='Trust'; typeCol='#667085'; }
+        else if(tt==='Trustees'){ typeTag='Trustees (§37C) — no nomination captured'; typeCol='#64748b'; }
         else if(tt==='Third Party'){ typeTag='3rd Party'; typeCol='#c62828'; }
         else { typeTag=tt; typeCol='#c62828'; }
       } else {
