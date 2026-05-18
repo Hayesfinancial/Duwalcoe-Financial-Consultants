@@ -6619,7 +6619,7 @@ function openPolicySchedule(cid){
   var totAnnual =annualPols.reduce(function(s,p){return s+N(p.Premium);},0);
 
   // ── PAYER-KEYED COST PRECALC ────────────────────────────────────────────
-  // The Cost block in Portfolio Summary now groups by who pays the premium,
+  // The Cost block in Portfolio Summary groups by who pays the premium,
   // not by policy type. PayerType field on each policy: Client / Third Party
   // / Company. Migration: policies without PayerType set fall back to
   // pragmatic defaults — Business Assurance → Company (typed Payer or blank
@@ -6627,13 +6627,26 @@ function openPolicySchedule(cid){
   // produce sensible totals immediately, and for the legacy typed Payer
   // text to surface a name where one exists.
   //
-  // The Cost block answers a different question from the dashboard tiles
-  // below: "whose cash flow funds these premiums?" vs "what type of policy
-  // is this?". Business Assurance policies the client doesn't pay for
-  // (the common case) appear under the company that pays them, not under
-  // the client.
-  var costByPayer = { client:0, others:{} }; // others: { 'Avatar Solutions': total, ... }
-  var costNonMonthlyByPayer = { client:0, others:{} };
+  // Each bucket now tracks BOTH the headline total AND a per-category split
+  // (risk / retirement / investment / medical / other) so the Cost block
+  // can show the breakdown as sub-text beneath each headline figure.
+  // Pension/Provident Fund premiums are classified as "retirement" in full
+  // (no internal risk/retirement split — Clinton's call).
+  function _premCategory(p){
+    var t = p.Type || '';
+    if(t === 'Business Assurance')      return 'business';
+    if(t === 'Life / Income Protector') return 'risk';
+    if(raTypes.indexOf(t) >= 0)         return 'retirement';
+    if(invTypes.indexOf(t) >= 0)        return 'investment';
+    if(t === 'Medical Aid')             return 'medical';
+    return 'other';
+  }
+  function _newPayerBucket(){
+    return {total:0, byCategory:{risk:0, retirement:0, investment:0, medical:0, business:0, other:0}};
+  }
+  var costByPayer            = { client: _newPayerBucket(), others:{} };
+  var costNonMonthlyByPayer  = { client: _newPayerBucket(), others:{} }; // tracked but not currently displayed
+  var annualByCategory       = {risk:0, retirement:0, investment:0, medical:0, business:0, other:0};
   function resolvedPayer(p){
     var pt = p.PayerType||'';
     if(!pt){
@@ -6664,12 +6677,24 @@ function openPolicySchedule(cid){
     var prem = N(p.Premium);
     if(prem<=0) return;
     var r = resolvedPayer(p);
+    var cat = _premCategory(p);
     var bucket = isNonMonthly(p) ? costNonMonthlyByPayer : costByPayer;
-    if(r.key==='client') bucket.client += prem;
+    var target;
+    if(r.key==='client') target = bucket.client;
     else {
-      if(!bucket.others[r.name]) bucket.others[r.name]=0;
-      bucket.others[r.name] += prem;
+      if(!bucket.others[r.name]) bucket.others[r.name] = _newPayerBucket();
+      target = bucket.others[r.name];
     }
+    target.total += prem;
+    target.byCategory[cat] += prem;
+  });
+  // Annual line breakdown — same category buckets, summed across annual policies only.
+  // Business Assurance IS included here because totAnnual (the headline) includes it.
+  // BizA premiums classify as 'business' so the sub-text adds up correctly.
+  annualPols.forEach(function(p){
+    var prem = N(p.Premium);
+    if(prem<=0) return;
+    annualByCategory[_premCategory(p)] += prem;
   });
 
   // Cover totals (personal only).
@@ -6816,10 +6841,23 @@ function openPolicySchedule(cid){
         return;
       }
       if(!r.val)return;
-      s+='<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 14px;border-bottom:1px solid #f0f0ec">';
-      s+='<span style="font-size:12px;color:#667">'+r.lbl+'</span>';
-      s+='<span style="font-size:13px;font-weight:700;color:#0e413a">'+r.val+'</span>';
-      s+='</div>';
+      if(r.sub){
+        // Two-line row: label + value on the first line, breakdown sub-text under the value.
+        // Used by the Cost block to show risk/retirement/investment split beneath each
+        // Monthly premium, other-payer line, and Annual line.
+        s+='<div style="padding:8px 14px;border-bottom:1px solid #f0f0ec">';
+        s+='<div style="display:flex;justify-content:space-between;align-items:center">';
+        s+='<span style="font-size:12px;color:#667">'+r.lbl+'</span>';
+        s+='<span style="font-size:13px;font-weight:700;color:#0e413a">'+r.val+'</span>';
+        s+='</div>';
+        s+='<div style="text-align:right;font-size:10px;color:#889;margin-top:3px;font-weight:500">'+r.sub+'</div>';
+        s+='</div>';
+      } else {
+        s+='<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 14px;border-bottom:1px solid #f0f0ec">';
+        s+='<span style="font-size:12px;color:#667">'+r.lbl+'</span>';
+        s+='<span style="font-size:13px;font-weight:700;color:#0e413a">'+r.val+'</span>';
+        s+='</div>';
+      }
     });
     s+='</div>';
     return s;
@@ -7185,27 +7223,55 @@ function openPolicySchedule(cid){
   doc+='<div style="background:#a8b938;color:#fff;padding:9px 16px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.8px">Portfolio Summary</div>';
   doc+='<div style="padding:14px;display:flex;flex-wrap:wrap;gap:12px">';
 
-  // Cost block — payer-keyed (who pays the premium), NOT policy-type-keyed.
-  // The Cost block answers "whose cash flow funds these premiums?". Annual
-  // / once-off frequencies bubble up into a separate annual line as before
-  // (using the payer-keyed precalc), so once-off Investment premiums and
-  // annual premiums still show.
+  // Cost block — payer-keyed (who pays the premium), with category breakdown
+  // shown as smaller sub-text beneath each headline figure. The Cost block
+  // answers "whose cash flow funds these premiums?" — the breakdown answers
+  // "of that, how much is risk vs retirement vs investment".
+  //
+  // Each costByPayer leaf now has shape {total, byCategory:{risk,retirement,investment,medical,other}}.
+  // Annual line uses annualByCategory (built alongside totAnnual).
+  //
+  // Pension/Provident Fund premiums are classified entirely as Retirement
+  // (no internal risk/retirement split — Clinton's call, see _premCategory).
+  function _breakdownSub(byCat){
+    var parts=[];
+    // Order: risk → retirement → investment → medical → business → other.
+    // Stable ordering so the sub-text reads the same on every policy schedule.
+    var labels = [
+      ['risk',       'Risk'],
+      ['retirement', 'Retirement'],
+      ['investment', 'Investment'],
+      ['medical',    'Medical'],
+      ['business',   'Business'],
+      ['other',      'Other']
+    ];
+    labels.forEach(function(pair){
+      var k=pair[0], lbl=pair[1];
+      var v = byCat[k] || 0;
+      if(v > 0) parts.push(lbl+' '+R2(v));
+    });
+    // If only one category is non-zero, the breakdown adds nothing — suppress it.
+    if(parts.length <= 1) return '';
+    return parts.join(' &nbsp;·&nbsp; ');
+  }
   var premRows=[];
-  var clientHasMonthly = costByPayer.client>0;
-  var otherNames = Object.keys(costByPayer.others).sort(function(a,b){return costByPayer.others[b]-costByPayer.others[a];});
+  var clientBucket = costByPayer.client;
+  var clientHasMonthly = clientBucket.total>0;
+  var otherNames = Object.keys(costByPayer.others).sort(function(a,b){return costByPayer.others[b].total-costByPayer.others[a].total;});
   if(clientHasMonthly){
     premRows.push({header:true,lbl:(c.Name||'Client')});
-    premRows.push({lbl:'Monthly premium', val:R2(costByPayer.client)});
+    premRows.push({lbl:'Monthly premium', val:R2(clientBucket.total), sub:_breakdownSub(clientBucket.byCategory)});
   }
   if(otherNames.length){
     premRows.push({header:true,lbl:'Cover paid on your behalf'});
     otherNames.forEach(function(nm){
-      premRows.push({lbl:nm, val:R2(costByPayer.others[nm])});
+      var b = costByPayer.others[nm];
+      premRows.push({lbl:nm, val:R2(b.total), sub:_breakdownSub(b.byCategory)});
     });
   }
   if(totAnnual>0){
     premRows.push({header:true,lbl:'Other frequencies'});
-    premRows.push({lbl:'Annual premiums', val:R2(totAnnual)});
+    premRows.push({lbl:'Annual premiums', val:R2(totAnnual), sub:_breakdownSub(annualByCategory)});
   }
   if(premRows.length) doc+=summaryBlock('Cost','#0e413a',premRows);
 
