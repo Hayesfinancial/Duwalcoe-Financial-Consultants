@@ -917,23 +917,14 @@ function renderDash(){
 
   // ── Wills tracking ──
   // "Wills under my name" = HasWill=Yes AND WillThroughMe=Yes, among active clients only.
-  // The dashboard tile shows wills-through-me / total-active so the gap is visible,
-  // plus a 4-way breakdown below the headline (mine / elsewhere / none / unasked).
-  // NULL/undefined/empty values for HasWill are treated as "not yet asked".
-  var willsThroughMe = 0; // 🟢 HasWill=Yes AND WillThroughMe=Yes
-  var willsElsewhere = 0; // 🟡 HasWill=Yes AND WillThroughMe!=Yes
-  var willsNone      = 0; // 🔴 HasWill=No (explicitly asked, no will)
-  var willsUnasked   = 0; // ⚪ HasWill empty/undefined (not yet asked)
-  var willsAnyKind   = 0; // kept for backward compat with any other code that may reference it
+  // The dashboard tile shows wills-through-me / total-active so the gap is visible.
+  // NULL/undefined/empty values are treated as "no" — same migration pattern as AUM/AOR.
+  var willsThroughMe = 0;
+  var willsAnyKind = 0;
   active.forEach(function(c){
     if(c.HasWill==='Yes'){
       willsAnyKind++;
       if(c.WillThroughMe==='Yes') willsThroughMe++;
-      else                        willsElsewhere++;
-    } else if(c.HasWill==='No'){
-      willsNone++;
-    } else {
-      willsUnasked++;
     }
   });
 
@@ -951,15 +942,7 @@ function renderDash(){
     '<div class="stat s-sg" style="padding:10px"><div class="v" style="font-size:18px">'+up.filter(function(u){return u.days<=30;}).length+'</div><div class="l" style="font-size:10px">Reminders (30d)</div></div>'+
     '<div class="stat s-sk" style="padding:10px"><div class="v" style="font-size:18px">'+open.length+'</div><div class="l" style="font-size:10px">Open Tasks</div></div>'+
     '<div class="stat s-rd" style="padding:10px"><div class="v" style="font-size:18px">'+reviewsDue+'</div><div class="l" style="font-size:10px">Reviews Due</div></div>'+
-    '<div class="stat s-gd" style="cursor:pointer;padding:10px" data-act="go-clients-no-will" title="Click to see active clients who said No to having a will">'+
-      '<div class="v" style="font-size:18px">📜 '+willsThroughMe+'<span style="font-size:11px;color:#889;font-weight:400"> / '+active.length+'</span></div>'+
-      '<div style="font-size:10px;font-weight:600;color:#667;margin-top:4px;display:flex;gap:8px;flex-wrap:wrap">'+
-        '<span title="Will with me">🟢 '+willsThroughMe+'</span>'+
-        '<span title="Will elsewhere">🟡 '+willsElsewhere+'</span>'+
-        '<span title="No will">🔴 '+willsNone+'</span>'+
-        '<span title="Not yet asked">⚪ '+willsUnasked+'</span>'+
-      '</div>'+
-    '</div>'+
+    '<div class="stat s-gd" style="cursor:pointer;padding:10px" data-act="go-clients-no-will" title="Click to see active clients without a will"><div class="v" style="font-size:18px">📜 '+willsThroughMe+'<span style="font-size:11px;color:#889;font-weight:400"> / '+active.length+'</span></div><div class="l" style="font-size:10px">Wills (mine)</div></div>'+
   '</div>'+
 
   // Main row: Tasks (left, wide) + AUM by Provider (right)
@@ -1216,15 +1199,13 @@ function renderClients(){
     if(a.LastAccessed&&b.LastAccessed) return b.LastAccessed-a.LastAccessed;
     return (a.Name||'').localeCompare(b.Name||'');
   });
-  var isLeads        = window.CLIENT_LIST_FILTER === 'leads';
-  var isInactive     = window.CLIENT_LIST_FILTER === 'inactive';
-  var isNoWill       = window.CLIENT_LIST_FILTER === 'nowill';       // 🔴 HasWill='No' only (explicit)
-  var isWillUnasked  = window.CLIENT_LIST_FILTER === 'willunasked';  // ⚪ HasWill empty/undefined
+  var isLeads    = window.CLIENT_LIST_FILTER === 'leads';
+  var isInactive = window.CLIENT_LIST_FILTER === 'inactive';
+  var isNoWill   = window.CLIENT_LIST_FILTER === 'nowill';
   var filtered = base.filter(function(c){
-    if(isLeads)        return c.IsLead==='Yes';
-    if(isInactive)     return c.IsLead!=='Yes' && (c.Status==='Inactive'||c.Status==='Cancelled');
-    if(isNoWill)       return c.IsLead!=='Yes' && c.Status!=='Inactive' && c.Status!=='Cancelled' && c.HasWill==='No';
-    if(isWillUnasked)  return c.IsLead!=='Yes' && c.Status!=='Inactive' && c.Status!=='Cancelled' && c.HasWill!=='Yes' && c.HasWill!=='No';
+    if(isLeads)    return c.IsLead==='Yes';
+    if(isInactive) return c.IsLead!=='Yes' && (c.Status==='Inactive'||c.Status==='Cancelled');
+    if(isNoWill)   return c.IsLead!=='Yes' && c.Status!=='Inactive' && c.Status!=='Cancelled' && c.HasWill!=='Yes';
     return c.IsLead!=='Yes' && c.Status!=='Inactive' && c.Status!=='Cancelled';
   });
   var list=SRCH?filtered.filter(function(c){
@@ -1234,20 +1215,18 @@ function renderClients(){
            (c.Email||'').toLowerCase().indexOf(q)>=0||
            String(c.Cell||'').indexOf(q)>=0;
   }):filtered;
-  var clientCount      = base.filter(function(c){ return c.IsLead!=='Yes' && c.Status!=='Inactive' && c.Status!=='Cancelled'; }).length;
-  var leadCount        = base.filter(function(c){ return c.IsLead==='Yes'; }).length;
-  var inactiveCount    = base.filter(function(c){ return c.IsLead!=='Yes' && (c.Status==='Inactive'||c.Status==='Cancelled'); }).length;
-  var noWillCount      = base.filter(function(c){ return c.IsLead!=='Yes' && c.Status!=='Inactive' && c.Status!=='Cancelled' && c.HasWill==='No'; }).length;
-  var willUnaskedCount = base.filter(function(c){ return c.IsLead!=='Yes' && c.Status!=='Inactive' && c.Status!=='Cancelled' && c.HasWill!=='Yes' && c.HasWill!=='No'; }).length;
-  var pageLabel = isLeads ? 'Leads' : isInactive ? 'Inactive' : isNoWill ? 'Clients without a Will' : isWillUnasked ? 'Clients — Will Not Yet Asked' : 'Clients';
+  var clientCount  = base.filter(function(c){ return c.IsLead!=='Yes' && c.Status!=='Inactive' && c.Status!=='Cancelled'; }).length;
+  var leadCount    = base.filter(function(c){ return c.IsLead==='Yes'; }).length;
+  var inactiveCount= base.filter(function(c){ return c.IsLead!=='Yes' && (c.Status==='Inactive'||c.Status==='Cancelled'); }).length;
+  var noWillCount  = base.filter(function(c){ return c.IsLead!=='Yes' && c.Status!=='Inactive' && c.Status!=='Cancelled' && c.HasWill!=='Yes'; }).length;
+  var pageLabel = isLeads ? 'Leads' : isInactive ? 'Inactive' : isNoWill ? 'Clients without a Will' : 'Clients';
   return '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">'+
     '<h1 style="font-family:\'DM Serif Display\',serif;font-size:22px;color:var(--navy)">'+pageLabel+' ('+list.length+')</h1>'+
     '<div style="display:flex;gap:6px;align-items:center">'+
     '<div style="display:flex;gap:0;border:1.5px solid var(--mist);border-radius:8px;overflow:hidden">'+
-    '<button class="btn xs" data-act="client-list-filter" data-filter="clients" style="border-radius:0;border:none;'+(!isLeads&&!isInactive&&!isNoWill&&!isWillUnasked?'background:var(--navy);color:#fff':'background:#f5f7fa;color:#889')+';padding:5px 14px;font-weight:700">👥 Clients ('+clientCount+')</button>'+
+    '<button class="btn xs" data-act="client-list-filter" data-filter="clients" style="border-radius:0;border:none;'+(!isLeads&&!isInactive&&!isNoWill?'background:var(--navy);color:#fff':'background:#f5f7fa;color:#889')+';padding:5px 14px;font-weight:700">👥 Clients ('+clientCount+')</button>'+
     '<button class="btn xs" data-act="client-list-filter" data-filter="leads" style="border-radius:0;border:none;border-left:1.5px solid var(--mist);'+(isLeads?'background:var(--navy);color:#fff':'background:#f5f7fa;color:#889')+';padding:5px 14px;font-weight:700">🎯 Leads ('+leadCount+')</button>'+
-    (noWillCount>0?'<button class="btn xs" data-act="client-list-filter" data-filter="nowill" style="border-radius:0;border:none;border-left:1.5px solid var(--mist);'+(isNoWill?'background:#9e2a2b;color:#fff':'background:#f5f7fa;color:#889')+';padding:5px 14px;font-weight:700" title="Active clients who said NO to having a will">📜 No Will ('+noWillCount+')</button>':'')+
-    (willUnaskedCount>0?'<button class="btn xs" data-act="client-list-filter" data-filter="willunasked" style="border-radius:0;border:none;border-left:1.5px solid var(--mist);'+(isWillUnasked?'background:#64748b;color:#fff':'background:#f5f7fa;color:#889')+';padding:5px 14px;font-weight:700" title="Active clients where the will question has not yet been asked">❓ Unasked ('+willUnaskedCount+')</button>':'')+
+    (noWillCount>0?'<button class="btn xs" data-act="client-list-filter" data-filter="nowill" style="border-radius:0;border:none;border-left:1.5px solid var(--mist);'+(isNoWill?'background:#92400e;color:#fff':'background:#f5f7fa;color:#889')+';padding:5px 14px;font-weight:700" title="Active clients without a will captured">📜 No Will ('+noWillCount+')</button>':'')+
     (inactiveCount>0?'<button class="btn xs" data-act="client-list-filter" data-filter="inactive" style="border-radius:0;border:none;border-left:1.5px solid var(--mist);'+(isInactive?'background:var(--rose);color:#fff':'background:#f5f7fa;color:#889')+';padding:5px 14px;font-weight:700">\u{1F4A4} Inactive ('+inactiveCount+')</button>':'')+
     '</div>'+
     (isLeads ? btn('btn b-gd','open-new-lead','+ New Lead') : (!isInactive ? btn('btn b-gd','open-new-client','+ New Client') : ''))+
@@ -1312,17 +1291,6 @@ function renderProfile(){
     '<div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap">'+
     '<div style="font-family:\'DM Serif Display\',serif;font-size:22px;margin-bottom:2px">'+(clean(c.Title)?c.Title+' ':'')+c.Name+'</div>'+
     (calcAge(c.DOB)!==null?'<span style="background:var(--gold);color:#fff;border-radius:20px;padding:2px 12px;font-size:13px;font-weight:700;letter-spacing:0.02em">Age '+calcAge(c.DOB)+'</span>':'')+
-    // ── Will status pill ── 4 states: mine (green), elsewhere (amber), none (red), not asked (grey).
-    // Uses same shape/size as the Age pill so they sit together cleanly.
-    (c.HasWill==='Yes' && c.WillThroughMe==='Yes' ?
-      '<span style="background:#2e7d5a;color:#fff;border-radius:20px;padding:2px 12px;font-size:13px;font-weight:700;letter-spacing:0.02em">📜 Will (mine)</span>'
-     : c.HasWill==='Yes' ?
-      '<span style="background:#d97706;color:#fff;border-radius:20px;padding:2px 12px;font-size:13px;font-weight:700;letter-spacing:0.02em">📜 Will (elsewhere)</span>'
-     : c.HasWill==='No' ?
-      '<span style="background:#9e2a2b;color:#fff;border-radius:20px;padding:2px 12px;font-size:13px;font-weight:700;letter-spacing:0.02em">📜 No will</span>'
-     :
-      '<span style="background:#94a3b8;color:#fff;border-radius:20px;padding:2px 12px;font-size:13px;font-weight:700;letter-spacing:0.02em">📜 Will not asked</span>'
-    )+
     '</div>'+
     (clean(c.MaidenName)?'<div style="font-size:12px;color:#aabbd4;margin-bottom:2px">Maiden name: <strong style="color:#ccd8e8">'+c.MaidenName+'</strong></div>':'')+
     (clean(c.CallingName)&&c.CallingName!==c.Name.split(' ')[0]?'<div style="font-size:12px;color:var(--gold);margin-bottom:4px">Known as: '+c.CallingName+'</div>':'<div style="font-size:12px;color:#7899bb;margin-bottom:4px">'+( c.CallingName||c.Name.split(' ')[0])+'</div>')+
@@ -6955,8 +6923,19 @@ function openPolicySchedule(cid){
       // Esc % column. Life Annuity has no premium escalation — its "escalation" is the
       // income escalation stored in BenEscalation. Show that here so the column isn't
       // empty for Life Annuities.
-      var _escVal = (p.Type==='Life Annuity') ? p.BenEscalation : p.PremEscalation;
-      s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-size:12px">'+Rpct(_escVal)+'</td>';
+      // Risk / Business policies have BOTH premium and benefit escalation on the card —
+      // show both stacked so the difference between premium growth and cover growth is
+      // visible. RA / Investment / other types only have premium escalation by design.
+      var _escCell;
+      if(p.Type==='Life Annuity'){
+        _escCell = Rpct(p.BenEscalation);
+      } else if(isRisk||isBiz){
+        _escCell = '<div style="line-height:1.4">'+Rpct(p.PremEscalation)+'<span style="font-size:10px;color:#888;font-weight:400"> prem</span></div>'+
+                   '<div style="line-height:1.4">'+Rpct(p.BenEscalation)+'<span style="font-size:10px;color:#888;font-weight:400"> ben</span></div>';
+      } else {
+        _escCell = Rpct(p.PremEscalation);
+      }
+      s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-size:12px">'+_escCell+'</td>';
       s+='</tr>';
 
       // Detail row — beneficiaries, income benefits, notes, owner
