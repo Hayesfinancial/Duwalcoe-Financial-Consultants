@@ -3685,11 +3685,49 @@ function buildRetirement() {
     S.importedPols.forEach(function(p){
       if(raPolTypes.indexOf(p.Type)>-1){
         var escRaw=String(p.PremEscalation!=null&&p.PremEscalation!==''?p.PremEscalation:(p.premEsc!=null&&p.premEsc!==''?p.premEsc:'')).replace(/,/g,'.').replace(/[^0-9.]/g,'');
+
+        // ── Monthly contribution for FV projection ──
+        // For Pension/Provident Fund: use the NET-to-retirement figure (gross premium
+        // minus the monthly portion of annual group risk premiums and admin fees) —
+        // this is what actually compounds in the fund. Using gross overstates the
+        // projected fund value because ~20-25% of contributions typically leak to
+        // costs in employer schemes.
+        //
+        // For all other types (RA, Preservation, TFS, Endowment, Living Annuity etc.)
+        // the premium IS what gets invested, so use the gross Premium as before.
+        //
+        // Legacy/incomplete records (no GroupRiskBenefits, no AnnualAdminFees) fall
+        // through to the gross figure — same behaviour as before this fix.
+        var contribForRet = '';
+        var isPensionType = (p.Type==='Pension Fund' || p.Type==='Provident Fund');
+        var isMonthly = (p.Frequency==='Monthly' || !p.Frequency);
+        if(isMonthly && p.Premium){
+          if(isPensionType){
+            var grossMonthly = parseFloat(String(p.Premium).replace(/[^0-9.\-]/g,''))||0;
+            var annualRisk = 0;
+            try {
+              var grRows = p.GroupRiskBenefits ? JSON.parse(p.GroupRiskBenefits) : [];
+              if(grRows && grRows.length){
+                grRows.forEach(function(r){
+                  annualRisk += parseFloat(String(r.prem||'').replace(/[^0-9.\-]/g,''))||0;
+                });
+              }
+            } catch(e){}
+            var annualAdmin = parseFloat(String(p.AnnualAdminFees||'').replace(/[^0-9.\-]/g,''))||0;
+            var netMonthly = grossMonthly - (annualRisk/12) - (annualAdmin/12);
+            // If costs exceed gross (shouldn't happen on a healthy scheme), fall back to gross
+            // to avoid feeding negative/zero contributions into the projection.
+            contribForRet = netMonthly > 0 ? String(Math.round(netMonthly*100)/100) : p.Premium;
+          } else {
+            contribForRet = p.Premium;
+          }
+        }
+
         S.retAssets.push({
           desc:(p.Insurer?p.Insurer+' — ':'')+p.Product||p.Type||'Fund',
           currentVal: p.BenFundValue||'',
           growthRate: p.GrowthRate||'',
-          monthlyContrib: p.Premium&&(p.Frequency==='Monthly'||!p.Frequency)?p.Premium:'',
+          monthlyContrib: contribForRet,
           contribEsc: escRaw||'',
           maturityAge: p.maturityAge||''
         });
