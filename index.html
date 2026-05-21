@@ -4726,10 +4726,16 @@ function buildPolicyForm(p){
     })();
     html+='</div>';
     // Premium escalation row — kept for Pension/Provident (salary CPI escalations etc.)
+    // Second column now holds the Annual Admin & Other Fees (R) field — captured separately
+    // from group risk row premiums because admin/consulting/other isn't tied to a benefit row.
     html+='<div id="pEscRow" class="g2"'+(_isOnceOff?' style="display:none"':'')+'>'
       +fld('pprem_pct','Premium / Salary Escalation %',p.PremEscalation,'text','placeholder="e.g. 6"')
-      +'<div></div>'
+      +fld('p_adminfees','Annual Admin & Other Fees (R)',p.AnnualAdminFees||'','text','placeholder="e.g. 2403" oninput="pensionBreakdownCalc()"')
       +'</div>';
+    // ── Contribution Breakdown panel ─────────────────────────────────────
+    // Auto-populated by pensionBreakdownCalc(). Hidden by default; shown only
+    // when there's enough data (salary + at least one of member%/employer%).
+    html+='<div id="p_breakdown_panel" style="display:none;margin-top:12px;padding:14px 16px;background:#f8f7f1;border:1px solid var(--smoke);border-radius:8px"></div>';
   } else {
     html+='<div class="g2">'+fld('ppm',isLifeAnn?'Purchase Price (Lump Sum)':'Premium / Contribution',p.Premium,'text',isInv?'oninput="invCalcMaturity()"':'')+(function(){
       var _fOpts=['Monthly','Quarterly','Annually','Once Off','Paid Up'];
@@ -5294,6 +5300,7 @@ function pensionContribCalc(){
     // Display already shows the migrated text on initial render; only reset to '—'
     // if there's no migrated value to show.
     if(disp && (!hid || !hid.value)) disp.innerHTML='—';
+    pensionBreakdownCalc();  // refresh panel (will hide if not calculable)
     return;
   }
   var annual  = sal * (memPct+empPct) / 100;
@@ -5304,6 +5311,109 @@ function pensionContribCalc(){
       ' &nbsp;·&nbsp; '+(memPct+empPct)+'% of salary</span>';
   }
   if(hid) hid.value = String(Math.round(monthly*100)/100);
+  pensionBreakdownCalc();
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Contribution Breakdown — analytical readout of where the contributions go.
+//
+// Reads: Pensionable Salary, Member %, Employer %, sum of group risk row
+// annual premiums, Annual Admin & Other Fees. Computes the % of salary going
+// to risk and admin, the net retirement %, and the employer/member allocation
+// split. Shows in the #p_breakdown_panel div. Hidden if not calculable.
+//
+// Convention assumed: costs come out of the employer rate first; member's
+// rate goes 100% to retirement. This matches Alexforbes / Momentum FundsAtWork /
+// Sanlam Umbrella default treatment. If costs exceed the employer rate (rare,
+// usually a poorly-structured scheme) we switch to a "Total contribution split"
+// framing instead of "Employer allocation", because employer-retirement would
+// otherwise show as negative.
+// ─────────────────────────────────────────────────────────────────────
+function pensionBreakdownCalc(){
+  var panel = document.getElementById('p_breakdown_panel');
+  if(!panel) return; // not on a Pension/Provident card
+  var sal = parseFloat((document.getElementById('p_pensal')||{value:''}).value.replace(/[^0-9.]/g,''))||0;
+  var memPct = parseFloat((document.getElementById('p_mempct')||{value:''}).value.replace(/[^0-9.]/g,''))||0;
+  var empPct = parseFloat((document.getElementById('p_emppct')||{value:''}).value.replace(/[^0-9.]/g,''))||0;
+  // Not enough to compute → hide
+  if(sal<=0 || (memPct+empPct)<=0){
+    panel.style.display='none';
+    panel.innerHTML='';
+    return;
+  }
+  // Sum annual group risk premiums from rows
+  var riskTotal = 0;
+  POL_GROUP_RISK_ROWS.forEach(function(r){ riskTotal += parseFloat(String(r.prem||'').replace(/[^0-9.]/g,''))||0; });
+  // Annual admin & other fees
+  var adminTotal = parseFloat((document.getElementById('p_adminfees')||{value:''}).value.replace(/[^0-9.]/g,''))||0;
+
+  var totalPct = memPct + empPct;
+  var annualContrib = sal * totalPct / 100;
+  var riskPct = (riskTotal / sal) * 100;
+  var adminPct = (adminTotal / sal) * 100;
+  var netRetPct = totalPct - riskPct - adminPct;
+  var netRetAnnual = annualContrib - riskTotal - adminTotal;
+
+  // Cost ratio (costs / total contributions) — colour-coded
+  var costRatio = annualContrib>0 ? ((riskTotal+adminTotal)/annualContrib)*100 : 0;
+  var costColour, costBg, costBorder;
+  if(costRatio < 15)      { costColour='#166534'; costBg='#f0fdf4'; costBorder='#bbf7d0'; }
+  else if(costRatio < 25) { costColour='#92400e'; costBg='#fef3c7'; costBorder='#fcd34d'; }
+  else                    { costColour='#991b1b'; costBg='#fef2f2'; costBorder='#fecaca'; }
+
+  var fmt = function(n){ return Math.round(n).toLocaleString('en-ZA'); };
+  var fpct = function(n){ return (Math.round(n*100)/100).toFixed(2)+'%'; };
+
+  // Employer-allocation breakdown (default convention).
+  // If costs exceed employer rate, switch framing.
+  var allocHtml = '';
+  var empRetPct = empPct - riskPct - adminPct;
+  if(empRetPct >= 0){
+    allocHtml =
+      '<div><strong>Employer '+empPct+'%:</strong> '+fpct(empRetPct)+' retirement &nbsp;·&nbsp; '+fpct(riskPct)+' risk &nbsp;·&nbsp; '+fpct(adminPct)+' admin</div>'+
+      '<div><strong>Member '+memPct+'%:</strong> '+fpct(memPct)+' retirement</div>';
+  } else {
+    // Costs > employer rate — costs spill into member portion too
+    allocHtml =
+      '<div style="color:#92400e"><em>Costs exceed employer contribution — costs are absorbed proportionally across the pool.</em></div>'+
+      '<div><strong>Total '+totalPct+'%:</strong> '+fpct(netRetPct)+' retirement &nbsp;·&nbsp; '+fpct(riskPct)+' risk &nbsp;·&nbsp; '+fpct(adminPct)+' admin</div>';
+  }
+
+  panel.innerHTML =
+    '<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:1px;margin-bottom:10px">Annual Contribution Breakdown</div>'+
+    '<div style="display:grid;grid-template-columns:auto 1fr 90px;gap:6px 14px;font-size:13px;align-items:center">'+
+      // Row: Total contribution
+      '<span style="color:#444;font-weight:600">Total contribution</span>'+
+      '<span style="font-family:Georgia,serif;color:var(--navy);font-weight:700">R '+fmt(annualContrib)+'</span>'+
+      '<span style="color:#889;font-size:11px;text-align:right">'+fpct(totalPct)+'</span>'+
+      // Row: Risk
+      '<span style="color:#889;padding-left:14px">Risk premiums</span>'+
+      '<span style="font-family:Georgia,serif;color:'+(riskTotal>0?'#9e2a2b':'#aaa')+'">R '+fmt(riskTotal)+'</span>'+
+      '<span style="color:#889;font-size:11px;text-align:right">'+fpct(riskPct)+'</span>'+
+      // Row: Admin
+      '<span style="color:#889;padding-left:14px">Admin &amp; fees</span>'+
+      '<span style="font-family:Georgia,serif;color:'+(adminTotal>0?'#9e2a2b':'#aaa')+'">R '+fmt(adminTotal)+'</span>'+
+      '<span style="color:#889;font-size:11px;text-align:right">'+fpct(adminPct)+'</span>'+
+      // Row: Net to retirement
+      '<span style="color:#444;font-weight:600;padding-top:8px;border-top:1px solid var(--smoke)">Net to retirement</span>'+
+      '<span style="font-family:Georgia,serif;color:'+(netRetAnnual>=0?'#166534':'#991b1b')+';font-weight:700;padding-top:8px;border-top:1px solid var(--smoke)">R '+fmt(netRetAnnual)+'</span>'+
+      '<span style="color:#889;font-size:11px;text-align:right;padding-top:8px;border-top:1px solid var(--smoke)">'+fpct(netRetPct)+'</span>'+
+    '</div>'+
+    // Allocation block
+    '<div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--smoke);font-size:12px;color:#555;line-height:1.7">'+
+      allocHtml+
+    '</div>'+
+    // Cost ratio block (colour-coded)
+    (riskTotal>0||adminTotal>0
+      ? '<div style="margin-top:10px;padding:7px 12px;border-radius:5px;background:'+costBg+';border:1px solid '+costBorder+';color:'+costColour+';font-size:12px;font-weight:600">'+
+          'Cost ratio: '+fpct(costRatio)+' of contributions '+
+          (costRatio<15?'· healthy':costRatio<25?'· typical employer scheme':'· high — consider review')+
+        '</div>'
+      : '<div style="margin-top:10px;padding:7px 12px;border-radius:5px;background:#f8f7f1;border:1px dashed var(--mist);color:#889;font-size:11px;font-style:italic">'+
+          'Capture group risk premiums and admin fees from the latest fund statement to see the breakdown.'+
+        '</div>'
+    );
+  panel.style.display='block';
 }
 
 // Render the group risk benefit rows.
@@ -5321,7 +5431,7 @@ function renderGroupRiskRows(){
       '</div>'+
       '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">'+
       '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Cover Amount (R)</div><input type="text" value="'+(r.cover||'')+'" placeholder="R" onchange="POL_GROUP_RISK_ROWS['+i+'].cover=this.value" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
-      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Premium <span style="color:#b45309">(informational — already in fund contribution)</span></div><input type="text" value="'+(r.prem||'')+'" placeholder="R" onchange="POL_GROUP_RISK_ROWS['+i+'].prem=this.value" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px;background:#fbfaf6"></div>'+
+      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Annual Premium (R) <span style="color:#889">— from statement, feeds breakdown</span></div><input type="text" value="'+(r.prem||'')+'" placeholder="R / year" onchange="POL_GROUP_RISK_ROWS['+i+'].prem=this.value;pensionBreakdownCalc()" oninput="POL_GROUP_RISK_ROWS['+i+'].prem=this.value;pensionBreakdownCalc()" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
       '</div>'+
       '<div style="margin-top:6px"><input type="text" value="'+((r.notes||'').replace(/"/g,'&quot;'))+'" placeholder="Notes (e.g. waiting period, insurer limit, age band)" onchange="POL_GROUP_RISK_ROWS['+i+'].notes=this.value" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
       '</div>';
@@ -5886,6 +5996,7 @@ function collectPolicyForm(){
     PensionableSalary:g('p_pensal'),
     MemberContribPct:g('p_mempct'),
     EmployerContribPct:g('p_emppct'),
+    AnnualAdminFees:g('p_adminfees'),
     HasGroupRisk:getR('phasgr'),
     GroupRiskApproved:getR('pgrapproved'),
     GroupRiskBenefits:JSON.stringify(POL_GROUP_RISK_ROWS),
