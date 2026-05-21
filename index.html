@@ -4581,6 +4581,7 @@ function openPolicyModal(cid,idx){
 var POL_INCOME_ROWS=[];
 var POL_LUMP_ROWS=[];
 var POL_BENS=[];
+var POL_GROUP_RISK_ROWS=[];
 
 function sec(title){
   return '<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--gold);padding:14px 0 6px;border-top:1px solid var(--smoke);margin-top:8px">'+title+'</div>';
@@ -4592,9 +4593,11 @@ function buildPolicyForm(p){
   try{ POL_INCOME_ROWS=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):[]; }catch(e){ POL_INCOME_ROWS=[]; }
   try{ POL_LUMP_ROWS=p.LumpBenefits?JSON.parse(p.LumpBenefits):[]; }catch(e){ POL_LUMP_ROWS=[]; }
   try{ POL_BENS=p.Beneficiaries?JSON.parse(p.Beneficiaries):[]; }catch(e){ POL_BENS=[]; }
+  try{ POL_GROUP_RISK_ROWS=p.GroupRiskBenefits?JSON.parse(p.GroupRiskBenefits):[]; }catch(e){ POL_GROUP_RISK_ROWS=[]; }
 
   var isRisk=(type==='Life / Income Protector'||type==='');
   var isRA=['Retirement Annuity','Pension Fund','Provident Fund','Pension Preservation','Provident Preservation'].indexOf(type)>=0;
+  var isPension=(type==='Pension Fund'||type==='Provident Fund');
   var isInv=['Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment','Unit Trust','Tax Free Savings'].indexOf(type)>=0;
   var isLA=(type==='Living Annuity');
   var isLifeAnn=(type==='Life Annuity');
@@ -4686,6 +4689,47 @@ function buildPolicyForm(p){
       })()+
     '</div>';
     // No policy-level escalation fields for risk — each benefit row has its own
+  } else if(isPension){
+    // ── Pension / Provident Fund — Salary + Member % + Employer % → auto-summed total
+    // Drives the existing `ppm` (Premium) field by calculation. Old records with a manually
+    // entered Premium but no salary/% are migrated by preserving the Premium value in the
+    // hidden field and showing it as the displayed total until salary/% are supplied.
+    var _ps  = p.PensionableSalary||'';
+    var _pmp = p.MemberContribPct||'';
+    var _pep = p.EmployerContribPct||'';
+    var _hasCalcInputs = (clean(_ps)!=='' && (clean(_pmp)!=='' || clean(_pep)!==''));
+    var _migratedPrem = (!_hasCalcInputs && p.Premium) ? p.Premium : '';
+    html+='<div style="font-size:11px;color:#889;margin-bottom:8px;padding:8px 10px;background:#f8f7f1;border:1px solid var(--smoke);border-radius:6px">'+
+      '<strong>Employer fund contribution.</strong> Capture from the latest fund administrator statement '+
+      '(e.g. Alexforbes, Momentum FundsAtWork, Sanlam Umbrella, Liberty Corporate). '+
+      'Member + Employer contributions are summed and combined for s11F deduction purposes.'+
+      '</div>';
+    html+='<div class="g3">'+
+      fld('p_pensal','Annual Pensionable Salary',_ps,'text','oninput="pensionContribCalc()"')+
+      fld('p_mempct','Member Contribution %',_pmp,'text','oninput="pensionContribCalc()" placeholder="e.g. 5"')+
+      fld('p_emppct','Employer Contribution %',_pep,'text','oninput="pensionContribCalc()" placeholder="e.g. 10"')+
+      '</div>';
+    // Calculated / displayed total + Frequency
+    html+='<div class="g2" style="margin-top:8px">';
+    html+='<div class="fld"><label>Monthly Total Contribution <span style="font-size:10px;color:#889;font-weight:400">(auto-calculated from salary &times; total %)</span></label>'+
+      '<div id="p_calctotal_display" style="padding:8px 11px;background:var(--smoke);border:1.5px solid var(--mist);border-radius:7px;font-size:13px;font-weight:700;color:var(--navy)">'+
+      (_migratedPrem?('R '+parseFloat(_migratedPrem).toLocaleString('en-ZA')+' <span style="font-size:10px;color:#b45309;font-weight:500"> · migrated from prior entry — set salary and % to refresh</span>'):'—')+
+      '</div>'+
+      '<input type="hidden" id="ppm" value="'+(p.Premium||'')+'">'+
+      '</div>';
+    html+=(function(){
+      var _fOpts=['Monthly','Quarterly','Annually','Once Off','Paid Up'];
+      var _fv=p.Frequency||'Monthly';
+      return '<div class="fld"><label>Frequency</label><select id="pfreq" onchange="freqChanged(this)" style="border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px;width:100%">'+
+        _fOpts.map(function(o){return '<option value="'+o+'"'+(_fv===o?' selected':'')+'>'+o+'</option>';}).join('')+
+        '</select></div>';
+    })();
+    html+='</div>';
+    // Premium escalation row — kept for Pension/Provident (salary CPI escalations etc.)
+    html+='<div id="pEscRow" class="g2"'+(_isOnceOff?' style="display:none"':'')+'>'
+      +fld('pprem_pct','Premium / Salary Escalation %',p.PremEscalation,'text','placeholder="e.g. 6"')
+      +'<div></div>'
+      +'</div>';
   } else {
     html+='<div class="g2">'+fld('ppm',isLifeAnn?'Purchase Price (Lump Sum)':'Premium / Contribution',p.Premium,'text',isInv?'oninput="invCalcMaturity()"':'')+(function(){
       var _fOpts=['Monthly','Quarterly','Annually','Once Off','Paid Up'];
@@ -4760,6 +4804,46 @@ function buildPolicyForm(p){
       html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="p3pot" value="No"'+(p.WithdrawSavingsPot==='No'?' checked':'')+'>No</label>';
       html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="p3pot" value="Undecided"'+((!p.WithdrawSavingsPot||p.WithdrawSavingsPot==='Undecided')?' checked':'')+'>Undecided</label>';
       html+='</div></div>';
+
+      // ── GROUP RISK BENEFITS (Pension / Provident Fund only) ─────────────
+      // Employer-fund group risk: Life Cover, Disability (lump & income), Dread Disease.
+      // Approved (in fund) vs Unapproved (employer-owned outside fund) drives tax treatment.
+      // Premium is informational only — the actual cost is already inside the fund contribution
+      // captured above (no double-counting on AUM / premium totals).
+      if(isPension){
+        var _hasGR = p.HasGroupRisk || (POL_GROUP_RISK_ROWS.length>0 ? 'Yes' : 'Yes'); // default Yes for new + existing
+        var _grApproved = p.GroupRiskApproved || 'Approved';
+        html+=sec('Group Risk Benefits');
+        html+='<div class="fld"><label>This fund includes group risk benefits</label>'+
+          '<div style="display:flex;gap:14px;margin-top:6px">'+
+          '<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="phasgr" value="Yes"'+(_hasGR==='Yes'?' checked':'')+' onchange="toggleGroupRiskSection()">Yes</label>'+
+          '<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="phasgr" value="No"'+(_hasGR==='No'?' checked':'')+' onchange="toggleGroupRiskSection()">No</label>'+
+          '</div></div>';
+        html+='<div id="grWrap" style="display:'+(_hasGR==='No'?'none':'block')+';margin-top:10px">';
+        // Approved / Unapproved selector
+        html+='<div class="fld"><label>Approved status <span style="font-size:10px;color:#889;font-weight:400">(drives tax treatment of payouts)</span></label>'+
+          '<div style="display:flex;gap:14px;margin-top:6px;flex-wrap:wrap">'+
+          '<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="pgrapproved" value="Approved"'+(_grApproved==='Approved'?' checked':'')+' onchange="updateGroupRiskTaxHint()">Approved (in fund)</label>'+
+          '<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="pgrapproved" value="Unapproved"'+(_grApproved==='Unapproved'?' checked':'')+' onchange="updateGroupRiskTaxHint()">Unapproved (employer-owned, outside fund)</label>'+
+          '</div></div>';
+        // Tax-treatment hint
+        html+='<div id="grTaxHint" style="font-size:11px;padding:8px 10px;border-radius:6px;margin-top:6px;'+
+          (_grApproved==='Approved'
+            ? 'background:#eff6ff;border:1px solid #bfdbfe;color:#1e40af">'+
+              '<strong>Approved:</strong> Death and lump-sum disability payouts taxed under the retirement lump-sum table '+
+              '(R550k tax-free, then 18/27/36%). Income disability (PHI) taxable at marginal rates. '+
+              'Section 37C trustee discretion applies — nominations are guidance, not binding.'
+            : 'background:#fef3c7;border:1px solid #fcd34d;color:#92400e">'+
+              '<strong>Unapproved:</strong> Death and disability lump sums are tax-free under s10(1)(gI). '+
+              'PHI payouts tax-free since 1 March 2015 (premium not deductible). '+
+              'No s37C — paid per policy beneficiary nomination. Estate-dutiable unless spouse-beneficiary.')+
+          '</div>';
+        // Benefit rows
+        html+='<div style="font-size:11px;color:#889;margin:10px 0 6px 0">One row per benefit. Cover values feed the FNA Death &amp; Disability needs analysis. Premium is informational — already included in the fund contribution above.</div>';
+        html+='<div id="grRowsWrap">'+renderGroupRiskRows()+'</div>';
+        html+='<button type="button" class="btn b-gh sm" style="margin-top:6px" onclick="addGroupRiskRow()">+ Add Group Risk Benefit</button>';
+        html+='</div>'; // end grWrap
+      }
     } else {
       // Investments use Maturity Date as primary; Maturity Age is auto-derived from client DOB.
       // If existing policy has MaturityAge but no MaturityDate, derive the date from DOB+age (migration).
@@ -5022,6 +5106,12 @@ function buildPolicyForm(p){
     }, 0);
   }
 
+  // Pension / Provident: fire contribution calc on load so a record with salary+%s
+  // populated shows the correct total immediately (rather than the migrated note).
+  if(isPension){
+    setTimeout(pensionContribCalc, 0);
+  }
+
   // RA frequency is user-selected and must not be overridden (lump sum once-off RAs are valid)
 }
 
@@ -5182,6 +5272,97 @@ function lumpRowDelete(i){
 function addLumpRow(){
   POL_LUMP_ROWS.push({type:'Life Cover',label:'',cover:'',prem:'',premEsc:'',benEsc:''});
   document.getElementById('lumpRowsWrap').innerHTML=renderLumpRows();
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Pension / Provident Fund helpers — contribution calc + group risk rows
+// ─────────────────────────────────────────────────────────────────────
+
+// Recalculate monthly total contribution from Pensionable Salary × (Member% + Employer%).
+// Updates the hidden ppm (Premium) field used by collectPolicyForm and the visible display.
+// If any input is blank/invalid we LEAVE the hidden ppm alone — this preserves migrated
+// values for old records where Premium was captured directly without salary/%. The display
+// still shows the dash so the user knows to fill the fields, but a save will not wipe data.
+function pensionContribCalc(){
+  var sal = parseFloat((document.getElementById('p_pensal')||{value:''}).value.replace(/[^0-9.]/g,''))||0;
+  var memPct = parseFloat((document.getElementById('p_mempct')||{value:''}).value.replace(/[^0-9.]/g,''))||0;
+  var empPct = parseFloat((document.getElementById('p_emppct')||{value:''}).value.replace(/[^0-9.]/g,''))||0;
+  var disp = document.getElementById('p_calctotal_display');
+  var hid  = document.getElementById('ppm');
+  if(sal<=0 || (memPct+empPct)<=0){
+    // Inputs incomplete — leave hidden ppm untouched (preserves migrated values).
+    // Display already shows the migrated text on initial render; only reset to '—'
+    // if there's no migrated value to show.
+    if(disp && (!hid || !hid.value)) disp.innerHTML='—';
+    return;
+  }
+  var annual  = sal * (memPct+empPct) / 100;
+  var monthly = annual / 12;
+  if(disp){
+    disp.innerHTML = 'R '+Math.round(monthly).toLocaleString('en-ZA')+
+      ' <span style="font-size:10px;color:#889;font-weight:500"> · annual R '+Math.round(annual).toLocaleString('en-ZA')+
+      ' &nbsp;·&nbsp; '+(memPct+empPct)+'% of salary</span>';
+  }
+  if(hid) hid.value = String(Math.round(monthly*100)/100);
+}
+
+// Render the group risk benefit rows.
+function renderGroupRiskRows(){
+  if(POL_GROUP_RISK_ROWS.length===0) return '<div style="font-size:12px;color:#aaa;padding:8px 0">No group risk benefits added yet — click + Add Group Risk Benefit.</div>';
+  var typeOpts=['Life Cover','Capital Disability (Lump Sum)','Income Disability (PHI)','Dread Disease','Funeral','Spouse Cover','Child Cover','Other'];
+  return POL_GROUP_RISK_ROWS.map(function(r,i){
+    return '<div style="background:var(--smoke);border-radius:8px;padding:10px 12px;margin-bottom:8px">'+
+      '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">'+
+      '<select onchange="POL_GROUP_RISK_ROWS['+i+'].type=this.value" style="border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px;flex:1.2">'+
+        typeOpts.map(function(o){return '<option'+(r.type===o?' selected':'')+'>'+o+'</option>';}).join('')+
+      '</select>'+
+      '<input type="text" value="'+((r.basis||'').replace(/"/g,'&quot;'))+'" placeholder="Cover basis (e.g. 3 × salary, 75% of salary)" onchange="POL_GROUP_RISK_ROWS['+i+'].basis=this.value" style="flex:2;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px">'+
+      '<button type="button" onclick="groupRiskRowDelete('+i+')" style="background:var(--rose);color:#fff;border:none;border-radius:6px;padding:5px 9px;cursor:pointer;font-size:11px;font-weight:700">✕</button>'+
+      '</div>'+
+      '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">'+
+      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Cover Amount (R)</div><input type="text" value="'+(r.cover||'')+'" placeholder="R" onchange="POL_GROUP_RISK_ROWS['+i+'].cover=this.value" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
+      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Premium <span style="color:#b45309">(informational — already in fund contribution)</span></div><input type="text" value="'+(r.prem||'')+'" placeholder="R" onchange="POL_GROUP_RISK_ROWS['+i+'].prem=this.value" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px;background:#fbfaf6"></div>'+
+      '</div>'+
+      '<div style="margin-top:6px"><input type="text" value="'+((r.notes||'').replace(/"/g,'&quot;'))+'" placeholder="Notes (e.g. waiting period, insurer limit, age band)" onchange="POL_GROUP_RISK_ROWS['+i+'].notes=this.value" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
+      '</div>';
+  }).join('');
+}
+
+function addGroupRiskRow(){
+  POL_GROUP_RISK_ROWS.push({type:'Life Cover',basis:'',cover:'',prem:'',notes:''});
+  var w=document.getElementById('grRowsWrap'); if(w) w.innerHTML=renderGroupRiskRows();
+}
+
+function groupRiskRowDelete(i){
+  POL_GROUP_RISK_ROWS.splice(i,1);
+  var w=document.getElementById('grRowsWrap'); if(w) w.innerHTML=renderGroupRiskRows();
+}
+
+// Show/hide the group risk wrap based on the Yes/No toggle.
+function toggleGroupRiskSection(){
+  var el = document.querySelector('input[name="phasgr"]:checked');
+  var v  = el ? el.value : 'Yes';
+  var wrap = document.getElementById('grWrap');
+  if(wrap) wrap.style.display = (v==='No' ? 'none' : 'block');
+}
+
+// Swap the tax-treatment hint based on Approved/Unapproved selection.
+function updateGroupRiskTaxHint(){
+  var el = document.querySelector('input[name="pgrapproved"]:checked');
+  var v  = el ? el.value : 'Approved';
+  var hint = document.getElementById('grTaxHint');
+  if(!hint) return;
+  if(v==='Approved'){
+    hint.style.cssText='font-size:11px;padding:8px 10px;border-radius:6px;margin-top:6px;background:#eff6ff;border:1px solid #bfdbfe;color:#1e40af';
+    hint.innerHTML='<strong>Approved:</strong> Death and lump-sum disability payouts taxed under the retirement lump-sum table '+
+      '(R550k tax-free, then 18/27/36%). Income disability (PHI) taxable at marginal rates. '+
+      'Section 37C trustee discretion applies — nominations are guidance, not binding.';
+  } else {
+    hint.style.cssText='font-size:11px;padding:8px 10px;border-radius:6px;margin-top:6px;background:#fef3c7;border:1px solid #fcd34d;color:#92400e';
+    hint.innerHTML='<strong>Unapproved:</strong> Death and disability lump sums are tax-free under s10(1)(gI). '+
+      'PHI payouts tax-free since 1 March 2015 (premium not deductible). '+
+      'No s37C — paid per policy beneficiary nomination. Estate-dutiable unless spouse-beneficiary.';
+  }
 }
 
 // Toggle the payer-name field visibility + label/placeholder based on PayerType.
@@ -5701,6 +5882,13 @@ function collectPolicyForm(){
       if(t==='Third Party' || t==='Company') return g('ppayname');
       return '';
     })(),
+    // ── Pension / Provident Fund extras (only present on Pension/Provident cards)
+    PensionableSalary:g('p_pensal'),
+    MemberContribPct:g('p_mempct'),
+    EmployerContribPct:g('p_emppct'),
+    HasGroupRisk:getR('phasgr'),
+    GroupRiskApproved:getR('pgrapproved'),
+    GroupRiskBenefits:JSON.stringify(POL_GROUP_RISK_ROWS),
     Notes:g('pnt'),
     Beneficiaries:JSON.stringify(POL_BENS),
     IncomeBenefits:JSON.stringify(POL_INCOME_ROWS)
