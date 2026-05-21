@@ -3752,6 +3752,43 @@ function buildRetirement() {
         if(match.BenFundValue) ra.currentVal=match.BenFundValue;
         // Sync maturity age from policy
         if(match.maturityAge&&!ra.maturityAge) ra.maturityAge=match.maturityAge;
+
+        // ── Pension / Provident Fund: auto-sync monthlyContrib to NET-to-retirement ──
+        // The CRM holds Premium as the GROSS contractual figure (matches IRP5). For
+        // FV projections we need the NET that actually compounds in the fund:
+        //   Net monthly = Premium − (annual group risk premiums ÷ 12) − (annual admin ÷ 12)
+        //
+        // This sync block runs on every render, so existing FNAs that were seeded
+        // with the gross figure (before this fix) self-correct on next open. It also
+        // keeps the FNA tracking any later CRM changes to group risk premiums or
+        // admin fees. For these policy types the user cannot manually override the
+        // FNA's monthlyContrib — CRM is the source of truth, consistent with the
+        // contribEsc/growthRate/currentVal sync above.
+        //
+        // For all other RA types (Retirement Annuity, Preservation, TFS, Endowment,
+        // Living Annuity etc.) the existing user-edit behaviour is preserved —
+        // monthlyContrib is NOT touched here.
+        if(match.Type==='Pension Fund' || match.Type==='Provident Fund'){
+          if(match.Frequency==='Monthly' || !match.Frequency){
+            var _grossM = parseFloat(String(match.Premium||'').replace(/[^0-9.\-]/g,''))||0;
+            if(_grossM > 0){
+              var _annRisk = 0;
+              try {
+                var _grR = match.GroupRiskBenefits ? JSON.parse(match.GroupRiskBenefits) : [];
+                if(_grR && _grR.length){
+                  _grR.forEach(function(rw){
+                    _annRisk += parseFloat(String(rw.prem||'').replace(/[^0-9.\-]/g,''))||0;
+                  });
+                }
+              } catch(e){}
+              var _annAdmin = parseFloat(String(match.AnnualAdminFees||'').replace(/[^0-9.\-]/g,''))||0;
+              var _netM = _grossM - (_annRisk/12) - (_annAdmin/12);
+              // Costs > gross would be a bad data scenario — fall back to gross to
+              // avoid feeding negative contributions into the projection.
+              ra.monthlyContrib = _netM > 0 ? String(Math.round(_netM*100)/100) : match.Premium;
+            }
+          }
+        }
       }
     });
   }
