@@ -3681,9 +3681,17 @@ function buildRetirement() {
 
   // Seed from CRM policies if empty
   var raPolTypes=['Retirement Annuity','Pension Fund','Provident Fund','Preservation Fund','Living Annuity','Tax Free Savings','Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment','Unit Trust'];
+  var discretionaryTypes=['Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment','Unit Trust'];
   if(S.retAssets.length===0 && S.importedPols && S.importedPols.length>0){
     S.importedPols.forEach(function(p){
       if(raPolTypes.indexOf(p.Type)>-1){
+        // Discretionary investments (Endowment, Offshore Endowment, Flexible Investment,
+        // Offshore Flexible Investment, Unit Trust) only seed into retirement assets when
+        // explicitly flagged. Core retirement vehicles (RA / Pension / Provident /
+        // Preservation / LA / TFS) always seed. This forces the advisor to confirm
+        // discretionary inclusion with the client at capture time.
+        if(discretionaryTypes.indexOf(p.Type)>-1 && p.IncludeInRetirement !== 'Yes') return;
+
         var escRaw=String(p.PremEscalation!=null&&p.PremEscalation!==''?p.PremEscalation:(p.premEsc!=null&&p.premEsc!==''?p.premEsc:'')).replace(/,/g,'.').replace(/[^0-9.]/g,'');
 
         // ── Monthly contribution for FV projection ──
@@ -3729,7 +3737,10 @@ function buildRetirement() {
           growthRate: p.GrowthRate||'',
           monthlyContrib: contribForRet,
           contribEsc: escRaw||'',
-          maturityAge: p.maturityAge||''
+          maturityAge: p.maturityAge||'',
+          // Discretionary rollover flag — if Yes and maturity<retirement, premiums
+          // continue past maturity. Read by all 7 projection sites in this file.
+          continuePastMaturity: (p.ContinuePastMaturity==='Yes')
         });
       }
     });
@@ -3752,6 +3763,8 @@ function buildRetirement() {
         if(match.BenFundValue) ra.currentVal=match.BenFundValue;
         // Sync maturity age from policy
         if(match.maturityAge&&!ra.maturityAge) ra.maturityAge=match.maturityAge;
+        // Sync rollover flag — CRM is source of truth, can flip per review meeting
+        ra.continuePastMaturity = (match.ContinuePastMaturity==='Yes');
 
         // ── Pension / Provident Fund: auto-sync monthlyContrib to NET-to-retirement ──
         // The CRM holds Premium as the GROSS contractual figure (matches IRP5). For
@@ -3821,7 +3834,7 @@ function buildRetirement() {
       var clientAge=ageFrom(S.cli.dob);
       var matAge=N(r.maturityAge);
       var proj;
-      if(matAge>0 && clientAge && matAge<retAge){
+      if(matAge>0 && clientAge && matAge<retAge && !r.continuePastMaturity){
         // Phase 1: grow with contributions to maturity
         var yrsToMat=Math.max(0,matAge-clientAge);
         var matVal=projectFund(r.currentVal,r.monthlyContrib,esc2,gr,yrsToMat);
@@ -4014,7 +4027,7 @@ function buildRetirement() {
       var gr=N(r.growthRate)>0?N(r.growthRate):N(S.assump.growth)||9;
       var esc3=N(r.contribEsc)>0?N(r.contribEsc):N(S.assump.incEsc)||6;
       var matAge=N(r.maturityAge);
-      if(matAge>0&&clientAgeNow&&matAge<retAge){
+      if(matAge>0&&clientAgeNow&&matAge<retAge && !r.continuePastMaturity){
         var yrsToMat=Math.max(0,matAge-clientAgeNow);
         var matVal=projectFund(r.currentVal,r.monthlyContrib,esc3,gr,yrsToMat);
         var yrsMatToRet=retAge-matAge;
@@ -4076,7 +4089,7 @@ function buildRetirement() {
       var esc3=N(r.contribEsc)>0?N(r.contribEsc):N(S.assump.incEsc)||6;
       var matAge=N(r.maturityAge);
       var fundProj;
-      if(matAge>0 && clientAgeNow && matAge<retAge){
+      if(matAge>0 && clientAgeNow && matAge<retAge && !r.continuePastMaturity){
         var yrsToMat=Math.max(0,matAge-clientAgeNow);
         var matVal=projectFund(r.currentVal,r.monthlyContrib,esc3,gr,yrsToMat);
         var yrsMatToRet=retAge-matAge;
@@ -4188,7 +4201,7 @@ function buildRetirement() {
       if(!N(r.currentVal)&&!N(r.monthlyContrib)) return a;
       var esc3=N(r.contribEsc)>0?N(r.contribEsc):N(S.assump.incEsc)||6;
       var matAge=N(r.maturityAge);
-      if(matAge>0&&clientAgeNow&&matAge<retAge){
+      if(matAge>0&&clientAgeNow&&matAge<retAge && !r.continuePastMaturity){
         var yrsToMat=Math.max(0,matAge-clientAgeNow);
         var matVal=projectFund(r.currentVal,r.monthlyContrib,esc3,scGrowth,yrsToMat);
         var yrsMatToRet=retAge-matAge;
@@ -6426,7 +6439,7 @@ function buildSummary() {
       var gr=N(r.growthRate)>0?N(r.growthRate):N(S.assump.growth)||9;
       var ec=N(r.contribEsc)>0?N(r.contribEsc):N(S.assump.incEsc)||6;
       var matAge=N(r.maturityAge);
-      if(matAge>0&&_smrCliAge&&matAge<retAge){
+      if(matAge>0&&_smrCliAge&&matAge<retAge && !r.continuePastMaturity){
         var yrsToMat=Math.max(0,matAge-_smrCliAge);
         var matVal=projectFund(r.currentVal,r.monthlyContrib,ec,gr,yrsToMat);
         var yrsMatToRet=retAge-matAge;
@@ -6722,7 +6735,7 @@ function buildOverview() {
       var gr=N(r.growthRate)>0?N(r.growthRate):N(S.assump.growth)||9;
       var ec=N(r.contribEsc)>0?N(r.contribEsc):N(S.assump.incEsc)||6;
       var matAge=N(r.maturityAge);
-      if(matAge>0&&_cliAgeO&&matAge<_retAgeO){
+      if(matAge>0&&_cliAgeO&&matAge<_retAgeO && !r.continuePastMaturity){
         var yrsToMat=Math.max(0,matAge-_cliAgeO);
         var matVal=projectFund(r.currentVal,r.monthlyContrib,ec,gr,yrsToMat);
         var yrsMatToRet=_retAgeO-matAge;
@@ -7424,7 +7437,7 @@ function printFNA(sections) {
     var gr=N(rn.growthRate)>0?N(rn.growthRate):N(S.assump.growth)||9;
     var esc=N(rn.contribEsc)>0?N(rn.contribEsc):N(S.assump.incEsc)||6;
     var matAge=N(rn.maturityAge);
-    if(matAge>0&&_prCliAge&&matAge<retAge){
+    if(matAge>0&&_prCliAge&&matAge<retAge && !rn.continuePastMaturity){
       var yrsToMat=Math.max(0,matAge-_prCliAge);
       var matVal=projectFund(rn.currentVal,rn.monthlyContrib,esc,gr,yrsToMat);
       var yrsMatToRet=retAge-matAge;

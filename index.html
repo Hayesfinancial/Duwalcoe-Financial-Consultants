@@ -4711,7 +4711,7 @@ function buildPolicyForm(p){
       '</div>';
     // Calculated / displayed total + Frequency
     html+='<div class="g2" style="margin-top:8px">';
-    html+='<div class="fld"><label>Monthly Total Contribution <span style="font-size:10px;color:#889;font-weight:400">(auto-calculated from salary &times; total %)</span></label>'+
+    html+='<div class="fld"><label><span id="p_calctotal_label">Monthly Total Contribution</span> <span style="font-size:10px;color:#889;font-weight:400">(auto-calculated from salary &times; total %)</span></label>'+
       '<div id="p_calctotal_display" style="padding:8px 11px;background:var(--smoke);border:1.5px solid var(--mist);border-radius:7px;font-size:13px;font-weight:700;color:var(--navy)">'+
       (_migratedPrem?('R '+parseFloat(_migratedPrem).toLocaleString('en-ZA')+' <span style="font-size:10px;color:#b45309;font-weight:500"> · migrated from prior entry — set salary and % to refresh</span>'):'—')+
       '</div>'+
@@ -4730,7 +4730,7 @@ function buildPolicyForm(p){
     // from group risk row premiums because admin/consulting/other isn't tied to a benefit row.
     html+='<div id="pEscRow" class="g2"'+(_isOnceOff?' style="display:none"':'')+'>'
       +fld('pprem_pct','Premium / Salary Escalation %',p.PremEscalation,'text','placeholder="e.g. 6"')
-      +fld('p_adminfees','Annual Admin & Other Fees (R)',p.AnnualAdminFees||'','text','placeholder="e.g. 2403" oninput="pensionBreakdownCalc()"')
+      +fld('p_adminfees','Annual Admin & Other Fees (R)',p.AnnualAdminFees||'','text','placeholder="e.g. 2403" oninput="pensionContribCalc()"')
       +'</div>';
     // ── Contribution Breakdown panel ─────────────────────────────────────
     // Auto-populated by pensionBreakdownCalc(). Hidden by default; shown only
@@ -4906,11 +4906,29 @@ function buildPolicyForm(p){
       var _gainBg=_gain>=0?'#f0fdf4':'#fef2f2';
       html+='<div style="padding:8px 11px;background:'+_gainBg+';border:1.5px solid var(--mist);border-radius:7px;font-size:13px;font-weight:700;color:'+_gainCol+'" id="inv_gain_display">'+(_net>0&&_fv>0?'R '+Math.round(_gain).toLocaleString('en-ZA')+' ('+_gainPct+'%)':'—')+'</div></div>';
       html+='</div>';
-      if(type==='Endowment'||type==='Offshore Endowment'){
-        html+='<div class="fld"><label>Include in Retirement Planning?</label><div style="display:flex;gap:12px;margin-top:8px">';
+      if(['Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment','Unit Trust'].indexOf(type)>=0){
+        // ── Retirement Planning Treatment ──
+        // Two policy-level decisions for discretionary investments:
+        //   IncludeInRetirement: should this policy count as retirement capital
+        //   in the FNA? Default No — advisor explicitly confirms with client.
+        //   ContinuePastMaturity: if the policy matures BEFORE retirement age,
+        //   do premiums continue to retirement age (eg rolled over), or stop at
+        //   maturity? Default No — matches the FNA's silent assumption.
+        // Both flags drive FNA projection logic. Captured here so the client
+        // intent is recorded at the policy level (single source of truth).
+        html+='<div style="background:#fafbfc;border:1px solid var(--smoke);border-radius:8px;padding:10px 12px;margin-top:4px">';
+        html+='<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:0.8px;margin-bottom:8px">Retirement Planning Treatment</div>';
+        html+='<div class="fld"><label>Include in Retirement Planning?</label><div style="display:flex;gap:12px;margin-top:6px">';
         html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="pinret" value="Yes"'+(p.IncludeInRetirement==='Yes'?' checked':'')+'>Yes</label>';
         html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="pinret" value="No"'+(p.IncludeInRetirement!=='Yes'?' checked':'')+'>No</label>';
         html+='</div></div>';
+        // Continue past maturity — relevant only when maturity is before retirement age.
+        // Field always rendered for discretionary types; the hint explains when it matters.
+        html+='<div class="fld" style="margin-top:8px"><label>If maturity is before retirement, premiums continue to retirement age? <span style="font-size:10px;color:#889;font-weight:400">(rollover assumption — confirm with client)</span></label><div style="display:flex;gap:12px;margin-top:6px">';
+        html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="pcontmat" value="Yes"'+(p.ContinuePastMaturity==='Yes'?' checked':'')+'>Yes — premiums continue (rolled over)</label>';
+        html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="pcontmat" value="No"'+(p.ContinuePastMaturity!=='Yes'?' checked':'')+'>No — premiums stop at maturity (default)</label>';
+        html+='</div></div>';
+        html+='</div>';
       }
     }
   }
@@ -5295,22 +5313,53 @@ function pensionContribCalc(){
   var empPct = parseFloat((document.getElementById('p_emppct')||{value:''}).value.replace(/[^0-9.]/g,''))||0;
   var disp = document.getElementById('p_calctotal_display');
   var hid  = document.getElementById('ppm');
+  var lbl  = document.getElementById('p_calctotal_label');
   if(sal<=0 || (memPct+empPct)<=0){
     // Inputs incomplete — leave hidden ppm untouched (preserves migrated values).
     // Display already shows the migrated text on initial render; only reset to '—'
     // if there's no migrated value to show.
     if(disp && (!hid || !hid.value)) disp.innerHTML='—';
+    if(lbl) lbl.textContent='Monthly Total Contribution';
     pensionBreakdownCalc();  // refresh panel (will hide if not calculable)
     return;
   }
-  var annual  = sal * (memPct+empPct) / 100;
-  var monthly = annual / 12;
+  // Gross figures
+  var grossAnnual  = sal * (memPct+empPct) / 100;
+  var grossMonthly = grossAnnual / 12;
+
+  // Costs — annual group risk premiums (summed from rows) + annual admin fees
+  var riskAnnual = 0;
+  POL_GROUP_RISK_ROWS.forEach(function(r){ riskAnnual += parseFloat(String(r.prem||'').replace(/[^0-9.]/g,''))||0; });
+  var adminAnnual = parseFloat((document.getElementById('p_adminfees')||{value:''}).value.replace(/[^0-9.]/g,''))||0;
+  var costsAnnual = riskAnnual + adminAnnual;
+  var costsMonthly = costsAnnual / 12;
+
+  // Net = what actually gets invested for retirement. Stored in `Premium` (hidden ppm)
+  // so all downstream consumers (FNA retirement projection, AUM dashboards, schedule
+  // print) reflect the genuine investment figure, not the gross contribution. Floor at 0
+  // for the defensive impossible-but-defensive case where costs exceed gross.
+  var netAnnual  = Math.max(0, grossAnnual - costsAnnual);
+  var netMonthly = netAnnual / 12;
+  var hasCosts = costsAnnual > 0;
+
+  // Headline display + label flip
   if(disp){
-    disp.innerHTML = 'R '+Math.round(monthly).toLocaleString('en-ZA')+
-      ' <span style="font-size:10px;color:#889;font-weight:500"> · annual R '+Math.round(annual).toLocaleString('en-ZA')+
-      ' &nbsp;·&nbsp; '+(memPct+empPct)+'% of salary</span>';
+    if(hasCosts){
+      disp.innerHTML = 'R '+Math.round(netMonthly).toLocaleString('en-ZA')+
+        ' <span style="font-size:10px;color:#889;font-weight:500"> · annual R '+Math.round(netAnnual).toLocaleString('en-ZA')+
+        ' net &nbsp;·&nbsp; from R '+Math.round(grossMonthly).toLocaleString('en-ZA')+'/m gross (R '+Math.round(costsMonthly).toLocaleString('en-ZA')+'/m to costs)</span>';
+    } else {
+      disp.innerHTML = 'R '+Math.round(grossMonthly).toLocaleString('en-ZA')+
+        ' <span style="font-size:10px;color:#889;font-weight:500"> · annual R '+Math.round(grossAnnual).toLocaleString('en-ZA')+
+        ' &nbsp;·&nbsp; '+(memPct+empPct)+'% of salary</span>';
+    }
   }
-  if(hid) hid.value = String(Math.round(monthly*100)/100);
+  if(lbl) lbl.textContent = hasCosts ? 'Monthly Net to Retirement' : 'Monthly Total Contribution';
+
+  // Hidden Premium (ppm) carries the headline figure: Net when costs are captured,
+  // Gross otherwise. Gross is always recoverable from PensionableSalary × total%
+  // so no information is lost.
+  if(hid) hid.value = String(Math.round((hasCosts?netMonthly:grossMonthly)*100)/100);
   pensionBreakdownCalc();
 }
 
@@ -5439,7 +5488,7 @@ function renderGroupRiskRows(){
       '</div>'+
       '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">'+
       '<div><div style="font-size:10px;color:#889;margin-bottom:3px">'+coverLabel+(isIPRow?' <span style="color:#b45309">— enter MONTHLY amount</span>':'')+'</div><input type="text" value="'+(r.cover||'')+'" placeholder="'+coverPh+'" oninput="POL_GROUP_RISK_ROWS['+i+'].cover=this.value" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
-      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Annual Premium (R) <span style="color:#889">— from statement, feeds breakdown</span></div><input type="text" value="'+(r.prem||'')+'" placeholder="R / year" oninput="POL_GROUP_RISK_ROWS['+i+'].prem=this.value;pensionBreakdownCalc()" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
+      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Annual Premium (R) <span style="color:#889">— from statement, feeds breakdown</span></div><input type="text" value="'+(r.prem||'')+'" placeholder="R / year" oninput="POL_GROUP_RISK_ROWS['+i+'].prem=this.value;pensionContribCalc()" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
       '</div>'+
       '<div style="margin-top:6px"><input type="text" value="'+((r.notes||'').replace(/"/g,'&quot;'))+'" placeholder="Notes (e.g. waiting period, insurer limit, age band)" oninput="POL_GROUP_RISK_ROWS['+i+'].notes=this.value" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
       '</div>';
@@ -5981,7 +6030,7 @@ function collectPolicyForm(){
     RetirementComponent:g('pb_retcomp'),SavingsComponent:g('pb_savcomp'),
     IllustrativeRate:g('pb_growrate')||g('pb_illrate'),PremGrowthRate:g('pb_growrate'),GrowthRate:g('pb_growrate'),
     TotalInvested:g('pb_totalinv'),TotalWithdrawn:g('pb_totalwith'),
-    WithdrawSavingsPot:getR('p3pot'),IncludeInRetirement:getR('pinret'),
+    WithdrawSavingsPot:getR('p3pot'),IncludeInRetirement:getR('pinret'),ContinuePastMaturity:getR('pcontmat'),
     MedPlan:g('pmedplan'),MedLives:g('pmedlives'),
     BenLAIncome:g('pb_la_income'),DrawdownRate:g('pb_la_drawdown'),LABonus:g('pb_la_bonus'),
     BenLifeAnnuityIncome:g('pb_lifann_inc'),LifeAnnuityGuarYrs:g('pb_lifann_guaryrs'),
