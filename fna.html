@@ -8172,6 +8172,179 @@ function printFNA(sections) {
           +'<span style="font-weight:700;color:#fbbf24">'+r(_pmt)+' /pm starting today</span></div>';
       })():'')
     );
+
+    // ── RETIREMENT WHAT-IF SCENARIO
+    // Only print when at least one scenario field has a value — otherwise the section would
+    // just duplicate the core calc on paper. Calc logic mirrors buildRetirement's what-if block;
+    // intentionally inlined here to follow the existing printFNA duplication pattern (core retirement
+    // calc is similarly duplicated from buildRetirement).
+    var _hasScenario = N(S.retScenario && S.retScenario.growth) > 0
+      || N(S.retScenario && S.retScenario.retAge) > 0
+      || N(S.retScenario && S.retScenario.extraLump) > 0
+      || N(S.retScenario && S.retScenario.extraPM) > 0
+      || N(S.retScenario && S.retScenario.extraAnnual) > 0;
+
+    if(_hasScenario){
+      // Read scenario inputs
+      var pscGrowth = Ndef(S.retScenario.growth, N(S.assump.growth)||9);
+      var pscExtraLump = N(S.retScenario.extraLump);
+      var pscExtraPM = N(S.retScenario.extraPM);
+      var pscExtraEsc = N(S.retScenario.extraEsc);
+      var pscExtraAnnual = N(S.retScenario.extraAnnual);
+      var pscExtraAnnualEsc = N(S.retScenario.extraAnnualEsc);
+
+      // Scenario retirement age — with validation; falls back to core retAge if invalid
+      var pscRetAge = retAge;
+      var pscYrsToRet = yrsToRet || 0;
+      var pscYrsInRet = yrsInRet;
+      var pscAgeOverridden = false;
+      if(N(S.retScenario.retAge) > 0){
+        var _inputAge = N(S.retScenario.retAge);
+        var _endAge = getRetEndAge();
+        if(cliAge && _inputAge > cliAge && _inputAge < _endAge){
+          pscRetAge = _inputAge;
+          pscYrsToRet = Math.max(0, pscRetAge - cliAge);
+          pscYrsInRet = getYearsInRetirement(pscRetAge);
+          pscAgeOverridden = (pscRetAge !== retAge);
+        }
+      }
+
+      // Monthly need at scenario age
+      var pscMonthlyAtRet = 0;
+      (S.retNeeds||[]).forEach(function(rn){
+        if(!N(rn.amtToday)) return;
+        var escTo = Ndef(rn.esc, N(S.assump.cpi)||6);
+        pscMonthlyAtRet += Math.round(N(rn.amtToday)*Math.pow(1+escTo/100,pscYrsToRet));
+      });
+      // Rental at scenario age (only properties not sold)
+      var pscRentalAtRet = 0;
+      (S.props||[]).forEach(function(p){
+        if(p.soldAtRetirement||!N(p.rental)) return;
+        var escTo = Ndef(p.rentalEsc, 6);
+        pscRentalAtRet += Math.round(N(p.rental)*Math.pow(1+escTo/100,pscYrsToRet));
+      });
+      // Farm/business income at scenario age
+      var pscOtherIncAtRet = 0;
+      (S.otherAssets||[]).forEach(function(a){
+        if((a.retirementRole||'')!=='Generates income (farm/business)' || !N(a.retirementIncomePM)) return;
+        var escTo = Ndef(a.retirementIncEsc, N(S.assump.cpi)||6);
+        pscOtherIncAtRet += Math.round(N(a.retirementIncomePM)*Math.pow(1+escTo/100,pscYrsToRet));
+      });
+      // Manual monthly income at scenario age
+      var pscManualIncAtRet = 0;
+      (S.retOtherIncome||[]).forEach(function(rn){
+        if(!N(rn.amtPM)) return;
+        var escTo = Ndef(rn.escTo, N(S.assump.cpi)||6);
+        pscManualIncAtRet += Math.round(N(rn.amtPM)*Math.pow(1+escTo/100,pscYrsToRet));
+      });
+
+      var pscNetGap = Math.max(0, pscMonthlyAtRet - pscRentalAtRet - pscOtherIncAtRet - pscManualIncAtRet);
+      var _pscCpi = N(S.assump.cpi)||6;
+      var _pscRetRet = N(S.assump.retReturn)||8;
+      var pscCapNeed = pscNetGap > 0 ? capitalise(pscNetGap, pscYrsInRet, _pscCpi, _pscRetRet) : 0;
+      var pscLumpNeed = lumpNeedP; // same fixed amount per design decision
+      var pscTotalCapNeed = pscCapNeed + pscLumpNeed;
+
+      // Fund projection at scenario age + scenario growth
+      var pscFundsProj = (S.retAssets||[]).reduce(function(a,rn){
+        if(!N(rn.currentVal)&&!N(rn.monthlyContrib)) return a;
+        var esc3 = Ndef(rn.contribEsc, N(S.assump.incEsc)||6);
+        var matAge = N(rn.maturityAge);
+        if(matAge>0 && cliAge && matAge<pscRetAge && !rn.continuePastMaturity){
+          var yrsToMat = Math.max(0, matAge-cliAge);
+          var matVal = projectFund(rn.currentVal,rn.monthlyContrib,esc3,pscGrowth,yrsToMat);
+          var yrsMatToRet = pscRetAge - matAge;
+          return a + Math.round(matVal*Math.pow(1+pscGrowth/100,yrsMatToRet));
+        }
+        return a + projectFund(rn.currentVal,rn.monthlyContrib,esc3,pscGrowth,pscYrsToRet);
+      }, 0);
+
+      // Manual lumps re-projected to scenario age, each at own growth rate
+      var pscOtherLumps = 0;
+      (S.retOtherLumps||[]).forEach(function(rn){
+        if(!N(rn.amt)) return;
+        var gr = Ndef(rn.growthRate, N(S.assump.growth)||9);
+        pscOtherLumps += Math.round(N(rn.amt)*Math.pow(1+gr/100,pscYrsToRet));
+      });
+      // Properties sold at retirement — re-projected to scenario age
+      var pscPropSold = 0;
+      (S.props||[]).forEach(function(p){
+        if(!p.soldAtRetirement||!N(p.val)) return;
+        var gr = Ndef(p.propGrowth, N(S.assump.growth)||9);
+        var projV = Math.round(N(p.val)*Math.pow(1+gr/100,pscYrsToRet));
+        var pct = Ndef(p.retirementPct, 100);
+        pscPropSold += Math.round(projV*pct/100);
+      });
+      // Other assets sold at retirement — re-projected to scenario age
+      var pscSoldProceeds = 0;
+      (S.otherAssets||[]).forEach(function(a){
+        if((a.retirementRole||'')!=='Sold at retirement \u2014 proceeds to retirement') return;
+        if(!N(a.retirementSaleProceeds)) return;
+        var gr = Ndef(a.growthRate, N(S.assump.growth)||9);
+        pscSoldProceeds += Math.round(N(a.retirementSaleProceeds)*Math.pow(1+gr/100,pscYrsToRet));
+      });
+
+      // Extras FV
+      var pscExtraLumpFV = (pscExtraLump>0 && pscYrsToRet>0) ? Math.round(pscExtraLump*Math.pow(1+pscGrowth/100,pscYrsToRet)) : pscExtraLump;
+      var pscExtraPMFV = (pscExtraPM>0 && pscYrsToRet>0) ? projectFund(0, pscExtraPM, pscExtraEsc, pscGrowth, pscYrsToRet) : 0;
+      var pscExtraAnnualFV = 0;
+      if(pscExtraAnnual>0 && pscYrsToRet>0){
+        var _ra2 = pscGrowth/100;
+        var _ga2 = pscExtraAnnualEsc/100;
+        if(Math.abs(_ra2-_ga2) < 0.0001){
+          pscExtraAnnualFV = Math.round(pscExtraAnnual * pscYrsToRet * Math.pow(1+_ra2, pscYrsToRet-1));
+        } else {
+          pscExtraAnnualFV = Math.round(pscExtraAnnual * (Math.pow(1+_ra2,pscYrsToRet) - Math.pow(1+_ga2,pscYrsToRet)) / (_ra2-_ga2));
+        }
+      }
+
+      var pscTotal = pscFundsProj + pscOtherLumps + pscPropSold + pscSoldProceeds + pscExtraLumpFV + pscExtraPMFV + pscExtraAnnualFV;
+      var pscGap = pscTotal - pscTotalCapNeed;
+
+      // Income coverage HTML (only when there is a monthly need)
+      var pscCovHTML = '';
+      if(pscMonthlyAtRet > 0){
+        var pscCapForIncome = Math.max(0, pscTotal - pscLumpNeed);
+        var pscIncomeFromCap = monthlyFromCapital(pscCapForIncome, pscYrsInRet, _pscCpi, _pscRetRet);
+        var pscIncomeFromOther = pscRentalAtRet + pscOtherIncAtRet + pscManualIncAtRet;
+        var pscAchievable = pscIncomeFromCap + pscIncomeFromOther;
+        var pscAchievableToday = pscYrsToRet>0 ? Math.round(pscAchievable / Math.pow(1+_pscCpi/100, pscYrsToRet)) : pscAchievable;
+        var pscMonthlyTodayDesired = (S.retNeeds||[]).reduce(function(a,rn){return a+N(rn.amtToday);},0);
+        var pscCovPct = Math.min(100, Math.round(pscAchievable / pscMonthlyAtRet * 100));
+        var pscCovColor = pscCovPct >= 95 ? '#86efac' : (pscCovPct >= 75 ? '#fbbf24' : '#f87171');
+        var _ageLbl = pscAgeOverridden ? ' (at age '+pscRetAge+')' : '';
+
+        pscCovHTML = '<div style="border-top:1px solid #334;margin:10px 0 6px 0;padding-top:6px;font-size:9px;font-weight:700;color:#a8b938;text-transform:uppercase;letter-spacing:0.6px">Income coverage in this scenario'+_ageLbl+'</div>'
+          + nrow('Desired monthly income'+_ageLbl, r(pscMonthlyAtRet)+'/pm')
+          + nrow('Achievable monthly income'+_ageLbl, r(pscAchievable)+'/pm');
+        if(pscMonthlyTodayDesired > 0){
+          pscCovHTML += '<div style="display:flex;justify-content:space-between;padding:2px 0;font-size:9px;opacity:0.85">'
+            + '<span style="color:#8899bb">\u2248 in today\'s rands</span>'
+            + '<span style="color:#f0f9d4">'+r(pscAchievableToday)+'/pm vs '+r(pscMonthlyTodayDesired)+'/pm desired</span></div>';
+        }
+        pscCovHTML += '<div style="display:flex;justify-content:space-between;padding:6px 0;border-top:1px solid #334;margin-top:4px;font-weight:700">'
+          + '<span style="color:#ccd6f6">Coverage of desired income</span>'
+          + '<span style="color:'+pscCovColor+';font-weight:700">'+pscCovPct+'%</span></div>';
+      }
+
+      // Surplus/shortfall row (matches the style of the core retirement summary)
+      var pscSurplusRow = '<div style="display:flex;justify-content:space-between;padding:7px 0;border-top:2px solid #334;margin-top:5px;font-size:12px;font-weight:700">'
+        + '<span style="color:#ccd6f6">'+(pscGap>=0?'SCENARIO SURPLUS':'SCENARIO SHORTFALL')+'</span>'
+        + '<span style="color:'+(pscGap>=0?'#86efac':'#f87171')+'">'+r(Math.abs(pscGap))+'</span></div>';
+
+      h += sec('Retirement What-If Scenario');
+      h += navyBox(
+        nrow('Scenario growth', pscGrowth+'%')
+        + (pscAgeOverridden ? nrow('Scenario retirement age', String(pscRetAge)+' yrs (core: '+retAge+')') : '')
+        + (pscAgeOverridden ? nrow('Capital needed at age '+pscRetAge, r(pscTotalCapNeed)) : '')
+        + nrow('Scenario total at retirement'+(pscAgeOverridden?' (at age '+pscRetAge+')':''), r(pscTotal), true)
+        + (pscExtraLumpFV>0 ? nrow('Extra lump sum at retirement value', r(pscExtraLumpFV), false, true) : '')
+        + (pscExtraPMFV>0 ? nrow('Extra monthly savings at retirement value', r(pscExtraPMFV), false, true) : '')
+        + (pscExtraAnnualFV>0 ? nrow('Extra annual contribution at retirement value', r(pscExtraAnnualFV), false, true) : '')
+        + pscSurplusRow
+        + pscCovHTML
+      );
+    }
   }
 
   // PAGE 6 — ESTATE PLANNING
