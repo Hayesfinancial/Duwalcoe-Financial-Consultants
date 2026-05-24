@@ -3565,10 +3565,11 @@ function buildRetirement() {
   var yrsToRet = cliAge ? Math.max(0, retAge - cliAge) : null;
   var yrsInRet = getYearsInRetirement(retAge);
 
-  if(!S.retScenario) S.retScenario = { growth:'', extraLump:'', extraPM:'', extraEsc:'', extraAnnual:'', extraAnnualEsc:'' };
+  if(!S.retScenario) S.retScenario = { growth:'', extraLump:'', extraPM:'', extraEsc:'', extraAnnual:'', extraAnnualEsc:'', retAge:'' };
   // Backfill new fields on existing FNAs that loaded an older retScenario object
   if(S.retScenario.extraAnnual === undefined) S.retScenario.extraAnnual = '';
   if(S.retScenario.extraAnnualEsc === undefined) S.retScenario.extraAnnualEsc = '';
+  if(S.retScenario.retAge === undefined) S.retScenario.retAge = '';
 
   // ── Assumptions reminder
   s.appendChild(stitle('Retirement Planning'));
@@ -4219,8 +4220,21 @@ function buildRetirement() {
     // ── What-if calculator
     s.appendChild(stitle('Retirement What-If Calculator'));
     var scInf = div('info');
-    scInf.innerHTML = 'Use this to test a different growth assumption and additional savings without changing the core retirement inputs above. Annual contributions (e.g. year-end bonus) have their own escalation.';
+    scInf.innerHTML = 'Test a different growth assumption, additional savings, and a different retirement age without changing the core retirement inputs above. The "Scenario retirement age" field at the top changes the entire projection horizon — leave blank to use the core retirement age ('+retAge+').';
     s.appendChild(scInf);
+
+    // Row 0: Scenario retirement age (changes the whole projection horizon)
+    var scGrid0 = g2();
+    var scAgeF = div('f'); scAgeF.appendChild(el('label','','Scenario retirement age'));
+    var scAgeW = document.createElement('div'); scAgeW.style.cssText='position:relative';
+    var scAgeI = document.createElement('input'); scAgeI.type='text'; scAgeI.inputMode='numeric';
+    scAgeI.value = S.retScenario.retAge||''; scAgeI.placeholder='blank = core age '+retAge;
+    scAgeI.style.cssText='width:100%;padding:8px;border:1px solid #334;background:#0e413a;color:#e8f0d4;border-radius:6px;font-size:13px';
+    scAgeI.addEventListener('input',function(e){ S.retScenario.retAge=e.target.value; });
+    scAgeI.addEventListener('blur',function(){ render(); });
+    scAgeW.appendChild(scAgeI); scAgeF.appendChild(scAgeW); scGrid0.appendChild(scAgeF);
+    scGrid0.appendChild(div()); // empty cell for spacing
+    s.appendChild(scGrid0);
 
     // Row 1: Growth % | Extra lump sum now
     var scGrid1 = g2();
@@ -4286,8 +4300,87 @@ function buildRetirement() {
     var scExtraAnnual = N(S.retScenario.extraAnnual);
     var scExtraAnnualEsc = N(S.retScenario.extraAnnualEsc);
 
+    // ── Scenario retirement age — validation and horizon calc
+    // Default to core retirement age; override only if user enters a valid scenario age.
+    var scRetAge = retAge;
+    var scYrsToRet = yrsToRet;
+    var scYrsInRet = yrsInRet;
+    var scAgeError = '';
+    var scAgeOverridden = false;
+    if(N(S.retScenario.retAge) > 0){
+      var _inputAge = N(S.retScenario.retAge);
+      var _endAge = getRetEndAge();
+      if(clientAgeNow && _inputAge <= clientAgeNow){
+        scAgeError = 'Scenario age ('+_inputAge+') must be later than current age ('+clientAgeNow+'). Using core age '+retAge+'.';
+      } else if(_inputAge >= _endAge){
+        scAgeError = 'Scenario age ('+_inputAge+') must be earlier than life expectancy ('+_endAge+'). Using core age '+retAge+'.';
+      } else {
+        scRetAge = _inputAge;
+        scYrsToRet = clientAgeNow ? Math.max(0, scRetAge - clientAgeNow) : yrsToRet;
+        scYrsInRet = getYearsInRetirement(scRetAge);
+        scAgeOverridden = (scRetAge !== retAge);
+      }
+    }
+
+    // Show validation error or scenario age confirmation banner
+    if(scAgeError){
+      var scErr = document.createElement('div');
+      scErr.style.cssText='background:#7f1d1d;color:#fecaca;padding:8px 12px;border-radius:6px;margin:8px 0;font-size:12px';
+      scErr.textContent=scAgeError;
+      s.appendChild(scErr);
+    } else if(scAgeOverridden){
+      var scInfo2 = document.createElement('div');
+      scInfo2.style.cssText='background:#a8b938;color:#0e413a;padding:8px 12px;border-radius:6px;margin:8px 0;font-size:12px;font-weight:600';
+      var _diff = scRetAge - retAge;
+      var _diffTxt = _diff > 0 ? ('+'+_diff+' years later') : (_diff+' years earlier');
+      scInfo2.textContent='Comparing at age '+scRetAge+' ('+_diffTxt+' than core) — '+scYrsToRet+' yrs to retirement, '+scYrsInRet+' yrs in retirement';
+      s.appendChild(scInfo2);
+    }
+
+    // ── Scenario-age-driven projections (replaces the previous single-horizon calcs)
+    // When no scenario age override is set, scYrsToRet === yrsToRet and these values collapse
+    // to the same arithmetic that produced totalProj / totalCapNeed in the core calc above.
+
+    // Monthly need at scenario retirement age (each retNeed at its own escalation)
+    var scMonthlyAtRet = 0;
+    (S.retNeeds||[]).forEach(function(r){
+      if(!N(r.amtToday)) return;
+      var escTo=Ndef(r.esc, N(S.assump.cpi)||6);
+      scMonthlyAtRet+=Math.round(N(r.amtToday)*Math.pow(1+escTo/100,scYrsToRet));
+    });
+
+    // Rental income at scenario age (only properties not sold)
+    var scRentalAtRet = 0;
+    (S.props||[]).forEach(function(p){
+      if(p.soldAtRetirement||!N(p.rental)) return;
+      var escTo=Ndef(p.rentalEsc, 6);
+      scRentalAtRet+=Math.round(N(p.rental)*Math.pow(1+escTo/100,scYrsToRet));
+    });
+
+    // Farm/business income at scenario age
+    var scOtherIncAtRet = 0;
+    (S.otherAssets||[]).forEach(function(a){
+      if((a.retirementRole||'')!=='Generates income (farm/business)' || !N(a.retirementIncomePM)) return;
+      var escTo=Ndef(a.retirementIncEsc, N(S.assump.cpi)||6);
+      scOtherIncAtRet+=Math.round(N(a.retirementIncomePM)*Math.pow(1+escTo/100,scYrsToRet));
+    });
+
+    // Manual monthly income (son's contribution, etc.) at scenario age
+    var scManualIncAtRet = 0;
+    (S.retOtherIncome||[]).forEach(function(r){
+      if(!N(r.amtPM)) return;
+      var escTo=Ndef(r.escTo, N(S.assump.cpi)||6);
+      scManualIncAtRet+=Math.round(N(r.amtPM)*Math.pow(1+escTo/100,scYrsToRet));
+    });
+
+    var scNetMonthlyGap = Math.max(0, scMonthlyAtRet - scRentalAtRet - scOtherIncAtRet - scManualIncAtRet);
+    var scCapNeed = scNetMonthlyGap > 0 ? capitalise(scNetMonthlyGap, scYrsInRet, defaultCpi, defaultRet) : 0;
+    var scLumpNeed = lumpNeed; // same fixed amount per design decision
+    var scTotalCapNeed = scCapNeed + scLumpNeed;
+
     var lumpNeededNow = 0;
     var extraPMNeeded = 0;
+    // Cards use core retGap / yrsToRet — unchanged, they answer "fix the baseline plan"
     if(retGap < 0 && yrsToRet > 0){
       var _sf0 = Math.abs(retGap);
       lumpNeededNow = scGrowth>0 ? Math.round(_sf0 / Math.pow(1+scGrowth/100, yrsToRet)) : Math.round(_sf0);
@@ -4303,46 +4396,70 @@ function buildRetirement() {
       }
     }
 
+    // Scenario fund projection — uses scGrowth and scRetAge (for maturity branching)
     var scenarioFundsProj = S.retAssets.reduce(function(a,r){
       if(!N(r.currentVal)&&!N(r.monthlyContrib)) return a;
       var esc3=Ndef(r.contribEsc, N(S.assump.incEsc)||6);
       var matAge=N(r.maturityAge);
-      if(matAge>0&&clientAgeNow&&matAge<retAge && !r.continuePastMaturity){
+      if(matAge>0&&clientAgeNow&&matAge<scRetAge && !r.continuePastMaturity){
         var yrsToMat=Math.max(0,matAge-clientAgeNow);
         var matVal=projectFund(r.currentVal,r.monthlyContrib,esc3,scGrowth,yrsToMat);
-        var yrsMatToRet=retAge-matAge;
+        var yrsMatToRet=scRetAge-matAge;
         return a+Math.round(matVal*Math.pow(1+scGrowth/100,yrsMatToRet));
       }
-      return a+projectFund(r.currentVal,r.monthlyContrib,esc3,scGrowth,yrsToRet);
+      return a+projectFund(r.currentVal,r.monthlyContrib,esc3,scGrowth,scYrsToRet);
     },0);
 
-    // Scenario uses the existing per-item growth on each manual lump (NOT the scenario growth %),
-    // because those items have their own asset class (bitcoin, inheritance) — overriding them would distort reality.
-    var scenarioOtherLumps = otherLumpsTotal;
+    // Manual lumps re-projected to scenario age, each at its own growth rate
+    var scenarioOtherLumps = 0;
+    (S.retOtherLumps||[]).forEach(function(r){
+      if(!N(r.amt)) return;
+      var gr=Ndef(r.growthRate, N(S.assump.growth)||9);
+      scenarioOtherLumps+=Math.round(N(r.amt)*Math.pow(1+gr/100,scYrsToRet));
+    });
 
-    var extraLumpFV = (scExtraLump>0 && yrsToRet>0) ? Math.round(scExtraLump*Math.pow(1+scGrowth/100,yrsToRet)) : scExtraLump;
-    var extraPMFV = (scExtraPM>0 && yrsToRet>0) ? projectFund(0, scExtraPM, scExtraEsc, scGrowth, yrsToRet) : 0;
+    // Properties sold at retirement — re-projected to scenario age
+    var scenarioPropSold = 0;
+    (S.props||[]).forEach(function(p){
+      if(!p.soldAtRetirement||!N(p.val)) return;
+      var gr=Ndef(p.propGrowth, N(S.assump.growth)||9);
+      var projV=Math.round(N(p.val)*Math.pow(1+gr/100,scYrsToRet));
+      var pct=Ndef(p.retirementPct, 100);
+      scenarioPropSold+=Math.round(projV*pct/100);
+    });
+
+    // Other assets sold at retirement — re-projected to scenario age
+    var scenarioSoldProceeds = 0;
+    (S.otherAssets||[]).forEach(function(a){
+      if((a.retirementRole||'')!=='Sold at retirement — proceeds to retirement') return;
+      if(!N(a.retirementSaleProceeds)) return;
+      var gr=Ndef(a.growthRate, N(S.assump.growth)||9);
+      scenarioSoldProceeds+=Math.round(N(a.retirementSaleProceeds)*Math.pow(1+gr/100,scYrsToRet));
+    });
+
+    var extraLumpFV = (scExtraLump>0 && scYrsToRet>0) ? Math.round(scExtraLump*Math.pow(1+scGrowth/100,scYrsToRet)) : scExtraLump;
+    var extraPMFV = (scExtraPM>0 && scYrsToRet>0) ? projectFund(0, scExtraPM, scExtraEsc, scGrowth, scYrsToRet) : 0;
 
     // Extra annual contribution — end-of-year growing annuity FV
     // If r=g: FV = annualPmt * n * (1+r)^(n-1)   (correct end-of-year identity)
     // Else:    FV = annualPmt * (R^n - G^n) / (R - G)
     var extraAnnualFV = 0;
-    if(scExtraAnnual>0 && yrsToRet>0){
+    if(scExtraAnnual>0 && scYrsToRet>0){
       var _ra = scGrowth/100;
       var _ga = scExtraAnnualEsc/100;
       if(Math.abs(_ra-_ga)<0.0001){
-        extraAnnualFV = Math.round(scExtraAnnual * yrsToRet * Math.pow(1+_ra, yrsToRet-1));
+        extraAnnualFV = Math.round(scExtraAnnual * scYrsToRet * Math.pow(1+_ra, scYrsToRet-1));
       } else {
-        extraAnnualFV = Math.round(scExtraAnnual * (Math.pow(1+_ra,yrsToRet) - Math.pow(1+_ga,yrsToRet)) / (_ra-_ga));
+        extraAnnualFV = Math.round(scExtraAnnual * (Math.pow(1+_ra,scYrsToRet) - Math.pow(1+_ga,scYrsToRet)) / (_ra-_ga));
       }
     }
 
-    var scenarioTotal = scenarioFundsProj + scenarioOtherLumps + propSoldTotal + soldProceedsAtRet + extraLumpFV + extraPMFV + extraAnnualFV;
-    var scenarioGap = scenarioTotal - totalCapNeed;
+    var scenarioTotal = scenarioFundsProj + scenarioOtherLumps + scenarioPropSold + scenarioSoldProceeds + extraLumpFV + extraPMFV + extraAnnualFV;
+    var scenarioGap = scenarioTotal - scTotalCapNeed;
 
     var scCards = div('cards c2');
     var scC1 = div('card');
-    scC1.innerHTML = '<div class="lbl">Lump sum needed now</div><div class="val '+(retGap<0?'warn':'ok')+'">'+(retGap<0?Rfmt(lumpNeededNow):'—')+'</div><div class="sub">At '+scGrowth+'% growth to retirement</div>';
+    scC1.innerHTML = '<div class="lbl">Lump sum needed now</div><div class="val '+(retGap<0?'warn':'ok')+'">'+(retGap<0?Rfmt(lumpNeededNow):'—')+'</div><div class="sub">At '+scGrowth+'% growth to core retirement age '+retAge+'</div>';
     scCards.appendChild(scC1);
     var scC2 = div('card');
     scC2.innerHTML = '<div class="lbl">Extra saving needed /pm</div><div class="val '+(retGap<0?'warn':'ok')+'">'+(retGap<0?Rfmt(extraPMNeeded):'—')+'</div><div class="sub">'+(scExtraEsc>0?'Starting today, escalating '+scExtraEsc+'% p.a.':'Level payment — set escalation % to reduce')+'</div>';
@@ -4356,8 +4473,13 @@ function buildRetirement() {
       var v=el('span','',val);
       r.appendChild(l); r.appendChild(v); scBox.appendChild(r);
     }
+    var _atAgeLbl = scAgeOverridden ? ' (at age '+scRetAge+')' : '';
     scRow('Scenario growth', scGrowth+'%');
-    scRow('Scenario total at retirement', Rfmt(scenarioTotal));
+    if(scAgeOverridden){
+      scRow('Scenario retirement age', String(scRetAge)+' yrs (core: '+retAge+')');
+      scRow('Capital needed at age '+scRetAge, Rfmt(scTotalCapNeed));
+    }
+    scRow('Scenario total at retirement'+_atAgeLbl, Rfmt(scenarioTotal));
     if(extraLumpFV>0) scRow('Extra lump sum at retirement value', Rfmt(extraLumpFV));
     if(extraPMFV>0) scRow('Extra monthly savings at retirement value', Rfmt(extraPMFV));
     if(extraAnnualFV>0) scRow('Extra annual contribution at retirement value', Rfmt(extraAnnualFV));
@@ -4365,27 +4487,27 @@ function buildRetirement() {
 
     // ── Income coverage analysis — what monthly income can the scenario actually fund?
     // Logic: scenarioTotal minus lump sum needs leaves capital available for income.
-    // Reverse-capitalise that to a sustainable monthly income, then add rental/farm/manual
-    // (which are independent of retirement capital). Compare to gross desired income at retirement.
-    if(monthlyAtRet > 0){
-      var scCapForIncome = Math.max(0, scenarioTotal - lumpNeed);
-      var scIncomeFromCap = monthlyFromCapital(scCapForIncome, yrsInRet, defaultCpi, defaultRet);
-      var scIncomeFromOther = rentalAtRet + otherIncAtRet + manualIncAtRet;
+    // Reverse-capitalise that to a sustainable monthly income using SCENARIO yrsInRet,
+    // then add rental/farm/manual at SCENARIO age. Compare to gross desired income at scenario age.
+    if(scMonthlyAtRet > 0){
+      var scCapForIncome = Math.max(0, scenarioTotal - scLumpNeed);
+      var scIncomeFromCap = monthlyFromCapital(scCapForIncome, scYrsInRet, defaultCpi, defaultRet);
+      var scIncomeFromOther = scRentalAtRet + scOtherIncAtRet + scManualIncAtRet;
       var scAchievable = scIncomeFromCap + scIncomeFromOther;
-      var scAchievableToday = yrsToRet>0 ? Math.round(scAchievable / Math.pow(1+defaultCpi/100, yrsToRet)) : scAchievable;
+      var scAchievableToday = scYrsToRet>0 ? Math.round(scAchievable / Math.pow(1+defaultCpi/100, scYrsToRet)) : scAchievable;
       var monthlyTodayDesired = (S.retNeeds||[]).reduce(function(a,r){return a+N(r.amtToday);},0);
       // Coverage % — clamped at 100% (surplus is already shown in the row above)
-      var scCovPct = Math.min(100, Math.round(scAchievable / monthlyAtRet * 100));
+      var scCovPct = Math.min(100, Math.round(scAchievable / scMonthlyAtRet * 100));
       var scCovColor = scCovPct >= 95 ? '#86efac' : (scCovPct >= 75 ? '#fbbf24' : '#f87171');
 
       // Subhead divider
       var scCovHead = document.createElement('div');
       scCovHead.style.cssText='border-top:1px solid #334;margin:10px 0 6px 0;padding-top:8px;font-size:12px;font-weight:600;color:#a8b938';
-      scCovHead.textContent='Income coverage in this scenario';
+      scCovHead.textContent='Income coverage in this scenario'+(scAgeOverridden?' (at age '+scRetAge+')':'');
       scBox.appendChild(scCovHead);
 
-      scRow('Desired monthly income at retirement', Rfmt(monthlyAtRet)+'/pm');
-      scRow('Achievable monthly income at retirement', Rfmt(scAchievable)+'/pm');
+      scRow('Desired monthly income'+_atAgeLbl, Rfmt(scMonthlyAtRet)+'/pm');
+      scRow('Achievable monthly income'+_atAgeLbl, Rfmt(scAchievable)+'/pm');
 
       // Today's-rand equivalent — secondary line, dimmed
       if(monthlyTodayDesired>0){
