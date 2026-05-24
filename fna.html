@@ -1156,6 +1156,50 @@ function existingCoverTotals(pols) {
   return t;
 }
 
+// HTML breakdown of which policies contribute to a given cover type — used in the
+// FNA Needs tab under each "Existing cover" line so the advisor can see at a glance
+// which policies make up the total (and whether any portion is pension group cover).
+// coverType: 'death' | 'dis' | 'dread' | 'ipPM'
+function coverContributorsHTML(pols, coverType) {
+  if (!pols || !pols.length) return '';
+  var typeToGRLabel = {
+    death: 'Life Cover',
+    dis:   'Capital Disability (Lump Sum)',
+    dread: 'Dread Disease',
+    ipPM:  'Income Disability (PHI)'
+  };
+  var grMatch = typeToGRLabel[coverType];
+  var isMonthly = (coverType === 'ipPM');
+  var rows = [];
+  pols.forEach(function(p) {
+    // Aggregate function excludes BA from death/dis/dread — mirror that here.
+    if (p.Type === 'Business Assurance' && coverType !== 'ipPM') return;
+    var t = policyCoverTotals(p);
+    var amt = t[coverType] || 0;
+    if (!amt) return;
+    // Detect whether this contribution includes pension group cover (for labelling)
+    var hasGroup = false;
+    try {
+      var gr = p.GroupRiskBenefits ? (typeof p.GroupRiskBenefits === 'string' ? JSON.parse(p.GroupRiskBenefits) : p.GroupRiskBenefits) : [];
+      if (gr && gr.length) {
+        hasGroup = gr.some(function(r){
+          return r.type === grMatch && (parseFloat(String(r.cover||'').replace(/[^0-9.\-]/g,''))||0) > 0;
+        });
+      }
+    } catch(e) {}
+    var isPensionType = (p.Type==='Pension Fund' || p.Type==='Provident Fund' || p.Type==='Pension Preservation' || p.Type==='Provident Preservation');
+    var groupTag = (hasGroup && isPensionType) ? ' <span style="color:#a8b938;font-weight:600">(group)</span>' : '';
+    var label = (p.Insurer || 'Unknown') + (p.Product ? ' — ' + p.Product : '') + groupTag;
+    rows.push(
+      '<div style="display:flex;justify-content:space-between;padding:2px 0 2px 16px;font-size:11px;color:var(--sub)">'
+      + '<span>\u21B3 ' + label + '</span>'
+      + '<span>' + Rfmt(amt) + (isMonthly ? ' /pm' : '') + '</span>'
+      + '</div>'
+    );
+  });
+  return rows.join('');
+}
+
 // ── CRM client write-back ────────────────────────────────────────────────
 // FNA is the primary capture tool for client demographics. Edits to client
 // fields write back to the CRM clients table on Supabase. Uses PATCH (partial
@@ -3533,6 +3577,7 @@ function buildNeeds() {
         '<div class="cr-row"><span>Capital needs</span><span class="gold">'+Rfmt(totCap)+'</span></div>'+
         '<div class="cr-row big"><span>Total cover needed</span><span class="gold">'+Rfmt(totalNeed)+'</span></div>'+
         '<div class="cr-row"><span>Existing cover</span><span class="gold">'+Rfmt(totalHave)+'</span></div>'+
+        coverContributorsHTML(S.importedPols, 'death')+
         '<div class="cr-row big"><span>'+(totalHave>=totalNeed?'Surplus':'Shortfall')+'</span><span style="color:'+(totalHave>=totalNeed?'var(--green)':'var(--red)')+'">'+Rfmt(Math.abs(totalHave-totalNeed))+'</span></div>';
       s.appendChild(sumBox);
     }
@@ -3610,8 +3655,9 @@ function buildNeeds() {
     if(disTotal>0||N(S.ipGrossPM)>0){
       var disBox=div('calc-result'); disBox.style.marginTop='16px';
       disBox.innerHTML=(N(S.ipGrossPM)>0?'<div class="cr-row"><span>IP benefit needed /pm</span><span class="gold">'+Rfmt(S.ipGrossPM)+'</span></div>':'')+
+        (N(S.ipGrossPM)>0?'<div class="cr-row"><span>Existing IP cover /pm</span><span class="gold">'+Rfmt(N(S.existingCover&&S.existingCover.ipPM))+'</span></div>'+coverContributorsHTML(S.importedPols, 'ipPM'):'')+
         (disTotal>0?'<div class="cr-row big"><span>Lump sum needed</span><span class="gold">'+Rfmt(disTotal)+'</span></div>':'')+
-        '<div class="cr-row"><span>Existing disability cover</span><span class="gold">'+Rfmt(disHave)+'</span></div>'+
+        (disTotal>0?'<div class="cr-row"><span>Existing disability cover</span><span class="gold">'+Rfmt(disHave)+'</span></div>'+coverContributorsHTML(S.importedPols, 'dis'):'')+
         (disTotal>0?'<div class="cr-row big"><span>'+(disHave>=disTotal?'Surplus':'Shortfall')+'</span><span style="color:'+(disHave>=disTotal?'var(--green)':'var(--red)')+'">'+Rfmt(Math.abs(disHave-disTotal))+'</span></div>':'');
       s.appendChild(disBox);
     }
@@ -3632,6 +3678,7 @@ function buildNeeds() {
       var drBox=div('calc-result'); drBox.style.marginTop='8px';
       drBox.innerHTML='<div class="cr-row big"><span>Cover needed</span><span class="gold">'+Rfmt(S.dreadAmt)+'</span></div>'+
         '<div class="cr-row"><span>Existing cover</span><span class="gold">'+Rfmt(dreadHave)+'</span></div>'+
+        coverContributorsHTML(S.importedPols, 'dread')+
         '<div class="cr-row big"><span>'+(drGap>=0?'Surplus':'Shortfall')+'</span><span style="color:'+(drGap>=0?'var(--green)':'var(--red)')+'">'+Rfmt(Math.abs(drGap))+'</span></div>';
       s.appendChild(drBox);
     }
@@ -5525,6 +5572,99 @@ function buildPolCard(p, i) {
       raNote2.innerHTML='<strong>Retirement fund:</strong> No CGT on death. Outside estate (trustees governed by s.37C). '+
         'Retirement lump sum tax applies to cash withdrawals in the beneficiary\'s hands.';
       card.appendChild(raNote2);
+
+      // ── Group Risk Benefits (read-only, source of truth is the CRM)
+      // Pension/Provident fund schemes typically carry group life, disability and
+      // dread cover. These are stored on the policy as p.GroupRiskBenefits JSON.
+      // Displayed here for advisor visibility — to edit, return to the CRM.
+      var _grRowsCard = [];
+      try { _grRowsCard = p.GroupRiskBenefits ? (typeof p.GroupRiskBenefits==='string' ? JSON.parse(p.GroupRiskBenefits) : p.GroupRiskBenefits) : []; } catch(e) { _grRowsCard = []; }
+
+      var grSt = el('div','','Group Risk Benefits');
+      grSt.style.cssText = 'font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--sub);display:block;margin-bottom:4px;margin-top:12px';
+      card.appendChild(grSt);
+
+      // Approved / Unapproved tag (and HasGroupRisk flag)
+      var _grApp = p.GroupRiskApproved || '';
+      var _hasGR = p.HasGroupRisk || (_grRowsCard.length>0 ? 'Yes' : '');
+      var grTag = div();
+      grTag.style.cssText = 'font-size:11px;padding:4px 9px;margin-bottom:6px;border-radius:5px;background:#f8f8f0;border:1px solid var(--mist);color:#555;display:inline-block';
+      if(_hasGR==='No'){
+        grTag.innerHTML = '<strong>No group risk benefits</strong> on this fund.';
+      } else if(_grApp==='Approved'){
+        grTag.innerHTML = '<strong>Approved</strong> (in fund) — benefits paid from the fund, subject to s.37C trustee discretion.';
+      } else if(_grApp==='Unapproved'){
+        grTag.innerHTML = '<strong>Unapproved</strong> (employer-owned, outside fund) — benefits paid directly per nomination.';
+      } else {
+        grTag.innerHTML = 'Approved / Unapproved status not specified in CRM.';
+      }
+      card.appendChild(grTag);
+
+      if(_grRowsCard.length > 0){
+        var grTbl = document.createElement('table');
+        grTbl.style.cssText = 'width:100%;border-collapse:collapse;font-size:12px';
+        var grHdr = document.createElement('tr');
+        ['Benefit Type','Basis','Cover','Annual Premium','Notes'].forEach(function(h){
+          var th = document.createElement('th');
+          th.textContent = h;
+          th.style.cssText = 'text-align:left;font-size:10px;color:var(--sub);font-weight:700;padding:3px 6px;border-bottom:1px solid var(--mist)';
+          grHdr.appendChild(th);
+        });
+        grTbl.appendChild(grHdr);
+
+        var grTbody = document.createElement('tbody');
+        var _roCellGR = 'padding:4px 6px';
+        var _roDispGR = 'display:inline-block;padding:3px 7px;font-size:12px;color:var(--text);background:#fafaf6;border:1.5px solid var(--mist);border-radius:4px;min-width:60px';
+        _grRowsCard.forEach(function(r){
+          var tr = document.createElement('tr');
+          // Type
+          var c1 = document.createElement('td'); c1.style.cssText = _roCellGR;
+          var t1 = document.createElement('div');
+          t1.style.cssText = 'font-weight:600;font-size:12px;color:var(--text)';
+          t1.textContent = r.type || '—';
+          c1.appendChild(t1); tr.appendChild(c1);
+          // Basis
+          var c2 = document.createElement('td'); c2.style.cssText = _roCellGR;
+          var t2 = document.createElement('span');
+          t2.textContent = r.basis || '—';
+          t2.style.cssText = _roDispGR + ';font-style:italic;color:#666';
+          c2.appendChild(t2); tr.appendChild(c2);
+          // Cover (with /pm suffix for Income Disability)
+          var c3 = document.createElement('td'); c3.style.cssText = _roCellGR;
+          var t3 = document.createElement('span');
+          var _covAmt = parseFloat(String(r.cover||'').replace(/[^0-9.\-]/g,''))||0;
+          var _isMonthly = (r.type==='Income Disability (PHI)');
+          t3.textContent = _covAmt > 0 ? ('R\u202f'+_covAmt.toLocaleString('en-ZA')+(_isMonthly?' /pm':'')) : '—';
+          t3.style.cssText = _roDispGR + ';font-weight:600';
+          c3.appendChild(t3); tr.appendChild(c3);
+          // Premium
+          var c4 = document.createElement('td'); c4.style.cssText = _roCellGR;
+          var t4 = document.createElement('span');
+          var _premAmt = parseFloat(String(r.prem||'').replace(/[^0-9.\-]/g,''))||0;
+          t4.textContent = _premAmt > 0 ? ('R\u202f'+_premAmt.toLocaleString('en-ZA')) : '—';
+          t4.style.cssText = _roDispGR;
+          c4.appendChild(t4); tr.appendChild(c4);
+          // Notes
+          var c5 = document.createElement('td'); c5.style.cssText = _roCellGR;
+          var t5 = document.createElement('span');
+          t5.textContent = r.notes || '—';
+          t5.style.cssText = _roDispGR + ';font-style:italic;color:#666;min-width:80px';
+          c5.appendChild(t5); tr.appendChild(c5);
+          grTbody.appendChild(tr);
+        });
+        grTbl.appendChild(grTbody);
+        card.appendChild(grTbl);
+
+        var grNote = div();
+        grNote.style.cssText = 'font-size:11px;color:#666;padding:6px 0 0;font-style:italic';
+        grNote.textContent = 'Source: CRM. To edit, open the policy in the CRM Policy Editor.';
+        card.appendChild(grNote);
+      } else if(_hasGR !== 'No'){
+        var noGR = div();
+        noGR.style.cssText = 'font-style:italic;color:#9a9a8a;font-size:12px;padding:8px 6px;margin-top:4px';
+        noGR.textContent = '— No group risk benefits captured in CRM —';
+        card.appendChild(noGR);
+      }
     }
 
     var premNote = div('info');
