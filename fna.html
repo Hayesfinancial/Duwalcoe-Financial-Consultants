@@ -3746,8 +3746,12 @@ function buildRetirement() {
     });
   }
 
-  // Keep contribEsc in sync with live policy escalation for matched funds
-  // Match by description prefix (Insurer name) — updates silently on every render
+  // CRM → FNA sync for matched funds (matched by Insurer/Product name in description).
+  // Design intent: the Policies tab is read-only and CRM is the source of truth there.
+  // The Retirement tab is where the advisor works the FNA, so once a value is entered
+  // (or seeded from CRM into an empty field) it is FNA-owned and is not overwritten
+  // by subsequent renders. To re-pull a CRM value, clear the FNA field — it will be
+  // re-populated from CRM on the next render.
   if(S.importedPols && S.importedPols.length>0){
     S.retAssets.forEach(function(ra){
       var match=(S.importedPols||[]).find(function(p){
@@ -3758,47 +3762,50 @@ function buildRetirement() {
       });
       if(match){
         var escRaw=String(match.PremEscalation!=null&&match.PremEscalation!==''?match.PremEscalation:(match.premEsc!=null&&match.premEsc!==''?match.premEsc:'')).replace(/,/g,'.').replace(/[^0-9.]/g,'');
-        if(escRaw) ra.contribEsc=escRaw;
-        if(match.GrowthRate) ra.growthRate=match.GrowthRate;
-        if(match.BenFundValue) ra.currentVal=match.BenFundValue;
+        // Empty-only sync — preserves user overrides on the FNA retirement card,
+        // including a deliberate "0" (e.g. no salary increase confirmed by client).
+        if(escRaw && (ra.contribEsc == null || String(ra.contribEsc).trim() === '')) ra.contribEsc=escRaw;
+        if(match.GrowthRate && (ra.growthRate == null || String(ra.growthRate).trim() === '')) ra.growthRate=match.GrowthRate;
+        if(match.BenFundValue && (ra.currentVal == null || String(ra.currentVal).trim() === '')) ra.currentVal=match.BenFundValue;
         // Sync maturity age from policy
         if(match.maturityAge&&!ra.maturityAge) ra.maturityAge=match.maturityAge;
-        // Sync rollover flag — CRM is source of truth, can flip per review meeting
+        // Sync rollover flag — CRM-side toggle with no FNA UI, so always reflects CRM
         ra.continuePastMaturity = (match.ContinuePastMaturity==='Yes');
 
-        // ── Pension / Provident Fund: auto-sync monthlyContrib to NET-to-retirement ──
+        // ── Pension / Provident Fund: seed monthlyContrib as NET-to-retirement ──
         // The CRM holds Premium as the GROSS contractual figure (matches IRP5). For
         // FV projections we need the NET that actually compounds in the fund:
         //   Net monthly = Premium − (annual group risk premiums ÷ 12) − (annual admin ÷ 12)
         //
-        // This sync block runs on every render, so existing FNAs that were seeded
-        // with the gross figure (before this fix) self-correct on next open. It also
-        // keeps the FNA tracking any later CRM changes to group risk premiums or
-        // admin fees. For these policy types the user cannot manually override the
-        // FNA's monthlyContrib — CRM is the source of truth, consistent with the
-        // contribEsc/growthRate/currentVal sync above.
+        // Empty-only seeding — consistent with contribEsc / growthRate / currentVal
+        // above. Once the advisor enters a value on the retirement card it is
+        // preserved (FNA-owned). To re-pull the CRM-derived net figure after a CRM
+        // change to group risk premiums or admin fees, clear the FNA field — it will
+        // recalculate on next render.
         //
         // For all other RA types (Retirement Annuity, Preservation, TFS, Endowment,
-        // Living Annuity etc.) the existing user-edit behaviour is preserved —
+        // Living Annuity etc.) initial seeding happens in the seed block above and
         // monthlyContrib is NOT touched here.
         if(match.Type==='Pension Fund' || match.Type==='Provident Fund'){
           if(match.Frequency==='Monthly' || !match.Frequency){
-            var _grossM = parseFloat(String(match.Premium||'').replace(/[^0-9.\-]/g,''))||0;
-            if(_grossM > 0){
-              var _annRisk = 0;
-              try {
-                var _grR = match.GroupRiskBenefits ? JSON.parse(match.GroupRiskBenefits) : [];
-                if(_grR && _grR.length){
-                  _grR.forEach(function(rw){
-                    _annRisk += parseFloat(String(rw.prem||'').replace(/[^0-9.\-]/g,''))||0;
-                  });
-                }
-              } catch(e){}
-              var _annAdmin = parseFloat(String(match.AnnualAdminFees||'').replace(/[^0-9.\-]/g,''))||0;
-              var _netM = _grossM - (_annRisk/12) - (_annAdmin/12);
-              // Costs > gross would be a bad data scenario — fall back to gross to
-              // avoid feeding negative contributions into the projection.
-              ra.monthlyContrib = _netM > 0 ? String(Math.round(_netM*100)/100) : match.Premium;
+            if(ra.monthlyContrib == null || String(ra.monthlyContrib).trim() === ''){
+              var _grossM = parseFloat(String(match.Premium||'').replace(/[^0-9.\-]/g,''))||0;
+              if(_grossM > 0){
+                var _annRisk = 0;
+                try {
+                  var _grR = match.GroupRiskBenefits ? JSON.parse(match.GroupRiskBenefits) : [];
+                  if(_grR && _grR.length){
+                    _grR.forEach(function(rw){
+                      _annRisk += parseFloat(String(rw.prem||'').replace(/[^0-9.\-]/g,''))||0;
+                    });
+                  }
+                } catch(e){}
+                var _annAdmin = parseFloat(String(match.AnnualAdminFees||'').replace(/[^0-9.\-]/g,''))||0;
+                var _netM = _grossM - (_annRisk/12) - (_annAdmin/12);
+                // Costs > gross would be a bad data scenario — fall back to gross to
+                // avoid feeding negative contributions into the projection.
+                ra.monthlyContrib = _netM > 0 ? String(Math.round(_netM*100)/100) : match.Premium;
+              }
             }
           }
         }
