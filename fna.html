@@ -2381,6 +2381,31 @@ function buildClient() {
   r4.appendChild(bindCRM(fld('Spouse / Partner Name', S.cli, 'spouseName'), 'spouseName'));
   s.appendChild(r4);
 
+  // Accrual exclusion checkbox — overrides accrual deduction without changing marriage type.
+  // CRM stays factually correct; FNA simply treats accrual as zero across all calcs.
+  // Useful when spouse asset data is not available and the accrual claim cannot be quantified.
+  var rAccrEx = document.createElement('div');
+  rAccrEx.style.cssText = 'background:#fef9ee;border:1px solid var(--gold2);border-radius:6px;padding:8px 12px;margin-bottom:10px;display:flex;align-items:flex-start;gap:10px';
+
+  var accrExCb = document.createElement('input');
+  accrExCb.type = 'checkbox';
+  accrExCb.id = 'excludeAccrualCb';
+  accrExCb.checked = !!S.cli.excludeAccrual;
+  accrExCb.style.cssText = 'width:18px;height:18px;cursor:pointer;flex-shrink:0;margin-top:1px';
+  accrExCb.addEventListener('change', function(e) {
+    S.cli.excludeAccrual = e.target.checked;
+    render();
+  });
+
+  var accrExLbl = document.createElement('label');
+  accrExLbl.setAttribute('for', 'excludeAccrualCb');
+  accrExLbl.style.cssText = 'font-size:12px;color:#7a5f1a;cursor:pointer;line-height:1.4';
+  accrExLbl.innerHTML = '<strong>Exclude accrual from this FNA</strong> \u2014 use when spouse asset data is not available. Marriage type stays as captured in CRM; the FNA treats the accrual deduction as zero everywhere it would normally apply (life cover need, estate duty, advice board, checklist, print).';
+
+  rAccrEx.appendChild(accrExCb);
+  rAccrEx.appendChild(accrExLbl);
+  s.appendChild(rAccrEx);
+
   var r5 = g3();
   // Spouse ID Number — auto-populate Spouse DOB from SA ID on blur (only when DOB is blank)
   var spIdWrap = fld('Spouse ID Number', S.cli, 'spouseId');
@@ -3455,6 +3480,8 @@ function buildNeeds() {
         var _csCPI=Math.round(_cs*_acf), _ssCPI=Math.round(_ss*_acf);
         _acc=Math.max(0,(Math.max(0,_ce-_cex-_csCPI)-Math.max(0,_se-_sex-_ssCPI))/2);
       }
+      // Exclude accrual override — set on Client tab
+      if (S.cli && S.cli.excludeAccrual) _acc = 0;
       var _cgtNeed=calcTotalCGT((N(S.cli.grossPM)>0?calcMarginalRate(N(S.cli.grossPM)*12):0.45)*100).totalCGT;
       var _gr=_pv+_s4q+_ep+_tp+_bd;
       var _ne=Math.max(0,_gr-_pl-_cgtNeed);
@@ -6413,6 +6440,14 @@ function buildEstate() {
   }
 
   // s.4(q) and abatement
+  // Exclude accrual override — if ticked on Client tab, the FNA treats accrual as zero
+  if (S.cli && S.cli.excludeAccrual) {
+    accrualClaim = 0;
+    var exNote = div('info');
+    exNote.style.cssText = 'background:#fef9ee;border:1px solid var(--gold2);color:#7a5f1a;font-size:11px;padding:6px 10px;margin-bottom:8px';
+    exNote.innerHTML = '⚠ <strong>Accrual excluded from this FNA</strong> (set in Client tab). Estate duty calc below treats accrual deduction as zero. CRM marriage type unchanged.';
+    s.appendChild(exNote);
+  }
   var accrualDed  = Math.min(accrualClaim, netEstate);
   var afterAccrual= Math.max(0, netEstate - accrualDed);
   var section4q   = s4qPolicies + s4qAssets;
@@ -6835,6 +6870,8 @@ function buildSummary() {
 
   var grossEstate = physVal + s4qPols + estPols + tpPols + bizDut;
   var netEstate = Math.max(0, grossEstate - physLiab - cgt);
+  // Exclude accrual override — set on Client tab
+  if (S.cli && S.cli.excludeAccrual) accrual = 0;
   var accrualDed = Math.min(accrual, netEstate);
   var afterAccr = Math.max(0, netEstate - accrualDed);
   var s4qDed = Math.min(s4qPols + s4qAssets, afterAccr);
@@ -7179,6 +7216,8 @@ function buildOverview() {
     var _acfO=N(S.accrual&&S.accrual.cpiFactor)>0?N(S.accrual.cpiFactor):(_ymrO>0?Math.pow(1+(N(S.assump.cpi)||6)/100,_ymrO):1);
     _accO=Math.max(0,(Math.max(0,_ceO-_cexO-Math.round(_csO*_acfO))-Math.max(0,_seO-_sexO-Math.round(_ssO*_acfO)))/2);
   }
+  // Exclude accrual override — set on Client tab
+  if (S.cli && S.cli.excludeAccrual) _accO = 0;
   var _grossO=_physO+_s4qO+_epO+_tpO+_bdO;
   var _netO=Math.max(0,_grossO-_liabsO-_cgtO);
   var _netAfAO=Math.max(0,_netO-_accO);
@@ -7916,6 +7955,8 @@ function printFNA(sections) {
 
   var grossEstate=physAssets+s4qPols+estPols+tpPols+bizDut;
   var netEstate=Math.max(0,grossEstate-physLiab-_cgtTotal);
+  // Exclude accrual override — set on Client tab
+  if (S.cli && S.cli.excludeAccrual) accrualClaim = 0;
   var accrualDed=Math.min(accrualClaim,netEstate);
   var afterAccrual=Math.max(0,netEstate-accrualDed);
   var s4qDed=Math.min(s4qPols+s4qAssets,afterAccrual);
