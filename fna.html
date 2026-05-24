@@ -702,6 +702,9 @@ var DEFAULTS = {
     { desc: 'Holiday / travel fund', amt: '' },
     { desc: 'Other lump sum at retirement', amt: '' }
   ],
+  retOtherLumps: [],   // [{desc, amt, growthRate}] — manual lump sums at retirement (bitcoin, inheritance, etc.)
+  retOtherIncome: [],  // [{desc, amtPM, escTo, escIn}] — manual monthly income in retirement (son's contribution, etc.)
+  retOtherCapital: '', // legacy single field — migrated into retOtherLumps[0] on first render of buildRetirement
   retNotes: '',
 
   // ROA
@@ -3562,7 +3565,10 @@ function buildRetirement() {
   var yrsToRet = cliAge ? Math.max(0, retAge - cliAge) : null;
   var yrsInRet = getYearsInRetirement(retAge);
 
-  if(!S.retScenario) S.retScenario = { growth:'', extraLump:'', extraPM:'', extraEsc:'' };
+  if(!S.retScenario) S.retScenario = { growth:'', extraLump:'', extraPM:'', extraEsc:'', extraAnnual:'', extraAnnualEsc:'' };
+  // Backfill new fields on existing FNAs that loaded an older retScenario object
+  if(S.retScenario.extraAnnual === undefined) S.retScenario.extraAnnual = '';
+  if(S.retScenario.extraAnnualEsc === undefined) S.retScenario.extraAnnualEsc = '';
 
   // ── Assumptions reminder
   s.appendChild(stitle('Retirement Planning'));
@@ -3922,11 +3928,44 @@ function buildRetirement() {
     }
   }
 
-  // Additional manual proceeds not from properties
-  var og=g2();
-  og.appendChild(rfld('Additional proceeds (other assets / manual)', S, 'retOtherCapital', {onblur:function(){render();}}));
-  og.appendChild(div());
-  s.appendChild(og);
+  // ── Migration: convert legacy single retOtherCapital field into a retOtherLumps item
+  if(!S.retOtherLumps) S.retOtherLumps=[];
+  if(!S.retOtherIncome) S.retOtherIncome=[];
+  if(N(S.retOtherCapital)>0 && S.retOtherLumps.length===0){
+    S.retOtherLumps.push({desc:'Additional proceeds (migrated)', amt:String(S.retOtherCapital), growthRate:''});
+    S.retOtherCapital='';
+  }
+
+  // ── Other lump sums at retirement (manual — bitcoin, inheritance, etc.)
+  var olInf=div('info');
+  olInf.innerHTML='Manual lump sums not from properties or other assets. Today\'s value + growth % projects forward to retirement. Blank growth = assumption ('+(S.assump.growth||9)+'%).';
+  s.appendChild(olInf);
+  S.retOtherLumps.forEach(function(r,i){
+    var row=g4();
+    row.appendChild(fld('Description',r,'desc'));
+    row.appendChild(rfld('Today\'s value',r,'amt',{onblur:function(){render();}}));
+    row.appendChild(pfld('Growth %',r,'growthRate',{onblur:function(){render();}}));
+    var dw=div('f'); dw.appendChild(delBtn(function(){S.retOtherLumps.splice(i,1);render();})); row.appendChild(dw);
+    s.appendChild(row);
+  });
+  s.appendChild(addBtn('+ Add other lump sum',function(){S.retOtherLumps.push({desc:'',amt:'',growthRate:''});render();}));
+
+  // ── Other monthly income in retirement (manual — son's contribution, family stipend, etc.)
+  s.appendChild(stitle('Other Monthly Income in Retirement'));
+  var oiInf=div('info');
+  oiInf.innerHTML='Manual monthly income not from rental or farm/business. Today\'s rands + escalation to retirement + escalation in retirement. Reduces the net monthly gap (like rental income).';
+  s.appendChild(oiInf);
+  S.retOtherIncome.forEach(function(r,i){
+    var row=document.createElement('div');
+    row.style.cssText='display:grid;grid-template-columns:2fr 1fr 1fr 1fr auto;gap:8px;align-items:end;margin-bottom:8px';
+    row.appendChild(fld('Description',r,'desc'));
+    row.appendChild(rfld('R/pm today',r,'amtPM',{onblur:function(){render();}}));
+    row.appendChild(pfld('Esc to ret %',r,'escTo',{onblur:function(){render();}}));
+    row.appendChild(pfld('Esc in ret %',r,'escIn',{onblur:function(){render();}}));
+    var dw=div('f'); dw.appendChild(delBtn(function(){S.retOtherIncome.splice(i,1);render();})); row.appendChild(dw);
+    s.appendChild(row);
+  });
+  s.appendChild(addBtn('+ Add other monthly income',function(){S.retOtherIncome.push({desc:'',amtPM:'',escTo:'',escIn:''});render();}));
 
   // ── Living Annuity and Life Annuity income drawings — informational
   var laIncPols=(S.importedPols||[]).filter(function(p){ return p.Type==='Living Annuity'&&N(p.BenLAIncome)>0; });
@@ -4015,6 +4054,14 @@ function buildRetirement() {
       otherIncAtRet+=Math.round(N(a.retirementIncomePM)*Math.pow(1+escTo/100,yrsToRet));
     });
 
+    // Manual monthly income at retirement (son's contribution, etc.) — escalates to retirement like rental
+    var manualIncAtRet=0;
+    (S.retOtherIncome||[]).forEach(function(r){
+      if(!N(r.amtPM)) return;
+      var escTo=Ndef(r.escTo, N(S.assump.cpi)||6);
+      manualIncAtRet+=Math.round(N(r.amtPM)*Math.pow(1+escTo/100,yrsToRet));
+    });
+
     // Display: monthly needs at retirement — each at its own escalation rate
     var monthlyAtRet = 0;
     (S.retNeeds||[]).forEach(function(r){
@@ -4022,7 +4069,7 @@ function buildRetirement() {
       var escTo=Ndef(r.esc, N(S.assump.cpi)||6);
       monthlyAtRet+=Math.round(N(r.amtToday)*Math.pow(1+escTo/100,yrsToRet));
     });
-    var netMonthlyGap = Math.max(0, monthlyAtRet - rentalAtRet - otherIncAtRet);
+    var netMonthlyGap = Math.max(0, monthlyAtRet - rentalAtRet - otherIncAtRet - manualIncAtRet);
 
     // Capital needed — capitalise the NET monthly gap directly
     // netMonthlyGap is already the future value AT retirement, so just capitalise it in retirement
@@ -4049,7 +4096,15 @@ function buildRetirement() {
         return a+Math.round(matVal*Math.pow(1+gr/100,yrsMatToRet));
       }
       return a+projectFund(r.currentVal,r.monthlyContrib,esc3,gr,yrsToRet);
-    },0)+N(S.retOtherCapital);
+    },0);
+    // Manual lump sums at retirement — each item projected forward at its own growth rate
+    var otherLumpsTotal=0;
+    (S.retOtherLumps||[]).forEach(function(r){
+      if(!N(r.amt)) return;
+      var gr=Ndef(r.growthRate, N(S.assump.growth)||9);
+      otherLumpsTotal+=Math.round(N(r.amt)*Math.pow(1+gr/100,yrsToRet));
+    });
+    totalProj+=otherLumpsTotal;
 
     // Add sold property net proceeds — net equity today projected forward (bond paid off assumed)
     var propSoldTotal=0;
@@ -4092,6 +4147,13 @@ function buildRetirement() {
     });
     if(rentalAtRet>0) rRow('Less: rental income at retirement', '('+Rfmt(rentalAtRet)+'/pm)', true);
     if(otherIncAtRet>0) rRow('Less: farm/business income at retirement', '('+Rfmt(otherIncAtRet)+'/pm)', true);
+    // Manual monthly income items — one row each
+    (S.retOtherIncome||[]).forEach(function(r){
+      if(!N(r.amtPM)) return;
+      var escTo=Ndef(r.escTo, N(S.assump.cpi)||6);
+      var atRet=Math.round(N(r.amtPM)*Math.pow(1+escTo/100,yrsToRet));
+      rRow('Less: '+(r.desc||'other income')+' at retirement', '('+Rfmt(atRet)+'/pm)', true);
+    });
     rRow('Net monthly gap at retirement', Rfmt(netMonthlyGap)+' /pm', false, true);
     rRow('Capital needed to fund net gap ('+defaultCpi+'% esc, '+yrsInRet+' yrs @ '+defaultRet+'% return)', '('+Rfmt(capNeed)+')', false, true);
     if(lumpNeed>0) rRow('Lump sum needs', '('+Rfmt(lumpNeed)+')', true);
@@ -4114,7 +4176,13 @@ function buildRetirement() {
       }
       rRow((r.desc||'Fund')+' @ '+gr+'%', Rfmt(fundProj), true);
     });
-    if(N(S.retOtherCapital)>0) rRow('Additional proceeds / manual', Rfmt(S.retOtherCapital), true);
+    // Per-item breakdown of manual lump sums at retirement
+    (S.retOtherLumps||[]).forEach(function(r){
+      if(!N(r.amt)) return;
+      var gr=Ndef(r.growthRate, N(S.assump.growth)||9);
+      var projV=Math.round(N(r.amt)*Math.pow(1+gr/100,yrsToRet));
+      rRow((r.desc||'Other lump')+' @ '+gr+'%', Rfmt(projV), true);
+    });
     if(propSoldTotal>0) rRow('Property proceeds ('+propsSold.length+' propert'+(propsSold.length===1?'y':'ies')+')', Rfmt(propSoldTotal), true);
     if(soldProceedsAtRet>0) rRow('Incl. other asset proceeds', Rfmt(soldProceedsAtRet), true);
     var gapRow=div(); gapRow.style.cssText='display:flex;justify-content:space-between;padding:8px 0;margin-top:8px;border-top:2px solid #445;font-size:14px;font-weight:700';
@@ -4151,18 +4219,18 @@ function buildRetirement() {
     // ── What-if calculator
     s.appendChild(stitle('Retirement What-If Calculator'));
     var scInf = div('info');
-    scInf.innerHTML = 'Use this to test a different growth assumption and additional savings without changing the core retirement inputs above.';
+    scInf.innerHTML = 'Use this to test a different growth assumption and additional savings without changing the core retirement inputs above. Annual contributions (e.g. year-end bonus) have their own escalation.';
     s.appendChild(scInf);
 
-    var scGrid = g4();
-
+    // Row 1: Growth % | Extra lump sum now
+    var scGrid1 = g2();
     var scGrowthF = div('f'); scGrowthF.appendChild(el('label','','Growth %'));
     var scGrowthW = div('pw'); scGrowthW.appendChild(el('span','pp','%'));
     var scGrowthI = document.createElement('input'); scGrowthI.type='text'; scGrowthI.inputMode='numeric';
     scGrowthI.value = S.retScenario.growth||''; scGrowthI.placeholder = S.assump.growth||'9';
     scGrowthI.addEventListener('input',function(e){ S.retScenario.growth=e.target.value; });
     scGrowthI.addEventListener('blur',function(){ render(); });
-    scGrowthW.insertBefore(scGrowthI, scGrowthW.firstChild); scGrowthF.appendChild(scGrowthW); scGrid.appendChild(scGrowthF);
+    scGrowthW.insertBefore(scGrowthI, scGrowthW.firstChild); scGrowthF.appendChild(scGrowthW); scGrid1.appendChild(scGrowthF);
 
     var scLumpF = div('f'); scLumpF.appendChild(el('label','','Extra lump sum now'));
     var scLumpW = div('rw'); scLumpW.appendChild(el('span','rp','R'));
@@ -4170,30 +4238,53 @@ function buildRetirement() {
     scLumpI.value = S.retScenario.extraLump||'';
     scLumpI.addEventListener('input',function(e){ S.retScenario.extraLump=e.target.value; });
     scLumpI.addEventListener('blur',function(){ render(); });
-    scLumpW.appendChild(scLumpI); scLumpF.appendChild(scLumpW); scGrid.appendChild(scLumpF);
+    scLumpW.appendChild(scLumpI); scLumpF.appendChild(scLumpW); scGrid1.appendChild(scLumpF);
+    s.appendChild(scGrid1);
 
+    // Row 2: Extra monthly saving | Escalation on monthly %
+    var scGrid2 = g2();
     var scPmF = div('f'); scPmF.appendChild(el('label','','Extra monthly saving'));
     var scPmW = div('rw'); scPmW.appendChild(el('span','rp','R'));
     var scPmI = document.createElement('input'); scPmI.type='text'; scPmI.inputMode='numeric';
     scPmI.value = S.retScenario.extraPM||'';
     scPmI.addEventListener('input',function(e){ S.retScenario.extraPM=e.target.value; });
     scPmI.addEventListener('blur',function(){ render(); });
-    scPmW.appendChild(scPmI); scPmF.appendChild(scPmW); scGrid.appendChild(scPmF);
+    scPmW.appendChild(scPmI); scPmF.appendChild(scPmW); scGrid2.appendChild(scPmF);
 
-    var scEscF = div('f'); scEscF.appendChild(el('label','','Escalation on extra saving %'));
+    var scEscF = div('f'); scEscF.appendChild(el('label','','Escalation on monthly %'));
     var scEscW = div('pw'); scEscW.appendChild(el('span','pp','%'));
     var scEscI = document.createElement('input'); scEscI.type='text'; scEscI.inputMode='numeric';
     scEscI.value = S.retScenario.extraEsc||'';
     scEscI.addEventListener('input',function(e){ S.retScenario.extraEsc=e.target.value; });
     scEscI.addEventListener('blur',function(){ render(); });
-    scEscW.insertBefore(scEscI, scEscW.firstChild); scEscF.appendChild(scEscW); scGrid.appendChild(scEscF);
+    scEscW.insertBefore(scEscI, scEscW.firstChild); scEscF.appendChild(scEscW); scGrid2.appendChild(scEscF);
+    s.appendChild(scGrid2);
 
-    s.appendChild(scGrid);
+    // Row 3: Extra annual contribution | Escalation on annual %
+    var scGrid3 = g2();
+    var scAnnF = div('f'); scAnnF.appendChild(el('label','','Extra annual contribution (e.g. bonus)'));
+    var scAnnW = div('rw'); scAnnW.appendChild(el('span','rp','R'));
+    var scAnnI = document.createElement('input'); scAnnI.type='text'; scAnnI.inputMode='numeric';
+    scAnnI.value = S.retScenario.extraAnnual||'';
+    scAnnI.addEventListener('input',function(e){ S.retScenario.extraAnnual=e.target.value; });
+    scAnnI.addEventListener('blur',function(){ render(); });
+    scAnnW.appendChild(scAnnI); scAnnF.appendChild(scAnnW); scGrid3.appendChild(scAnnF);
+
+    var scAnnEscF = div('f'); scAnnEscF.appendChild(el('label','','Escalation on annual %'));
+    var scAnnEscW = div('pw'); scAnnEscW.appendChild(el('span','pp','%'));
+    var scAnnEscI = document.createElement('input'); scAnnEscI.type='text'; scAnnEscI.inputMode='numeric';
+    scAnnEscI.value = S.retScenario.extraAnnualEsc||'';
+    scAnnEscI.addEventListener('input',function(e){ S.retScenario.extraAnnualEsc=e.target.value; });
+    scAnnEscI.addEventListener('blur',function(){ render(); });
+    scAnnEscW.insertBefore(scAnnEscI, scAnnEscW.firstChild); scAnnEscF.appendChild(scAnnEscW); scGrid3.appendChild(scAnnEscF);
+    s.appendChild(scGrid3);
 
     var scGrowth = Ndef(S.retScenario.growth, N(S.assump.growth)||9);
     var scExtraLump = N(S.retScenario.extraLump);
     var scExtraPM = N(S.retScenario.extraPM);
     var scExtraEsc = N(S.retScenario.extraEsc);
+    var scExtraAnnual = N(S.retScenario.extraAnnual);
+    var scExtraAnnualEsc = N(S.retScenario.extraAnnualEsc);
 
     var lumpNeededNow = 0;
     var extraPMNeeded = 0;
@@ -4225,9 +4316,28 @@ function buildRetirement() {
       return a+projectFund(r.currentVal,r.monthlyContrib,esc3,scGrowth,yrsToRet);
     },0);
 
+    // Scenario uses the existing per-item growth on each manual lump (NOT the scenario growth %),
+    // because those items have their own asset class (bitcoin, inheritance) — overriding them would distort reality.
+    var scenarioOtherLumps = otherLumpsTotal;
+
     var extraLumpFV = (scExtraLump>0 && yrsToRet>0) ? Math.round(scExtraLump*Math.pow(1+scGrowth/100,yrsToRet)) : scExtraLump;
     var extraPMFV = (scExtraPM>0 && yrsToRet>0) ? projectFund(0, scExtraPM, scExtraEsc, scGrowth, yrsToRet) : 0;
-    var scenarioTotal = scenarioFundsProj + N(S.retOtherCapital) + propSoldTotal + soldProceedsAtRet + extraLumpFV + extraPMFV;
+
+    // Extra annual contribution — end-of-year growing annuity FV
+    // If r=g: FV = annualPmt * n * (1+r)^(n-1)   (correct end-of-year identity)
+    // Else:    FV = annualPmt * (R^n - G^n) / (R - G)
+    var extraAnnualFV = 0;
+    if(scExtraAnnual>0 && yrsToRet>0){
+      var _ra = scGrowth/100;
+      var _ga = scExtraAnnualEsc/100;
+      if(Math.abs(_ra-_ga)<0.0001){
+        extraAnnualFV = Math.round(scExtraAnnual * yrsToRet * Math.pow(1+_ra, yrsToRet-1));
+      } else {
+        extraAnnualFV = Math.round(scExtraAnnual * (Math.pow(1+_ra,yrsToRet) - Math.pow(1+_ga,yrsToRet)) / (_ra-_ga));
+      }
+    }
+
+    var scenarioTotal = scenarioFundsProj + scenarioOtherLumps + propSoldTotal + soldProceedsAtRet + extraLumpFV + extraPMFV + extraAnnualFV;
     var scenarioGap = scenarioTotal - totalCapNeed;
 
     var scCards = div('cards c2');
@@ -4250,6 +4360,7 @@ function buildRetirement() {
     scRow('Scenario total at retirement', Rfmt(scenarioTotal));
     if(extraLumpFV>0) scRow('Extra lump sum at retirement value', Rfmt(extraLumpFV));
     if(extraPMFV>0) scRow('Extra monthly savings at retirement value', Rfmt(extraPMFV));
+    if(extraAnnualFV>0) scRow('Extra annual contribution at retirement value', Rfmt(extraAnnualFV));
     scRow(scenarioGap>=0?'Scenario surplus':'Scenario shortfall', Rfmt(Math.abs(scenarioGap)), true);
     s.appendChild(scBox);
   }
@@ -6427,7 +6538,7 @@ function buildSummary() {
   var newCoverToSell = estPayGap + spouseGap + tpTotalGap;
 
   var retirementNeed = 0, retirementHave = 0, retirementGap = null;
-  var monthlyAtRet = 0, rentalAtRet = 0, otherIncomeAtRet = 0, netGapPM = 0, retLumps = 0;
+  var monthlyAtRet = 0, rentalAtRet = 0, otherIncomeAtRet = 0, manualIncomeAtRet = 0, netGapPM = 0, retLumps = 0;
   if(S.scope.retirement && yrsToRet !== null){
     (S.retNeeds||[]).forEach(function(r){
       if(!N(r.amtToday)) return;
@@ -6444,7 +6555,12 @@ function buildSummary() {
       var escTo = Ndef(a.retirementIncEsc, N(S.assump.cpi)||6);
       otherIncomeAtRet += Math.round(N(a.retirementIncomePM) * Math.pow(1 + escTo/100, yrsToRet));
     });
-    netGapPM = Math.max(0, monthlyAtRet - rentalAtRet - otherIncomeAtRet);
+    (S.retOtherIncome||[]).forEach(function(r){
+      if(!N(r.amtPM)) return;
+      var escTo = Ndef(r.escTo, N(S.assump.cpi)||6);
+      manualIncomeAtRet += Math.round(N(r.amtPM) * Math.pow(1 + escTo/100, yrsToRet));
+    });
+    netGapPM = Math.max(0, monthlyAtRet - rentalAtRet - otherIncomeAtRet - manualIncomeAtRet);
     var capNeed = netGapPM > 0 ? capitalise(netGapPM, yrsInRet, N(S.assump.cpi)||6, N(S.assump.retReturn)||8) : 0;
     retLumps = (S.retLumps||[]).reduce(function(a,r){return a+N(r.amt);},0);
     retirementNeed = capNeed + retLumps;
@@ -6461,7 +6577,13 @@ function buildSummary() {
         return a+Math.round(matVal*Math.pow(1+gr/100,yrsMatToRet));
       }
       return a + projectFund(r.currentVal, r.monthlyContrib, ec, gr, yrsToRet);
-    },0) + N(S.retOtherCapital);
+    },0);
+    // Manual lump sums at retirement (bitcoin, inheritance, etc.) — each at own growth rate
+    (S.retOtherLumps||[]).forEach(function(r){
+      if(!N(r.amt)) return;
+      var gr=Ndef(r.growthRate, N(S.assump.growth)||9);
+      retirementHave += Math.round(N(r.amt) * Math.pow(1+gr/100, yrsToRet));
+    });
     (S.props||[]).forEach(function(p){
       if(!p.soldAtRetirement || !N(p.val)) return;
       var gr=Ndef(p.propGrowth, N(S.assump.growth)||9);
@@ -6593,6 +6715,7 @@ function buildSummary() {
     addLine(incomeBox,'Monthly need at retirement',Rfmt(monthlyAtRet)+'/pm',true);
     if(rentalAtRet>0) addLine(incomeBox,'Less rental income at retirement',Rfmt(rentalAtRet)+'/pm');
     if(otherIncomeAtRet>0) addLine(incomeBox,'Less other retirement income',Rfmt(otherIncomeAtRet)+'/pm');
+    if(manualIncomeAtRet>0) addLine(incomeBox,'Less manual income items at retirement',Rfmt(manualIncomeAtRet)+'/pm');
     addLine(incomeBox,'Net income gap to fund',Rfmt(netGapPM)+'/pm',true,'#1d4ed8');
     rgrid.appendChild(incomeBox);
 
@@ -6740,7 +6863,13 @@ function buildOverview() {
       var escTo=Ndef(a.retirementIncEsc, N(S.assump.cpi)||6);
       _ovOtherIncAtRet+=Math.round(N(a.retirementIncomePM)*Math.pow(1+escTo/100,_yrsToRO));
     });
-    var _ovNetGap=Math.max(0, _ovMonthlyAtRet - _ovRentalAtRet - _ovOtherIncAtRet);
+    var _ovManualIncAtRet=0;
+    (S.retOtherIncome||[]).forEach(function(r){
+      if(!N(r.amtPM))return;
+      var escTo=Ndef(r.escTo, N(S.assump.cpi)||6);
+      _ovManualIncAtRet+=Math.round(N(r.amtPM)*Math.pow(1+escTo/100,_yrsToRO));
+    });
+    var _ovNetGap=Math.max(0, _ovMonthlyAtRet - _ovRentalAtRet - _ovOtherIncAtRet - _ovManualIncAtRet);
     var _ovCpi=N(S.assump.cpi)||6;
     var _ovRetRet=N(S.assump.retReturn)||8;
     var _capNeedO = _ovNetGap > 0 ? capitalise(_ovNetGap, _yrsInRetO, _ovCpi, _ovRetRet) : 0;
@@ -6757,7 +6886,13 @@ function buildOverview() {
         return a+Math.round(matVal*Math.pow(1+gr/100,yrsMatToRet));
       }
       return a+projectFund(r.currentVal,r.monthlyContrib,ec,gr,_yrsToRO);
-    },0)+N(S.retOtherCapital);
+    },0);
+    // Manual lump sums at retirement — each at own growth rate
+    (S.retOtherLumps||[]).forEach(function(r){
+      if(!N(r.amt))return;
+      var gr=Ndef(r.growthRate, N(S.assump.growth)||9);
+      _retHaveO+=Math.round(N(r.amt)*Math.pow(1+gr/100,_yrsToRO));
+    });
     (S.props||[]).forEach(function(p){
       if(!p.soldAtRetirement||!N(p.val))return;
       var gr=Ndef(p.propGrowth, N(S.assump.growth)||9);
@@ -7432,6 +7567,12 @@ function printFNA(sections) {
     var esc=Ndef(a.retirementIncEsc, N(S.assump.cpi)||6);
     otherIncAtRetP+=Math.round(N(a.retirementIncomePM)*Math.pow(1+esc/100,yrsToRet));
   });
+  var manualIncAtRetP=0;
+  (S.retOtherIncome||[]).forEach(function(r){
+    if(!N(r.amtPM)||!yrsToRet) return;
+    var esc=Ndef(r.escTo, N(S.assump.cpi)||6);
+    manualIncAtRetP+=Math.round(N(r.amtPM)*Math.pow(1+esc/100,yrsToRet));
+  });
   var capNeedP=0;
   // Calculate net monthly gap at retirement — must match buildRetirement logic
   var _prMonthlyAtRet=0;
@@ -7440,7 +7581,7 @@ function printFNA(sections) {
     var escTo=Ndef(rn.esc, N(S.assump.cpi)||6);
     _prMonthlyAtRet+=Math.round(N(rn.amtToday)*Math.pow(1+escTo/100,yrsToRet||0));
   });
-  var _prNetGap=Math.max(0, _prMonthlyAtRet - rentalAtRetP - otherIncAtRetP);
+  var _prNetGap=Math.max(0, _prMonthlyAtRet - rentalAtRetP - otherIncAtRetP - manualIncAtRetP);
   var _prCpi=N(S.assump.cpi)||6;
   var _prRetRet=N(S.assump.retReturn)||8;
   capNeedP = _prNetGap > 0 ? capitalise(_prNetGap, yrsInRet, _prCpi, _prRetRet) : 0;
@@ -7459,7 +7600,13 @@ function printFNA(sections) {
       return a+Math.round(matVal*Math.pow(1+gr/100,yrsMatToRet));
     }
     return a+projectFund(rn.currentVal,rn.monthlyContrib,esc,gr,yrsToRet||0);
-  },0)+N(S.retOtherCapital);
+  },0);
+  // Manual lump sums at retirement — each at own growth rate
+  (S.retOtherLumps||[]).forEach(function(r){
+    if(!N(r.amt)||!yrsToRet) return;
+    var gr=Ndef(r.growthRate, N(S.assump.growth)||9);
+    totalProjP+=Math.round(N(r.amt)*Math.pow(1+gr/100,yrsToRet));
+  });
   var propSoldP=0;
   (S.props||[]).forEach(function(p){
     if(!p.soldAtRetirement||!N(p.val)||!yrsToRet) return;
@@ -7830,6 +7977,17 @@ function printFNA(sections) {
       +(propSoldP>0?nrow('Incl. property proceeds',r(propSoldP),false,true):'')
       +(rentalAtRetP>0?nrow('Rental income at retirement',r(rentalAtRetP)+' /pm',false,true):'')
       +(otherIncAtRetP>0?nrow('Farm/business income at retirement',r(otherIncAtRetP)+' /pm',false,true):'')
+      +(manualIncAtRetP>0?nrow('Other monthly income at retirement (manual)',r(manualIncAtRetP)+' /pm',false,true):'')
+      +(function(){
+        var rowsH='';
+        (S.retOtherLumps||[]).forEach(function(rn){
+          if(!N(rn.amt)||!yrsToRet) return;
+          var gr=Ndef(rn.growthRate, N(S.assump.growth)||9);
+          var projV=Math.round(N(rn.amt)*Math.pow(1+gr/100,yrsToRet));
+          rowsH+=nrow('Incl. '+(rn.desc||'other lump')+' @ '+gr+'%',r(projV),false,true);
+        });
+        return rowsH;
+      })()
       +(laIncAtRetP>0?nrow('Living Annuity income (from LA funds above)',r(laIncAtRetP)+' /pm \u2014 informational',false,true):'')
       +'<div style="display:flex;justify-content:space-between;padding:7px 0;border-top:2px solid #334;margin-top:5px;font-size:12px;font-weight:700">'
       +'<span style="color:#ccd6f6">'+(retGapP>=0?'SURPLUS':'SHORTFALL')+'</span>'
