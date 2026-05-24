@@ -1069,6 +1069,93 @@ function applyPolsFromCRM(pols) {
   S.existingCover.totalPrem  = totPrem  > 0 ? String(Math.round(totPrem))  : '';
 }
 
+// ── Per-policy and aggregate existing-cover totals ────────────────────
+// These helpers are the canonical way to compute "existing cover" across the
+// display layer (Advice Board, Checklist, print policy schedule, print summaries).
+// They mirror the routing convention used by applyPolsFromCRM:
+//   • Non-BA: BenDeath/BenDisability/BenDreadDisease + GroupRiskBenefits rows
+//   • Business Assurance: LoanAmount falls back to BenDeath (legacy display)
+//   • IP (ipPM): sums IncomeBenefits across ALL policy types (matches applyPolsFromCRM)
+//   • Aggregate function excludes Business Assurance from death/dis/dread totals.
+
+// Per-policy cover totals — used for per-row display in the printed Policy Schedule.
+function policyCoverTotals(p) {
+  var t = { death: 0, dis: 0, dread: 0, ipPM: 0 };
+  if (!p) return t;
+
+  if (p.Type === 'Business Assurance') {
+    // BA: LoanAmount falls back to BenDeath (legacy convention in print schedule)
+    t.death = N(p.LoanAmount) || N(p.BenDeath);
+    t.dis = N(p.BenDisability);
+    t.dread = N(p.BenDreadDisease);
+  } else {
+    // Standalone lump-sum benefit fields
+    t.death = N(p.BenDeath);
+    t.dis = N(p.BenDisability);
+    t.dread = N(p.BenDreadDisease);
+
+    // Pension/Provident Fund group risk benefits — routed by row type
+    try {
+      var gr = p.GroupRiskBenefits ? (typeof p.GroupRiskBenefits === 'string' ? JSON.parse(p.GroupRiskBenefits) : p.GroupRiskBenefits) : [];
+      if (gr && gr.length) {
+        gr.forEach(function(r) {
+          var c = N(r.cover);
+          if (!c) return;
+          var ty = r.type || '';
+          if (ty === 'Life Cover')                            t.death += c;
+          else if (ty === 'Capital Disability (Lump Sum)')    t.dis   += c;
+          else if (ty === 'Income Disability (PHI)')          t.ipPM  += c; // monthly
+          else if (ty === 'Dread Disease')                    t.dread += c;
+          // Funeral / Spouse Cover / Child Cover / Other: intentionally not routed
+        });
+      }
+    } catch(e) {}
+  }
+
+  // IP from IncomeBenefits JSON — applies to all policy types (matches applyPolsFromCRM)
+  try {
+    var ib = p.IncomeBenefits ? (typeof p.IncomeBenefits === 'string' ? JSON.parse(p.IncomeBenefits) : p.IncomeBenefits) : [];
+    if (ib && ib.length) ib.forEach(function(r){ t.ipPM += N(r.amount); });
+  } catch(e) {}
+
+  return t;
+}
+
+// Aggregate cover totals across the policy list — used by every summary/overview/print.
+// Excludes Business Assurance from death/dis/dread (matches applyPolsFromCRM convention).
+function existingCoverTotals(pols) {
+  var t = { death: 0, dis: 0, dread: 0, ipPM: 0 };
+  (pols || []).forEach(function(p) {
+    var isBA = p.Type === 'Business Assurance';
+    if (!isBA) {
+      t.death += N(p.BenDeath);
+      t.dis   += N(p.BenDisability);
+      t.dread += N(p.BenDreadDisease);
+      // Group risk benefits — pension funds only
+      try {
+        var gr = p.GroupRiskBenefits ? (typeof p.GroupRiskBenefits === 'string' ? JSON.parse(p.GroupRiskBenefits) : p.GroupRiskBenefits) : [];
+        if (gr && gr.length) {
+          gr.forEach(function(r) {
+            var c = N(r.cover);
+            if (!c) return;
+            var ty = r.type || '';
+            if (ty === 'Life Cover')                            t.death += c;
+            else if (ty === 'Capital Disability (Lump Sum)')    t.dis   += c;
+            else if (ty === 'Income Disability (PHI)')          t.ipPM  += c;
+            else if (ty === 'Dread Disease')                    t.dread += c;
+          });
+        }
+      } catch(e) {}
+    }
+    // IP from IncomeBenefits — included for ALL policies (matches applyPolsFromCRM)
+    try {
+      var ib = p.IncomeBenefits ? (typeof p.IncomeBenefits === 'string' ? JSON.parse(p.IncomeBenefits) : p.IncomeBenefits) : [];
+      if (ib && ib.length) ib.forEach(function(r){ t.ipPM += N(r.amount); });
+    } catch(e) {}
+  });
+  return t;
+}
+
 // ── CRM client write-back ────────────────────────────────────────────────
 // FNA is the primary capture tool for client demographics. Edits to client
 // fields write back to the CRM clients table on Supabase. Uses PATCH (partial
@@ -6624,7 +6711,8 @@ function buildSummary() {
   var deathIncomeNeed = (S.deathIncome||[]).reduce(function(a,r){return a+calcIncomeNeed(r);},0);
   var deathCapNeed = (S.deathCapital||[]).reduce(function(a,r){return a+N(r.amt);},0);
   var deathNeed = autoLiab + manLiab + deathIncomeNeed + deathCapNeed;
-  var deathHave = pols.reduce(function(a,p){ return p.Type!=='Business Assurance' ? a+N(p.BenDeath) : a; },0);
+  var _ecsS1 = existingCoverTotals(pols);
+  var deathHave = _ecsS1.death;
   var deathGap = deathHave - deathNeed;
 
   var _disAutoAB=0;
@@ -6632,16 +6720,13 @@ function buildSummary() {
   (S.vehicles||[]).forEach(function(v){ if(v.payOffIfDisabled && N(v.finance)>0) _disAutoAB+=N(v.finance); });
   (S.liabilities||[]).forEach(function(l){ if(l.payOffIfDisabled && N(l.bal)>0) _disAutoAB+=N(l.bal); });
   var disNeed = (S.disIncome||[]).reduce(function(a,r){return a+calcIncomeNeed(r);},0) + (S.disCapital||[]).reduce(function(a,r){return a+N(r.amt);},0) + _disAutoAB;
-  var disHave = pols.reduce(function(a,p){return a+N(p.BenDisability);},0);
+  var disHave = _ecsS1.dis;
   var disGap = disHave - disNeed;
   var dreadNeed = N(S.dreadAmt);
-  var dreadHave = pols.reduce(function(a,p){return a+N(p.BenDreadDisease);},0);
+  var dreadHave = _ecsS1.dread;
   var dreadGap = dreadHave - dreadNeed;
   var ipNeed = N(S.ipGrossPM) || grossFromNett(S.ipNettPM);
-  var ipHave = pols.reduce(function(a,p){
-    var ib=[]; try{ ib=JSON.parse(p.IncomeBenefits||'[]'); }catch(e){}
-    return a + ib.reduce(function(s2,b){ return s2 + N(b.amount); },0);
-  },0);
+  var ipHave = _ecsS1.ipPM;
   var ipGap = ipHave - ipNeed;
 
   var liquidCash = (S.otherAssets||[]).reduce(function(sum,a){
@@ -6977,7 +7062,8 @@ function buildOverview() {
   var _totIncO=(S.deathIncome||[]).reduce(function(a,r){return a+calcIncomeNeed(r);},0);
   var _totCapO=(S.deathCapital||[]).reduce(function(a,r){return a+N(r.amt);},0);
   var _deathNeedO=_totLiabO+_totIncO+_totCapO;
-  var _deathHaveO=pols.reduce(function(a,p){return p.Type!=='Business Assurance'?a+N(p.BenDeath):a;},0);
+  var _ecsO = existingCoverTotals(pols);
+  var _deathHaveO=_ecsO.death;
   var _deathGapO=_deathHaveO-_deathNeedO;
 
   var _disIncO=(S.disIncome||[]).reduce(function(a,r){return a+calcIncomeNeed(r);},0);
@@ -6987,12 +7073,9 @@ function buildOverview() {
   (S.vehicles||[]).forEach(function(v){ if(v.payOffIfDisabled && N(v.finance)>0) _disAutoO+=N(v.finance); });
   (S.liabilities||[]).forEach(function(l){ if(l.payOffIfDisabled && N(l.bal)>0) _disAutoO+=N(l.bal); });
   var _disTotO=_disIncO+_disCapO+_disAutoO;
-  var _disHaveO=pols.reduce(function(a,p){return a+N(p.BenDisability);},0);
-  var _dreadHaveO=pols.reduce(function(a,p){return a+N(p.BenDreadDisease);},0);
-  var _ipHaveO=pols.reduce(function(a,p){
-    var ib=[];try{ib=JSON.parse(p.IncomeBenefits||'[]');}catch(e){}
-    return a+ib.reduce(function(s2,b){return s2+N(b.amount);},0);
-  },0);
+  var _disHaveO=_ecsO.dis;
+  var _dreadHaveO=_ecsO.dread;
+  var _ipHaveO=_ecsO.ipPM;
 
   // Liquidity
   var _liqCashO=(S.otherAssets||[]).reduce(function(sum,a){
@@ -7237,17 +7320,17 @@ function buildROATab() {
         var need = S.deathLiabs.reduce(function(a,x){return a+N(x.amt);},0)
                  + S.deathIncome.reduce(function(a,x){return a+calcIncomeNeed(x);},0)
                  + S.deathCapital.reduce(function(a,x){return a+N(x.amt);},0);
-        var have = pols.reduce(function(a,p){return p.Type!=='Business Assurance'?a+N(p.BenDeath):a;},0);
+        var have = existingCoverTotals(pols).death;
         return need > 0 ? 'FNA need: '+Rfmt(need)+' / Have: '+Rfmt(have) : '';
       case 1: // Disability
         var dn = S.disIncome.reduce(function(a,x){return a+calcIncomeNeed(x);},0)+S.disCapital.reduce(function(a,x){return a+N(x.amt);},0);
         (S.props||[]).forEach(function(p){ if(p.payOffIfDisabled && N(p.bond)>0) dn+=N(p.bond); });
         (S.vehicles||[]).forEach(function(v){ if(v.payOffIfDisabled && N(v.finance)>0) dn+=N(v.finance); });
         (S.liabilities||[]).forEach(function(l){ if(l.payOffIfDisabled && N(l.bal)>0) dn+=N(l.bal); });
-        var dh = pols.reduce(function(a,p){return a+N(p.BenDisability);},0);
+        var dh = existingCoverTotals(pols).dis;
         return dn > 0 ? 'FNA need: '+Rfmt(dn)+' / Have: '+Rfmt(dh) : '';
       case 2: // Dread
-        var drh = pols.reduce(function(a,p){return a+N(p.BenDreadDisease);},0);
+        var drh = existingCoverTotals(pols).dread;
         return N(S.dreadAmt) > 0 ? 'FNA need: '+Rfmt(S.dreadAmt)+' / Have: '+Rfmt(drh) : '';
       case 3: // IP
         return N(S.ipGrossPM) > 0 ? 'FNA need: '+Rfmt(S.ipGrossPM)+'/pm gross' : '';
@@ -7348,7 +7431,8 @@ function generateROA() {
   var totIncCap=S.deathIncome.reduce(function(s,x){return s+calcIncomeNeed(x);},0);
   var totCapNeed=S.deathCapital.reduce(function(s,x){return s+N(x.amt);},0);
   var totalDeathNeed=totLiabNeed+totIncCap+totCapNeed;
-  var totalDeathHave=pols.reduce(function(a,p){return p.Type!=='Business Assurance'?a+N(p.BenDeath):a;},0);
+  var _ecsR1 = existingCoverTotals(pols);
+  var totalDeathHave=_ecsR1.death;
   var disIncCap=S.disIncome.reduce(function(a,x){return a+calcIncomeNeed(x);},0);
   var disCapNeed=S.disCapital.reduce(function(a,x){return a+N(x.amt);},0);
   var _disAutoPrint=0;
@@ -7356,8 +7440,8 @@ function generateROA() {
   (S.vehicles||[]).forEach(function(v){ if(v.payOffIfDisabled && N(v.finance)>0) _disAutoPrint+=N(v.finance); });
   (S.liabilities||[]).forEach(function(l){ if(l.payOffIfDisabled && N(l.bal)>0) _disAutoPrint+=N(l.bal); });
   var totalDisNeed=disIncCap+disCapNeed+_disAutoPrint;
-  var totalDisHave=pols.reduce(function(a,p){return a+N(p.BenDisability);},0);
-  var totalDreadHave=pols.reduce(function(a,p){return a+N(p.BenDreadDisease);},0);
+  var totalDisHave=_ecsR1.dis;
+  var totalDreadHave=_ecsR1.dread;
 
   function esc(t){ return (t||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
   function rfmt(v){ return v>0?'R\u00a0'+Math.round(v).toLocaleString('en-ZA'):'—'; }
@@ -7718,7 +7802,8 @@ function printFNA(sections) {
   var totInc=(S.deathIncome||[]).reduce(function(a,rn){return a+calcIncomeNeed(rn);},0);
   var totCap=(S.deathCapital||[]).reduce(function(a,rn){return a+N(rn.amt);},0);
   var totalDeathNeed=totLiab+totInc+totCap;
-  var totalDeathHave=pols.reduce(function(a,p){return p.Type!=='Business Assurance'?a+N(p.BenDeath):a;},0);
+  var _ecsP = existingCoverTotals(pols);
+  var totalDeathHave=_ecsP.death;
 
   // Retirement
   var rentalAtRetP=0;
@@ -7806,12 +7891,9 @@ function printFNA(sections) {
   var liqGapP=liqProvsP-liqNeedP;
 
   // Disability / dread / IP have values — used on Page 7
-  var disHaveP=pols.reduce(function(a,p){return a+N(p.BenDisability);},0);
-  var dreadHaveP=pols.reduce(function(a,p){return a+N(p.BenDreadDisease);},0);
-  var ipHaveP=pols.reduce(function(a,p){
-    var ib=[];try{ib=JSON.parse(p.IncomeBenefits||'[]');}catch(e){}
-    return a+ib.reduce(function(s2,b){return s2+N(b.amount);},0);
-  },0);
+  var disHaveP=_ecsP.dis;
+  var dreadHaveP=_ecsP.dread;
+  var ipHaveP=_ecsP.ipPM;
 
   // CSS
   var h='<!DOCTYPE html><html><head><meta charset="UTF-8"><title>FNA \u2014 '+e(S.cli.name)+'</title><style>';
@@ -7959,8 +8041,8 @@ function printFNA(sections) {
     pols.forEach(function(p){
       var prem=N(p.Premium);
       var premStr=prem>0?(r(prem)+(p.Frequency==='Annually'?' /yr':p.Frequency==='Once Off'?' once':' /pm')):'&mdash;';
-      var ipAmt=0;try{JSON.parse(p.IncomeBenefits||'[]').forEach(function(x){ipAmt+=N(x.amount);});}catch(ex){}
-      var cover=p.Type==='Business Assurance'?r(N(p.LoanAmount)||N(p.BenDeath)):r(p.BenDeath);
+      // Per-policy totals — combines standalone fields with pension fund group risk benefits
+      var _pct = policyCoverTotals(p);
       var escP=String(p.PremEscalation!=null&&p.PremEscalation!==''?p.PremEscalation:(p.premEsc||''));
       var escB=String(p.BenEscalation||'');
       h+='<tr>'
@@ -7970,10 +8052,10 @@ function printFNA(sections) {
         +td(premStr,true)
         +td(escP?escP+'%':'&mdash;',true)
         +td(escB?escB+'%':'&mdash;',true)
-        +td(cover,true)
-        +td(r(p.BenDisability),true)
-        +td(r(p.BenDreadDisease),true)
-        +td(ipAmt>0?r(ipAmt)+' /pm':'&mdash;',true)
+        +td(r(_pct.death),true)
+        +td(r(_pct.dis),true)
+        +td(r(_pct.dread),true)
+        +td(_pct.ipPM>0?r(_pct.ipPM)+' /pm':'&mdash;',true)
         +td(r(p.BenFundValue),true)
         +td('<span style="font-size:9px">'+e(p.BeneficiaryType||p.Beneficiary||'&mdash;')+'</span>')
         +'</tr>';
@@ -8035,7 +8117,7 @@ function printFNA(sections) {
       h+=sec('Disability');
       var dI=(S.disIncome||[]).reduce(function(a,rn){return a+calcIncomeNeed(rn);},0);
       var dC=(S.disCapital||[]).reduce(function(a,rn){return a+N(rn.amt);},0);
-      var dH=pols.reduce(function(a,p){return a+N(p.BenDisability);},0);
+      var dH=disHaveP;
       var dG=dH-(dI+dC);
       h+=navyBox(nrow('Capital needed',r(dI+dC))+nrow('Cover in place',r(dH))
         +'<div style="display:flex;justify-content:space-between;font-weight:700;padding-top:5px;border-top:1px solid #334;margin-top:4px">'
@@ -8045,7 +8127,7 @@ function printFNA(sections) {
 
     if(S.scope.dread&&N(S.dreadAmt)>0){
       h+=sec('Dread Disease');
-      var ddH=pols.reduce(function(a,p){return a+N(p.BenDreadDisease);},0);
+      var ddH=dreadHaveP;
       var ddG=ddH-N(S.dreadAmt);
       h+=navyBox(nrow('Amount needed',r(S.dreadAmt))+nrow('Cover in place',r(ddH))
         +'<div style="display:flex;justify-content:space-between;font-weight:700;padding-top:5px;border-top:1px solid #334;margin-top:4px">'
@@ -8055,7 +8137,7 @@ function printFNA(sections) {
 
     if(S.scope.ip){
       h+=sec('Income Protection');
-      var ipH=pols.reduce(function(a,p){var ib=[];try{ib=JSON.parse(p.IncomeBenefits||'[]');}catch(ex){}return a+ib.reduce(function(s,b){return s+N(b.amount);},0);},0);
+      var ipH=ipHaveP;
       h+=navyBox(nrow('IP benefit needed /pm',r(S.ipGrossPM||S.ipNettPM))+nrow('IP cover in place /pm',r(ipH)));
     }
   }
