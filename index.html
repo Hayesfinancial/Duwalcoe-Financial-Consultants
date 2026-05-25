@@ -391,6 +391,10 @@ function post(data, cb){
   function upsert(table, row, callback){
     sbFetch('POST', '/rest/v1/'+table, [row], function(res, err){
       try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
+      if(err){
+        toast('⚠️ SAVE FAILED ('+table+') — press F12, check console','err');
+        console.error('SUPABASE SAVE FAILED — table:', table, '— payload:', row, '— server response:', err);
+      }
       if(callback) callback(err?{ok:0}:{ok:1});
     });
   }
@@ -399,6 +403,10 @@ function post(data, cb){
   function del(table, id, callback){
     sbFetch('DELETE', '/rest/v1/'+table+'?ID=eq.'+encodeURIComponent(id), null, function(res, err){
       try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
+      if(err){
+        toast('⚠️ DELETE FAILED ('+table+') — press F12, check console','err');
+        console.error('SUPABASE DELETE FAILED — table:', table, '— id:', id, '— server response:', err);
+      }
       if(callback) callback(err?{ok:0}:{ok:1});
     });
   }
@@ -407,6 +415,10 @@ function post(data, cb){
   function patch(table, id, fields, callback){
     sbFetch('PATCH', '/rest/v1/'+table+'?ID=eq.'+encodeURIComponent(id), fields, function(res, err){
       try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
+      if(err){
+        toast('⚠️ UPDATE FAILED ('+table+') — press F12, check console','err');
+        console.error('SUPABASE PATCH FAILED — table:', table, '— id:', id, '— fields:', fields, '— server response:', err);
+      }
       if(callback) callback(err?{ok:0}:{ok:1});
     });
   }
@@ -6336,12 +6348,22 @@ function savePolicy(){
   closeAll();render();
   var _polForServer = JSON.parse(JSON.stringify(pol));
   delete _polForServer._pendingSave;
-  post({action:'savePolicy',policy:_polForServer},function(){
-    // Server confirmed — clear pending flag
-    var _ci=DB.policies.findIndex(function(x){return x.ID===pol.ID;});
-    if(_ci>=0){ DB.policies[_ci]=_polForServer; }
-    try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
-    toast('Policy saved ✓','ok');
+  post({action:'savePolicy',policy:_polForServer},function(res){
+    if(res && res.ok===1){
+      // Server confirmed — clear pending flag and update DB with the clean server-shape policy
+      var _ci=DB.policies.findIndex(function(x){return x.ID===pol.ID;});
+      if(_ci>=0){ DB.policies[_ci]=_polForServer; }
+      try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
+      toast('Policy saved ✓','ok');
+    } else {
+      // Server rejected — do NOT replace the in-memory policy with _polForServer
+      // (which lacks _pendingSave). The policy currently in DB.policies still has
+      // _pendingSave:true from line 6332, so syncNow() on next reload will recover
+      // it via the pending-save merge in lines 345-353. The error toast and console
+      // log have already been emitted by the upsert() helper above. Log the policy
+      // ID here so Clinton can find it in the localStorage backup if needed.
+      console.error('Policy NOT saved to server. Policy retained in localStorage with _pendingSave flag. Policy ID:', pol.ID, '— Insurer:', pol.Insurer, '— PolicyNo:', pol.PolicyNo);
+    }
   });
 }
 
