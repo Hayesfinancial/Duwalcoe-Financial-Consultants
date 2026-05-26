@@ -236,6 +236,25 @@ var EXEC_RATE  = 0.04025;   // Executor fees 3.5% + VAT
 function isS4qSpouse(type){
   return type === 'Spouse';
 }
+// Legal-spouse test on the client's marital status field. The marital
+// dropdown uses values like "Married \u2014 ANC no accrual" etc; "Life
+// partner", "Single", "Divorced", "Widowed" do NOT qualify for s.4(q).
+function isLegallyMarried(m){
+  return (m||'').indexOf('Married') === 0;
+}
+// Centralised rule: does an asset/policy accrue to the surviving spouse for
+// s.4(q) deduction and s.9HB CGT rollover?
+// (a) Direct: beneficiary/deathBenType is 'Spouse'.
+// (b) Via residue: beneficiary/deathBenType is 'Estate' (or blank) AND the
+//     client has ticked "Spouse inherits residue" on the Estate tab AND the
+//     client is legally married. Life Partner never qualifies.
+function accruesToSpouse(benType){
+  if(benType === 'Spouse') return true;
+  var residueTick = !!(typeof S !== 'undefined' && S && S.cli && S.cli.spouseInheritsResidue);
+  var married = isLegallyMarried(typeof S !== 'undefined' && S && S.cli ? S.cli.marital : '');
+  if(residueTick && married && (benType === 'Estate' || !benType)) return true;
+  return false;
+}
 // Anything that routes through the deceased estate (executor fees, dutiable
 // as estate property). Trust is treated case-by-case — defaults to false here
 // because a properly-structured trust nomination is paid outside the estate.
@@ -531,44 +550,68 @@ function calcCGTAsset(marketVal, baseCost, primaryResidence) {
 }
 
 // Total CGT liability across all assets on death
-// Returns array of { desc, gain, gainAfterPR, includedGain, cgt }
-// and totalCGT after applying shared annual exclusion
+// Returns { items, rolloverItems, totalGainAfterPR, netGain, includedGain, totalCGT }
+// - items: assets that are CGT-applicable (not rolled over). Includes assets
+//   whose gain is wiped by the primary residence exclusion (gainAfterPR=0),
+//   so the panel can show the working transparently.
+// - rolloverItems: assets where s.9HB spousal rollover applies (direct spouse
+//   beneficiary OR Estate beneficiary routed via residue when the residue tick
+//   is on and the client is legally married). These contribute zero CGT but
+//   are listed for adviser transparency.
 function calcTotalCGT(marginalRate) {
   var items = [];
+  var rolloverItems = [];
   var totalGainAfterPR = 0;
 
-  // Properties — only if NOT going to spouse (spouse = rollover)
+  function pushTaxable(desc, r){
+    items.push({ desc: desc, gain: r.gain, gainAfterPR: r.gainAfterExcl,
+                 marketVal: r.marketVal, baseCost: r.baseCost,
+                 primaryResidence: !!r.primaryResidence });
+    totalGainAfterPR += r.gainAfterExcl;
+  }
+  function pushRollover(desc, marketVal, baseCost, via){
+    rolloverItems.push({ desc: desc, marketVal: N(marketVal), baseCost: N(baseCost),
+                         via: via || 'spouse' }); // 'spouse' or 'residue'
+  }
+
+  // Properties
   (S.props||[]).forEach(function(p) {
     if (!N(p.val) || !N(p.baseCost)) return;
-    if ((p.deathBenType||'Estate') === 'Spouse') return; // rollover
-    var r = calcCGTAsset(p.val, p.baseCost, !!p.primaryResidence);
-    if (r.gainAfterExcl > 0) {
-      items.push({ desc: p.desc||'Property', gain: r.gain, gainAfterPR: r.gainAfterExcl });
-      totalGainAfterPR += r.gainAfterExcl;
+    var bt = p.deathBenType || 'Estate';
+    if (accruesToSpouse(bt)) {
+      pushRollover(p.desc||'Property', p.val, p.baseCost, bt==='Spouse'?'spouse':'residue');
+      return;
     }
+    var r = calcCGTAsset(p.val, p.baseCost, !!p.primaryResidence);
+    r.marketVal = N(p.val); r.baseCost = N(p.baseCost); r.primaryResidence = !!p.primaryResidence;
+    pushTaxable(p.desc||'Property', r);
   });
 
   // Vehicles
   (S.vehicles||[]).forEach(function(v) {
     if (!N(v.val) || !N(v.baseCost)) return;
-    if ((v.deathBenType||'Estate') === 'Spouse') return;
-    var r = calcCGTAsset(v.val, v.baseCost, false);
-    if (r.gainAfterExcl > 0) {
-      items.push({ desc: v.desc||'Vehicle', gain: r.gain, gainAfterPR: r.gainAfterExcl });
-      totalGainAfterPR += r.gainAfterExcl;
+    var bt = v.deathBenType || 'Estate';
+    if (accruesToSpouse(bt)) {
+      pushRollover(v.desc||'Vehicle', v.val, v.baseCost, bt==='Spouse'?'spouse':'residue');
+      return;
     }
+    var r = calcCGTAsset(v.val, v.baseCost, false);
+    r.marketVal = N(v.val); r.baseCost = N(v.baseCost); r.primaryResidence = false;
+    pushTaxable(v.desc||'Vehicle', r);
   });
 
   // Other assets — only if cgtApplicable is not explicitly false
   (S.otherAssets||[]).forEach(function(a) {
     if (!N(a.val) || !N(a.baseCost)) return;
     if (a.cgtApplicable === false || a.cgtApplicable === 'false') return; // explicitly exempt
-    if ((a.deathBenType||'Estate') === 'Spouse') return;
-    var r = calcCGTAsset(a.val, a.baseCost, false);
-    if (r.gainAfterExcl > 0) {
-      items.push({ desc: a.desc||'Asset', gain: r.gain, gainAfterPR: r.gainAfterExcl });
-      totalGainAfterPR += r.gainAfterExcl;
+    var bt = a.deathBenType || 'Estate';
+    if (accruesToSpouse(bt)) {
+      pushRollover(a.desc||'Asset', a.val, a.baseCost, bt==='Spouse'?'spouse':'residue');
+      return;
     }
+    var r = calcCGTAsset(a.val, a.baseCost, false);
+    r.marketVal = N(a.val); r.baseCost = N(a.baseCost); r.primaryResidence = false;
+    pushTaxable(a.desc||'Asset', r);
   });
 
   // Investment / Unit Trust policies — CGT applies, base cost = lump sum premium
@@ -576,15 +619,22 @@ function calcTotalCGT(marginalRate) {
   // Endowments, TFS, RA types, Living Annuity — all exempt
   (S.importedPols||[]).forEach(function(p) {
     if (p.Type !== 'Investment' && p.Type !== 'Unit Trust') return;
-    if ((p.BeneficiaryType||'') === 'Spouse') return; // rollover
+    var bt = p.BeneficiaryType || '';
+    if (accruesToSpouse(bt)) {
+      // For rollover display we use the fund value as proceeds
+      var baseCostRollover = (p.Frequency === 'Once Off') ? N(p.Premium) : N(p.LumpSumPremium);
+      if (N(p.BenFundValue) > 0) {
+        pushRollover((p.Insurer||'Investment')+(p.Product?' \u2014 '+p.Product:''),
+                     p.BenFundValue, baseCostRollover, bt==='Spouse'?'spouse':'residue');
+      }
+      return;
+    }
     // Base cost: Once Off premium = lump sum. Otherwise use manually entered LumpSumPremium.
     var baseCostPol = (p.Frequency === 'Once Off') ? N(p.Premium) : N(p.LumpSumPremium);
     if (!N(p.BenFundValue) || !baseCostPol) return;
     var r = calcCGTAsset(p.BenFundValue, baseCostPol, false);
-    if (r.gainAfterExcl > 0) {
-      items.push({ desc: (p.Insurer||'Investment')+(p.Product?' — '+p.Product:''), gain: r.gain, gainAfterPR: r.gainAfterExcl });
-      totalGainAfterPR += r.gainAfterExcl;
-    }
+    r.marketVal = N(p.BenFundValue); r.baseCost = baseCostPol; r.primaryResidence = false;
+    pushTaxable((p.Insurer||'Investment')+(p.Product?' \u2014 '+p.Product:''), r);
   });
 
   // Apply shared annual exclusion (R440k in year of death)
@@ -593,7 +643,9 @@ function calcTotalCGT(marginalRate) {
   var mr          = N(marginalRate) > 0 ? N(marginalRate) / 100 : 0.45; // default max if unknown
   var totalCGT    = Math.round(includedGain * mr);
 
-  return { items: items, totalGainAfterPR: totalGainAfterPR, netGain: netGain, includedGain: includedGain, totalCGT: totalCGT };
+  return { items: items, rolloverItems: rolloverItems,
+           totalGainAfterPR: totalGainAfterPR, netGain: netGain,
+           includedGain: includedGain, totalCGT: totalCGT };
 }
 var DEFAULTS = {
   // Personal
@@ -2873,8 +2925,8 @@ function buildAssets() {
 
     if(hasR4){ card.appendChild(r4); }
 
-    // CGT preview — only if base cost entered and not going to spouse
-    if(N(p.baseCost)>0 && N(p.val)>0 && (p.deathBenType||'Estate')!=='Spouse'){
+    // CGT preview — only if base cost entered and not accruing to spouse
+    if(N(p.baseCost)>0 && N(p.val)>0 && !accruesToSpouse(p.deathBenType||'Estate')){
       var cgtR=calcCGTAsset(p.val, p.baseCost, !!p.primaryResidence);
       var mr=N(S.cli.grossPM)>0?calcMarginalRate(N(S.cli.grossPM)*12):0.45;
       var cgtEst=Math.round(cgtR.gainAfterExcl*CGT_INCLUSION*mr);
@@ -2885,9 +2937,12 @@ function buildAssets() {
         ' · Est. CGT @ '+Math.round(mr*100)+'% marginal: <strong>'+Rfmt(cgtEst)+'</strong>'+
         ' <span style="color:var(--sub)">(before R440k annual exclusion shared across all assets)</span>';
       card.appendChild(cgtBox);
-    } else if((p.deathBenType||'Estate')==='Spouse'){
+    } else if(accruesToSpouse(p.deathBenType||'Estate')){
       var rollBox=div(); rollBox.style.cssText='margin-top:8px;padding:6px 10px;border-radius:6px;background:#f0fdf4;border:1px solid #86efac;font-size:11px;color:#166534';
-      rollBox.textContent='✓ Spouse rollover — no CGT on death. CGT deferred until spouse disposes.';
+      var _viaRes = (p.deathBenType||'Estate') !== 'Spouse';
+      rollBox.textContent = _viaRes
+        ? '\u2713 Spouse rollover via residue \u2014 no CGT on death. CGT deferred until spouse disposes.'
+        : '\u2713 Spouse rollover \u2014 no CGT on death. CGT deferred until spouse disposes.';
       card.appendChild(rollBox);
     }
 
@@ -2964,7 +3019,7 @@ function buildAssets() {
     card.appendChild(vr2);
 
     // CGT preview
-    if(N(v.baseCost)>0 && N(v.val)>0 && (v.deathBenType||'Estate')!=='Spouse'){
+    if(N(v.baseCost)>0 && N(v.val)>0 && !accruesToSpouse(v.deathBenType||'Estate')){
       var vcgtR=calcCGTAsset(v.val, v.baseCost, false);
       if(vcgtR.gainAfterExcl>0){
         var vmr=N(S.cli.grossPM)>0?calcMarginalRate(N(S.cli.grossPM)*12):0.45;
@@ -2975,9 +3030,12 @@ function buildAssets() {
           ' · Est. CGT @ '+Math.round(vmr*100)+'%: <strong>'+Rfmt(vcgtEst)+'</strong>';
         card.appendChild(vcgtBox);
       }
-    } else if((v.deathBenType||'Estate')==='Spouse'){
+    } else if(accruesToSpouse(v.deathBenType||'Estate')){
       var vrollBox=div(); vrollBox.style.cssText='margin-top:8px;padding:6px 10px;border-radius:6px;background:#f0fdf4;border:1px solid #86efac;font-size:11px;color:#166534';
-      vrollBox.textContent='✓ Spouse rollover — no CGT on death.';
+      var _vViaRes = (v.deathBenType||'Estate') !== 'Spouse';
+      vrollBox.textContent = _vViaRes
+        ? '\u2713 Spouse rollover via residue \u2014 no CGT on death.'
+        : '\u2713 Spouse rollover \u2014 no CGT on death.';
       card.appendChild(vrollBox);
     }
 
@@ -3172,7 +3230,7 @@ function buildAssets() {
 
     // CGT preview
     var isCGTPreview = a.cgtApplicable !== false && a.cgtApplicable !== 'false';
-    if(isCGTPreview && N(a.baseCost)>0&&N(a.val)>0&&(a.deathBenType||'Estate')!=='Spouse'){
+    if(isCGTPreview && N(a.baseCost)>0&&N(a.val)>0&&!accruesToSpouse(a.deathBenType||'Estate')){
       var acgtR=calcCGTAsset(a.val,a.baseCost,false);
       if(acgtR.gainAfterExcl>0){
         var amr=N(S.cli.grossPM)>0?calcMarginalRate(N(S.cli.grossPM)*12):0.45;
@@ -3183,12 +3241,16 @@ function buildAssets() {
           ' · Est. CGT @ '+Math.round(amr*100)+'%: <strong>'+Rfmt(acgtEst)+'</strong>';
         card.appendChild(acgtBox);
       }
-    } else if((a.deathBenType||'Estate')==='Spouse'){
+    } else if(isCGTPreview && accruesToSpouse(a.deathBenType||'Estate')){
       var arb=div(); arb.style.cssText='margin-top:8px;padding:6px 10px;border-radius:6px;background:#f0fdf4;border:1px solid #86efac;font-size:11px;color:#166534';
-      arb.textContent='✓ Spouse rollover — no CGT on death.'; card.appendChild(arb);
+      var _aViaRes = (a.deathBenType||'Estate') !== 'Spouse';
+      arb.textContent = _aViaRes
+        ? '\u2713 Spouse rollover via residue \u2014 no CGT on death.'
+        : '\u2713 Spouse rollover \u2014 no CGT on death.';
+      card.appendChild(arb);
     } else if(!isCGTPreview){
       var arbE=div(); arbE.style.cssText='margin-top:8px;padding:6px 10px;border-radius:6px;background:#f0fdf4;border:1px solid #86efac;font-size:11px;color:#166534';
-      arbE.textContent='✓ CGT exempt — excluded from estate CGT calculation.'; card.appendChild(arbE);
+      arbE.textContent='\u2713 CGT exempt \u2014 excluded from estate CGT calculation.'; card.appendChild(arbE);
     }
 
     s.appendChild(card);
@@ -3201,7 +3263,7 @@ function buildAssets() {
   // ── CGT Summary on death
   var margRate = N(S.cli.grossPM)>0 ? calcMarginalRate(N(S.cli.grossPM)*12) : 0.45;
   var cgtSummary = calcTotalCGT(margRate*100);
-  if(cgtSummary.items.length>0){
+  if(cgtSummary.items.length>0 || cgtSummary.rolloverItems.length>0){
     s.appendChild(stitle('Capital Gains Tax — Estimated Liability on Death'));
     var cgtInf=div('info');
     cgtInf.innerHTML='On death, SARS deems a disposal of all assets at market value (Eighth Schedule). '+
@@ -3210,20 +3272,42 @@ function buildAssets() {
       'Inclusion rate: <strong>40%</strong> of net gain included in taxable income, taxed at marginal rate.';
     s.appendChild(cgtInf);
     var cgtBox=div(); cgtBox.style.cssText='background:var(--navy);color:#fff;border-radius:9px;padding:16px 18px;margin-bottom:14px';
-    function cgtRow(lbl,val,bold,colour){
-      var r=div(); r.style.cssText='display:flex;justify-content:space-between;padding:'+(bold?'7':'4')+'px 0'+(bold?';border-top:1px solid #334;margin-top:4px':'');
+    function cgtRow(lbl,val,bold,colour,indent){
+      var r=div(); r.style.cssText='display:flex;justify-content:space-between;padding:'+(bold?'7':'4')+'px 0'+(bold?';border-top:1px solid #334;margin-top:4px':'')+(indent?';padding-left:14px':'');
       var l=el('span','',lbl); l.style.cssText='color:#ccd6f6;font-size:'+(bold?'13':'12')+'px';
       var v=el('span','',val); v.style.cssText='font-size:'+(bold?'14':'12')+'px;font-weight:'+(bold?'700':'400')+';color:'+(colour||'#f0f9d4');
       r.appendChild(l); r.appendChild(v); cgtBox.appendChild(r);
     }
     cgtSummary.items.forEach(function(item){
-      cgtRow(item.desc,Rfmt(item.gainAfterPR));
+      var gain = Math.max(0, N(item.marketVal) - N(item.baseCost));
+      cgtRow(item.desc, Rfmt(N(item.marketVal)), false, '#fff');
+      cgtRow('Less: base cost', '('+Rfmt(N(item.baseCost))+')', false, '#ccd6f6', true);
+      cgtRow('Gain', Rfmt(gain), false, '#fff', true);
+      if(item.primaryResidence){
+        var prAmt = Math.min(CGT_PRIMARY_RES, gain);
+        if(prAmt>0) cgtRow('Less: primary residence exclusion (R3m cap)', '('+Rfmt(prAmt)+')', false, '#ccd6f6', true);
+      }
+      cgtRow('Gain after exclusions', Rfmt(item.gainAfterPR), false, item.gainAfterPR>0?'#fff':'#86efac', true);
     });
-    cgtRow('Total gain (after primary residence exclusion)',Rfmt(cgtSummary.totalGainAfterPR),false);
+    cgtRow('Total gain (after primary residence exclusion)',Rfmt(cgtSummary.totalGainAfterPR),true);
     cgtRow('Less: annual exclusion (year of death)','('+Rfmt(CGT_ANNUAL_EXCL)+')',false);
     cgtRow('Net capital gain',Rfmt(cgtSummary.netGain),true);
     cgtRow('Included gain (× 40%)',Rfmt(cgtSummary.includedGain),false);
-    cgtRow('Estimated CGT @ '+Math.round(margRate*100)+'% marginal rate',Rfmt(cgtSummary.totalCGT),true,'#f87171');
+    cgtRow('Estimated CGT @ '+Math.round(margRate*100)+'% marginal rate',Rfmt(cgtSummary.totalCGT),true,cgtSummary.totalCGT>0?'#f87171':'#86efac');
+
+    if(cgtSummary.rolloverItems.length>0){
+      var roHdr=div(); roHdr.style.cssText='margin-top:10px;padding-top:8px;border-top:1px solid #334;font-size:11px;color:#86efac;font-weight:600';
+      roHdr.textContent='\u2713 Spouse rollover — CGT deferred until spouse disposes';
+      cgtBox.appendChild(roHdr);
+      cgtSummary.rolloverItems.forEach(function(ri){
+        var rRow=div(); rRow.style.cssText='display:flex;justify-content:space-between;padding:3px 0 3px 14px;font-size:11px;color:#ccd6f6';
+        var rl=el('span','',ri.desc+(ri.via==='residue'?' (via residue)':''));
+        var rv=el('span','',Rfmt(ri.marketVal));
+        rv.style.color='#fff';
+        rRow.appendChild(rl); rRow.appendChild(rv); cgtBox.appendChild(rRow);
+      });
+    }
+
     var cgtNote=div(); cgtNote.style.cssText='font-size:10px;color:#667;margin-top:8px;padding-top:6px;border-top:1px solid #334';
     cgtNote.textContent='This is an estimate. Actual CGT depends on exact base costs, valuation date values (pre-Oct 2001 assets), deductible expenditure and final tax position.';
     cgtBox.appendChild(cgtNote);
@@ -3455,14 +3539,28 @@ function buildNeeds() {
         +(S.vehicles||[]).reduce(function(a,v){return a+N(v.finance);},0)
         +(S.liabilities||[]).reduce(function(a,l){return a+N(l.bal);},0);
       var _s4q=0,_ep=0,_tp=0,_bd=0;
+      // Policy categorisation. Spouse-beneficiary policies go directly into the
+      // s.4(q) deduction. Estate-beneficiary policies normally sit in _ep
+      // (dutiable, executor administers); but if "Spouse inherits residue" is
+      // ticked on the Estate tab AND the client is legally married, they flow
+      // through to the spouse via the residue and therefore qualify for s.4(q).
       (S.importedPols||[]).forEach(function(p){
         if(p.Type==='Business Assurance'){if(p.EstateDutiable==='Yes')_bd+=N(p.LoanAmount)||N(p.BenDeath);return;}
         var b=N(p.BenDeath);if(!b)return;
         var bt=p.BeneficiaryType||'';
         if(isS4qSpouse(bt))_s4q+=b;
-        else if(bt==='Estate')_ep+=b;
+        else if(bt==='Estate') {
+          if(accruesToSpouse('Estate')) _s4q+=b; // flows through estate to spouse via residue
+          else _ep+=b;
+        }
         else if(isDutiableNonSpouse(bt))_tp+=b;
       });
+      // Physical assets accruing to spouse (direct or via residue) — add to s.4(q).
+      // These are already in _pv (gross estate), so we only add to the deduction pool.
+      var _s4qPhys=0;
+      (S.props||[]).forEach(function(p){ if(accruesToSpouse(p.deathBenType||'Estate')) _s4qPhys+=Math.max(0,N(p.val)-N(p.bond)); });
+      (S.vehicles||[]).forEach(function(v){ if(accruesToSpouse(v.deathBenType||'Estate')) _s4qPhys+=Math.max(0,N(v.val)-N(v.finance)); });
+      (S.otherAssets||[]).forEach(function(a){ if(accruesToSpouse(a.deathBenType||'Estate')) _s4qPhys+=N(a.val); });
       var _acc=0;
       if((S.cli.marital||'').indexOf('accrual')>-1){
         var _ra=(S.importedPols||[]).reduce(function(a,p){return POL_RA_TYPES.indexOf(p.Type)>-1?a+(N(p.BenFundValue)||N(p.BenDeath)):a;},0);
@@ -3487,7 +3585,7 @@ function buildNeeds() {
       var _ne=Math.max(0,_gr-_pl-_cgtNeed);
       var _ad=Math.min(_acc,_ne);
       var _aa=Math.max(0,_ne-_ad);
-      var _s4d=Math.min(_s4q,_aa);
+      var _s4d=Math.min(_s4q+_s4qPhys,_aa);
       var _as4=Math.max(0,_aa-_s4d);
       var _dut=Math.max(0,_as4-ABATEMENT);
       var _duty=_dut<=DUTY_THRESH?_dut*DUTY_RATE1:DUTY_THRESH*DUTY_RATE1+(_dut-DUTY_THRESH)*DUTY_RATE2;
@@ -3496,7 +3594,7 @@ function buildNeeds() {
       // Use _aa (after s4q, before abatement) as the denominator — that is the correct base
       function _ap(v){return (_aa>0&&_duty>0)?Math.round(_duty*(v/_aa)):0;}
       var _de=_ap(_pv+_ep); // estate's share: physical assets + estate policies
-      if(_de>0) autoLiabs.push({desc:'Estate duty — estate\'s share', amt:_de, _auto:true});
+      if(_de>0) autoLiabs.push({desc:'Estate duty \u2014 estate\'s share', amt:_de, _auto:true});
       if(_exec>0) autoLiabs.push({desc:'Executor fees (4.025%)', amt:Math.round(_exec), _auto:true});
       if(_ad>0) autoLiabs.push({desc:'Accrual payable to spouse', amt:Math.round(_ad), _auto:true});
     }
@@ -6065,13 +6163,16 @@ function buildEstate() {
 
     function assetRow(desc, val, liab, benType) {
       var net = N(val) - N(liab);
+      var bt = benType||'Estate';
+      var fallsToLabel = bt;
+      if(bt==='Estate' && accruesToSpouse('Estate')) fallsToLabel = 'Estate \u2192 Spouse (residue)';
       var tr = document.createElement('tr');
       tr.innerHTML = '<td style="padding:5px 8px;border-bottom:1px solid var(--mist)">'+esc2(desc)+'</td>'+
         '<td style="text-align:right;padding:5px 8px;border-bottom:1px solid var(--mist)">'+Rfmt(val)+'</td>'+
         '<td style="text-align:right;padding:5px 8px;border-bottom:1px solid var(--mist);color:var(--sub)">'+
-          (N(liab)>0?'('+Rfmt(liab)+')':'—')+'</td>'+
+          (N(liab)>0?'('+Rfmt(liab)+')':'\u2014')+'</td>'+
         '<td style="text-align:right;padding:5px 8px;border-bottom:1px solid var(--mist);font-weight:600">'+Rfmt(net)+'</td>'+
-        '<td style="padding:5px 8px;border-bottom:1px solid var(--mist);font-size:11px;color:var(--sub)">'+esc2(benType||'Estate')+'</td>';
+        '<td style="padding:5px 8px;border-bottom:1px solid var(--mist);font-size:11px;color:var(--sub)">'+esc2(fallsToLabel)+'</td>';
       tbody.appendChild(tr);
       physVal += N(val);
       physLiab += N(liab);
@@ -6079,11 +6180,13 @@ function buildEstate() {
         component: desc || 'Asset',
         category: 'Physical asset',
         amount: N(val),
-        note: (benType||'Estate')==='Spouse'
-          ? 'Included in gross estate; deducted later under s.4(q) if left to spouse.'
-          : ((benType||'Estate')==='Estate'
+        note: accruesToSpouse(bt)
+          ? (bt==='Spouse'
+              ? 'Included in gross estate; deducted later under s.4(q) as spouse bequest.'
+              : 'Included in gross estate; flows to spouse via residue \u2014 deducted under s.4(q).')
+          : ((bt||'Estate')==='Estate'
               ? 'Included in gross estate as a physical estate asset.'
-              : 'Included in gross estate; routed to '+(benType||'beneficiary')+' for planning context (no s.4(q) deduction).')
+              : 'Included in gross estate; routed to '+(bt||'beneficiary')+' for planning context (no s.4(q) deduction).')
       });
       if(N(liab)>0){
         preDutyLiabilityItems.push({
@@ -6124,10 +6227,11 @@ function buildEstate() {
   var s4qPolicies = 0, estatePols = 0, thirdPartyPols = 0, bizDutiable = 0;
   var s4qAssets = 0;
 
-  // Assets with spouse as beneficiary
-  (S.props||[]).forEach(function(p){ if((p.deathBenType||'')==='Spouse') s4qAssets+=N(p.val)-N(p.bond); });
-  (S.vehicles||[]).forEach(function(v){ if((v.deathBenType||'')==='Spouse') s4qAssets+=N(v.val)-N(v.finance); });
-  (S.otherAssets||[]).forEach(function(a){ if((a.deathBenType||'')==='Spouse') s4qAssets+=N(a.val); });
+  // Assets accruing to spouse (direct deathBenType=Spouse OR routed via residue
+  // when "Spouse inherits residue" is ticked and the client is legally married)
+  (S.props||[]).forEach(function(p){ if(accruesToSpouse(p.deathBenType||'Estate')) s4qAssets+=Math.max(0,N(p.val)-N(p.bond)); });
+  (S.vehicles||[]).forEach(function(v){ if(accruesToSpouse(v.deathBenType||'Estate')) s4qAssets+=Math.max(0,N(v.val)-N(v.finance)); });
+  (S.otherAssets||[]).forEach(function(a){ if(accruesToSpouse(a.deathBenType||'Estate')) s4qAssets+=N(a.val); });
 
   var polTbl = document.createElement('table');
   polTbl.style.cssText='width:100%;border-collapse:collapse;margin-bottom:12px;font-size:12px';
@@ -6164,6 +6268,12 @@ function buildEstate() {
     polTbody.appendChild(tr);
   }
 
+  // Estate-beneficiary policies that flow to spouse via residue (when ticked +
+  // legally married) still need to be administered by the executor (so they
+  // stay in estatePols for executor fee purposes) BUT also qualify for s.4(q)
+  // deduction. We track that portion separately.
+  var s4qEstateViaResidue = 0;
+
   pols.forEach(function(p){
     var bt = p.BeneficiaryType||'';
     if(p.Type==='Business Assurance'){
@@ -6172,14 +6282,14 @@ function buildEstate() {
       if(p.EstateDutiable==='Yes'){
         bizDutiable+=amt;
         grossEstateItems.push({
-          component: (p.Insurer||'Policy') + (p.BizType ? ' — ' + p.BizType : ''),
+          component: (p.Insurer||'Policy') + (p.BizType ? ' \u2014 ' + p.BizType : ''),
           category: 'Business assurance deemed property',
           amount: amt,
           note: 'Marked estate dutiable, so included as deemed property in the gross estate.'
         });
-        treatment='Deemed property — dutiable'; colour='#dc2626';
+        treatment='Deemed property \u2014 dutiable'; colour='#dc2626';
       } else {
-        treatment='Outside estate — '+esc2(p.BizType||'Business assurance'); colour='#6b7280';
+        treatment='Outside estate \u2014 '+esc2(p.BizType||'Business assurance'); colour='#6b7280';
       }
       if(amt>0) polRow(p.Insurer,p.Product,p.Beneficiary||p.BizType,p.Type,amt,treatment,colour);
       return;
@@ -6189,34 +6299,40 @@ function buildEstate() {
     if(bt==='Spouse'){
       s4qPolicies+=ben;
       grossEstateItems.push({
-        component: (p.Insurer||'Policy') + (p.Product ? ' — ' + p.Product : ''),
+        component: (p.Insurer||'Policy') + (p.Product ? ' \u2014 ' + p.Product : ''),
         category: 'Policy to spouse',
         amount: ben,
         note: 'Included in gross estate, then deducted under s.4(q).'
       });
-      polRow(p.Insurer,p.Product,p.Beneficiary||'Spouse','Spouse',ben,'s.4(q) — not dutiable','#16a34a');
+      polRow(p.Insurer,p.Product,p.Beneficiary||'Spouse','Spouse',ben,'s.4(q) \u2014 not dutiable','#16a34a');
     } else if(bt==='Estate'){
       estatePols+=ben;
+      var routeViaResidue = accruesToSpouse('Estate');
+      if(routeViaResidue) s4qEstateViaResidue += ben;
       grossEstateItems.push({
-        component: (p.Insurer||'Policy') + (p.Product ? ' — ' + p.Product : ''),
-        category: 'Policy to estate',
+        component: (p.Insurer||'Policy') + (p.Product ? ' \u2014 ' + p.Product : ''),
+        category: routeViaResidue ? 'Policy to estate (residue \u2192 spouse)' : 'Policy to estate',
         amount: ben,
-        note: 'Falls into the estate and is administered by the executor.'
+        note: routeViaResidue
+          ? 'Administered by the executor, then flows to spouse via residue \u2014 deductible under s.4(q).'
+          : 'Falls into the estate and is administered by the executor.'
       });
-      polRow(p.Insurer,p.Product,'Estate','Estate',ben,'Dutiable — executor administers','#dc2626');
+      polRow(p.Insurer,p.Product,'Estate','Estate',ben,
+        routeViaResidue ? 'Executor admins \u2014 residue to spouse (s.4(q))' : 'Dutiable \u2014 executor administers',
+        routeViaResidue ? '#16a34a' : '#dc2626');
     } else if(isDutiableNonSpouse(bt)){
       // Life Partner, Child, Parent, Dependant, Trust, Other, or the legacy
       // "Third Party" tag — all treated as deemed property for estate duty.
       thirdPartyPols+=ben;
       grossEstateItems.push({
-        component: (p.Insurer||'Policy') + (p.Product ? ' — ' + p.Product : ''),
+        component: (p.Insurer||'Policy') + (p.Product ? ' \u2014 ' + p.Product : ''),
         category: bt+' deemed property',
         amount: ben,
         note: 'Paid direct, but still treated as deemed property for estate duty.'
       });
-      polRow(p.Insurer,p.Product,p.Beneficiary||bt,bt,ben,'Deemed property — dutiable','#f59e0b');
+      polRow(p.Insurer,p.Product,p.Beneficiary||bt,bt,ben,'Deemed property \u2014 dutiable','#f59e0b');
     } else {
-      polRow(p.Insurer,p.Product,p.Beneficiary||'—',bt||'—',ben,'Set beneficiary type on policy card','#9ca3af');
+      polRow(p.Insurer,p.Product,p.Beneficiary||'\u2014',bt||'\u2014',ben,'Set beneficiary type on policy card','#9ca3af');
     }
   });
 
@@ -6450,7 +6566,7 @@ function buildEstate() {
   }
   var accrualDed  = Math.min(accrualClaim, netEstate);
   var afterAccrual= Math.max(0, netEstate - accrualDed);
-  var section4q   = s4qPolicies + s4qAssets;
+  var section4q   = s4qPolicies + s4qAssets + s4qEstateViaResidue;
   var s4qDed      = Math.min(section4q, afterAccrual);
   var afterS4q    = Math.max(0, afterAccrual - s4qDed);
   var dutiable    = Math.max(0, afterS4q - ABATEMENT);
@@ -6583,6 +6699,59 @@ function buildEstate() {
   b1.row('Estate duty @ 20%'+(dutiable>DUTY_THRESH?' / 25%':''), Rfmt(Math.round(estateDuty)), false, true, true);
   s.appendChild(b1.box);
 
+  // ── CAPITAL GAINS TAX ON DEATH — detail panel
+  // Mirrors the Estate Duty Calculation box visually. Shows every CGT-applicable
+  // asset with its full working (proceeds, base cost, gain, primary residence
+  // exclusion, gain after exclusions), then the aggregate calc: annual exclusion,
+  // inclusion rate, marginal rate. Rollover items are listed in a footer.
+  if(_cgtResult.items.length>0 || _cgtResult.rolloverItems.length>0){
+    s.appendChild(stitle('Capital Gains Tax on Death'));
+    var cgtInfBox = div('info');
+    cgtInfBox.innerHTML='Section 9HA of the Income Tax Act deems a disposal of all assets at market value on death. '+
+      'Assets accruing to the surviving spouse (directly or via residue) qualify for s.9HB rollover \u2014 no CGT, base cost carries to spouse. '+
+      'Year-of-death annual exclusion: <strong>R'+Rfmt(CGT_ANNUAL_EXCL).replace(/^R\s*/,'')+'</strong>. Primary residence exclusion: <strong>R'+Rfmt(CGT_PRIMARY_RES).replace(/^R\s*/,'')+'</strong> of gain.';
+    s.appendChild(cgtInfBox);
+
+    var b2cgt = makeCalcBox('Capital Gains Tax Calculation');
+    if(_cgtResult.items.length>0){
+      _cgtResult.items.forEach(function(item){
+        var gain = Math.max(0, N(item.marketVal) - N(item.baseCost));
+        b2cgt.row(item.desc, Rfmt(N(item.marketVal)));
+        b2cgt.sub('Market value (proceeds on deemed disposal)', '');
+        b2cgt.row('Less: Base cost', '('+Rfmt(N(item.baseCost))+')', true);
+        b2cgt.row('Gain', Rfmt(gain), false, false, true);
+        if(item.primaryResidence){
+          var prAmt = Math.min(CGT_PRIMARY_RES, gain);
+          if(prAmt>0){
+            b2cgt.row('Less: Primary residence exclusion', '('+Rfmt(prAmt)+')', true);
+            b2cgt.sub('R'+Rfmt(CGT_PRIMARY_RES).replace(/^R\s*/,'')+' cap on gain (s.45 / para 45)', '');
+          }
+        }
+        b2cgt.row('Gain after exclusions', Rfmt(item.gainAfterPR), false, false, true);
+      });
+      b2cgt.row('Total gain (after primary residence exclusions)', Rfmt(_cgtResult.totalGainAfterPR), false, true, true);
+      b2cgt.row('Less: Annual exclusion (year of death)', '('+Rfmt(CGT_ANNUAL_EXCL)+')', true);
+      b2cgt.row('Net capital gain', Rfmt(_cgtResult.netGain), false, false, true);
+      b2cgt.row('\u00d7 Inclusion rate (40%)', Rfmt(_cgtResult.includedGain));
+      b2cgt.sub('Included gain added to taxable income in year of death', '');
+      b2cgt.row('\u00d7 Marginal rate ('+Math.round(_estMR*100)+'%)', Rfmt(_cgtResult.totalCGT), false, true, true);
+      b2cgt.row('Capital Gains Tax on death', Rfmt(_cgtResult.totalCGT), false, true, true);
+    } else {
+      b2cgt.row('All CGT-applicable assets covered by spousal rollover', Rfmt(0), false, true, true);
+      b2cgt.sub('No taxable CGT \u2014 see rollover assets below', '');
+    }
+    s.appendChild(b2cgt.box);
+
+    if(_cgtResult.rolloverItems.length>0){
+      var roBox = makeCalcBox('Spousal Rollover (s.9HB) \u2014 CGT Deferred');
+      _cgtResult.rolloverItems.forEach(function(ri){
+        roBox.row(ri.desc + (ri.via==='residue' ? ' (via residue)' : ''), Rfmt(ri.marketVal));
+        roBox.sub('Base cost R'+Rfmt(ri.baseCost).replace(/^R\s*/,'')+' carries to spouse. CGT triggered when spouse disposes or dies.', '');
+      });
+      s.appendChild(roBox.box);
+    }
+  }
+
   // Duty apportionment breakdown
   if(dutyPayableByThirdParties>0){
     var b1b = makeCalcBox('Duty Apportionment (s.7)');
@@ -6710,10 +6879,13 @@ function buildEstate() {
   }
 
   // Spouse s.4(q) policies
-  if(s4qPolicies>0||s4qAssets>0){
+  if(s4qPolicies>0||s4qAssets>0||s4qEstateViaResidue>0){
     var spouseList=pols.filter(function(p){return(p.BeneficiaryType||'')==='Spouse'&&N(p.BenDeath)>0&&p.Type!=='Business Assurance';});
     var spouseNote=spouseList.map(function(p){return(p.Insurer||'')+(p.Product?' \u2014 '+p.Product:'')+': '+Rfmt(p.BenDeath);}).join(' \u00b7 ');
-    benRow((S.cli.spouseName||S.cli.spouse||'Spouse')+' \u2014 Section 4(q)',Rfmt(s4qPolicies+s4qAssets),spouseNote||'Paid direct \u2014 not dutiable','#86efac');
+    if(s4qEstateViaResidue>0){
+      spouseNote = (spouseNote?spouseNote+' \u00b7 ':'')+'Estate policies via residue: '+Rfmt(s4qEstateViaResidue);
+    }
+    benRow((S.cli.spouseName||S.cli.spouse||'Spouse')+' \u2014 Section 4(q)',Rfmt(s4qPolicies+s4qAssets+s4qEstateViaResidue),spouseNote||'Paid direct \u2014 not dutiable','#86efac');
   }
 
   // Spouse inherits residue option
@@ -6839,18 +7011,21 @@ function buildSummary() {
   var physLiab = bondLiabs + vehLiabs + otherLiabs;
   var netWorth = physVal - physLiab;
 
-  var s4qPols=0, estPols=0, tpPols=0, bizDut=0, s4qAssets=0;
+  var s4qPols=0, estPols=0, tpPols=0, bizDut=0, s4qAssets=0, s4qEstateViaResidue=0;
   pols.forEach(function(p){
     if(p.Type==='Business Assurance'){ if(p.EstateDutiable==='Yes') bizDut += N(p.LoanAmount)||N(p.BenDeath); return; }
     var b=N(p.BenDeath); if(!b) return;
     var bt=p.BeneficiaryType||'';
     if(isS4qSpouse(bt)) s4qPols += b;
-    else if(bt==='Estate') estPols += b;
+    else if(bt==='Estate') {
+      estPols += b;
+      if(accruesToSpouse('Estate')) s4qEstateViaResidue += b;
+    }
     else if(isDutiableNonSpouse(bt)) tpPols += b;
   });
-  (S.props||[]).forEach(function(p){ if((p.deathBenType||'Estate')==='Spouse') s4qAssets += N(p.val)-N(p.bond); });
-  (S.vehicles||[]).forEach(function(v){ if((v.deathBenType||'Estate')==='Spouse') s4qAssets += N(v.val)-N(v.finance); });
-  (S.otherAssets||[]).forEach(function(a){ if((a.deathBenType||'Estate')==='Spouse') s4qAssets += N(a.val); });
+  (S.props||[]).forEach(function(p){ if(accruesToSpouse(p.deathBenType||'Estate')) s4qAssets += Math.max(0,N(p.val)-N(p.bond)); });
+  (S.vehicles||[]).forEach(function(v){ if(accruesToSpouse(v.deathBenType||'Estate')) s4qAssets += Math.max(0,N(v.val)-N(v.finance)); });
+  (S.otherAssets||[]).forEach(function(a){ if(accruesToSpouse(a.deathBenType||'Estate')) s4qAssets += N(a.val); });
 
   var accrual = 0;
   if((S.cli.marital||'').toLowerCase().indexOf('accrual') > -1){
@@ -6874,7 +7049,7 @@ function buildSummary() {
   if (S.cli && S.cli.excludeAccrual) accrual = 0;
   var accrualDed = Math.min(accrual, netEstate);
   var afterAccr = Math.max(0, netEstate - accrualDed);
-  var s4qDed = Math.min(s4qPols + s4qAssets, afterAccr);
+  var s4qDed = Math.min(s4qPols + s4qAssets + s4qEstateViaResidue, afterAccr);
   var afterS4q = Math.max(0, afterAccr - s4qDed);
   var dutiable = Math.max(0, afterS4q - ABATEMENT);
   var duty = dutiable <= DUTY_THRESH ? dutiable * DUTY_RATE1 : DUTY_THRESH * DUTY_RATE1 + (dutiable - DUTY_THRESH) * DUTY_RATE2;
@@ -7195,15 +7370,22 @@ function buildOverview() {
   var _liabsO = (S.props||[]).reduce(function(a,p){return a+N(p.bond);},0)
     +(S.vehicles||[]).reduce(function(a,v){return a+N(v.finance);},0)
     +(S.liabilities||[]).reduce(function(a,l){return a+N(l.bal);},0);
-  var _s4qO=0,_epO=0,_tpO=0,_bdO=0;
+  var _s4qO=0,_epO=0,_tpO=0,_bdO=0,_s4qAssetsO=0,_s4qEstResidueO=0;
   pols.forEach(function(p){
     if(p.Type==='Business Assurance'){if(p.EstateDutiable==='Yes')_bdO+=N(p.LoanAmount)||N(p.BenDeath);return;}
     var b=N(p.BenDeath);if(!b)return;
     var bt=p.BeneficiaryType||'';
     if(isS4qSpouse(bt))_s4qO+=b;
-    else if(bt==='Estate')_epO+=b;
+    else if(bt==='Estate'){
+      _epO+=b;
+      if(accruesToSpouse('Estate'))_s4qEstResidueO+=b;
+    }
     else if(isDutiableNonSpouse(bt))_tpO+=b;
   });
+  // Physical assets accruing to spouse (direct or via residue)
+  (S.props||[]).forEach(function(p){if(accruesToSpouse(p.deathBenType||'Estate'))_s4qAssetsO+=Math.max(0,N(p.val)-N(p.bond));});
+  (S.vehicles||[]).forEach(function(v){if(accruesToSpouse(v.deathBenType||'Estate'))_s4qAssetsO+=Math.max(0,N(v.val)-N(v.finance));});
+  (S.otherAssets||[]).forEach(function(a){if(accruesToSpouse(a.deathBenType||'Estate'))_s4qAssetsO+=N(a.val);});
   var _accO=0;
   if((S.cli.marital||'').indexOf('accrual')>-1){
     var _raO=pols.reduce(function(a,p){return POL_RA_TYPES.indexOf(p.Type)>-1?a+N(p.BenFundValue):a;},0);
@@ -7221,7 +7403,7 @@ function buildOverview() {
   var _grossO=_physO+_s4qO+_epO+_tpO+_bdO;
   var _netO=Math.max(0,_grossO-_liabsO-_cgtO);
   var _netAfAO=Math.max(0,_netO-_accO);
-  var _s4qDedO=Math.min(_s4qO,_netAfAO);
+  var _s4qDedO=Math.min(_s4qO+_s4qAssetsO+_s4qEstResidueO,_netAfAO);
   var _aftS4qO=Math.max(0,_netAfAO-_s4qDedO);
   var _dutO=Math.max(0,_aftS4qO-ABATEMENT);
   var _dutyO=_dutO<=DUTY_THRESH?_dutO*DUTY_RATE1:DUTY_THRESH*DUTY_RATE1+(_dutO-DUTY_THRESH)*DUTY_RATE2;
@@ -7924,17 +8106,21 @@ function printFNA(sections) {
     +(S.vehicles||[]).reduce(function(a,v){return a+N(v.finance);},0)
     +(S.liabilities||[]).reduce(function(a,l){return a+N(l.bal);},0);
 
-  var s4qPols=0,estPols=0,tpPols=0,bizDut=0,s4qAssets=0;
+  var s4qPols=0,estPols=0,tpPols=0,bizDut=0,s4qAssets=0,s4qEstateViaResidue=0;
   pols.forEach(function(p){
     if(p.Type==='Business Assurance'){if(p.EstateDutiable==='Yes')bizDut+=N(p.LoanAmount)||N(p.BenDeath);return;}
     var b=N(p.BenDeath);if(!b)return;
     var bt=p.BeneficiaryType||'';
     if(isS4qSpouse(bt)) s4qPols+=b;
-    else if(bt==='Estate') estPols+=b;
+    else if(bt==='Estate') {
+      estPols+=b;
+      if(accruesToSpouse('Estate')) s4qEstateViaResidue+=b;
+    }
     else if(isDutiableNonSpouse(bt)) tpPols+=b;
   });
-  (S.props||[]).forEach(function(p){if((p.deathBenType||'Estate')==='Spouse')s4qAssets+=N(p.val)-N(p.bond);});
-  (S.vehicles||[]).forEach(function(v){if((v.deathBenType||'Estate')==='Spouse')s4qAssets+=N(v.val)-N(v.finance);});
+  (S.props||[]).forEach(function(p){if(accruesToSpouse(p.deathBenType||'Estate'))s4qAssets+=Math.max(0,N(p.val)-N(p.bond));});
+  (S.vehicles||[]).forEach(function(v){if(accruesToSpouse(v.deathBenType||'Estate'))s4qAssets+=Math.max(0,N(v.val)-N(v.finance));});
+  (S.otherAssets||[]).forEach(function(a){if(accruesToSpouse(a.deathBenType||'Estate'))s4qAssets+=N(a.val);});
 
   var _emr=N(S.cli.grossPM)>0?calcMarginalRate(N(S.cli.grossPM)*12):0.45;
   var _cgtResult=calcTotalCGT(_emr*100);
@@ -7959,7 +8145,7 @@ function printFNA(sections) {
   if (S.cli && S.cli.excludeAccrual) accrualClaim = 0;
   var accrualDed=Math.min(accrualClaim,netEstate);
   var afterAccrual=Math.max(0,netEstate-accrualDed);
-  var s4qDed=Math.min(s4qPols+s4qAssets,afterAccrual);
+  var s4qDed=Math.min(s4qPols+s4qAssets+s4qEstateViaResidue,afterAccrual);
   var afterS4q=Math.max(0,afterAccrual-s4qDed);
   var dutiable=Math.max(0,afterS4q-ABATEMENT);
   var estateDuty=dutiable<=DUTY_THRESH?dutiable*DUTY_RATE1:DUTY_THRESH*DUTY_RATE1+(dutiable-DUTY_THRESH)*DUTY_RATE2;
@@ -8202,14 +8388,20 @@ function printFNA(sections) {
   h+='<div><div class="lbl">Net Worth</div><div class="val '+(physAssets-physLiab>=0?'surp':'short')+'">'+r(physAssets-physLiab)+'</div></div>';
   h+='</div>';
 
-  if(_cgtResult.items.length>0){
+  if(_cgtResult.items.length>0 || _cgtResult.rolloverItems.length>0){
     h+=sec('Capital Gains Tax \u2014 Estimated Liability on Death');
     h+=tblHead(['Asset','Gain after exclusions']);
     _cgtResult.items.forEach(function(item){
       h+='<tr>'+td(e(item.desc))+td(r(item.gainAfterPR),true)+'</tr>';
     });
-    h+='<tr style="font-weight:700;background:#fff3cd"><td style="padding:4px 7px">Total CGT @ '+Math.round(_emr*100)+'% marginal (40% inclusion, R300k annual excl)</td>'
+    h+='<tr style="font-weight:700;background:#fff3cd"><td style="padding:4px 7px">Total CGT @ '+Math.round(_emr*100)+'% marginal (40% inclusion, R'+Rfmt(CGT_ANNUAL_EXCL).replace(/^R\s*/,'')+' annual excl)</td>'
       +'<td style="text-align:right;padding:4px 7px;font-weight:700">'+r(_cgtTotal)+'</td></tr>';
+    if(_cgtResult.rolloverItems.length>0){
+      _cgtResult.rolloverItems.forEach(function(ri){
+        h+='<tr style="background:#f0fdf4;color:#166534;font-size:9px"><td style="padding:3px 7px">\u2713 Spouse rollover'+(ri.via==='residue'?' (via residue)':'')+': '+e(ri.desc)+'</td>'
+          +'<td style="text-align:right;padding:3px 7px">'+r(ri.marketVal)+'</td></tr>';
+      });
+    }
     h+='</tbody></table>';
   }
 
@@ -8632,6 +8824,43 @@ function printFNA(sections) {
       if(residue>0) h+=row('Residue to spouse (inherits residue)',r(residue));
     }
     h+='</tbody></table>';
+
+    // ── CAPITAL GAINS TAX ON DEATH (printed) — mirrors the Estate tab panel
+    if(_cgtResult.items.length>0 || _cgtResult.rolloverItems.length>0){
+      h+=sec('Capital Gains Tax on Death');
+      h+='<p style="font-size:10px;color:#444;margin-bottom:6px">Section 9HA deems a disposal of all assets at market value on death. Assets accruing to the surviving spouse (directly or via residue) qualify for s.9HB rollover \u2014 no CGT, base cost carries to spouse. Year-of-death annual exclusion: <strong>R'+Rfmt(CGT_ANNUAL_EXCL).replace(/^R\s*/,'')+'</strong>. Primary residence exclusion: <strong>R'+Rfmt(CGT_PRIMARY_RES).replace(/^R\s*/,'')+'</strong> of gain.</p>';
+      h+=tblHead(['Item','Amount']);
+      if(_cgtResult.items.length>0){
+        _cgtResult.items.forEach(function(item){
+          var gain = Math.max(0, N(item.marketVal) - N(item.baseCost));
+          h+='<tr style="background:#f8f9fc"><td style="padding:4px 7px;font-weight:600">'+e(item.desc)+'</td><td style="text-align:right;padding:4px 7px;font-weight:600">'+r(N(item.marketVal))+'</td></tr>';
+          h+='<tr><td style="padding:3px 7px 3px 18px;font-size:10px;color:#555">Less: Base cost</td><td style="text-align:right;padding:3px 7px;font-size:10px">('+r(N(item.baseCost))+')</td></tr>';
+          h+='<tr><td style="padding:3px 7px 3px 18px;font-size:10px;color:#555">Gain</td><td style="text-align:right;padding:3px 7px;font-size:10px">'+r(gain)+'</td></tr>';
+          if(item.primaryResidence){
+            var prAmt = Math.min(CGT_PRIMARY_RES, gain);
+            if(prAmt>0){
+              h+='<tr><td style="padding:3px 7px 3px 18px;font-size:10px;color:#555">Less: Primary residence exclusion (R'+Rfmt(CGT_PRIMARY_RES).replace(/^R\s*/,'')+' cap)</td><td style="text-align:right;padding:3px 7px;font-size:10px">('+r(prAmt)+')</td></tr>';
+            }
+          }
+          h+='<tr><td style="padding:3px 7px 3px 18px;font-size:10px;color:#555;font-weight:600">Gain after exclusions</td><td style="text-align:right;padding:3px 7px;font-size:10px;font-weight:600">'+r(item.gainAfterPR)+'</td></tr>';
+        });
+        h+=row('Total gain (after primary residence exclusions)',r(_cgtResult.totalGainAfterPR),true);
+        h+=row('Less: Annual exclusion (year of death)','('+r(CGT_ANNUAL_EXCL)+')',false,true);
+        h+=row('Net capital gain',r(_cgtResult.netGain),true);
+        h+=row('\u00d7 Inclusion rate (40%)',r(_cgtResult.includedGain));
+        h+=row('\u00d7 Marginal rate ('+Math.round(_emr*100)+'%)',r(_cgtResult.totalCGT),true);
+        h+='<tr style="font-weight:700;background:#fff3cd"><td style="padding:5px 7px">Capital Gains Tax on Death</td><td style="text-align:right;padding:5px 7px;font-weight:700">'+r(_cgtResult.totalCGT)+'</td></tr>';
+      } else {
+        h+='<tr><td colspan="2" style="padding:6px 7px;text-align:center;color:#166534;background:#f0fdf4;font-weight:600">All CGT-applicable assets covered by spousal rollover \u2014 no taxable CGT</td></tr>';
+      }
+      if(_cgtResult.rolloverItems.length>0){
+        h+='<tr><td colspan="2" style="padding:6px 7px;background:#f0fdf4;color:#166534;font-weight:600;font-size:10px">\u2713 Spousal Rollover (s.9HB) \u2014 CGT Deferred</td></tr>';
+        _cgtResult.rolloverItems.forEach(function(ri){
+          h+='<tr style="background:#f0fdf4;font-size:10px"><td style="padding:3px 7px 3px 18px;color:#166534">'+e(ri.desc)+(ri.via==='residue'?' (via residue)':'')+' \u00b7 base cost R'+Rfmt(ri.baseCost).replace(/^R\s*/,'')+' carries to spouse</td><td style="text-align:right;padding:3px 7px;color:#166534">'+r(ri.marketVal)+'</td></tr>';
+        });
+      }
+      h+='</tbody></table>';
+    }
 
     h+=sec('Policy Routing &amp; Duty Apportionment');
     h+=tblHead(['Policy','Sum Assured','Beneficiary','Beneficiary Type','Dutiable','Duty Share']);
