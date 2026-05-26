@@ -255,6 +255,19 @@ function accruesToSpouse(benType){
   if(residueTick && married && (benType === 'Estate' || !benType)) return true;
   return false;
 }
+// For estate-duty purposes, the value that pays out on death for a given
+// policy. Risk policies use BenDeath (the sum assured). Investment-type
+// policies (endowments, unit trusts, TFS, flexible investments) where no
+// separate death cover is set pay out the fund value \u2014 the fund itself
+// IS the death benefit. Retirement fund types (RA, Pension, Provident,
+// Preservation, Living Annuity) are excluded by type in each calc path and
+// do not form part of the deceased estate.
+function policyDeathProceeds(p) {
+  var bd = N(p && p.BenDeath);
+  if (bd > 0) return bd;
+  if (p && POL_INV_TYPES.indexOf(p.Type) > -1) return N(p.BenFundValue);
+  return 0;
+}
 // Anything that routes through the deceased estate (executor fees, dutiable
 // as estate property). Trust is treated case-by-case — defaults to false here
 // because a properly-structured trust nomination is paid outside the estate.
@@ -3544,9 +3557,12 @@ function buildNeeds() {
       // (dutiable, executor administers); but if "Spouse inherits residue" is
       // ticked on the Estate tab AND the client is legally married, they flow
       // through to the spouse via the residue and therefore qualify for s.4(q).
+      // policyDeathProceeds() handles investment-type policies (endowments,
+      // unit trusts, TFS, flexible investments) where the fund value IS the
+      // death benefit (no separate BenDeath cover set).
       (S.importedPols||[]).forEach(function(p){
         if(p.Type==='Business Assurance'){if(p.EstateDutiable==='Yes')_bd+=N(p.LoanAmount)||N(p.BenDeath);return;}
-        var b=N(p.BenDeath);if(!b)return;
+        var b=policyDeathProceeds(p);if(!b)return;
         var bt=p.BeneficiaryType||'';
         if(isS4qSpouse(bt))_s4q+=b;
         else if(bt==='Estate') {
@@ -3555,12 +3571,29 @@ function buildNeeds() {
         }
         else if(isDutiableNonSpouse(bt))_tp+=b;
       });
-      // Physical assets accruing to spouse (direct or via residue) — add to s.4(q).
+      // Physical assets accruing to spouse (direct or via residue) \u2014 add to s.4(q).
       // These are already in _pv (gross estate), so we only add to the deduction pool.
-      var _s4qPhys=0;
-      (S.props||[]).forEach(function(p){ if(accruesToSpouse(p.deathBenType||'Estate')) _s4qPhys+=Math.max(0,N(p.val)-N(p.bond)); });
-      (S.vehicles||[]).forEach(function(v){ if(accruesToSpouse(v.deathBenType||'Estate')) _s4qPhys+=Math.max(0,N(v.val)-N(v.finance)); });
-      (S.otherAssets||[]).forEach(function(a){ if(accruesToSpouse(a.deathBenType||'Estate')) _s4qPhys+=N(a.val); });
+      // Third-party physical assets (going to Child, Trust, etc.) bear their own
+      // duty share \u2014 they're in _pv but tracked separately for apportionment.
+      var _s4qPhys=0,_tpPhys=0;
+      (S.props||[]).forEach(function(p){
+        var bt=p.deathBenType||'Estate';
+        var netVal=Math.max(0,N(p.val)-N(p.bond));
+        if(accruesToSpouse(bt)) _s4qPhys+=netVal;
+        else if(isDutiableNonSpouse(bt)) _tpPhys+=netVal;
+      });
+      (S.vehicles||[]).forEach(function(v){
+        var bt=v.deathBenType||'Estate';
+        var netVal=Math.max(0,N(v.val)-N(v.finance));
+        if(accruesToSpouse(bt)) _s4qPhys+=netVal;
+        else if(isDutiableNonSpouse(bt)) _tpPhys+=netVal;
+      });
+      (S.otherAssets||[]).forEach(function(a){
+        var bt=a.deathBenType||'Estate';
+        var netVal=N(a.val);
+        if(accruesToSpouse(bt)) _s4qPhys+=netVal;
+        else if(isDutiableNonSpouse(bt)) _tpPhys+=netVal;
+      });
       var _acc=0;
       if((S.cli.marital||'').indexOf('accrual')>-1){
         var _ra=(S.importedPols||[]).reduce(function(a,p){return POL_RA_TYPES.indexOf(p.Type)>-1?a+(N(p.BenFundValue)||N(p.BenDeath)):a;},0);
@@ -3578,7 +3611,7 @@ function buildNeeds() {
         var _csCPI=Math.round(_cs*_acf), _ssCPI=Math.round(_ss*_acf);
         _acc=Math.max(0,(Math.max(0,_ce-_cex-_csCPI)-Math.max(0,_se-_sex-_ssCPI))/2);
       }
-      // Exclude accrual override — set on Client tab
+      // Exclude accrual override \u2014 set on Client tab
       if (S.cli && S.cli.excludeAccrual) _acc = 0;
       var _cgtNeed=calcTotalCGT((N(S.cli.grossPM)>0?calcMarginalRate(N(S.cli.grossPM)*12):0.45)*100).totalCGT;
       var _gr=_pv+_s4q+_ep+_tp+_bd;
@@ -3590,10 +3623,15 @@ function buildNeeds() {
       var _dut=Math.max(0,_as4-ABATEMENT);
       var _duty=_dut<=DUTY_THRESH?_dut*DUTY_RATE1:DUTY_THRESH*DUTY_RATE1+(_dut-DUTY_THRESH)*DUTY_RATE2;
       var _exec=(_pv+_ep)*EXEC_RATE;
-      // Apportion duty (s.7) — each category pays duty proportional to its share of estate after s4q
-      // Use _aa (after s4q, before abatement) as the denominator — that is the correct base
+      // Apportion duty (s.7) \u2014 each category pays duty proportional to its share of estate after s4q
+      // Use _aa (after s4q, before abatement) as the denominator \u2014 that is the correct base
       function _ap(v){return (_aa>0&&_duty>0)?Math.round(_duty*(v/_aa)):0;}
-      var _de=_ap(_pv+_ep); // estate's share: physical assets + estate policies
+      // Estate's share = physical actually retained by estate (gross physical minus
+      // spouse-accruing minus third-party-bequeathed) plus estate policies.
+      // The estate only pays duty on assets it retains; third parties bear their
+      // own share; spouse-accruing assets are deducted under s.4(q).
+      var _physEstate=Math.max(0,_pv-_s4qPhys-_tpPhys);
+      var _de=_ap(_physEstate+_ep); // estate's share
       if(_de>0) autoLiabs.push({desc:'Estate duty \u2014 estate\'s share', amt:_de, _auto:true});
       if(_exec>0) autoLiabs.push({desc:'Executor fees (4.025%)', amt:Math.round(_exec), _auto:true});
       if(_ad>0) autoLiabs.push({desc:'Accrual payable to spouse', amt:Math.round(_ad), _auto:true});
@@ -6226,12 +6264,29 @@ function buildEstate() {
 
   var s4qPolicies = 0, estatePols = 0, thirdPartyPols = 0, bizDutiable = 0;
   var s4qAssets = 0;
+  // Third-party physical assets \u2014 properties/vehicles/other assets bequeathed
+  // to non-spouse, non-estate beneficiaries (Child, Trust, Parent, Dependant,
+  // Life Partner, Other). Tracked separately so duty can be apportioned to the
+  // third-party beneficiary under s.7 rather than burdened on the estate.
+  var tpPhysAssets = 0;
 
   // Assets accruing to spouse (direct deathBenType=Spouse OR routed via residue
   // when "Spouse inherits residue" is ticked and the client is legally married)
-  (S.props||[]).forEach(function(p){ if(accruesToSpouse(p.deathBenType||'Estate')) s4qAssets+=Math.max(0,N(p.val)-N(p.bond)); });
-  (S.vehicles||[]).forEach(function(v){ if(accruesToSpouse(v.deathBenType||'Estate')) s4qAssets+=Math.max(0,N(v.val)-N(v.finance)); });
-  (S.otherAssets||[]).forEach(function(a){ if(accruesToSpouse(a.deathBenType||'Estate')) s4qAssets+=N(a.val); });
+  (S.props||[]).forEach(function(p){
+    var bt=p.deathBenType||'Estate', netVal=Math.max(0,N(p.val)-N(p.bond));
+    if(accruesToSpouse(bt)) s4qAssets+=netVal;
+    else if(isDutiableNonSpouse(bt)) tpPhysAssets+=netVal;
+  });
+  (S.vehicles||[]).forEach(function(v){
+    var bt=v.deathBenType||'Estate', netVal=Math.max(0,N(v.val)-N(v.finance));
+    if(accruesToSpouse(bt)) s4qAssets+=netVal;
+    else if(isDutiableNonSpouse(bt)) tpPhysAssets+=netVal;
+  });
+  (S.otherAssets||[]).forEach(function(a){
+    var bt=a.deathBenType||'Estate', netVal=N(a.val);
+    if(accruesToSpouse(bt)) s4qAssets+=netVal;
+    else if(isDutiableNonSpouse(bt)) tpPhysAssets+=netVal;
+  });
 
   var polTbl = document.createElement('table');
   polTbl.style.cssText='width:100%;border-collapse:collapse;margin-bottom:12px;font-size:12px';
@@ -6294,7 +6349,7 @@ function buildEstate() {
       if(amt>0) polRow(p.Insurer,p.Product,p.Beneficiary||p.BizType,p.Type,amt,treatment,colour);
       return;
     }
-    var ben = N(p.BenDeath);
+    var ben = policyDeathProceeds(p);
     if(!ben) return;
     if(bt==='Spouse'){
       s4qPolicies+=ben;
@@ -6575,16 +6630,24 @@ function buildEstate() {
     : DUTY_THRESH * DUTY_RATE1 + (dutiable - DUTY_THRESH) * DUTY_RATE2;
   var afterAbatement = afterS4q; // apportion against afterS4q — correct s.7 base
 
-  // Apportionment — each category pays proportional share of duty based on afterS4q
+  // Apportionment \u2014 each category pays proportional share of duty based on afterS4q
   function apportionDuty(val){
     return (afterAbatement>0 && estateDuty>0) ? estateDuty * (val / afterAbatement) : 0;
   }
-  var dutyOnPhysical     = apportionDuty(totalDutiableAssets);
-  var dutyOnEstatePols   = apportionDuty(estatePols);
+  // Physical assets actually retained by the estate (i.e. NOT s.4(q)-deducted to
+  // spouse and NOT bequeathed to a third party). Bonds/finance/liabilities are
+  // already netted against asset values where applicable in s4qAssets/tpPhysAssets.
+  var physToEstate = Math.max(0, totalDutiableAssets - s4qAssets - tpPhysAssets);
+  // Estate policies that the estate actually bears (i.e. not flowing to spouse
+  // via residue \u2014 those have been counted into s.4(q) deduction).
+  var estatePolsBearingDuty = Math.max(0, estatePols - s4qEstateViaResidue);
+  var dutyOnPhysical     = apportionDuty(physToEstate);
+  var dutyOnEstatePols   = apportionDuty(estatePolsBearingDuty);
+  var dutyOnThirdPartyPhys = apportionDuty(tpPhysAssets);
   var dutyOnThirdParty   = apportionDuty(thirdPartyPols);
   var dutyOnBizDutiable  = apportionDuty(bizDutiable);
   var dutyPayableByEstate       = dutyOnPhysical + dutyOnEstatePols;
-  var dutyPayableByThirdParties = dutyOnThirdParty + dutyOnBizDutiable;
+  var dutyPayableByThirdParties = dutyOnThirdParty + dutyOnThirdPartyPhys + dutyOnBizDutiable;
 
   var bondLiabs = (S.props||[]).reduce(function(a,p){return a+N(p.bond);},0);
   var vehLiabs = (S.vehicles||[]).reduce(function(a,v){return a+N(v.finance);},0);
@@ -6759,13 +6822,37 @@ function buildEstate() {
     b1b.sub('Apportioned in proportion to each category\'s share of the dutiable estate','');
     b1b.row('Payable by estate (physical + estate policies)', Rfmt(Math.round(dutyPayableByEstate)), false, false, true);
     if(dutyOnThirdParty>0){
-      b1b.row('Payable by third party / trust beneficiaries', Rfmt(Math.round(dutyOnThirdParty)), true);
+      b1b.row('Payable by third party / trust beneficiaries (policies)', Rfmt(Math.round(dutyOnThirdParty)), true);
       pols.forEach(function(p){
         // Anything other than Spouse or Estate counts as "third party" for the
-        // s3(3) apportionment purpose — Life Partner, Child, Parent, Dependant,
+        // s3(3) apportionment purpose \u2014 Life Partner, Child, Parent, Dependant,
         // Trust, Other, and the legacy "Third Party" tag.
-        if(isDutiableNonSpouse(p.BeneficiaryType||'')&&N(p.BenDeath)>0&&p.Type!=='Business Assurance'){
-          b1b.sub((p.Insurer||'Policy')+(p.Product?' \u2014 '+p.Product:'')+' \u00b7 '+Rfmt(p.BenDeath), 'Duty: '+Rfmt(Math.round(apportionDuty(N(p.BenDeath)))));
+        var polAmt = policyDeathProceeds(p);
+        if(isDutiableNonSpouse(p.BeneficiaryType||'')&&polAmt>0&&p.Type!=='Business Assurance'){
+          b1b.sub((p.Insurer||'Policy')+(p.Product?' \u2014 '+p.Product:'')+' \u00b7 '+Rfmt(polAmt), 'Duty: '+Rfmt(Math.round(apportionDuty(polAmt))));
+        }
+      });
+    }
+    if(dutyOnThirdPartyPhys>0){
+      b1b.row('Payable by third party (bequeathed physical assets)', Rfmt(Math.round(dutyOnThirdPartyPhys)), true);
+      (S.props||[]).forEach(function(p){
+        var bt=p.deathBenType||'Estate';
+        if(isDutiableNonSpouse(bt)&&N(p.val)>0){
+          var netV=Math.max(0,N(p.val)-N(p.bond));
+          b1b.sub((p.desc||'Property')+' \u00b7 '+esc2(bt)+' \u00b7 '+Rfmt(netV), 'Duty: '+Rfmt(Math.round(apportionDuty(netV))));
+        }
+      });
+      (S.vehicles||[]).forEach(function(v){
+        var bt=v.deathBenType||'Estate';
+        if(isDutiableNonSpouse(bt)&&N(v.val)>0){
+          var netV=Math.max(0,N(v.val)-N(v.finance));
+          b1b.sub((v.desc||'Vehicle')+' \u00b7 '+esc2(bt)+' \u00b7 '+Rfmt(netV), 'Duty: '+Rfmt(Math.round(apportionDuty(netV))));
+        }
+      });
+      (S.otherAssets||[]).forEach(function(a){
+        var bt=a.deathBenType||'Estate';
+        if(isDutiableNonSpouse(bt)&&N(a.val)>0){
+          b1b.sub((a.desc||'Asset')+' \u00b7 '+esc2(bt)+' \u00b7 '+Rfmt(N(a.val)), 'Duty: '+Rfmt(Math.round(apportionDuty(N(a.val)))));
         }
       });
     }
@@ -7011,10 +7098,10 @@ function buildSummary() {
   var physLiab = bondLiabs + vehLiabs + otherLiabs;
   var netWorth = physVal - physLiab;
 
-  var s4qPols=0, estPols=0, tpPols=0, bizDut=0, s4qAssets=0, s4qEstateViaResidue=0;
+  var s4qPols=0, estPols=0, tpPols=0, bizDut=0, s4qAssets=0, s4qEstateViaResidue=0, tpPhysAssets=0;
   pols.forEach(function(p){
     if(p.Type==='Business Assurance'){ if(p.EstateDutiable==='Yes') bizDut += N(p.LoanAmount)||N(p.BenDeath); return; }
-    var b=N(p.BenDeath); if(!b) return;
+    var b=policyDeathProceeds(p); if(!b) return;
     var bt=p.BeneficiaryType||'';
     if(isS4qSpouse(bt)) s4qPols += b;
     else if(bt==='Estate') {
@@ -7023,9 +7110,21 @@ function buildSummary() {
     }
     else if(isDutiableNonSpouse(bt)) tpPols += b;
   });
-  (S.props||[]).forEach(function(p){ if(accruesToSpouse(p.deathBenType||'Estate')) s4qAssets += Math.max(0,N(p.val)-N(p.bond)); });
-  (S.vehicles||[]).forEach(function(v){ if(accruesToSpouse(v.deathBenType||'Estate')) s4qAssets += Math.max(0,N(v.val)-N(v.finance)); });
-  (S.otherAssets||[]).forEach(function(a){ if(accruesToSpouse(a.deathBenType||'Estate')) s4qAssets += N(a.val); });
+  (S.props||[]).forEach(function(p){
+    var bt=p.deathBenType||'Estate', netVal=Math.max(0,N(p.val)-N(p.bond));
+    if(accruesToSpouse(bt)) s4qAssets += netVal;
+    else if(isDutiableNonSpouse(bt)) tpPhysAssets += netVal;
+  });
+  (S.vehicles||[]).forEach(function(v){
+    var bt=v.deathBenType||'Estate', netVal=Math.max(0,N(v.val)-N(v.finance));
+    if(accruesToSpouse(bt)) s4qAssets += netVal;
+    else if(isDutiableNonSpouse(bt)) tpPhysAssets += netVal;
+  });
+  (S.otherAssets||[]).forEach(function(a){
+    var bt=a.deathBenType||'Estate', netVal=N(a.val);
+    if(accruesToSpouse(bt)) s4qAssets += netVal;
+    else if(isDutiableNonSpouse(bt)) tpPhysAssets += netVal;
+  });
 
   var accrual = 0;
   if((S.cli.marital||'').toLowerCase().indexOf('accrual') > -1){
@@ -7045,7 +7144,7 @@ function buildSummary() {
 
   var grossEstate = physVal + s4qPols + estPols + tpPols + bizDut;
   var netEstate = Math.max(0, grossEstate - physLiab - cgt);
-  // Exclude accrual override — set on Client tab
+  // Exclude accrual override \u2014 set on Client tab
   if (S.cli && S.cli.excludeAccrual) accrual = 0;
   var accrualDed = Math.min(accrual, netEstate);
   var afterAccr = Math.max(0, netEstate - accrualDed);
@@ -7055,7 +7154,11 @@ function buildSummary() {
   var duty = dutiable <= DUTY_THRESH ? dutiable * DUTY_RATE1 : DUTY_THRESH * DUTY_RATE1 + (dutiable - DUTY_THRESH) * DUTY_RATE2;
   var execFees = (physVal + estPols) * EXEC_RATE;
   function apDuty(v){ return (afterS4q>0 && duty>0) ? Math.round(duty * (v / afterS4q)) : 0; }
-  var estateDutyShare = apDuty(physVal + estPols);
+  // Estate's share of duty = physical actually retained (gross minus spouse-accruing
+  // minus third-party-bequeathed) + estate policies that aren't residue-routed to spouse.
+  var physToEstateS = Math.max(0, physVal - s4qAssets - tpPhysAssets);
+  var estPolsBearingDutyS = Math.max(0, estPols - s4qEstateViaResidue);
+  var estateDutyShare = apDuty(physToEstateS + estPolsBearingDutyS);
 
   var autoLiab = physLiab + cgt;
   if(S.scope.estate){ autoLiab += estateDutyShare + Math.round(execFees) + Math.round(accrualDed); }
@@ -7370,10 +7473,10 @@ function buildOverview() {
   var _liabsO = (S.props||[]).reduce(function(a,p){return a+N(p.bond);},0)
     +(S.vehicles||[]).reduce(function(a,v){return a+N(v.finance);},0)
     +(S.liabilities||[]).reduce(function(a,l){return a+N(l.bal);},0);
-  var _s4qO=0,_epO=0,_tpO=0,_bdO=0,_s4qAssetsO=0,_s4qEstResidueO=0;
+  var _s4qO=0,_epO=0,_tpO=0,_bdO=0,_s4qAssetsO=0,_s4qEstResidueO=0,_tpPhysO=0;
   pols.forEach(function(p){
     if(p.Type==='Business Assurance'){if(p.EstateDutiable==='Yes')_bdO+=N(p.LoanAmount)||N(p.BenDeath);return;}
-    var b=N(p.BenDeath);if(!b)return;
+    var b=policyDeathProceeds(p);if(!b)return;
     var bt=p.BeneficiaryType||'';
     if(isS4qSpouse(bt))_s4qO+=b;
     else if(bt==='Estate'){
@@ -7382,10 +7485,22 @@ function buildOverview() {
     }
     else if(isDutiableNonSpouse(bt))_tpO+=b;
   });
-  // Physical assets accruing to spouse (direct or via residue)
-  (S.props||[]).forEach(function(p){if(accruesToSpouse(p.deathBenType||'Estate'))_s4qAssetsO+=Math.max(0,N(p.val)-N(p.bond));});
-  (S.vehicles||[]).forEach(function(v){if(accruesToSpouse(v.deathBenType||'Estate'))_s4qAssetsO+=Math.max(0,N(v.val)-N(v.finance));});
-  (S.otherAssets||[]).forEach(function(a){if(accruesToSpouse(a.deathBenType||'Estate'))_s4qAssetsO+=N(a.val);});
+  // Physical assets: split spouse-accruing vs third-party-bequeathed
+  (S.props||[]).forEach(function(p){
+    var bt=p.deathBenType||'Estate', netVal=Math.max(0,N(p.val)-N(p.bond));
+    if(accruesToSpouse(bt))_s4qAssetsO+=netVal;
+    else if(isDutiableNonSpouse(bt))_tpPhysO+=netVal;
+  });
+  (S.vehicles||[]).forEach(function(v){
+    var bt=v.deathBenType||'Estate', netVal=Math.max(0,N(v.val)-N(v.finance));
+    if(accruesToSpouse(bt))_s4qAssetsO+=netVal;
+    else if(isDutiableNonSpouse(bt))_tpPhysO+=netVal;
+  });
+  (S.otherAssets||[]).forEach(function(a){
+    var bt=a.deathBenType||'Estate', netVal=N(a.val);
+    if(accruesToSpouse(bt))_s4qAssetsO+=netVal;
+    else if(isDutiableNonSpouse(bt))_tpPhysO+=netVal;
+  });
   var _accO=0;
   if((S.cli.marital||'').indexOf('accrual')>-1){
     var _raO=pols.reduce(function(a,p){return POL_RA_TYPES.indexOf(p.Type)>-1?a+N(p.BenFundValue):a;},0);
@@ -7398,7 +7513,7 @@ function buildOverview() {
     var _acfO=N(S.accrual&&S.accrual.cpiFactor)>0?N(S.accrual.cpiFactor):(_ymrO>0?Math.pow(1+(N(S.assump.cpi)||6)/100,_ymrO):1);
     _accO=Math.max(0,(Math.max(0,_ceO-_cexO-Math.round(_csO*_acfO))-Math.max(0,_seO-_sexO-Math.round(_ssO*_acfO)))/2);
   }
-  // Exclude accrual override — set on Client tab
+  // Exclude accrual override \u2014 set on Client tab
   if (S.cli && S.cli.excludeAccrual) _accO = 0;
   var _grossO=_physO+_s4qO+_epO+_tpO+_bdO;
   var _netO=Math.max(0,_grossO-_liabsO-_cgtO);
@@ -7417,7 +7532,10 @@ function buildOverview() {
   _autoLO+=_cgtO;
   if(S.scope.estate){
     function _apO(v){return (_aftS4qO>0&&_dutyO>0)?Math.round(_dutyO*(v/_aftS4qO)):0;}
-    _autoLO+=_apO(_physO+_epO)+Math.round(_execO)+Math.round(_accO);
+    // Estate's share = physical retained by estate + estate policies bearing duty
+    var _physToEstO=Math.max(0,_physO-_s4qAssetsO-_tpPhysO);
+    var _epBearDutyO=Math.max(0,_epO-_s4qEstResidueO);
+    _autoLO+=_apO(_physToEstO+_epBearDutyO)+Math.round(_execO)+Math.round(_accO);
   }
   var _totLiabO=_autoLO+(S.deathLiabs||[]).reduce(function(a,r){return a+N(r.amt);},0);
   var _totIncO=(S.deathIncome||[]).reduce(function(a,r){return a+calcIncomeNeed(r);},0);
@@ -8106,10 +8224,10 @@ function printFNA(sections) {
     +(S.vehicles||[]).reduce(function(a,v){return a+N(v.finance);},0)
     +(S.liabilities||[]).reduce(function(a,l){return a+N(l.bal);},0);
 
-  var s4qPols=0,estPols=0,tpPols=0,bizDut=0,s4qAssets=0,s4qEstateViaResidue=0;
+  var s4qPols=0,estPols=0,tpPols=0,bizDut=0,s4qAssets=0,s4qEstateViaResidue=0,tpPhysAssets=0;
   pols.forEach(function(p){
     if(p.Type==='Business Assurance'){if(p.EstateDutiable==='Yes')bizDut+=N(p.LoanAmount)||N(p.BenDeath);return;}
-    var b=N(p.BenDeath);if(!b)return;
+    var b=policyDeathProceeds(p);if(!b)return;
     var bt=p.BeneficiaryType||'';
     if(isS4qSpouse(bt)) s4qPols+=b;
     else if(bt==='Estate') {
@@ -8118,9 +8236,21 @@ function printFNA(sections) {
     }
     else if(isDutiableNonSpouse(bt)) tpPols+=b;
   });
-  (S.props||[]).forEach(function(p){if(accruesToSpouse(p.deathBenType||'Estate'))s4qAssets+=Math.max(0,N(p.val)-N(p.bond));});
-  (S.vehicles||[]).forEach(function(v){if(accruesToSpouse(v.deathBenType||'Estate'))s4qAssets+=Math.max(0,N(v.val)-N(v.finance));});
-  (S.otherAssets||[]).forEach(function(a){if(accruesToSpouse(a.deathBenType||'Estate'))s4qAssets+=N(a.val);});
+  (S.props||[]).forEach(function(p){
+    var bt=p.deathBenType||'Estate', netVal=Math.max(0,N(p.val)-N(p.bond));
+    if(accruesToSpouse(bt))s4qAssets+=netVal;
+    else if(isDutiableNonSpouse(bt))tpPhysAssets+=netVal;
+  });
+  (S.vehicles||[]).forEach(function(v){
+    var bt=v.deathBenType||'Estate', netVal=Math.max(0,N(v.val)-N(v.finance));
+    if(accruesToSpouse(bt))s4qAssets+=netVal;
+    else if(isDutiableNonSpouse(bt))tpPhysAssets+=netVal;
+  });
+  (S.otherAssets||[]).forEach(function(a){
+    var bt=a.deathBenType||'Estate', netVal=N(a.val);
+    if(accruesToSpouse(bt))s4qAssets+=netVal;
+    else if(isDutiableNonSpouse(bt))tpPhysAssets+=netVal;
+  });
 
   var _emr=N(S.cli.grossPM)>0?calcMarginalRate(N(S.cli.grossPM)*12):0.45;
   var _cgtResult=calcTotalCGT(_emr*100);
@@ -8141,7 +8271,7 @@ function printFNA(sections) {
 
   var grossEstate=physAssets+s4qPols+estPols+tpPols+bizDut;
   var netEstate=Math.max(0,grossEstate-physLiab-_cgtTotal);
-  // Exclude accrual override — set on Client tab
+  // Exclude accrual override \u2014 set on Client tab
   if (S.cli && S.cli.excludeAccrual) accrualClaim = 0;
   var accrualDed=Math.min(accrualClaim,netEstate);
   var afterAccrual=Math.max(0,netEstate-accrualDed);
@@ -8151,7 +8281,14 @@ function printFNA(sections) {
   var estateDuty=dutiable<=DUTY_THRESH?dutiable*DUTY_RATE1:DUTY_THRESH*DUTY_RATE1+(dutiable-DUTY_THRESH)*DUTY_RATE2;
   var execFees=(physAssets+estPols)*EXEC_RATE;
   function apDuty(v){return(afterS4q>0&&estateDuty>0)?Math.round(estateDuty*(v/afterS4q)):0;}
-  var dutyEstate=apDuty(physAssets+estPols);
+  // Estate's share of duty = physical retained by estate (gross minus spouse-accruing
+  // minus third-party-bequeathed) + estate policies bearing duty (not residue-routed).
+  var physToEstateP=Math.max(0,physAssets-s4qAssets-tpPhysAssets);
+  var estPolsBearingDutyP=Math.max(0,estPols-s4qEstateViaResidue);
+  var dutyEstate=apDuty(physToEstateP+estPolsBearingDutyP);
+  var dutyTpPhys=apDuty(tpPhysAssets);
+  var dutyTpPolsP=apDuty(tpPols);
+  var dutyBizP=apDuty(bizDut);
 
   // Death needs
   var autoLiabsP=[];
@@ -8865,21 +9002,56 @@ function printFNA(sections) {
     h+=sec('Policy Routing &amp; Duty Apportionment');
     h+=tblHead(['Policy','Sum Assured','Beneficiary','Beneficiary Type','Dutiable','Duty Share']);
     pols.forEach(function(p){
-      var amt=p.Type==='Business Assurance'?(N(p.LoanAmount)||N(p.BenDeath)):N(p.BenDeath);
+      var amt=p.Type==='Business Assurance'?(N(p.LoanAmount)||N(p.BenDeath)):policyDeathProceeds(p);
       if(!amt&&!N(p.BenFundValue)) return;
       var bt=p.BeneficiaryType||'';
       // Dutiable if: (a) deemed-property non-spouse type (Life Partner, Child, etc.),
-      // (b) Estate beneficiary, (c) Business Assurance flagged as estate dutiable.
-      // Only Spouse-tagged personal policies and non-dutiable business policies
-      // show '—' (no duty share).
-      var dutyShare=(isDutiableNonSpouse(bt)||bt==='Estate'||(p.Type==='Business Assurance'&&p.EstateDutiable==='Yes'))?r(apDuty(amt)):'&mdash;';
+      // (b) Estate beneficiary AND not residue-routed to spouse,
+      // (c) Business Assurance flagged as estate dutiable.
+      // Spouse-tagged personal policies, Estate policies that flow to spouse via
+      // residue, and non-dutiable business policies show '\u2014' (no duty share).
+      var estateRouteViaResidue = (bt==='Estate' && accruesToSpouse('Estate'));
+      var bearsDuty = (isDutiableNonSpouse(bt) || (bt==='Estate' && !estateRouteViaResidue) || (p.Type==='Business Assurance'&&p.EstateDutiable==='Yes'));
+      var dutyShare = bearsDuty ? r(apDuty(amt)) : '&mdash;';
+      var dutiableLabel = (p.EstateDutiable || (estateRouteViaResidue ? 'No (residue\u2192spouse)' : '\u2014'));
       h+='<tr>'
         +td('<strong>'+e(p.Insurer||'&mdash;')+'</strong><br><span style="font-size:9px;color:#666">'+e(p.Product||'')+'</span>')
         +td(r(amt||p.BenFundValue),true)
         +td(e(p.Beneficiary||p.BizType||'&mdash;'))
         +td('<span style="font-size:9px">'+e(bt||p.Type)+'</span>')
-        +td(e(p.EstateDutiable||'&mdash;'))
+        +td(e(dutiableLabel))
         +td(dutyShare,true)+'</tr>';
+    });
+    // Third-party physical assets bequeathed to non-spouse beneficiaries
+    var _tpPhysList=[];
+    (S.props||[]).forEach(function(p){
+      var bt=p.deathBenType||'Estate';
+      if(isDutiableNonSpouse(bt)&&N(p.val)>0){
+        var netV=Math.max(0,N(p.val)-N(p.bond));
+        _tpPhysList.push({desc:p.desc||'Property',bt:bt,val:netV});
+      }
+    });
+    (S.vehicles||[]).forEach(function(v){
+      var bt=v.deathBenType||'Estate';
+      if(isDutiableNonSpouse(bt)&&N(v.val)>0){
+        var netV=Math.max(0,N(v.val)-N(v.finance));
+        _tpPhysList.push({desc:v.desc||'Vehicle',bt:bt,val:netV});
+      }
+    });
+    (S.otherAssets||[]).forEach(function(a){
+      var bt=a.deathBenType||'Estate';
+      if(isDutiableNonSpouse(bt)&&N(a.val)>0){
+        _tpPhysList.push({desc:a.desc||'Asset',bt:bt,val:N(a.val)});
+      }
+    });
+    _tpPhysList.forEach(function(it){
+      h+='<tr>'
+        +td('<strong>'+e(it.desc)+'</strong><br><span style="font-size:9px;color:#666">Physical asset bequeathed to '+e(it.bt)+'</span>')
+        +td(r(it.val),true)
+        +td(e(it.bt))
+        +td('<span style="font-size:9px">'+e(it.bt)+'</span>')
+        +td('Yes')
+        +td(r(apDuty(it.val)),true)+'</tr>';
     });
     h+='</tbody></table>';
 
