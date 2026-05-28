@@ -234,7 +234,12 @@ var EXEC_RATE  = 0.04025;   // Executor fees 3.5% + VAT
 // is a factual dependant for s37C purposes but NOT a spouse for s4(q). So
 // only "Spouse" returns true here.
 function isS4qSpouse(type){
-  return type === 'Spouse';
+  // A "spouse" under the Estate Duty Act s.1 includes a permanent same-sex or
+  // heterosexual union (the Income Tax Act s.1 spouse definition, adopted by the
+  // EDA). A beneficiary tagged 'Life Partner' accordingly qualifies for s.4(q) —
+  // the adviser only uses the Life Partner tag where the union is genuinely
+  // permanent (otherwise the marital status would be Single).
+  return type === 'Spouse' || type === 'Life Partner';
 }
 // Legal-spouse test on the client's marital status field. The marital
 // dropdown uses values like "Married \u2014 ANC no accrual" etc; "Life
@@ -244,15 +249,18 @@ function isLegallyMarried(m){
 }
 // Centralised rule: does an asset/policy accrue to the surviving spouse for
 // s.4(q) deduction and s.9HB CGT rollover?
-// (a) Direct: beneficiary/deathBenType is 'Spouse'.
+// (a) Direct: beneficiary type qualifies as "spouse" under the EDA — either
+//     'Spouse' or 'Life Partner' (a permanent life partnership is a spouse
+//     under the Income Tax Act s.1 definition, which the EDA adopts).
 // (b) Via residue: beneficiary/deathBenType is 'Estate' (or blank) AND the
 //     client has ticked "Spouse inherits residue" on the Estate tab AND the
-//     client is legally married. Life Partner never qualifies.
+//     client's marital status qualifies (legally married OR 'Life partner').
 function accruesToSpouse(benType){
-  if(benType === 'Spouse') return true;
+  if(isS4qSpouse(benType)) return true;
   var residueTick = !!(typeof S !== 'undefined' && S && S.cli && S.cli.spouseInheritsResidue);
-  var married = isLegallyMarried(typeof S !== 'undefined' && S && S.cli ? S.cli.marital : '');
-  if(residueTick && married && (benType === 'Estate' || !benType)) return true;
+  var marital = (typeof S !== 'undefined' && S && S.cli ? (S.cli.marital||'') : '');
+  var partnerForS4q = isLegallyMarried(marital) || marital === 'Life partner';
+  if(residueTick && partnerForS4q && (benType === 'Estate' || !benType)) return true;
   return false;
 }
 // For estate-duty purposes, the value that pays out on death for a given
@@ -6127,11 +6135,14 @@ function buildPolCard(p, i) {
     } else if (bt === 'Trust') {
       routeInf.style.cssText += ';background:#f1f5f9;color:#475569;border:1px solid #cbd5e1';
       routeInf.innerHTML = '→ <strong>Routed to Trust:</strong> Deemed property under s.3(3) — dutiable for estate duty unless the trust nomination meets specific exemptions. Bypasses executor fees. Check trust deed and structure.';
+    } else if (bt === 'Life Partner') {
+      routeInf.style.cssText += ';background:#f0fdf4;color:#166534;border:1px solid #86efac';
+      routeInf.innerHTML = '✓ <strong>Section 4(q):</strong> Paid direct to the named beneficiary. A permanent life partner qualifies as "spouse" under the Estate Duty Act (s.1, adopting the ITA definition) — so the s.4(q) deduction applies and no estate duty falls on this benefit. Bypasses executor fees.';
     } else if (bt && bt !== 'Spouse' && bt !== 'Estate') {
-      // Life Partner / Child / Parent / Dependant / Other / legacy Third Party
+      // Child / Parent / Dependant / Other / legacy Third Party — none qualify for s.4(q)
       routeInf.style.cssText += ';background:#fef2f2;color:#7f1d1d;border:1px solid #fecaca';
       var routeLabel = bt === 'Third Party' ? 'Third Party (legacy tag)' : bt;
-      routeInf.innerHTML = '→ <strong>Routed to '+routeLabel+':</strong> Paid direct to the named beneficiary, but <strong>deemed property under s.3(3)</strong> of the Estate Duty Act — included in the gross estate and apportioned for duty. No s.4(q) abatement (only legally-married spouse qualifies). Bypasses executor fees.';
+      routeInf.innerHTML = '→ <strong>Routed to '+routeLabel+':</strong> Paid direct to the named beneficiary, but <strong>deemed property under s.3(3)</strong> of the Estate Duty Act — included in the gross estate and apportioned for duty. No s.4(q) abatement (does not qualify as "spouse"). Bypasses executor fees.';
     }
     card.appendChild(routeInf);
   }
