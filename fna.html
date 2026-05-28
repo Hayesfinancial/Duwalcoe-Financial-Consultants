@@ -3744,15 +3744,103 @@ function buildNeeds() {
     var totCap=S.deathCapital.reduce(function(a,r){return a+N(r.amt);},0);
     var totalNeed=totLiab+totInc+totCap;
     var totalHave=N(S.existingCover&&S.existingCover.death);
+    // ── Per-beneficiary cover allocation (uses the benTo tag on each need and the
+    // BeneficiaryType on each policy). Aggregating need vs cover is misleading
+    // when cover is routed to one beneficiary but the need is owed to another
+    // (e.g. policies to spouse/LP while a child has the need). Each bucket shows
+    // its own need, existing cover and gap; over-cover in one bucket does NOT
+    // offset a shortfall in another — that has to be solved by re-nominating
+    // beneficiaries, not by collapsing the numbers.
+    var _spouseIncCap = 0, _estateIncCap = 0, _tpByName = {};
+    (S.deathIncome||[]).forEach(function(rn){
+      var c = calcIncomeNeed(rn); if(!c) return;
+      var bt = rn.benTo || 'Spouse';
+      if(isS4qSpouse(bt))      _spouseIncCap += c;
+      else if(bt === 'Estate') _estateIncCap += c;
+      else {
+        var nm = (rn.benName||'').trim() || ('Unnamed '+bt);
+        if(!_tpByName[nm]) _tpByName[nm] = {incCap:0, polCover:0};
+        _tpByName[nm].incCap += c;
+      }
+    });
+    (S.deathCapital||[]).forEach(function(rn){
+      var amt = N(rn.amt); if(!amt) return;
+      var bt = rn.benTo || 'Spouse';
+      if(isS4qSpouse(bt))      _spouseIncCap += amt;
+      else if(bt === 'Estate') _estateIncCap += amt;
+      else {
+        var nm = (rn.benName||'').trim() || ('Unnamed '+bt);
+        if(!_tpByName[nm]) _tpByName[nm] = {incCap:0, polCover:0};
+        _tpByName[nm].incCap += amt;
+      }
+    });
+    var _s4qPols = 0, _estPols = 0;
+    (S.importedPols||[]).forEach(function(p){
+      if(p.Type === 'Business Assurance') return;
+      var amt = N(p.BenDeath); if(!amt) return;
+      var bt = p.BeneficiaryType || '';
+      if(isS4qSpouse(bt))         _s4qPols += amt;
+      else if(bt === 'Estate')    _estPols += amt;
+      else if(isDutiableNonSpouse(bt)){
+        var nm = (p.Beneficiary||'').trim() || ('Unnamed '+bt);
+        if(!_tpByName[nm]) _tpByName[nm] = {incCap:0, polCover:0};
+        _tpByName[nm].polCover += amt;
+      }
+    });
+    var _estPayNeed = totLiab + _estateIncCap;
+    var _estPayHave = _estPols;
+    var _estPayGap  = Math.max(0, _estPayNeed - _estPayHave);
+    var _spouseGap  = Math.max(0, _spouseIncCap - _s4qPols);
+    var _tpGapTotal = 0;
+    Object.keys(_tpByName).forEach(function(nm){
+      _tpGapTotal += Math.max(0, _tpByName[nm].incCap - _tpByName[nm].polCover);
+    });
+    var _totalNewCover = _estPayGap + _spouseGap + _tpGapTotal;
+
     if(totalNeed>0){
       var sumBox=div('calc-result'); sumBox.style.marginTop='16px';
-      sumBox.innerHTML='<div class="cr-row"><span>Liabilities</span><span class="gold">'+Rfmt(totLiab)+'</span></div>'+
-        '<div class="cr-row"><span>Income (capitalised)</span><span class="gold">'+Rfmt(totInc)+'</span></div>'+
-        '<div class="cr-row"><span>Capital needs</span><span class="gold">'+Rfmt(totCap)+'</span></div>'+
-        '<div class="cr-row big"><span>Total cover needed</span><span class="gold">'+Rfmt(totalNeed)+'</span></div>'+
-        '<div class="cr-row"><span>Existing cover</span><span class="gold">'+Rfmt(totalHave)+'</span></div>'+
-        coverContributorsHTML(S.importedPols, 'death')+
-        '<div class="cr-row big"><span>'+(totalHave>=totalNeed?'Surplus':'Shortfall')+'</span><span style="color:'+(totalHave>=totalNeed?'var(--green)':'var(--red)')+'">'+Rfmt(Math.abs(totalHave-totalNeed))+'</span></div>';
+      function _bHead(title){
+        return '<div style="font-size:11px;color:var(--gold);font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.12)">'+title+'</div>';
+      }
+      function _bGap(gap, over){
+        var lbl, col;
+        if(gap > 0)      { lbl='Shortfall';    col='var(--red)'; }
+        else if(over > 0){ lbl='Over-covered'; col='var(--green)'; }
+        else             { lbl='Covered';      col='var(--green)'; }
+        var amt = gap > 0 ? gap : (over > 0 ? over : 0);
+        return '<div class="cr-row" style="font-weight:700"><span>'+lbl+'</span><span style="color:'+col+'">'+Rfmt(amt)+'</span></div>';
+      }
+      var _h = '<div class="cr-row"><span>Liabilities</span><span class="gold">'+Rfmt(totLiab)+'</span></div>'+
+               '<div class="cr-row"><span>Income (capitalised)</span><span class="gold">'+Rfmt(totInc)+'</span></div>'+
+               '<div class="cr-row"><span>Capital needs</span><span class="gold">'+Rfmt(totCap)+'</span></div>'+
+               '<div class="cr-row"><span>Existing cover (all policies)</span><span class="gold">'+Rfmt(totalHave)+'</span></div>'+
+               coverContributorsHTML(S.importedPols, 'death');
+      if(_estPayNeed > 0 || _estPayHave > 0){
+        _h += _bHead('Estate-payable')+
+              '<div class="cr-row"><span>Need (liabilities + estate-tagged)</span><span class="gold">'+Rfmt(_estPayNeed)+'</span></div>'+
+              '<div class="cr-row"><span>Existing cover routed to estate</span><span class="gold">'+Rfmt(_estPayHave)+'</span></div>'+
+              _bGap(_estPayGap, 0);
+      }
+      if(_spouseIncCap > 0 || _s4qPols > 0){
+        var _spOver = _s4qPols - _spouseIncCap;
+        _h += _bHead('Spouse / Life Partner (s.4(q))')+
+              '<div class="cr-row"><span>Need (spouse/LP-tagged)</span><span class="gold">'+Rfmt(_spouseIncCap)+'</span></div>'+
+              '<div class="cr-row"><span>Existing direct cover</span><span class="gold">'+Rfmt(_s4qPols)+'</span></div>'+
+              _bGap(_spouseGap, _spOver > 0 ? _spOver : 0);
+      }
+      Object.keys(_tpByName).forEach(function(nm){
+        var t = _tpByName[nm];
+        if(t.incCap === 0 && t.polCover === 0) return;
+        var _tpGap = Math.max(0, t.incCap - t.polCover);
+        var _tpOver = t.polCover - t.incCap;
+        _h += _bHead(nm)+
+              '<div class="cr-row"><span>Need (income + capital)</span><span class="gold">'+Rfmt(t.incCap)+'</span></div>'+
+              '<div class="cr-row"><span>Existing cover named to '+nm+'</span><span class="gold">'+Rfmt(t.polCover)+'</span></div>'+
+              _bGap(_tpGap, _tpOver > 0 ? _tpOver : 0);
+      });
+      _h += '<div class="cr-row big" style="border-top:2px solid var(--gold);margin-top:12px;padding-top:10px"><span>Total new cover to sell</span><span style="color:'+(_totalNewCover>0?'var(--red)':'var(--green)')+'">'+Rfmt(_totalNewCover)+'</span></div>'+
+            '<div style="font-size:10px;color:rgba(255,255,255,0.55);padding:6px 0 0;font-style:italic;line-height:1.4">Over-cover in one bucket does not fund a shortfall in another \u2014 re-nominate beneficiaries to redirect existing cover.</div>';
+      sumBox.innerHTML = _h;
       s.appendChild(sumBox);
     }
   }
@@ -8323,6 +8411,59 @@ function printFNA(sections) {
   var _ecsP = existingCoverTotals(pols);
   var totalDeathHave=_ecsP.death;
 
+  // ── Per-beneficiary cover allocation (for the printed Needs & Summary pages).
+  // The old print compared a gross "total need" against a gross "total cover" and
+  // could show a SURPLUS when cover routed to one beneficiary (e.g. Spouse/LP) is
+  // numerically large but doesn't fund a need owed to someone else (e.g. a child).
+  // These buckets mirror the on-screen Structuring engine: gaps don't net across
+  // beneficiaries — over-cover in one bucket cannot fund a shortfall in another.
+  var spouseIncCapP = 0;   // needs tagged Spouse OR Life Partner
+  var estateIncCapP = 0;   // needs explicitly tagged Estate
+  var tpByNameP = {};      // { name -> {incCap:n, polCover:n} } for named third parties
+  (S.deathIncome||[]).forEach(function(rn){
+    var c = calcIncomeNeed(rn); if(!c) return;
+    var bt = rn.benTo || 'Spouse';
+    if(isS4qSpouse(bt))      spouseIncCapP += c;
+    else if(bt === 'Estate') estateIncCapP += c;
+    else {
+      var nm = (rn.benName||'').trim() || 'Unnamed third party';
+      if(!tpByNameP[nm]) tpByNameP[nm] = {incCap:0, polCover:0};
+      tpByNameP[nm].incCap += c;
+    }
+  });
+  (S.deathCapital||[]).forEach(function(rn){
+    var amt = N(rn.amt); if(!amt) return;
+    var bt = rn.benTo || 'Spouse';
+    if(isS4qSpouse(bt))      spouseIncCapP += amt;
+    else if(bt === 'Estate') estateIncCapP += amt;
+    else {
+      var nm = (rn.benName||'').trim() || 'Unnamed third party';
+      if(!tpByNameP[nm]) tpByNameP[nm] = {incCap:0, polCover:0};
+      tpByNameP[nm].incCap += amt;
+    }
+  });
+  // Existing cover allocated to named third parties (Child/Parent/Dependant/Other).
+  pols.forEach(function(p){
+    if(p.Type === 'Business Assurance') return;
+    if(!isDutiableNonSpouse(p.BeneficiaryType||'')) return;
+    var amt = N(p.BenDeath); if(!amt) return;
+    var nm = (p.Beneficiary||'').trim() || 'Unnamed third party';
+    if(!tpByNameP[nm]) tpByNameP[nm] = {incCap:0, polCover:0};
+    tpByNameP[nm].polCover += amt;
+  });
+
+  // Bucket gaps. autoLiabTotal+manLiabTotal already includes duty/executor/CGT/accrual
+  // when scope.estate is on (see autoLiabsP construction above).
+  var estatePayNeedP = totLiab + estateIncCapP;
+  var estatePayHaveP = estPols;
+  var estatePayGapP  = Math.max(0, estatePayNeedP - estatePayHaveP);
+  var spouseGapP     = Math.max(0, spouseIncCapP - s4qPols);
+  var tpGapTotalP    = 0;
+  Object.keys(tpByNameP).forEach(function(nm){
+    tpGapTotalP += Math.max(0, tpByNameP[nm].incCap - tpByNameP[nm].polCover);
+  });
+  var totalNewCoverP = estatePayGapP + spouseGapP + tpGapTotalP;
+
   // Retirement
   var rentalAtRetP=0;
   (S.props||[]).forEach(function(p){
@@ -8625,16 +8766,51 @@ function printFNA(sections) {
       }
 
       h+=sec('Life Cover \u2014 Summary');
-      h+=navyBox(
-        nrow('Total liabilities',r(totLiab))
-        +nrow('Income needs (capitalised)',r(totInc))
-        +nrow('Capital requirements',r(totCap))
-        +nrow('Total cover required',r(totalDeathNeed),true)
-        +nrow('Existing life cover in place',r(totalDeathHave))
-        +'<div style="display:flex;justify-content:space-between;padding:7px 0;border-top:2px solid #334;margin-top:5px;font-size:12px;font-weight:700">'
-        +'<span style="color:#ccd6f6">'+(totalDeathHave>=totalDeathNeed?'SURPLUS':'SHORTFALL')+'</span>'
-        +'<span style="color:'+(totalDeathHave>=totalDeathNeed?'#86efac':'#f87171')+'">'+r(Math.abs(totalDeathHave-totalDeathNeed))+'</span></div>'
-      );
+      // Helpers for per-bucket display inside the navyBox.
+      function bucketHeadP(title){
+        return '<div style="font-size:10px;color:#a8b938;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-top:8px;padding-top:6px;border-top:1px solid #334">'+title+'</div>';
+      }
+      function bucketGapP(gap, overCovered){
+        var lbl, col;
+        if(gap > 0)         { lbl='Shortfall';    col='#f87171'; }
+        else if(overCovered){ lbl='Over-covered'; col='#86efac'; }
+        else                { lbl='Covered';      col='#86efac'; }
+        var amt = gap > 0 ? gap : (overCovered ? overCovered : 0);
+        return '<div style="display:flex;justify-content:space-between;padding:4px 0;font-weight:700;font-size:11px">'
+          +'<span style="color:#ccd6f6">'+lbl+'</span>'
+          +'<span style="color:'+col+'">'+r(amt)+'</span></div>';
+      }
+      var _bx = nrow('Total liabilities',r(totLiab))
+              + nrow('Income needs (capitalised)',r(totInc))
+              + nrow('Capital requirements',r(totCap));
+      if(estatePayNeedP > 0 || estatePayHaveP > 0){
+        _bx += bucketHeadP('Estate-payable')
+             + nrow('Need (liabilities + estate costs)', r(estatePayNeedP))
+             + nrow('Existing cover routed to estate', r(estatePayHaveP))
+             + bucketGapP(estatePayGapP, 0);
+      }
+      if(spouseIncCapP > 0 || s4qPols > 0){
+        var spouseOver = s4qPols - spouseIncCapP;
+        _bx += bucketHeadP('Spouse / Life Partner (s.4(q))')
+             + nrow('Need (spouse / life-partner-tagged)', r(spouseIncCapP))
+             + nrow('Existing direct cover', r(s4qPols))
+             + bucketGapP(spouseGapP, spouseOver > 0 ? spouseOver : 0);
+      }
+      Object.keys(tpByNameP).forEach(function(nm){
+        var t = tpByNameP[nm];
+        if(t.incCap === 0 && t.polCover === 0) return;
+        var tpGap = Math.max(0, t.incCap - t.polCover);
+        var tpOver = t.polCover - t.incCap;
+        _bx += bucketHeadP(e(nm))
+             + nrow('Need (income + capital)', r(t.incCap))
+             + nrow('Existing cover named to '+e(nm), r(t.polCover))
+             + bucketGapP(tpGap, tpOver > 0 ? tpOver : 0);
+      });
+      _bx += '<div style="display:flex;justify-content:space-between;padding:8px 0 2px;border-top:2px solid #a8b938;margin-top:10px;font-size:12px;font-weight:700">'
+           + '<span style="color:#ccd6f6">TOTAL NEW LIFE COVER TO SELL</span>'
+           + '<span style="color:'+(totalNewCoverP>0?'#f87171':'#86efac')+'">'+r(totalNewCoverP)+'</span></div>'
+           + '<div style="font-size:9px;color:#94a3b8;padding-top:2px;font-style:italic">Over-cover in one bucket does not offset a shortfall in another \u2014 cover routed to one beneficiary cannot fund a need owed to someone else.</div>';
+      h+=navyBox(_bx);
     }
 
     if(S.scope.disability){
@@ -9146,7 +9322,22 @@ function printFNA(sections) {
   if(S.scope.death||S.scope.disability||S.scope.dread||S.scope.ip){
     h+=sumCatP('Protection');
     if(S.scope.death){
-      h+=sumRowP('Life cover (total)',totalDeathNeed,totalDeathHave);
+      // Per-beneficiary rows (mirrors the printed Needs Analysis page). Each bucket
+      // shows its own need, existing cover and gap. Over-cover in one bucket does
+      // NOT offset a shortfall in another — that's the whole point of breaking the
+      // aggregate out.
+      if(estatePayNeedP > 0 || estatePayHaveP > 0){
+        h+=sumRowP('Life cover \u2014 estate-payable', estatePayNeedP, estatePayHaveP);
+      }
+      if(spouseIncCapP > 0 || s4qPols > 0){
+        h+=sumRowP('Life cover \u2014 spouse / life partner (s.4(q))', spouseIncCapP, s4qPols);
+      }
+      Object.keys(tpByNameP).forEach(function(nm){
+        var t = tpByNameP[nm];
+        if(t.incCap === 0 && t.polCover === 0) return;
+        h+=sumRowP('Life cover \u2014 '+e(nm), t.incCap, t.polCover);
+      });
+      // Reference breakdown of what makes up the total need (informational).
       if(totLiab>0) h+=sumRowP('\u2514 Liabilities & estate costs: '+r(totLiab)+(S.scope.estate?' (incl. duty & executor)':''),0,0,true);
       if(totInc>0)  h+=sumRowP('\u2514 Income replacement (capitalised): '+r(totInc),0,0,true);
       if(totCap>0)  h+=sumRowP('\u2514 Capital needs: '+r(totCap),0,0,true);
