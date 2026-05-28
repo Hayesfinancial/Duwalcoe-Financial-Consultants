@@ -353,6 +353,18 @@ function syncNow() {
     }catch(e){}
 
     DB.tasks  = loaded.tasks||[];
+    // Re-apply any locally pending task saves (mirror clients/policies above) so a
+    // task created or edited while the server was unreachable is never wiped by a sync.
+    try{
+      var _ldbT=JSON.parse(localStorage.getItem('du_db')||'{}');
+      (_ldbT.tasks||[]).forEach(function(lt){
+        if(lt._pendingSave){
+          var _ti=DB.tasks.findIndex(function(st){return String(st.ID)===String(lt.ID);});
+          if(_ti>=0) DB.tasks[_ti]=lt;
+          else DB.tasks.push(lt);
+        }
+      });
+    }catch(e){}
     DB.roas   = loaded.roas||[];
     DB.links  = loaded.familylinks||[];
 
@@ -389,11 +401,20 @@ function post(data, cb){
 
   // upsert a single row into a table
   function upsert(table, row, callback){
-    sbFetch('POST', '/rest/v1/'+table, [row], function(res, err){
+    // Never send the internal _pendingSave flag to Supabase (no such column).
+    var sendRow = row;
+    if(row && row._pendingSave !== undefined){ sendRow = Object.assign({}, row); delete sendRow._pendingSave; }
+    sbFetch('POST', '/rest/v1/'+table, [sendRow], function(res, err){
+      // Task save-failure protection: flag the local task on failure (so syncNow keeps
+      // it and never wipes it) and clear the flag on success. Mirrors policy handling.
+      if(table==='tasks' && row && row.ID!==undefined){
+        var _pt=DB.tasks.find(function(x){return String(x.ID)===String(row.ID);});
+        if(_pt){ if(err) _pt._pendingSave=true; else delete _pt._pendingSave; }
+      }
       try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
       if(err){
         toast('⚠️ SAVE FAILED ('+table+') — press F12, check console','err');
-        console.error('SUPABASE SAVE FAILED — table:', table, '— payload:', row, '— server response:', err);
+        console.error('SUPABASE SAVE FAILED — table:', table, '— payload:', sendRow, '— server response:', err);
       }
       if(callback) callback(err?{ok:0}:{ok:1});
     });
@@ -414,6 +435,12 @@ function post(data, cb){
   // partial update — patch specific columns
   function patch(table, id, fields, callback){
     sbFetch('PATCH', '/rest/v1/'+table+'?ID=eq.'+encodeURIComponent(id), fields, function(res, err){
+      // Task update-failure protection (see upsert): keep failed task edits locally
+      // by flagging _pendingSave so the next sync preserves rather than reverts them.
+      if(table==='tasks'){
+        var _pt=DB.tasks.find(function(x){return String(x.ID)===String(id);});
+        if(_pt){ if(err) _pt._pendingSave=true; else delete _pt._pendingSave; }
+      }
       try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
       if(err){
         toast('⚠️ UPDATE FAILED ('+table+') — press F12, check console','err');
@@ -6607,9 +6634,11 @@ function saveTask(){
   DB.tasks.push(task);
   try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
   closeAll(); render();
-  post({action:'saveTask',task:task},function(){
-    try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
-    toast('Task saved ✓','ok');
+  post({action:'saveTask',task:task},function(res){
+    // upsert() has already persisted to localStorage and, on failure, flagged the task
+    // _pendingSave so syncNow can't wipe it. Only report a genuine success.
+    if(res && res.ok){ toast('Task saved ✓','ok'); }
+    else { toast('⚠️ Could not reach server — task kept locally and will retry on next sync. It is NOT lost.','err'); }
   });
 }
 
