@@ -366,7 +366,27 @@ function syncNow() {
       });
     }catch(e){}
     DB.roas   = loaded.roas||[];
+    // Re-apply any locally pending ROA saves so a failed save isn't wiped by a sync.
+    try{
+      var _ldbR=JSON.parse(localStorage.getItem('du_db')||'{}');
+      (_ldbR.roas||[]).forEach(function(lr){
+        if(lr._pendingSave){
+          var _ri=DB.roas.findIndex(function(sr){return String(sr.ID)===String(lr.ID);});
+          if(_ri>=0) DB.roas[_ri]=lr; else DB.roas.push(lr);
+        }
+      });
+    }catch(e){}
     DB.links  = loaded.familylinks||[];
+    // Re-apply any locally pending family-member saves/edits (spouse, children, dependants).
+    try{
+      var _ldbL=JSON.parse(localStorage.getItem('du_db')||'{}');
+      (_ldbL.links||[]).forEach(function(ll){
+        if(ll._pendingSave){
+          var _li=DB.links.findIndex(function(sl){return String(sl.ID)===String(ll.ID);});
+          if(_li>=0) DB.links[_li]=ll; else DB.links.push(ll);
+        }
+      });
+    }catch(e){}
 
     // Notes — convert array to object keyed by ClientID
     window._sharedNotes = {};
@@ -405,11 +425,14 @@ function post(data, cb){
     var sendRow = row;
     if(row && row._pendingSave !== undefined){ sendRow = Object.assign({}, row); delete sendRow._pendingSave; }
     sbFetch('POST', '/rest/v1/'+table, [sendRow], function(res, err){
-      // Task save-failure protection: flag the local task on failure (so syncNow keeps
-      // it and never wipes it) and clear the flag on success. Mirrors policy handling.
-      if(table==='tasks' && row && row.ID!==undefined){
-        var _pt=DB.tasks.find(function(x){return String(x.ID)===String(row.ID);});
-        if(_pt){ if(err) _pt._pendingSave=true; else delete _pt._pendingSave; }
+      // Save-failure protection for locally-cached tables: on failure flag the local
+      // record so syncNow keeps it; on success clear the flag. Prevents a failed save
+      // from being silently overwritten on the next refresh/sync. (Policies manage their
+      // own flag inside savePolicy, so they are intentionally not handled here.)
+      var _saveArr={clients:DB.clients,tasks:DB.tasks,roas:DB.roas,familylinks:DB.links}[table];
+      if(_saveArr && row && row.ID!==undefined){
+        var _sr=_saveArr.find(function(x){return String(x.ID)===String(row.ID);});
+        if(_sr){ if(err) _sr._pendingSave=true; else delete _sr._pendingSave; }
       }
       try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
       if(err){
@@ -435,11 +458,12 @@ function post(data, cb){
   // partial update — patch specific columns
   function patch(table, id, fields, callback){
     sbFetch('PATCH', '/rest/v1/'+table+'?ID=eq.'+encodeURIComponent(id), fields, function(res, err){
-      // Task update-failure protection (see upsert): keep failed task edits locally
-      // by flagging _pendingSave so the next sync preserves rather than reverts them.
-      if(table==='tasks'){
-        var _pt=DB.tasks.find(function(x){return String(x.ID)===String(id);});
-        if(_pt){ if(err) _pt._pendingSave=true; else delete _pt._pendingSave; }
+      // Update-failure protection (see upsert): keep failed edits locally by flagging
+      // _pendingSave so the next sync preserves rather than reverts them.
+      var _patchArr={tasks:DB.tasks,familylinks:DB.links}[table];
+      if(_patchArr){
+        var _pr=_patchArr.find(function(x){return String(x.ID)===String(id);});
+        if(_pr){ if(err) _pr._pendingSave=true; else delete _pr._pendingSave; }
       }
       try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
       if(err){
@@ -1527,10 +1551,15 @@ function saveFamMember(){
     DB.links.push(link);
   }
 
+  // Flag pending + persist locally so a refresh or failed save can't wipe this family
+  // member — syncNow recovers it. upsert()/patch() clear the flag on a confirmed save.
+  link._pendingSave = true;
+  try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
   closeAll();
   render();
-  post({action: existing ? 'updateFamMember' : 'saveFamMember', member:link}, function(){
-    toast(FAM_TYPE + (existing ? ' updated' : ' saved'), 'ok');
+  post({action: existing ? 'updateFamMember' : 'saveFamMember', member:link}, function(res){
+    if(res && res.ok){ toast(FAM_TYPE + (existing ? ' updated' : ' saved'), 'ok'); }
+    else { toast('⚠️ Could not reach server — '+FAM_TYPE+' kept locally and will retry on next sync. It is NOT lost.','err'); }
   });
 }
 
@@ -4587,17 +4616,25 @@ function saveClient(openFNA){
   var savedId = c.ID;
   var savedIsLead = c.IsLead==='Yes';
   EC=null; closeAll();
+  // Flag pending so a refresh before the server confirms (or a failed save) can't wipe
+  // the record — syncNow recovers it. upsert() strips this flag before sending and clears
+  // it on a confirmed save. Mirrors the policy save path.
+  c._pendingSave = true;
   // Write to localStorage immediately so a refresh before server responds keeps the data
   try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
   // Open the client/lead profile immediately after save
   openClient(savedId);
-  post({action:'saveClient',client:c},function(){
+  post({action:'saveClient',client:c},function(res){
     clearEditingLock(c.ID);
     try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
-    toast((savedIsLead?'Lead':'Client')+' saved','ok');
-    if(openFNA){
-      var fnaUrl = buildFnaUrl(c);
-      window.open(fnaUrl,'_blank');
+    if(res && res.ok){
+      toast((savedIsLead?'Lead':'Client')+' saved','ok');
+      if(openFNA){
+        var fnaUrl = buildFnaUrl(c);
+        window.open(fnaUrl,'_blank');
+      }
+    } else {
+      toast('⚠️ Could not reach server — '+(savedIsLead?'lead':'client')+' kept locally and will retry on next sync. It is NOT lost.','err');
     }
   });
 }
