@@ -230,20 +230,22 @@ var EXEC_RATE  = 0.04025;   // Executor fees 3.5% + VAT
 // un-retagged policies. These helpers centralise the legal mapping so each
 // site of conditional logic doesn't have to enumerate.
 //
-// s4(q) abatement only applies to a *legally married* Spouse. A Life Partner
-// is a factual dependant for s37C purposes but NOT a spouse for s4(q). So
-// only "Spouse" returns true here.
+// s.4(q) abatement applies where the beneficiary qualifies as a "spouse" under
+// the Estate Duty Act s.1 — which adopts the Income Tax Act s.1 definition and
+// therefore includes a permanent same-sex or heterosexual union. The adviser
+// tags such partners as 'Life Partner' only where the union is genuinely
+// permanent (otherwise marital status is Single), so both 'Spouse' and
+// 'Life Partner' return true here.
 function isS4qSpouse(type){
-  // A "spouse" under the Estate Duty Act s.1 includes a permanent same-sex or
-  // heterosexual union (the Income Tax Act s.1 spouse definition, adopted by the
-  // EDA). A beneficiary tagged 'Life Partner' accordingly qualifies for s.4(q) —
-  // the adviser only uses the Life Partner tag where the union is genuinely
-  // permanent (otherwise the marital status would be Single).
+  // See block comment above. Returns true for the two beneficiary types that
+  // qualify as "spouse" for s.4(q) and para 67 CGT rollover purposes.
   return type === 'Spouse' || type === 'Life Partner';
 }
-// Legal-spouse test on the client's marital status field. The marital
-// dropdown uses values like "Married \u2014 ANC no accrual" etc; "Life
-// partner", "Single", "Divorced", "Widowed" do NOT qualify for s.4(q).
+// Legal-marriage test on the client's marital status field. Returns true only
+// for values that start with "Married" (ANC with/no accrual, COP). Note: this
+// is narrower than the spouse-definition rule — for s.4(q) purposes a 'Life
+// partner' marital status ALSO qualifies; callers must handle that separately
+// (see accruesToSpouse below).
 function isLegallyMarried(m){
   return (m||'').indexOf('Married') === 0;
 }
@@ -285,21 +287,22 @@ function isEstatePathed(type){
 // Dutiable-but-not-via-estate: a third-party-style nomination where the
 // policy proceeds are deemed property of the estate (s3(3) of the Estate
 // Duty Act) and the duty is apportioned to the beneficiary. Covers
-// Life Partner, Child, Parent, Dependant, Trust, Other, and the legacy
-// "Third Party" tag.
+// Child, Parent, Dependant, Trust, Other, and the legacy "Third Party" tag.
+// (Life Partner is excluded — it qualifies as "spouse" for s.4(q) and so is
+// not in this group.)
 function isDutiableNonSpouse(type){
   if(!type) return false;
-  if(type === 'Spouse') return false;
+  if(isS4qSpouse(type)) return false; // 'Spouse' or 'Life Partner' — both s.4(q) eligible
   if(type === 'Estate') return false;
-  return true; // Life Partner / Child / Parent / Dependant / Trust / Other / Third Party
+  return true; // Child / Parent / Dependant / Trust / Other / Third Party
 }
 // Display palette for the read-only Beneficiary Type chip on policy cards.
 function benTypePalette(type){
-  if(type === 'Spouse')        return {fg:'#166534', bg:'#f0fdf4'}; // green — 4(q)
+  if(isS4qSpouse(type))        return {fg:'#166534', bg:'#f0fdf4'}; // green — 4(q): Spouse or permanent Life Partner
   if(type === 'Estate')        return {fg:'#92400e', bg:'#fff7ed'}; // amber — estate
   if(type === 'Trust')         return {fg:'#475569', bg:'#f1f5f9'}; // grey — case-specific
   if(type === 'Third Party')   return {fg:'#1e40af', bg:'#eff6ff'}; // blue — legacy
-  // Life Partner / Child / Parent / Dependant / Other — all dutiable apportionable
+  // Child / Parent / Dependant / Other — all dutiable apportionable
   if(type)                     return {fg:'#7f1d1d', bg:'#fef2f2'}; // red
   return                              {fg:'#9a9a8a', bg:'#fafaf6'}; // empty
 }
@@ -600,7 +603,7 @@ function calcTotalCGT(marginalRate) {
     if (!N(p.val) || !N(p.baseCost)) return;
     var bt = p.deathBenType || 'Estate';
     if (accruesToSpouse(bt)) {
-      pushRollover(p.desc||'Property', p.val, p.baseCost, bt==='Spouse'?'spouse':'residue');
+      pushRollover(p.desc||'Property', p.val, p.baseCost, isS4qSpouse(bt)?'spouse':'residue');
       return;
     }
     var r = calcCGTAsset(p.val, p.baseCost, !!p.primaryResidence);
@@ -613,7 +616,7 @@ function calcTotalCGT(marginalRate) {
     if (!N(v.val) || !N(v.baseCost)) return;
     var bt = v.deathBenType || 'Estate';
     if (accruesToSpouse(bt)) {
-      pushRollover(v.desc||'Vehicle', v.val, v.baseCost, bt==='Spouse'?'spouse':'residue');
+      pushRollover(v.desc||'Vehicle', v.val, v.baseCost, isS4qSpouse(bt)?'spouse':'residue');
       return;
     }
     var r = calcCGTAsset(v.val, v.baseCost, false);
@@ -627,7 +630,7 @@ function calcTotalCGT(marginalRate) {
     if (a.cgtApplicable === false || a.cgtApplicable === 'false') return; // explicitly exempt
     var bt = a.deathBenType || 'Estate';
     if (accruesToSpouse(bt)) {
-      pushRollover(a.desc||'Asset', a.val, a.baseCost, bt==='Spouse'?'spouse':'residue');
+      pushRollover(a.desc||'Asset', a.val, a.baseCost, isS4qSpouse(bt)?'spouse':'residue');
       return;
     }
     var r = calcCGTAsset(a.val, a.baseCost, false);
@@ -646,7 +649,7 @@ function calcTotalCGT(marginalRate) {
       var baseCostRollover = (p.Frequency === 'Once Off') ? N(p.Premium) : N(p.LumpSumPremium);
       if (N(p.BenFundValue) > 0) {
         pushRollover((p.Insurer||'Investment')+(p.Product?' \u2014 '+p.Product:''),
-                     p.BenFundValue, baseCostRollover, bt==='Spouse'?'spouse':'residue');
+                     p.BenFundValue, baseCostRollover, isS4qSpouse(bt)?'spouse':'residue');
       }
       return;
     }
@@ -2960,7 +2963,7 @@ function buildAssets() {
       card.appendChild(cgtBox);
     } else if(accruesToSpouse(p.deathBenType||'Estate')){
       var rollBox=div(); rollBox.style.cssText='margin-top:8px;padding:6px 10px;border-radius:6px;background:#f0fdf4;border:1px solid #86efac;font-size:11px;color:#166534';
-      var _viaRes = (p.deathBenType||'Estate') !== 'Spouse';
+      var _viaRes = !isS4qSpouse(p.deathBenType||'Estate');
       rollBox.textContent = _viaRes
         ? '\u2713 Spouse rollover via residue \u2014 no CGT on death. CGT deferred until spouse disposes.'
         : '\u2713 Spouse rollover \u2014 no CGT on death. CGT deferred until spouse disposes.';
@@ -3053,7 +3056,7 @@ function buildAssets() {
       }
     } else if(accruesToSpouse(v.deathBenType||'Estate')){
       var vrollBox=div(); vrollBox.style.cssText='margin-top:8px;padding:6px 10px;border-radius:6px;background:#f0fdf4;border:1px solid #86efac;font-size:11px;color:#166534';
-      var _vViaRes = (v.deathBenType||'Estate') !== 'Spouse';
+      var _vViaRes = !isS4qSpouse(v.deathBenType||'Estate');
       vrollBox.textContent = _vViaRes
         ? '\u2713 Spouse rollover via residue \u2014 no CGT on death.'
         : '\u2713 Spouse rollover \u2014 no CGT on death.';
@@ -3264,7 +3267,7 @@ function buildAssets() {
       }
     } else if(isCGTPreview && accruesToSpouse(a.deathBenType||'Estate')){
       var arb=div(); arb.style.cssText='margin-top:8px;padding:6px 10px;border-radius:6px;background:#f0fdf4;border:1px solid #86efac;font-size:11px;color:#166534';
-      var _aViaRes = (a.deathBenType||'Estate') !== 'Spouse';
+      var _aViaRes = !isS4qSpouse(a.deathBenType||'Estate');
       arb.textContent = _aViaRes
         ? '\u2713 Spouse rollover via residue \u2014 no CGT on death.'
         : '\u2713 Spouse rollover \u2014 no CGT on death.';
@@ -3437,7 +3440,7 @@ function buildIncomeNeedRow(parent, r, i, arrayKey) {
     // treatment so the adviser is reminded which categories qualify for 4(q).
     var _needIncOpts = [
       {v:'Spouse',l:'Spouse — 4(q) abatement'},
-      {v:'Life Partner',l:'Life Partner — no 4(q)'},
+      {v:'Life Partner',l:'Life Partner — 4(q) abatement'},
       {v:'Child',l:'Child'},
       {v:'Parent',l:'Parent'},
       {v:'Dependant',l:'Dependant'},
@@ -3699,7 +3702,7 @@ function buildNeeds() {
       var bsel=document.createElement('select');
       var _needCapOpts = [
         {v:'Spouse',l:'Spouse — 4(q) abatement'},
-        {v:'Life Partner',l:'Life Partner — no 4(q)'},
+        {v:'Life Partner',l:'Life Partner — 4(q) abatement'},
         {v:'Child',l:'Child'},
         {v:'Parent',l:'Parent'},
         {v:'Dependant',l:'Dependant'},
@@ -5611,9 +5614,9 @@ function buildPolCard(p, i) {
     if(isCGTInv){
       var isOnceOff2 = (p.Frequency === 'Once Off');
       var polBaseCost2 = isOnceOff2 ? N(p.Premium) : N(p.LumpSumPremium);
-      if(N(p.BenFundValue)>0 && polBaseCost2>0 && (p.BeneficiaryType||'')==='Spouse'){
+      if(N(p.BenFundValue)>0 && polBaseCost2>0 && isS4qSpouse(p.BeneficiaryType||'')){
         var invRollBox=div(); invRollBox.style.cssText='font-size:11px;padding:6px 10px;margin-top:4px;border-radius:6px;background:#f0fdf4;border:1px solid #86efac;color:#166534';
-        invRollBox.textContent='✓ Spouse beneficiary — CGT deferred on death (rollover applies).';
+        invRollBox.textContent='✓ Spousal rollover (para 67) — CGT deferred on death; base cost carries to the surviving '+((p.BeneficiaryType||'')==='Life Partner'?'life partner':'spouse')+'.';
         card.appendChild(invRollBox);
       } else if(N(p.BenFundValue)>0 && polBaseCost2>0){
         var invGain=Math.max(0, N(p.BenFundValue)-polBaseCost2);
@@ -6058,7 +6061,7 @@ function buildPolCard(p, i) {
         if (!p.BeneficiaryType && primaryBen.type) p.BeneficiaryType = primaryBen.type;
         if (!p.Beneficiary && primaryBen.name)     p.Beneficiary     = primaryBen.name;
         // Auto-set EstateDutiable from type if not set.
-        // Rule: only legally-married Spouse qualifies for s4(q) (EstateDutiable='No').
+        // Rule: 'Spouse' or 'Life Partner' beneficiary qualifies for s.4(q) (EstateDutiable='No').
         // Everything else — Life Partner, Child, Parent, Dependant, Trust, Other,
         // Estate, and the legacy "Third Party" tag — is dutiable. Either deemed
         // property under s3(3) (life policies paid to non-spouse), executor-pathed
@@ -6230,8 +6233,8 @@ function buildEstate() {
         category: 'Physical asset',
         amount: N(val),
         note: accruesToSpouse(bt)
-          ? (bt==='Spouse'
-              ? 'Included in gross estate; deducted later under s.4(q) as spouse bequest.'
+          ? (isS4qSpouse(bt)
+              ? 'Included in gross estate; deducted later under s.4(q) as bequest to '+(bt==='Life Partner'?'life partner':'spouse')+'.'
               : 'Included in gross estate; flows to spouse via residue \u2014 deducted under s.4(q).')
           : ((bt||'Estate')==='Estate'
               ? 'Included in gross estate as a physical estate asset.'
@@ -6362,15 +6365,15 @@ function buildEstate() {
     }
     var ben = policyDeathProceeds(p);
     if(!ben) return;
-    if(bt==='Spouse'){
+    if(isS4qSpouse(bt)){
       s4qPolicies+=ben;
       grossEstateItems.push({
         component: (p.Insurer||'Policy') + (p.Product ? ' \u2014 ' + p.Product : ''),
-        category: 'Policy to spouse',
+        category: 'Policy to '+(bt==='Life Partner'?'life partner':'spouse'),
         amount: ben,
         note: 'Included in gross estate, then deducted under s.4(q).'
       });
-      polRow(p.Insurer,p.Product,p.Beneficiary||'Spouse','Spouse',ben,'s.4(q) \u2014 not dutiable','#16a34a');
+      polRow(p.Insurer,p.Product,p.Beneficiary||bt,bt,ben,'s.4(q) \u2014 not dutiable','#16a34a');
     } else if(bt==='Estate'){
       estatePols+=ben;
       var routeViaResidue = accruesToSpouse('Estate');
@@ -6978,7 +6981,7 @@ function buildEstate() {
 
   // Spouse s.4(q) policies
   if(s4qPolicies>0||s4qAssets>0||s4qEstateViaResidue>0){
-    var spouseList=pols.filter(function(p){return(p.BeneficiaryType||'')==='Spouse'&&N(p.BenDeath)>0&&p.Type!=='Business Assurance';});
+    var spouseList=pols.filter(function(p){return isS4qSpouse(p.BeneficiaryType||'')&&N(p.BenDeath)>0&&p.Type!=='Business Assurance';});
     var spouseNote=spouseList.map(function(p){return(p.Insurer||'')+(p.Product?' \u2014 '+p.Product:'')+': '+Rfmt(p.BenDeath);}).join(' \u00b7 ');
     if(s4qEstateViaResidue>0){
       spouseNote = (spouseNote?spouseNote+' \u00b7 ':'')+'Estate policies via residue: '+Rfmt(s4qEstateViaResidue);
@@ -7210,7 +7213,7 @@ function buildSummary() {
   (S.deathIncome||[]).forEach(function(r){
     var c = calcIncomeNeed(r); if(!c) return;
     var bt = r.benTo || 'Spouse';
-    if(bt==='Spouse') spouseIncCap += c;
+    if(isS4qSpouse(bt)) spouseIncCap += c;
     else if(bt==='Estate') estateIncCap += c;
     else {
       // Any non-Spouse, non-Estate type — group by name for per-beneficiary view.
@@ -7222,7 +7225,7 @@ function buildSummary() {
   (S.deathCapital||[]).forEach(function(r){
     var amt = N(r.amt); if(!amt) return;
     var bt = r.benTo || 'Spouse';
-    if(bt==='Spouse') spouseIncCap += amt;
+    if(isS4qSpouse(bt)) spouseIncCap += amt;
     else if(bt==='Estate') estateIncCap += amt;
     else {
       // Any non-Spouse, non-Estate type (Life Partner, Child, Parent, Dependant,
