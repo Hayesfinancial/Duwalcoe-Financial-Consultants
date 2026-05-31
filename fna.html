@@ -807,6 +807,12 @@ var DEFAULTS = {
   // Policies imported from CRM via URL
   importedPols: [],
 
+  // Family / dependants pulled live from the CRM (familylinks table). Source
+  // for the Needs-tab beneficiary-name dropdowns so names are picked, not typed
+  // (the CRM is the single source of truth). Refreshed on open and on ↻ CRM;
+  // also persisted so the dropdowns still work before the live fetch resolves.
+  crmFamily: [],
+
   // Estate planning — dutiable asset overrides (keyed by desc)
   estateAssets: [],
   estateNotes: ''
@@ -977,7 +983,9 @@ function queueSmartSave() {
     var doSilentLiveFetch = function() {
       fetchLiveClientFromCRM({showStatus: false}, function(){
         fetchLivePoliciesFromCRM({showStatus: false}, function(){
-          persist(); render();
+          fetchLiveFamilyFromCRM({showStatus: false}, function(){
+            persist(); render();
+          });
         });
       });
     };
@@ -1666,6 +1674,32 @@ function fetchLivePoliciesFromCRM(opts, onDone) {
   });
 }
 
+// Pull the client's family / dependants live from the CRM (familylinks table).
+// Names feed the Needs-tab beneficiary-name dropdowns so the adviser picks an
+// existing name rather than retyping it (the CRM is the source of truth). The
+// spouse is added separately from S.cli.spouseName in crmBenNamePool(), so this
+// fetch only needs Name + Type for the linked members. Failure is non-fatal —
+// the dropdowns fall back to the last-known list persisted in S.crmFamily.
+function fetchLiveFamilyFromCRM(opts, onDone) {
+  opts = opts || {};
+  var crmClientId = (window._crmParams && window._crmParams.get('cid'))
+                    || window._crmInternalId || '';
+  if (!crmClientId) { if (onDone) onDone(false, 'no_cid'); return; }
+  var path = '/rest/v1/familylinks'
+           + '?PrincipalID=eq.' + encodeURIComponent(crmClientId)
+           + '&select=Name,Type';
+  sbFetch('GET', path, null, function(rows, err){
+    if (err || !Array.isArray(rows)) {
+      if (onDone) onDone(false, err || 'bad_response');
+      return;
+    }
+    S.crmFamily = rows
+      .map(function(r){ return { Name: (r.Name||''), Type: (r.Type||'') }; })
+      .filter(function(r){ return r.Name && String(r.Name).trim(); });
+    if (onDone) onDone(true, rows);
+  });
+}
+
 // Called by the "Refresh from CRM" button — pulls live data from Supabase for
 // both client demographics (income, marital, spouse, etc.) and active policies.
 // URL params captured at FNA-open are intentionally NOT used: they are stale
@@ -1683,17 +1717,20 @@ function refreshFromCRM() {
   status('\u2193 Fetching policies from CRM...');
 
   fetchLivePoliciesFromCRM({showStatus: false}, function(polsOk, polsInfoOrErr){
-    // Reset retirement assets so they re-seed from the current policy list
-    S.retAssets = [];
-    persist();
-    render();
+    // Also refresh the family/dependant list (feeds the Needs-tab name pickers).
+    fetchLiveFamilyFromCRM({showStatus: false}, function(){
+      // Reset retirement assets so they re-seed from the current policy list
+      S.retAssets = [];
+      persist();
+      render();
 
-    if (polsOk) {
-      var n = Array.isArray(polsInfoOrErr) ? polsInfoOrErr.length : 0;
-      status('\u2713 Refreshed policies from CRM (' + n + ' active ' + (n===1?'policy':'policies') + ')');
-    } else {
-      status('\u26A0 Could not fetch policies from CRM');
-    }
+      if (polsOk) {
+        var n = Array.isArray(polsInfoOrErr) ? polsInfoOrErr.length : 0;
+        status('\u2713 Refreshed policies from CRM (' + n + ' active ' + (n===1?'policy':'policies') + ')');
+      } else {
+        status('\u26A0 Could not fetch policies from CRM');
+      }
+    });
   });
 }
 
@@ -3382,6 +3419,92 @@ function buildAssets() {
 // ═══════════════════════════════════════════════════════════
 
 // ── Income Need helpers — global, used by buildNeeds, buildSummary, printFNA
+// Build the deduped pool of beneficiary names known to the CRM for this client:
+// the spouse/partner (from the client record) plus every linked family member /
+// dependant (from the CRM familylinks table, fetched live into S.crmFamily).
+// Case-insensitive dedupe; first spelling seen wins. This is the source for the
+// Needs-tab name pickers so names are chosen, never retyped.
+function crmBenNamePool() {
+  var pool = [], seen = {};
+  function add(nm, ty) {
+    nm = (nm == null ? '' : String(nm)).trim();
+    if (!nm) return;
+    var k = nm.toLowerCase();
+    if (seen[k]) return;
+    seen[k] = true;
+    pool.push({ name: nm, type: ty || '' });
+  }
+  if (S.cli && S.cli.spouseName) add(S.cli.spouseName, 'Spouse');
+  (S.crmFamily || []).forEach(function(m){ add(m.Name || m.name, m.Type || m.type); });
+  return pool;
+}
+
+// Build the "Beneficiary name" field for a Needs row. Person-type nominations
+// (Spouse, Life Partner, Child, Parent, Dependant, Other, legacy Third Party)
+// get a dropdown sourced from the CRM family list — picked, not typed, so the
+// gap analysis (which buckets by name) never splits on a misspelling. Trust
+// keeps a free-text field (a trust is not a family member). Estate and unset
+// types have no named beneficiary. Returns a field element, or null when no
+// name field applies. `setName(value)` writes the chosen name back to state.
+function needBenNameField(benTo, currentName, setName) {
+  benTo = benTo || '';
+  if (benTo === 'Estate' || benTo === '') return null;
+
+  var wrap = div('f');
+  wrap.appendChild(el('label', '', 'Beneficiary name'));
+
+  // Trust → free text (trust deed name, not a CRM family member).
+  if (benTo === 'Trust') {
+    var ti = document.createElement('input');
+    ti.type = 'text';
+    ti.value = currentName || '';
+    ti.placeholder = 'Trust name';
+    ti.addEventListener('input', function(e){ setName(e.target.value); });
+    wrap.appendChild(ti);
+    return wrap;
+  }
+
+  // Person types → dropdown of CRM family names.
+  var pool = crmBenNamePool();
+  var cur = (currentName || '').trim();
+  var sel = document.createElement('select');
+
+  var ph = document.createElement('option');
+  ph.value = '';
+  ph.textContent = pool.length ? '— select from CRM —' : '— no family on CRM —';
+  sel.appendChild(ph);
+
+  var inPool = false;
+  pool.forEach(function(m){
+    var o = document.createElement('option');
+    o.value = m.name;
+    o.textContent = m.type ? (m.name + ' — ' + m.type) : m.name;
+    if (m.name.toLowerCase() === cur.toLowerCase()) { o.selected = true; inPool = true; }
+    sel.appendChild(o);
+  });
+
+  // Preserve an existing name that isn't on the CRM — never silently drop it,
+  // but flag it so the adviser can reconcile (add the person in the CRM).
+  if (cur && !inPool) {
+    var oc = document.createElement('option');
+    oc.value = cur;
+    oc.textContent = cur + ' (not on CRM)';
+    oc.selected = true;
+    sel.appendChild(oc);
+  }
+
+  sel.addEventListener('change', function(e){ setName(e.target.value); render(); });
+  wrap.appendChild(sel);
+
+  if (!pool.length) {
+    var hint = document.createElement('div');
+    hint.textContent = 'No family on the CRM yet — add the person in the CRM (Family / Dependants), then click ↻ CRM.';
+    hint.style.cssText = 'font-size:10px;color:#92400e;margin-top:4px;line-height:1.3';
+    wrap.appendChild(hint);
+  }
+  return wrap;
+}
+
 function calcIncomeNeed(r) {
   var gross = N(r.grossPM) || grossFromNett(r.nettPM);
   if (!gross) return 0;
@@ -3456,24 +3579,17 @@ function buildIncomeNeedRow(parent, r, i, arrayKey) {
     });
     bsel.addEventListener('change', function(e){
       S[arrayKey][i].benTo = e.target.value;
-      // Clear free-text name when the type goes back to a "well-known" category
-      // (Spouse uses the spouse from Client tab; Estate has no named beneficiary).
-      // Keep name for Life Partner / Child / Parent / Dependant / Trust / Other / Third Party.
-      if (e.target.value === 'Spouse' || e.target.value === 'Estate') S[arrayKey][i].benName = '';
+      // Only Estate has no named beneficiary — clear the name there. Spouse,
+      // Life Partner, Child, Parent, Dependant, Trust and Other all keep a name.
+      if (e.target.value === 'Estate') S[arrayKey][i].benName = '';
       render();
     });
     bf.appendChild(bsel); benRow.appendChild(bf);
 
-    // Beneficiary name — shown for any type where a specific person/entity is named
-    var _showName = !(r.benTo === 'Spouse' || r.benTo === 'Estate' || !r.benTo);
-    if (_showName) {
-      var nmf = div('f'); nmf.appendChild(el('label','','Beneficiary name'));
-      var nmi = document.createElement('input'); nmi.type='text'; nmi.value = r.benName || '';
-      nmi.addEventListener('input', function(e){ S[arrayKey][i].benName = e.target.value; });
-      nmf.appendChild(nmi); benRow.appendChild(nmf);
-    } else {
-      benRow.appendChild(div());
-    }
+    // Beneficiary name — CRM-sourced dropdown for person types; free text for
+    // Trust; nothing for Estate/unset (handled inside needBenNameField).
+    var _nmf = needBenNameField(r.benTo, r.benName, function(v){ S[arrayKey][i].benName = v; });
+    benRow.appendChild(_nmf || div());
     benRow.appendChild(div()); // spacer column
     card.appendChild(benRow);
   }
@@ -3718,19 +3834,13 @@ function buildNeeds() {
       });
       bsel.addEventListener('change',function(e){
         S.deathCapital[i].benTo=e.target.value;
-        if(e.target.value==='Spouse' || e.target.value==='Estate') S.deathCapital[i].benName='';
+        // Only Estate has no named beneficiary — clear there; keep for the rest.
+        if(e.target.value==='Estate') S.deathCapital[i].benName='';
         render();
       });
       bf.appendChild(bsel); benRow.appendChild(bf);
-      var _showNameC = !(r.benTo === 'Spouse' || r.benTo === 'Estate' || !r.benTo);
-      if(_showNameC){
-        var nmf=div('f'); nmf.appendChild(el('label','','Beneficiary name'));
-        var nmi=document.createElement('input'); nmi.type='text'; nmi.value=r.benName||'';
-        nmi.addEventListener('input',function(e){ S.deathCapital[i].benName=e.target.value; });
-        nmf.appendChild(nmi); benRow.appendChild(nmf);
-      } else {
-        benRow.appendChild(div());
-      }
+      var _nmfC = needBenNameField(r.benTo, r.benName, function(v){ S.deathCapital[i].benName = v; });
+      benRow.appendChild(_nmfC || div());
       benRow.appendChild(div());
       card.appendChild(benRow);
       s.appendChild(card);
