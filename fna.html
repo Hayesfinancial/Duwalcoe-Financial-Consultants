@@ -6169,33 +6169,65 @@ function buildPolCard(p, i) {
   benSt.style.marginTop = '10px';
   card.appendChild(benSt);
 
-  var btr = div();
-  btr.style.cssText = 'display:grid;grid-template-columns:2fr 1fr 1fr;gap:14px;margin-bottom:10px';
-
-  // Beneficiary name (read-only — CRM is source of truth)
-  btr.appendChild(roDisp('Beneficiary Name', p.Beneficiary));
-
-  // BeneficiaryType (read-only display with colour indicator)
-  var btDispWrap = div('f');
-  btDispWrap.appendChild(el('label','','Beneficiary Type'));
-  var btDispBox = document.createElement('div');
-  var _btVal = p.BeneficiaryType || '';
-  // Palette handles all 8 new types (Spouse, Life Partner, Child, Parent,
-  // Dependant, Trust, Estate, Other) plus the legacy "Third Party" tag.
-  var _btPal = benTypePalette(_btVal);
-  var _btColour = _btPal.fg;
-  var _btBg = _btPal.bg;
-  if (_btVal) {
-    btDispBox.textContent = _btVal;
-    btDispBox.style.cssText = 'border:1.5px solid var(--mist);border-radius:6px;padding:7px 10px;font-size:13px;font-weight:700;background:'+_btBg+';color:'+_btColour+';min-height:20px;line-height:20px';
-  } else {
-    btDispBox.textContent = '— from CRM —';
-    btDispBox.style.cssText = 'border:1.5px dashed var(--mist);border-radius:6px;padding:7px 10px;font-size:13px;background:transparent;color:#9a9a8a;font-style:italic;min-height:20px;line-height:20px';
+  // ── Beneficiaries list (read-only — CRM is source of truth) ───────────
+  // Show EVERY nominated beneficiary with its split %, not just the primary.
+  // A split nomination (e.g. 50% Life Partner / 50% Child on a retirement
+  // annuity) must surface in full — collapsing to the first row hid the
+  // remaining beneficiaries. Falls back to the legacy flat Beneficiary /
+  // BeneficiaryType fields for old policies saved before the array existed.
+  var _allBens = [];
+  try { _allBens = p.Beneficiaries ? JSON.parse(p.Beneficiaries) : []; } catch(e) { _allBens = []; }
+  if (!Array.isArray(_allBens)) _allBens = [];
+  _allBens = _allBens.filter(function(b){ return b && b.name && String(b.name).trim(); });
+  if (_allBens.length === 0 && (p.Beneficiary || p.BeneficiaryType)) {
+    _allBens = [{ name: p.Beneficiary || '', type: p.BeneficiaryType || '', pct: '' }];
   }
-  btDispWrap.appendChild(btDispBox);
-  btr.appendChild(btDispWrap);
 
-  // EstateDutiable (read-only display with colour indicator)
+  var benListWrap = div('f');
+  benListWrap.appendChild(el('label','','Beneficiaries'));
+  var benListBox = document.createElement('div');
+  benListBox.style.cssText = 'border:1.5px solid var(--mist);border-radius:6px;padding:7px 9px;background:#fafaf6;display:flex;flex-direction:column;gap:7px;min-height:20px';
+  if (_allBens.length === 0) {
+    var emptyB = document.createElement('div');
+    emptyB.textContent = '— from CRM —';
+    emptyB.style.cssText = 'font-size:13px;color:#9a9a8a;font-style:italic';
+    benListBox.appendChild(emptyB);
+  } else {
+    _allBens.forEach(function(b){
+      var rowB = document.createElement('div');
+      rowB.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap';
+      var nm = document.createElement('span');
+      nm.textContent = (b.name||'').trim() || '— no name —';
+      nm.style.cssText = 'font-size:13px;color:#1a1a1a;font-weight:600;min-width:120px';
+      rowB.appendChild(nm);
+      // Type chip — same palette used elsewhere on the card.
+      var _pPal = benTypePalette(b.type||'');
+      var chip = document.createElement('span');
+      chip.textContent = (b.type||'').trim() || '— no type —';
+      chip.style.cssText = 'display:inline-block;padding:2px 8px;font-size:11px;font-weight:700;border-radius:5px;background:'+_pPal.bg+';color:'+_pPal.fg+';border:1px solid '+_pPal.fg+'33';
+      rowB.appendChild(chip);
+      // Split percentage (right-aligned). Blank pct shows a dash.
+      var pctTxt = String(b.pct==null?'':b.pct).trim().replace(/%$/,'');
+      var pctSpan = document.createElement('span');
+      pctSpan.textContent = pctTxt ? (pctTxt + '%') : '—';
+      pctSpan.style.cssText = 'font-size:12px;font-weight:700;color:var(--navy);margin-left:auto';
+      rowB.appendChild(pctSpan);
+      benListBox.appendChild(rowB);
+    });
+    // Split sanity check — only when 2+ beneficiaries carry percentages.
+    if (_allBens.length > 1) {
+      var _pctTot = _allBens.reduce(function(a,b){ return a + N(b.pct); }, 0);
+      if (_pctTot > 0 && Math.round(_pctTot) !== 100) {
+        var warnB = document.createElement('div');
+        warnB.textContent = '⚠ Split totals '+Math.round(_pctTot)+'% (expected 100%) — check the nomination in the CRM.';
+        warnB.style.cssText = 'font-size:10px;color:#92400e;background:#fffbeb;border:1px solid #fcd34d;border-radius:4px;padding:3px 6px';
+        benListBox.appendChild(warnB);
+      }
+    }
+  }
+  benListWrap.appendChild(benListBox);
+
+  // EstateDutiable (read-only display with colour indicator) — policy-level
   var edDispWrap = div('f');
   edDispWrap.appendChild(el('label','','Estate Dutiable'));
   var edDispBox = document.createElement('div');
@@ -6209,6 +6241,11 @@ function buildPolCard(p, i) {
     edDispBox.style.cssText = 'border:1.5px dashed var(--mist);border-radius:6px;padding:7px 10px;font-size:13px;background:transparent;color:#9a9a8a;font-style:italic;min-height:20px;line-height:20px';
   }
   edDispWrap.appendChild(edDispBox);
+
+  // Layout: full beneficiaries list beside the policy-level Estate Dutiable box.
+  var btr = div();
+  btr.style.cssText = 'display:grid;grid-template-columns:2fr 1fr;gap:14px;margin-bottom:10px;align-items:start';
+  btr.appendChild(benListWrap);
   btr.appendChild(edDispWrap);
   card.appendChild(btr);
 
