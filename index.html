@@ -1894,7 +1894,7 @@ function renderPolicies(c,pols){
       // CRM and the printed schedule are always visually consistent. Order here
       // is also the display order in the policies card.
       var raTypes=['Retirement Annuity','Pension Fund','Provident Fund','Pension Preservation','Provident Preservation','Living Annuity','Life Annuity'];
-      var invTypes=['Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment','Unit Trust','Tax Free Savings'];
+      var invTypes=['Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment','Unit Trust','Tax Free Savings','Guaranteed Endowment'];
       function catOf(p){
         var t=p.Type||'';
         if(t==='Business Assurance') return 'business';
@@ -4677,13 +4677,14 @@ function buildPolicyForm(p){
   var isInv=['Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment','Unit Trust','Tax Free Savings'].indexOf(type)>=0;
   var isLA=(type==='Living Annuity');
   var isLifeAnn=(type==='Life Annuity');
+  var isGuarEndow=(type==='Guaranteed Endowment');
   var isMed=type==='Medical Aid';
   var isBiz=type==='Business Assurance';
   // _isOnceOff defined here so it's available in ALL sections below
   var _freq=p.Frequency||'Monthly';
   var _isOnceOff=_freq==='Once Off'||_freq==='Paid Up';
 
-  var typeOpts=['Life / Income Protector','Business Assurance','Retirement Annuity','Pension Fund','Provident Fund','Pension Preservation','Provident Preservation','Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment','Unit Trust','Tax Free Savings','Living Annuity','Life Annuity','Medical Aid','Other'];
+  var typeOpts=['Life / Income Protector','Business Assurance','Retirement Annuity','Pension Fund','Provident Fund','Pension Preservation','Provident Preservation','Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment','Unit Trust','Tax Free Savings','Guaranteed Endowment','Living Annuity','Life Annuity','Medical Aid','Other'];
 
   var html='<div style="display:flex;flex-direction:column;gap:0">';
 
@@ -4820,7 +4821,7 @@ function buildPolicyForm(p){
         _fOpts.map(function(o){return '<option value="'+o+'"'+(_fv===o?' selected':'')+'>'+o+'</option>';}).join('')+
         '</select></div>';
     })()+'</div>';
-    if(!isLA && !isLifeAnn){
+    if(!isLA && !isLifeAnn && !isGuarEndow){
       html+='<div id="pEscRow" class="g2"'+(_isOnceOff?' style="display:none"':'')+'>'
         +fld('pprem_pct','Premium Escalation %',p.PremEscalation,'text',isInv?'oninput="invCalcMaturity()"':'')
         +((isRA||isInv)?'<div></div>':fld('pben_pct','Benefit Escalation %',p.BenEscalation))
@@ -5105,6 +5106,39 @@ function buildPolicyForm(p){
     html+='<div class="g2">'+fld('pb_lifann_inc','Guaranteed Monthly Income',p.BenLifeAnnuityIncome)+fld('pben_pct','Annual Income Escalation %',p.BenEscalation)+'</div>';
     html+='<div class="g2">'+fld('pb_lifann_guaryrs','Guaranteed Term (years — 0 if none)',p.LifeAnnuityGuarYrs)+'<div></div>'+'</div>';
     html+='<div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:7px;padding:8px 12px;font-size:12px;color:#1e40af;margin-top:6px">ℹ <strong>Life Annuity:</strong> No fund value and no CGT. No estate duty unless a guarantee period applies. Income is fully taxable (PAYE). Once-off purchase — not a recurring premium.</div>';
+  }
+
+  // GUARANTEED ENDOWMENT (e.g. Fedgroup Secured Investment)
+  // A fixed-term, fixed-rate discretionary investment. The capital grows to a
+  // known maturity value; an OPTIONAL fixed monthly income is paid out over the
+  // term. The mechanics are identical whether or not it pays an income — the
+  // "Pays a regular income?" toggle just reveals the income field. Field IDs are
+  // shared with the investment/annuity cards so collectPolicyForm picks them up:
+  //   pb_totalinv → TotalInvested (amount invested)
+  //   pb_fv       → BenFundValue (value now)
+  //   pb_growrate → GrowthRate (fixed rate)
+  //   pb_matdate  → MaturityDate
+  //   pb_matval   → BenMaturityValue (value at maturity)
+  //   pb_la_income→ BenLAIncome (monthly income, income variant only)
+  //   ppaysincome → PaysIncome (new flag column)
+  if(isGuarEndow){
+    html+=sec('Guaranteed Endowment — Investment & Maturity');
+    html+='<div style="font-size:11px;color:#889;margin-bottom:8px">Fixed-term, fixed-rate discretionary investment. The maturity value is the figure quoted by the provider — enter it directly rather than projecting it.</div>';
+    html+='<div class="g2">'+fld('pb_totalinv','Amount Invested',p.TotalInvested)+fld('pb_fv','Value Now',p.BenFundValue)+'</div>';
+    html+='<div class="g2">'
+      +'<div class="fld"><label>Interest / Growth Rate %</label><div style="position:relative"><input id="pb_growrate" type="text" value="'+(p.GrowthRate||p.PremGrowthRate||p.IllustrativeRate||'')+'" placeholder="e.g. 10.1" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 28px 8px 10px;font-family:inherit;font-size:13px"><span style="position:absolute;right:10px;top:50%;transform:translateY(-50%);color:#889;font-size:11px;pointer-events:none">%</span></div></div>'
+      +fdp('pb_matdate','Maturity Date',p.MaturityDate||'')
+      +'</div>';
+    html+='<div class="g2">'+fld('pb_matval','Value at Maturity',p.BenMaturityValue)+'<div></div></div>';
+    // Income toggle — reveals the monthly income field when set to Yes.
+    html+='<div class="fld" style="margin-top:4px"><label>Pays a regular income?</label><div style="display:flex;gap:12px;margin-top:6px">';
+    html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="ppaysincome" value="Yes"'+(p.PaysIncome==='Yes'?' checked':'')+' onchange="document.getElementById(\'geIncomeWrap\').style.display=this.value===\'Yes\'?\'block\':\'none\'">Yes</label>';
+    html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="ppaysincome" value="No"'+(p.PaysIncome!=='Yes'?' checked':'')+' onchange="document.getElementById(\'geIncomeWrap\').style.display=this.value===\'Yes\'?\'block\':\'none\'">No</label>';
+    html+='</div></div>';
+    html+='<div id="geIncomeWrap" style="margin-top:8px;display:'+(p.PaysIncome==='Yes'?'block':'none')+'">';
+    html+='<div class="g2">'+fld('pb_la_income','Monthly Income Paid',p.BenLAIncome)+'<div></div></div>';
+    html+='</div>';
+    html+='<div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:7px;padding:8px 12px;font-size:12px;color:#1e40af;margin-top:10px">ℹ <strong>Guaranteed Endowment:</strong> Discretionary investment — the capital sits in the estate and the maturity value is fixed by the provider. When it pays an income, the monthly amount is drawn over the term.</div>';
   }
 
   // MEDICAL
@@ -6109,6 +6143,7 @@ function collectPolicyForm(){
     IllustrativeRate:g('pb_growrate')||g('pb_illrate'),PremGrowthRate:g('pb_growrate'),GrowthRate:g('pb_growrate'),
     TotalInvested:g('pb_totalinv'),TotalWithdrawn:g('pb_totalwith'),
     WithdrawSavingsPot:getR('p3pot'),IncludeInRetirement:getR('pinret'),ContinuePastMaturity:getR('pcontmat'),
+    PaysIncome:getR('ppaysincome'),
     MedPlan:g('pmedplan'),MedLives:g('pmedlives'),
     BenLAIncome:g('pb_la_income'),DrawdownRate:g('pb_la_drawdown'),LABonus:g('pb_la_bonus'),
     BenLifeAnnuityIncome:g('pb_lifann_inc'),LifeAnnuityGuarYrs:g('pb_lifann_guaryrs'),
