@@ -7441,7 +7441,20 @@ function buildSummary() {
   var afterS4q = Math.max(0, afterAccr - s4qDed);
   var dutiable = Math.max(0, afterS4q - ABATEMENT);
   var duty = dutiable <= DUTY_THRESH ? dutiable * DUTY_RATE1 : DUTY_THRESH * DUTY_RATE1 + (dutiable - DUTY_THRESH) * DUTY_RATE2;
-  var execFees = (physVal + estPols) * EXEC_RATE;
+  // Willed investments — investment policies routed to the estate but nominated to
+  // a person (the "can't carry a beneficiary, willed in the will" case). They fall
+  // into the estate, so they bear the executor fee here (previously omitted). Their
+  // net value passes to the named beneficiary in the structuring buckets below.
+  var willedInvBase = 0;
+  pols.forEach(function(p){
+    if(p.Type==='Business Assurance') return;
+    var _wt=p.Type||'';
+    if(!(POL_INV_TYPES.indexOf(_wt)>-1 || _wt==='Guaranteed Endowment')) return;
+    if(effectiveRouting(p)!=='Estate') return;
+    if(!isDutiableNonSpouse(p.BeneficiaryType||'')) return;
+    willedInvBase += policyDeathProceeds(p);
+  });
+  var execFees = (physVal + estPols + willedInvBase) * EXEC_RATE;
   function apDuty(v){ return (afterS4q>0 && duty>0) ? Math.round(duty * (v / afterS4q)) : 0; }
   // Estate's share of duty = physical actually retained (gross minus spouse-accruing
   // minus third-party-bequeathed) + estate policies that aren't residue-routed to spouse.
@@ -7535,6 +7548,24 @@ function buildSummary() {
     if(!tpByName[_nm]) tpByName[_nm]={incCap:0, polCover:0};
     tpByName[_nm].invDirect = (tpByName[_nm].invDirect||0) + _amt;
   });
+  // Willed (estate-routed) investments → NET value to the named beneficiary:
+  // fund value − their apportioned estate duty. Clean of executor fee (the estate
+  // carries it, from residue, per the rule — and willedInvBase added it to execFees
+  // above). CGT on death is already carried as an estate cost (cgt), so it is NOT
+  // deducted again here; a recurring investment (base cost unknown) is flagged.
+  pols.forEach(function(p){
+    if(p.Type==='Business Assurance') return;
+    var _wt=p.Type||'';
+    if(!(POL_INV_TYPES.indexOf(_wt)>-1 || _wt==='Guaranteed Endowment')) return;
+    if(effectiveRouting(p)!=='Estate') return;
+    if(!isDutiableNonSpouse(p.BeneficiaryType||'')) return;
+    var _fv = policyDeathProceeds(p); if(!_fv) return;
+    var _nm = (p.Beneficiary||'').trim() || 'Unnamed third party';
+    var _net = Math.max(0, _fv - apDuty(_fv));
+    if(!tpByName[_nm]) tpByName[_nm]={incCap:0, polCover:0};
+    tpByName[_nm].invWilled = (tpByName[_nm].invWilled||0) + _net;
+    if((p.Frequency||'')!=='Once Off') tpByName[_nm].invWilledCGTNote = true; // recurring → base cost from provider
+  });
   // Sold, bequeathed properties named to a third party. Net cash to that person =
   // sale value − selling costs − bond − their apportioned estate duty. The bond
   // always stays in the estate's need, but the sale proceeds settle it, so it
@@ -7566,7 +7597,7 @@ function buildSummary() {
   var tpTotalGap = 0;
   Object.keys(tpByName).forEach(function(nm){
     var _tt=tpByName[nm];
-    tpTotalGap += Math.max(0, _tt.incCap - _tt.polCover - (_tt.invDirect||0) - (_tt.assetSold||0));
+    tpTotalGap += Math.max(0, _tt.incCap - _tt.polCover - (_tt.invDirect||0) - (_tt.assetSold||0) - (_tt.invWilled||0));
   });
   var newCoverToSell = estPayGap + spouseGap + tpTotalGap;
 
@@ -7715,14 +7746,16 @@ function buildSummary() {
     // Third-party sections (one per named beneficiary)
     Object.keys(tpByName).forEach(function(nm){
       var t = tpByName[nm];
-      var _inv=(t.invDirect||0), _ast=(t.assetSold||0);
-      if(t.incCap===0 && t.polCover===0 && _inv===0 && _ast===0) return;
-      var tpGap = Math.max(0, t.incCap - t.polCover - _inv - _ast);
+      var _inv=(t.invDirect||0), _ast=(t.assetSold||0), _wil=(t.invWilled||0);
+      if(t.incCap===0 && t.polCover===0 && _inv===0 && _ast===0 && _wil===0) return;
+      var tpGap = Math.max(0, t.incCap - t.polCover - _inv - _ast - _wil);
       addLine(strBox,'\u00a0','');
       addLine(strBox,'THIRD PARTY \u2014 '+nm.toUpperCase(),'',true);
       if(t.incCap>0)   addLine(strBox,'Need (capital + capitalised income)',Rfmt(t.incCap));
       if(t.polCover>0) addLine(strBox,'Less: existing cover','('+Rfmt(t.polCover)+')');
       if(_inv>0)       addLine(strBox,'Less: investment — pays nominee directly','('+Rfmt(_inv)+')');
+      if(_wil>0)       addLine(strBox,'Less: investment — willed via estate (net of duty)','('+Rfmt(_wil)+')');
+      if(_wil>0 && t.invWilledCGTNote) addLine(strBox,'   ⚠ CGT not included — base cost to be obtained from provider','');
       if(_ast>0)       addLine(strBox,'Less: property sold at death (net)','('+Rfmt(_ast)+')');
       addLine(strBox,'New '+nm+' cover to advise on',Rfmt(tpGap),true,tpGap>0?'#b91c1c':'#166534');
     });
