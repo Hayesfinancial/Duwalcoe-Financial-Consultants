@@ -278,6 +278,16 @@ function policyDeathProceeds(p) {
   if (p && POL_INV_TYPES.indexOf(p.Type) > -1) return N(p.BenFundValue);
   return 0;
 }
+// Estate routing for an investment policy's death proceeds. Mirrors the CRM
+// policy-card default exactly: Flexible / Offshore Flexible / Unit Trust / TFS
+// fall into the estate; everything else (endowment, offshore endowment,
+// guaranteed endowment, living annuity, etc.) pays the nominee directly. An
+// explicit EstateRouting value captured on the policy card overrides the default.
+function effectiveRouting(p){
+  if(p && p.EstateRouting) return p.EstateRouting;
+  var t = (p && p.Type) || '';
+  return (['Flexible Investment','Offshore Flexible Investment','Unit Trust','Tax Free Savings'].indexOf(t) > -1) ? 'Estate' : 'Direct';
+}
 // Anything that routes through the deceased estate (executor fees, dutiable
 // as estate property). Trust is treated case-by-case — defaults to false here
 // because a properly-structured trust nomination is paid outside the estate.
@@ -2906,6 +2916,18 @@ function buildAssets() {
     // a specific person so the Advice Board can net it against that person's need.
     var _propBenNm = needBenNameField(p.deathBenType||'Estate', p.benName, function(v){ S.props[i].benName=v; });
     if(_propBenNm){ _propBenNm.style.minWidth='160px'; r3.appendChild(_propBenNm); }
+    // Selling costs % — only relevant when the property is sold at death; applied
+    // to the gross sale value (agent commission etc. is charged on the sale price).
+    // Default 6% when blank; editable per property.
+    if(p.soldAtDeath){
+      var scFld=div('f'); scFld.style.cssText='display:flex;flex-direction:column;gap:4px;min-width:120px';
+      scFld.appendChild(el('label','','Selling costs %'));
+      var scInp=document.createElement('input'); scInp.type='text'; scInp.inputMode='numeric';
+      scInp.value=(p.sellCostPct!==undefined && p.sellCostPct!=='')?p.sellCostPct:'6';
+      scInp.style.cssText='border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-size:12px;font-family:inherit';
+      scInp.addEventListener('input',function(e){S.props[i].sellCostPct=e.target.value;});
+      scFld.appendChild(scInp); r3.appendChild(scFld);
+    }
     card.appendChild(r3);
 
     // Row 4: Retirement-specific fields — depends on soldAtRetirement tick and rental
@@ -7488,16 +7510,54 @@ function buildSummary() {
     if(!tpByName[nm]) tpByName[nm] = {incCap:0, polCover:0};
     tpByName[nm].polCover += amt;
   });
+  // ── 2b (first cut): resources reaching a named third party — direct-pay
+  // investments + sold bequeathed properties. Willed investments, not-sold
+  // rental, vehicles/cash and the liquid-cash routing fix are the next cut and
+  // contribute zero until then (conservative — they can only over-state a gap).
+  pols.forEach(function(p){
+    if(p.Type==='Business Assurance') return;
+    var _pt=p.Type||'';
+    var _isDirectPayInv = (POL_INV_TYPES.indexOf(_pt)>-1 || _pt==='Guaranteed Endowment' || _pt==='Living Annuity'); // Life Annuity (term income) deferred
+    if(!_isDirectPayInv) return;
+    if(effectiveRouting(p)!=='Direct') return;            // willed-via-estate deferred to next cut
+    if(!isDutiableNonSpouse(p.BeneficiaryType||'')) return;
+    var _amt = N(p.BenFundValue) || N(p.BenDeath); if(!_amt) return;
+    var _nm = (p.Beneficiary||'').trim() || 'Unnamed third party';
+    if(!tpByName[_nm]) tpByName[_nm]={incCap:0, polCover:0};
+    tpByName[_nm].invDirect = (tpByName[_nm].invDirect||0) + _amt;
+  });
+  // Sold, bequeathed properties named to a third party. Net cash to that person =
+  // sale value − selling costs − bond − their apportioned estate duty. The bond
+  // always stays in the estate's need, but the sale proceeds settle it, so it
+  // stops demanding NEW cover — modelled by crediting the settled bond to estate
+  // liquidity (estPayHave) below.
+  var _soldBondToEstateLiq = 0;
+  (S.props||[]).forEach(function(pr){
+    if(!pr.soldAtDeath) return;
+    if(!isDutiableNonSpouse(pr.deathBenType||'Estate')) return;
+    var _nm = (pr.benName||'').trim() || 'Unnamed third party';
+    var _pv = N(pr.val); if(!_pv) return;
+    var _scp = (pr.sellCostPct!==undefined && pr.sellCostPct!=='') ? N(pr.sellCostPct) : 6;
+    var _proceeds = Math.max(0, _pv - _pv*_scp/100);
+    var _bnd = N(pr.bond);
+    var _herDuty = apDuty(Math.max(0, _pv - _bnd));   // duty assessed on net equity at death
+    var _herNet = Math.max(0, _proceeds - _bnd - _herDuty);
+    var _bondSettled = Math.max(0, Math.min(_proceeds, _bnd));
+    if(!tpByName[_nm]) tpByName[_nm]={incCap:0, polCover:0};
+    tpByName[_nm].assetSold = (tpByName[_nm].assetSold||0) + _herNet;
+    _soldBondToEstateLiq += _bondSettled;
+  });
   var estPayNeed = physLiab + manLiab + estateIncCap;
   if(S.scope.estate){ estPayNeed += cgt + estateDutyShare + Math.round(execFees) + Math.round(accrualDed); }
-  var estPayHave = estPols + liquidCash;
+  var estPayHave = estPols + liquidCash + _soldBondToEstateLiq;
   var estPayGap = Math.max(0, estPayNeed - estPayHave);
   var spouseNeed = spouseIncCap;
   var spouseHave = s4qPols;
   var spouseGap = Math.max(0, spouseNeed - spouseHave);
   var tpTotalGap = 0;
   Object.keys(tpByName).forEach(function(nm){
-    tpTotalGap += Math.max(0, tpByName[nm].incCap - tpByName[nm].polCover);
+    var _tt=tpByName[nm];
+    tpTotalGap += Math.max(0, _tt.incCap - _tt.polCover - (_tt.invDirect||0) - (_tt.assetSold||0));
   });
   var newCoverToSell = estPayGap + spouseGap + tpTotalGap;
 
@@ -7646,12 +7706,15 @@ function buildSummary() {
     // Third-party sections (one per named beneficiary)
     Object.keys(tpByName).forEach(function(nm){
       var t = tpByName[nm];
-      if(t.incCap===0 && t.polCover===0) return;
-      var tpGap = Math.max(0, t.incCap - t.polCover);
+      var _inv=(t.invDirect||0), _ast=(t.assetSold||0);
+      if(t.incCap===0 && t.polCover===0 && _inv===0 && _ast===0) return;
+      var tpGap = Math.max(0, t.incCap - t.polCover - _inv - _ast);
       addLine(strBox,'\u00a0','');
       addLine(strBox,'THIRD PARTY \u2014 '+nm.toUpperCase(),'',true);
       if(t.incCap>0)   addLine(strBox,'Need (capital + capitalised income)',Rfmt(t.incCap));
       if(t.polCover>0) addLine(strBox,'Less: existing cover','('+Rfmt(t.polCover)+')');
+      if(_inv>0)       addLine(strBox,'Less: investment — pays nominee directly','('+Rfmt(_inv)+')');
+      if(_ast>0)       addLine(strBox,'Less: property sold at death (net)','('+Rfmt(_ast)+')');
       addLine(strBox,'New '+nm+' cover to advise on',Rfmt(tpGap),true,tpGap>0?'#b91c1c':'#166534');
     });
 
