@@ -195,6 +195,16 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--cream);c
     </div>
   </div>
 </div>
+<div class="ov" id="idAuditMod">
+  <div class="modal" style="max-width:880px">
+    <div class="mh"><h3>🪪 ID Number ↔ Date of Birth Audit</h3><button class="xb" data-close="1">✕</button></div>
+    <div class="mb" id="idAuditBody"></div>
+    <div class="mf">
+      <button class="btn b-gh sm" data-close="1">Close</button>
+      <button class="btn b-gd sm" data-act="id-audit-fix-all">🔧 Repair all mismatches</button>
+    </div>
+  </div>
+</div>
 <div class="ov" id="doctorMod">
   <div class="modal" style="max-width:480px">
     <div class="mh"><h3 id="doctorModT">Doctor / Medical Contact</h3><button class="xb" data-close="1">✕</button></div>
@@ -660,6 +670,39 @@ function dobFromID(id){
   var yy=id.slice(0,2),mm=id.slice(2,4),dd=id.slice(4,6);
   if(isNaN(+yy)||isNaN(+mm)||isNaN(+dd))return '';
   return (+yy<30?'20':'19')+yy+'-'+mm+'-'+dd;
+}
+// Validate a South African ID number: 13 digits, a real encoded date, and a
+// passing Luhn checksum. A valid ID is the authoritative source of DOB.
+function saIdValid(id){
+  var s=String(id||'').replace(/\D/g,'');
+  if(s.length!==13) return false;
+  var mm=+s.slice(2,4), dd=+s.slice(4,6);
+  if(mm<1||mm>12||dd<1) return false;
+  var yyyy=+((+s.slice(0,2)<30?'20':'19')+s.slice(0,2));
+  if(dd>new Date(yyyy,mm,0).getDate()) return false;
+  var sum=0;
+  for(var i=0;i<13;i++){
+    var n=+s.charAt(i);
+    if(i%2===1){ n*=2; if(n>9) n-=9; }
+    sum+=n;
+  }
+  return sum%10===0;
+}
+// Set an fdp date picker (hidden input + Y/M/D dropdowns) — or a plain date
+// input — to a YYYY-MM-DD value, keeping the visible dropdowns in step.
+function fdpSetValue(id, dob){
+  var h=document.getElementById(id);
+  if(!h) return;
+  h.value=dob||'';
+  var parts=String(dob||'').split('-');
+  if(parts.length!==3) return;
+  var yEl=document.getElementById(id+'_y');
+  var mEl=document.getElementById(id+'_m');
+  var dEl=document.getElementById(id+'_d');
+  if(yEl) yEl.value=parts[0];
+  if(mEl) mEl.value=parts[1];
+  if(dEl){ dEl.innerHTML=fdpDayOpts(parts[0],parts[1],parts[2]); dEl.value=parts[2]; }
+  if(yEl&&mEl&&dEl) fdpUpdateDay(id);
 }
 function g(id){ var e=document.getElementById(id); return e?e.value.trim():''; }
 function toast(msg,type){
@@ -1362,7 +1405,7 @@ function renderClients(){
     (willUnaskedCount>0?'<button class="btn xs" data-act="client-list-filter" data-filter="willunasked" style="border-radius:0;border:none;border-left:1.5px solid var(--mist);'+(isWillUnasked?'background:#64748b;color:#fff':'background:#f5f7fa;color:#889')+';padding:5px 14px;font-weight:700" title="Active clients where the will question has not yet been asked">❓ Unasked ('+willUnaskedCount+')</button>':'')+
     (inactiveCount>0?'<button class="btn xs" data-act="client-list-filter" data-filter="inactive" style="border-radius:0;border:none;border-left:1.5px solid var(--mist);'+(isInactive?'background:var(--rose);color:#fff':'background:#f5f7fa;color:#889')+';padding:5px 14px;font-weight:700">\u{1F4A4} Inactive ('+inactiveCount+')</button>':'')+
     '</div>'+
-    (isLeads ? btn('btn b-gd','open-new-lead','+ New Lead') : (!isInactive&&!isNoWill&&!isWillUnasked ? btn('btn b-gd','open-new-client','+ New Client') : ''))+
+    (isLeads ? btn('btn b-gd','open-new-lead','+ New Lead') : (!isInactive&&!isNoWill&&!isWillUnasked ? btn('btn b-gh','id-dob-audit','🪪 ID Audit')+' '+btn('btn b-gd','open-new-client','+ New Client') : ''))+
     '</div>'+
     '</div>'+
     '<div class="sb"><span style="color:#aaa">🔍</span>'+
@@ -1534,15 +1577,17 @@ function openFamModal(cid, type){
     preDob   = existing.DOB      || '';
     preCell  = existing.Cell     || '';
     preEmail = existing.Email    || '';
-    if(!preDob && preId.length >= 6) preDob = dobFromID(preId);
+    if(saIdValid(preId)) preDob = dobFromID(String(preId).replace(/\D/g,''));
+    else if(!preDob && preId.length >= 6) preDob = dobFromID(preId);
   } else if(type==='Spouse' && c){
     preN     = c.SpouseName  || '';
     preId    = c.SpouseIDNumber || '';
     preDob   = c.SpouseDOB   || '';
     preCell  = c.SpouseCell  || '';
     preEmail = c.SpouseEmail || '';
-    // Derive DOB from ID if DOB blank
-    if(!preDob && preId.length >= 6) preDob = dobFromID(preId);
+    // Derive DOB from ID — a valid ID is authoritative, otherwise only fill a blank
+    if(saIdValid(preId)) preDob = dobFromID(String(preId).replace(/\D/g,''));
+    else if(!preDob && preId.length >= 6) preDob = dobFromID(preId);
   }
   document.getElementById('famModB').innerHTML =
     '<div class="g2">'+
@@ -1562,6 +1607,8 @@ function saveFamMember(){
   var idnum = document.getElementById('fam_id') ? document.getElementById('fam_id').value.trim() : '';
   var cell = document.getElementById('fam_cell') ? document.getElementById('fam_cell').value.trim() : '';
   var email = document.getElementById('fam_email') ? document.getElementById('fam_email').value.trim() : '';
+  // ID governs DOB: a valid SA ID is the authoritative source of the DOB.
+  if(saIdValid(idnum)) dob = dobFromID(idnum.replace(/\D/g,''));
 
   // Spouse is one-per-client. If one already exists in DB.links, update that
   // row in place instead of creating a duplicate. Children can legitimately
@@ -4199,6 +4246,162 @@ function fdpUpdateDay(id){
   }
 }
 
+// ══ ID ↔ DOB AUDIT ═══════════════════════════════════════════
+// Scans every captured ID number (clients, spouse fields, family links),
+// validates the SA ID checksum, and compares the encoded date against the
+// stored DOB. A valid ID is the authoritative source; mismatches are
+// repairable one-by-one or in bulk. Each repair is saved to the server
+// through the standard upsert/patch paths with ok-flag checking.
+var ID_AUDIT = {rows:[], checked:0};
+
+function idAuditScan(){
+  var out = {rows:[], checked:0};
+  function checkOne(owner, where, idnum, dob, fix){
+    var raw = String(idnum||'').trim();
+    if(!raw) return;
+    out.checked++;
+    var digits = raw.replace(/\D/g,'');
+    if(digits.length !== 13){
+      out.rows.push({owner:owner, where:where, id:raw, stored:clean(dob), derived:'', status:'notsa', fix:null});
+      return;
+    }
+    if(!saIdValid(digits)){
+      out.rows.push({owner:owner, where:where, id:raw, stored:clean(dob), derived:'', status:'badsum', fix:null});
+      return;
+    }
+    var d = dobFromID(digits);
+    if(clean(dob) !== d){
+      out.rows.push({owner:owner, where:where, id:raw, stored:clean(dob), derived:d, status:'mismatch', fix:fix});
+    }
+  }
+  DB.clients.forEach(function(c){
+    checkOne(c.Name||('Client '+c.ID), 'Client record', c.IDNumber, c.DOB, {type:'client', id:c.ID});
+    if(clean(c.SpouseIDNumber)){
+      checkOne((c.SpouseName||'Spouse')+' — spouse of '+(c.Name||''), 'Spouse fields on client record', c.SpouseIDNumber, c.SpouseDOB, {type:'spouse', id:c.ID});
+    }
+  });
+  DB.links.forEach(function(m){
+    if(clean(m.IDNumber)){
+      var p = DB.clients.find(function(x){ return String(x.ID)===String(m.PrincipalID); });
+      checkOne((m.Name||'Family member')+' — '+(m.Type||'family')+' of '+(p?(p.Name||''):''), 'Family link', m.IDNumber, m.DOB, {type:'link', id:m.ID});
+    }
+  });
+  return out;
+}
+
+function openIdAudit(){
+  ID_AUDIT = idAuditScan();
+  renderIdAudit();
+  document.getElementById('idAuditMod').classList.add('open');
+}
+
+function renderIdAudit(){
+  var rows = ID_AUDIT.rows;
+  var mism = rows.filter(function(r){ return r.status==='mismatch'; }).length;
+  var bad  = rows.filter(function(r){ return r.status==='badsum'; }).length;
+  var nsa  = rows.filter(function(r){ return r.status==='notsa'; }).length;
+  function pill(bg, txt){
+    return '<span style="background:'+bg+';color:#fff;border-radius:12px;padding:3px 11px;font-size:11.5px;font-weight:700">'+txt+'</span>';
+  }
+  var h = '<div style="font-size:12.5px;color:#556;margin-bottom:10px">Every captured ID number across clients, spouse fields and family links is validated against the SA ID checksum and compared to the stored date of birth. A valid ID number is the authoritative source of the DOB — repairs below save the ID-encoded date.</div>';
+  h += '<div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">'
+    + pill('#0e413a','IDs checked: '+ID_AUDIT.checked)
+    + pill(mism ? '#9e2a2b' : '#5a7d2a','DOB mismatches: '+mism)
+    + pill(bad  ? '#9e2a2b' : '#5a7d2a','Failed checksum: '+bad)
+    + pill('#64748b','Not 13-digit SA IDs: '+nsa)
+    + '</div>';
+  if(!rows.length){
+    h += '<div class="empty">✅ Every captured ID number passes the checksum and matches its stored date of birth.</div>';
+  } else {
+    h += '<div style="max-height:52vh;overflow-y:auto;border:1.5px solid var(--mist);border-radius:8px">'
+      + '<table style="width:100%;border-collapse:collapse;font-size:12px">'
+      + '<tr style="text-align:left;background:#f5f7fa">'
+      + '<th style="padding:7px 9px;border-bottom:2px solid var(--navy)">Person</th>'
+      + '<th style="padding:7px 9px;border-bottom:2px solid var(--navy)">ID number</th>'
+      + '<th style="padding:7px 9px;border-bottom:2px solid var(--navy)">Stored DOB</th>'
+      + '<th style="padding:7px 9px;border-bottom:2px solid var(--navy)">DOB per ID</th>'
+      + '<th style="padding:7px 9px;border-bottom:2px solid var(--navy)">Status</th>'
+      + '<th style="padding:7px 9px;border-bottom:2px solid var(--navy)"></th>'
+      + '</tr>';
+    rows.forEach(function(r, i){
+      var st, col;
+      if(r.status==='mismatch'){ st='MISMATCH'; col='#9e2a2b'; }
+      else if(r.status==='badsum'){ st='FAILS CHECKSUM — verify ID document'; col='#9e2a2b'; }
+      else { st='Not a 13-digit SA ID'; col='#64748b'; }
+      h += '<tr>'
+        + '<td style="padding:6px 9px;border-bottom:1px solid var(--mist)">'+escHtml(r.owner)+'<div style="font-size:10px;color:#889">'+escHtml(r.where)+'</div></td>'
+        + '<td style="padding:6px 9px;border-bottom:1px solid var(--mist);font-family:monospace">'+escHtml(r.id)+'</td>'
+        + '<td style="padding:6px 9px;border-bottom:1px solid var(--mist)">'+(r.stored||'<span style="color:#bbb">blank</span>')+'</td>'
+        + '<td style="padding:6px 9px;border-bottom:1px solid var(--mist);font-weight:700">'+(r.derived||'—')+'</td>'
+        + '<td style="padding:6px 9px;border-bottom:1px solid var(--mist);color:'+col+';font-weight:700;font-size:10.5px">'+st+'</td>'
+        + '<td style="padding:6px 9px;border-bottom:1px solid var(--mist)">'+(r.fix?'<button class="btn xs b-gd" data-act="id-audit-fix" data-fixkey="'+i+'">Fix</button>':'')+'</td>'
+        + '</tr>';
+    });
+    h += '</table></div>';
+  }
+  document.getElementById('idAuditBody').innerHTML = h;
+}
+
+function applyIdFix(r, done){
+  var f = r.fix;
+  if(!f){ if(done) done(false); return; }
+  if(f.type==='client' || f.type==='spouse'){
+    var c = DB.clients.find(function(x){ return String(x.ID)===String(f.id); });
+    if(!c){ if(done) done(false); return; }
+    if(f.type==='client') c.DOB = r.derived;
+    else c.SpouseDOB = r.derived;
+    // Keep the familylinks spouse row in step when correcting SpouseDOB,
+    // so the two spouse storage locations cannot disagree afterwards.
+    if(f.type==='spouse'){
+      var sl = DB.links.find(function(l){ return String(l.PrincipalID)===String(c.ID) && l.Type==='Spouse'; });
+      if(sl && String(sl.IDNumber||'').replace(/\D/g,'')===String(r.id).replace(/\D/g,'')){
+        sl.DOB = r.derived;
+        post({action:'updateFamMember', member:sl});
+      }
+    }
+    post({action:'saveClient', client:c}, function(res){ if(done) done(res && res.ok===1); });
+  } else if(f.type==='link'){
+    var m = DB.links.find(function(l){ return String(l.ID)===String(f.id); });
+    if(!m){ if(done) done(false); return; }
+    m.DOB = r.derived;
+    post({action:'updateFamMember', member:m}, function(res){ if(done) done(res && res.ok===1); });
+  } else {
+    if(done) done(false);
+  }
+}
+
+function idAuditFix(key){
+  var r = ID_AUDIT.rows[+key];
+  if(!r || !r.fix) return;
+  applyIdFix(r, function(ok){
+    if(ok) toast('DOB corrected for '+r.owner, 'ok');
+    // applyIdFix's save path already raised a red toast on failure
+    ID_AUDIT = idAuditScan();
+    renderIdAudit();
+    render();
+  });
+}
+
+function idAuditFixAll(){
+  var fixes = ID_AUDIT.rows.filter(function(r){ return r.status==='mismatch' && r.fix; });
+  if(!fixes.length){ toast('No repairable mismatches', 'ok'); return; }
+  if(!confirm('Correct '+fixes.length+' date(s) of birth from the ID numbers? Each will be saved to the server.')) return;
+  var pending = fixes.length, failed = 0;
+  fixes.forEach(function(r){
+    applyIdFix(r, function(ok){
+      if(!ok) failed++;
+      pending--;
+      if(pending===0){
+        if(failed) toast('⚠️ '+failed+' repair(s) failed — those records were kept locally and will retry on sync', 'err');
+        else toast('All '+fixes.length+' dates of birth corrected from ID numbers', 'ok');
+        ID_AUDIT = idAuditScan();
+        renderIdAudit();
+        render();
+      }
+    });
+  });
+}
+
 function radioGroup(name, lbl, opts, val){
   return '<div class="fld"><label>'+lbl+'</label>'+
     '<div style="display:flex;gap:12px;flex-wrap:wrap;padding:6px 0">'+
@@ -4390,9 +4593,18 @@ function openClientModal(id, isLead){
   setTimeout(function(){
     var fdEl = document.getElementById('fd');
     var fiEl = document.getElementById('fi');
-    if(fdEl && fiEl && !fdEl.value && fiEl.value.length >= 6){
-      var derived = dobFromID(fiEl.value);
-      if(derived) fdEl.value = derived;
+    if(fdEl && fiEl){
+      if(saIdValid(fiEl.value)){
+        var derived = dobFromID(String(fiEl.value).replace(/\D/g,''));
+        if(derived && fdEl.value !== derived){
+          var hadOld = !!fdEl.value;
+          fdpSetValue('fd', derived);
+          if(hadOld) toast('Date of birth corrected from ID number — save to apply','ok');
+        }
+      } else if(!fdEl.value && fiEl.value.length >= 6){
+        var derivedBlank = dobFromID(fiEl.value);
+        if(derivedBlank) fdpSetValue('fd', derivedBlank);
+      }
     }
     // Pre-fill spouse section from DB.links if client record spouse fields are blank
     var fspnameEl = document.getElementById('fspname');
@@ -4411,12 +4623,21 @@ function openClientModal(id, isLead){
         if(fspeEl  && !fspeEl.value)  fspeEl.value  = spLink.Email || '';
       }
     }
-    // Spouse DOB from ID
+    // Spouse DOB from ID — a valid ID is authoritative
     var fspdob = document.getElementById('fspdob');
     var fspid  = document.getElementById('fspid');
-    if(fspdob && fspid && !fspdob.value && fspid.value.length >= 6){
-      var derived2 = dobFromID(fspid.value);
-      if(derived2) fspdob.value = derived2;
+    if(fspdob && fspid){
+      if(saIdValid(fspid.value)){
+        var derivedSp = dobFromID(String(fspid.value).replace(/\D/g,''));
+        if(derivedSp && fspdob.value !== derivedSp){
+          var hadOldSp = !!fspdob.value;
+          fdpSetValue('fspdob', derivedSp);
+          if(hadOldSp) toast('Spouse date of birth corrected from ID number — save to apply','ok');
+        }
+      } else if(!fspdob.value && fspid.value.length >= 6){
+        var derived2 = dobFromID(fspid.value);
+        if(derived2) fdpSetValue('fspdob', derived2);
+      }
     }
   }, 50);
 
@@ -5026,6 +5247,10 @@ function saveClient(openFNA){
     Education:g('fedu'),Qualification:g('fqual'),TelHome:g('ftelh'),TelWork:g('ftelw'),
     SpouseName:g('fspname'),SpouseIDNumber:g('fspid'),SpouseDOB:g('fspdob'),SpouseCell:g('fspcell'),SpouseEmail:g('fspemail'),
     Address:g('fadr'),POBox:g('fpobox')||'',DriveUrl:g('fdr'),Notes:'',RiskCategory:g('frc'),Adviser:cu(),IsLead:g('fisleadst')||'No'};
+  // ID governs DOB: a 13-digit SA ID that passes the checksum is the
+  // authoritative source of the date of birth (client and spouse alike).
+  if(saIdValid(c.IDNumber))       c.DOB       = dobFromID(String(c.IDNumber).replace(/\D/g,''));
+  if(saIdValid(c.SpouseIDNumber)) c.SpouseDOB = dobFromID(String(c.SpouseIDNumber).replace(/\D/g,''));
   // Contacted flag — only relevant for leads; read from modal checkbox if present, else preserve existing value
   var _prev = DB.clients.find(function(x){return String(x.ID)===String(id);});
   var _cbEl = document.getElementById('fcontacted');
@@ -5087,7 +5312,7 @@ function saveClient(openFNA){
     var existing = DB.links.find(function(l){ return String(l.PrincipalID)===String(id) && l.Type==='Spouse'; });
     if(!existing){
       var spLink = {ID:'fam_sp_'+Date.now(), PrincipalID:id,
-        Name:g('fspname'), IDNumber:g('fspid')||'', DOB:g('fspdob'),
+        Name:g('fspname'), IDNumber:g('fspid')||'', DOB:c.SpouseDOB,
         Cell:g('fspcell'), Email:g('fspemail'), Type:'Spouse', IsClient:'No', ClientID:''};
       DB.links.push(spLink);
       post({action:'saveFamMember', member:spLink});
@@ -5095,7 +5320,7 @@ function saveClient(openFNA){
       // Update existing spouse link with latest info from client form
       existing.Name = g('fspname');
       existing.IDNumber = g('fspid')||existing.IDNumber||'';
-      existing.DOB  = g('fspdob')||existing.DOB||'';
+      existing.DOB  = c.SpouseDOB||existing.DOB||'';
       existing.Cell = g('fspcell')||existing.Cell||'';
       existing.Email= g('fspemail')||existing.Email||'';
       post({action:'updateFamMember', member:existing});
@@ -7704,6 +7929,9 @@ document.addEventListener('click', function(e){
         case 'edit-client':    openClientModal(id); break;
         case 'open-new-client':openClientModal(); break;
         case 'open-new-lead':  openClientModal(null, true); break;
+        case 'id-dob-audit':   openIdAudit(); break;
+        case 'id-audit-fix':   idAuditFix(el.getAttribute('data-fixkey')); break;
+        case 'id-audit-fix-all': idAuditFixAll(); break;
         case 'convert-lead':   convertLead(id); break;
         case 'toggle-contacted': toggleContacted(id, el.checked); break;
         case 'client-list-filter': window.CLIENT_LIST_FILTER=el.getAttribute('data-filter'); render(); break;
@@ -8790,29 +9018,22 @@ document.addEventListener('input', function(e){
   }
   if(e.target.id==='linkExistSrch'){ searchLinkExist(e.target.value); }
   if(e.target.getAttribute('data-autdob')){
-    var dob=dobFromID(e.target.value);
+    var idvRaw=e.target.value.trim();
+    var idvDigits=idvRaw.replace(/\D/g,'');
+    var validId=saIdValid(idvRaw);
+    if(idvDigits.length===13 && !validId){
+      toast('ID number fails the SA ID checksum — please re-check','err');
+    }
+    var dob=validId?dobFromID(idvDigits):dobFromID(idvRaw);
     if(dob){
       var dobFieldId=e.target.getAttribute('data-dobfield');
       // Find the correct hidden date input
       var fd=dobFieldId?document.getElementById(dobFieldId):null;
       if(!fd)fd=document.getElementById('fd');
       if(!fd)fd=document.getElementById('fam_dob');
-      // Only populate if blank
-      if(fd && !fd.value){
-        fd.value=dob;
-        // Also update the visible year/month/day dropdowns
-        var baseId=fd.id;
-        var parts=dob.split('-');
-        var yEl=document.getElementById(baseId+'_y');
-        var mEl=document.getElementById(baseId+'_m');
-        var dEl=document.getElementById(baseId+'_d');
-        if(yEl) yEl.value=parts[0];
-        if(mEl) mEl.value=parts[1];
-        if(dEl){
-          dEl.innerHTML=fdpDayOpts(parts[0],parts[1],parts[2]);
-          dEl.value=parts[2];
-        }
-        fdpUpdateDay(baseId);
+      // Valid checksum: the ID governs — overwrite. Otherwise only fill a blank.
+      if(fd && (validId || !fd.value)){
+        if(fd.value!==dob) fdpSetValue(fd.id, dob);
       }
     }
   }
