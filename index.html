@@ -182,6 +182,19 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--cream);c
     </div>
   </div>
 </div>
+<div class="ov" id="fnaPackMod">
+  <div class="modal" style="max-width:760px">
+    <div class="mh"><h3 id="fnaPackT">FNA Data Pack</h3><button class="xb" data-close="1">✕</button></div>
+    <div class="mb">
+      <div style="font-size:12px;color:#667;margin-bottom:4px">Review what will be shared, then copy and paste it to Claude for the FNA. Banking details are deliberately excluded.</div>
+      <textarea id="fnaPackTxt" readonly style="width:100%;min-height:420px;border:1.5px solid var(--mist);border-radius:7px;padding:10px 12px;font-size:12px;font-family:monospace;line-height:1.5;color:var(--ink);outline:none;resize:vertical;white-space:pre"></textarea>
+    </div>
+    <div class="mf">
+      <button class="btn b-gh sm" data-close="1">Close</button>
+      <button class="btn b-gd sm" onclick="copyFnaPackToClipboard()">📋 Copy to Clipboard</button>
+    </div>
+  </div>
+</div>
 <div class="ov" id="doctorMod">
   <div class="modal" style="max-width:480px">
     <div class="mh"><h3 id="doctorModT">Doctor / Medical Contact</h3><button class="xb" data-close="1">✕</button></div>
@@ -1445,6 +1458,7 @@ function renderProfile(){
     "<a href='"+buildComplianceUrl(c)+"' target='_blank' style='text-decoration:none'><button class='btn b-sk sm' style='background:#0e413a;color:#d4af5a;border-color:#2a3a5e'>📋 Compliance Docs</button></a>"+
     "<a href='"+buildFormsUrl(c)+"' target='_blank' style='text-decoration:none'><button class='btn b-sk sm' style='background:#0e413a;color:#ccd660;border-color:#2a3a5e'>📝 Forms</button></a>"+
     '<button class="btn b-sk sm" style="background:#0e413a;color:#7aa8dc;border-color:#2a3a5e" onclick="launchContribCalc(\''+c.ID+'\')">🧮 Contrib Calc</button>'+
+    '<button class="btn b-sk sm" style="background:#0e413a;color:#a8b938;border-color:#2a3a5e" onclick="copyFnaDataPack(\''+c.ID+'\')">📦 FNA Data Pack</button>'+
     '<button class="btn b-sk sm" style="background:#0e413a;color:#d4af5a;border-color:#2a3a5e" onclick="printBrokerAuth(\''+c.ID+'\')">📄 Broker Auth</button>'+
     '<button class="btn b-sk sm" style="background:#0e413a;color:#d4af5a;border-color:#2a3a5e" onclick="printClientConsent(\''+c.ID+'\')">📄 Policy Consent</button>'+
     '<a href="https://drive.google.com/drive/search?q='+encodeURIComponent(c.Name)+'" target="_blank" style="text-decoration:none"><button class="btn b-gh sm" style="color:#fff;border-color:#334466">📁 Drive</button></a>'+
@@ -4536,6 +4550,203 @@ function launchContribCalc(clientId){
   try { localStorage.setItem('du_contrib_launch', JSON.stringify(payload)); }
   catch(e){ toast('Could not prepare launch data','err'); return; }
   window.open('contributions.html','_blank');
+}
+
+// ══ FNA DATA PACK ═════════════════════════════════════════════════════════
+// Assembles everything Claude needs to do an FNA for a client into one
+// structured text block: client details, will status, spouse, family,
+// active policies (all non-empty fields + computed cover totals), the full
+// financial position, captured needs, and notes. Banking is deliberately
+// excluded — sensitive and not needed for FNA work.
+function buildFnaDataPack(cid){
+  var c = DB.clients.find(function(x){return String(x.ID)===String(cid);});
+  if(!c) return '';
+  var L = [];
+  function line(s){ L.push(s); }
+  function kv(lbl, v){ if(v!==undefined && v!==null && String(v).trim()!=='' && String(v)!=='None') line('  '+lbl+': '+v); }
+  function maritalReadable(m){
+    if(m==='Married - ANC with accrual')    return 'Married — ANC with accrual';
+    if(m==='Married - ANC without accrual') return 'Married — ANC without accrual';
+    if(m==='Married in COP')                return 'Married — in community of property';
+    return m||'';
+  }
+
+  line('═══ FNA DATA PACK — '+(c.Name||'')+' ═══');
+  line('Generated: '+new Date().toISOString().slice(0,16).replace('T',' ')+'  ·  Source: Duwalcoe CRM');
+  line('');
+
+  // ── Client ──
+  line('── CLIENT ──');
+  kv('Name', (clean(c.Title)?c.Title+' ':'')+(c.Name||''));
+  kv('Date of Birth', c.DOB);
+  var age = calcAge(c.DOB);
+  if(age!==null) kv('Current Age', age);
+  kv('ID Number', c.IDNumber);
+  kv('Gender', c.Gender);
+  kv('Smoker', c.Smoker);
+  kv('Marital Status', maritalReadable(c.MaritalStatus));
+  kv('Marriage / Anniversary Date', c.Anniversary);
+  kv('Occupation', c.Occupation);
+  kv('Employer', c.Employer);
+  kv('Gross Income per Month (R)', c.Income);
+  kv('Education', clean(c.Education)?(c.Education+(clean(c.Qualification)?' — '+c.Qualification:'')):'');
+  kv('Physical Address', c.Address);
+  line('  Will: '+(c.HasWill==='Yes'?('Yes'+(c.WillThroughMe==='Yes'?' (through this practice)':' (elsewhere)')+(clean(c.WillDate)?', dated '+c.WillDate:'')+(clean(c.WillAttorney)?', attorney: '+c.WillAttorney:'')):c.HasWill==='No'?'No will':'Not yet asked'));
+  kv('Will Notes', c.WillNotes);
+  line('');
+
+  // ── Spouse ──
+  if(clean(c.SpouseName)){
+    line('── SPOUSE ──');
+    kv('Name', c.SpouseName);
+    kv('ID Number', c.SpouseIDNumber);
+    kv('Date of Birth', c.SpouseDOB);
+    var sAge = calcAge(c.SpouseDOB);
+    if(sAge!==null) kv('Current Age', sAge);
+    line('');
+  }
+
+  // ── Family ──
+  var fam = famFor(cid);
+  if(fam.length){
+    line('── FAMILY / DEPENDANTS ──');
+    fam.forEach(function(m){
+      var fAge = calcAge(m.DOB);
+      line('  '+(m.Type||'Member')+': '+(m.Name||'')+(m.DOB?' — born '+m.DOB:'')+(fAge!==null?' (age '+fAge+')':'')+(clean(m.IDNumber)?' — ID '+m.IDNumber:''));
+    });
+    line('');
+  }
+
+  // ── Policies ──
+  var pols = polsFor(cid).filter(function(p){ return p.Status!=='Replaced'; });
+  line('── POLICIES ('+pols.length+' active/current) ──');
+  if(!pols.length) line('  (none captured)');
+  var polSkip = {ID:1, ClientID:1, ReviewHistory:1, _pendingSave:1, LastAccessed:1, CapturedDate:1, ReplacedBy:1, ReplacedDate:1, ReplacedPolicyNo:1};
+  pols.forEach(function(p, i){
+    line('  ── Policy '+(i+1)+': '+(p.Insurer||'?')+' — '+(p.Type||'?')+(p.PolicyNo?' #'+p.PolicyNo:'')+' ──');
+    // Computed cover totals (sums all lump-benefit rows; legacy single fields can under-count)
+    try{
+      var dC = lumpSum(p,'Life Cover','BenDeath');
+      var dD = lumpSum(p,'Capital Disability','BenDisability');
+      var dDD = lumpSum(p,'Dread Disease / Severe Illness','BenDreadDisease');
+      if(dC)  line('  TotalDeathCover (computed): '+dC);
+      if(dD)  line('  TotalDisabilityCover (computed): '+dD);
+      if(dDD) line('  TotalDreadDiseaseCover (computed): '+dDD);
+    }catch(e){}
+    Object.keys(p).forEach(function(k){
+      if(polSkip[k]) return;
+      var v = p[k];
+      if(v===undefined || v===null || String(v).trim()==='' || String(v)==='None') return;
+      line('  '+k+': '+v);
+    });
+  });
+  line('');
+
+  // ── Financial Position ──
+  var fpRows = finposFor(cid).filter(function(r){ return r.Kind!=='need' && r.Kind!=='need_notes'; });
+  line('── FINANCIAL POSITION ('+fpRows.length+' items) ──');
+  if(!fpRows.length) line('  (none captured)');
+  var totA=0, totL=0;
+  FP_KINDS.forEach(function(k){
+    var items = fpRows.filter(function(r){ return r.Kind===k.kind; });
+    if(!items.length) return;
+    line('  ── '+k.label+' ──');
+    items.forEach(function(r){
+      var d = fpData(r);
+      line('  • '+(d.desc||'(no description)')+(r.UpdatedAt?'  [last updated '+r.UpdatedAt+']':''));
+      Object.keys(d).forEach(function(key){
+        if(key==='desc') return;
+        var v = d[key];
+        if(v===undefined || v===null || String(v).trim()==='') return;
+        line('      '+key+': '+v);
+      });
+      if(r.Kind==='liability'){ totL += fpN(d.balance); }
+      else if(r.Kind==='business'){
+        totA += fpN(d.value);
+        if(d.loanAcc==='Credit') totA += fpN(d.loanBal);
+        else if(d.loanAcc==='Debit') totL += fpN(d.loanBal);
+      } else {
+        totA += fpN(d.value);
+        totL += fpN(d.bondOut) + fpN(d.financeOut);
+      }
+    });
+  });
+  if(fpRows.length){
+    line('  Totals (display arithmetic): Assets '+fpR(totA)+'  ·  Liabilities (incl. bonds/finance/debit loans) '+fpR(totL)+'  ·  Net '+fpR(totA-totL));
+  }
+  line('');
+
+  // ── Needs ──
+  var needRows = finposFor(cid).filter(function(r){ return r.Kind==='need'; });
+  var nn = needNotesRowFor(cid);
+  var nnText = nn ? (fpData(nn).text||'') : '';
+  line('── CLIENT NEEDS ('+needRows.length+' captured) ──');
+  line('  Note: blank escalation on income needs = assume CPI. Amounts are the client\'s stated needs (capture), not analysis results.');
+  if(nnText){ line('  Discussion notes: '+nnText.replace(/\n/g, '\n    ')); }
+  if(!needRows.length) line('  (none captured)');
+  NEED_SCENARIOS.forEach(function(scen){
+    var items = needRows.filter(function(r){ return (fpData(r).scenario||'Other')===scen; });
+    if(!items.length) return;
+    line('  ── '+scen+' ──');
+    items.forEach(function(r){
+      var d = fpData(r);
+      var isInc = d.needType==='Monthly income';
+      var amt = String(d.amount||'').trim();
+      var spec = isInc
+        ? ('Income: '+(amt?('R '+amt+' /pm'):'(amount not set)')+(d.years?' for '+d.years+' years':'')+(d.esc?', escalating '+d.esc+'% p.a.':', escalation not specified (assume CPI)'))
+        : ('Capital: '+(amt?('R '+amt):'(amount not set)'));
+      line('  • '+(d.desc||'(no description)')+' — '+spec+(d.benTo?'  · for: '+(d.benTo==='Named person'?(d.benName||'named person'):d.benTo):''));
+      if(d.notes) line('      notes: '+d.notes);
+    });
+  });
+  line('');
+
+  // ── Notes ──
+  var noteBits = [];
+  if(clean(c.Notes)) noteBits.push('Client record notes:\n  '+String(c.Notes).replace(/\n/g,'\n  '));
+  var shared = (window._sharedNotes||{})[String(cid)];
+  if(shared && shared.text) noteBits.push('Shared notes ('+(shared.by||'')+(shared.date?', '+shared.date:'')+'):\n  '+String(shared.text).replace(/\n/g,'\n  '));
+  if(noteBits.length){
+    line('── NOTES ──');
+    noteBits.forEach(function(n){ line(n); });
+    line('');
+  }
+
+  line('═══ END OF DATA PACK ═══');
+  return L.join('\n');
+}
+
+function copyFnaDataPack(cid){
+  var c = DB.clients.find(function(x){return String(x.ID)===String(cid);});
+  if(!c){ toast('Client not found','err'); return; }
+  var txt = buildFnaDataPack(cid);
+  document.getElementById('fnaPackT').textContent = 'FNA Data Pack — '+(c.Name||'');
+  document.getElementById('fnaPackTxt').value = txt;
+  document.getElementById('fnaPackMod').classList.add('open');
+  // Attempt automatic copy; the modal stays open for review either way
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(txt).then(function(){
+      toast('Data pack copied — paste it to Claude','ok');
+    }).catch(function(){ /* user can use the Copy button */ });
+  }
+}
+
+function copyFnaPackToClipboard(){
+  var ta = document.getElementById('fnaPackTxt');
+  if(!ta) return;
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(ta.value).then(function(){
+      toast('Copied — paste it to Claude','ok');
+    }).catch(function(){
+      ta.focus(); ta.select();
+      try{ document.execCommand('copy'); toast('Copied — paste it to Claude','ok'); }
+      catch(e){ toast('Could not copy — select the text and copy manually','err'); }
+    });
+  } else {
+    ta.focus(); ta.select();
+    try{ document.execCommand('copy'); toast('Copied — paste it to Claude','ok'); }
+    catch(e){ toast('Could not copy — select the text and copy manually','err'); }
+  }
 }
 
 // ── Shared letterhead HTML for broker documents
