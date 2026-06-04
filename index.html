@@ -187,6 +187,12 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--cream);c
     <div class="mh"><h3 id="fnaPackT">FNA Data Pack</h3><button class="xb" data-close="1">✕</button></div>
     <div class="mb">
       <div style="font-size:12px;color:#667;margin-bottom:4px">Review what will be shared, then copy and paste it to Claude for the FNA. Banking details are deliberately excluded.</div>
+      <div id="fnaPackSpouseWrap" style="display:none;margin:4px 0 8px;padding:7px 10px;background:#f7f9f2;border:1.5px solid var(--mist);border-radius:7px">
+        <label style="display:flex;align-items:flex-start;gap:8px;font-size:12px;color:var(--ink);cursor:pointer;margin:0">
+          <input type="checkbox" id="fnaPackSpouse" onchange="refreshFnaPack()" style="margin-top:2px">
+          <span id="fnaPackSpouseLbl">Include linked spouse&rsquo;s assets &amp; policies (context for accrual/estate only — their needs are excluded)</span>
+        </label>
+      </div>
       <textarea id="fnaPackTxt" readonly style="width:100%;min-height:420px;border:1.5px solid var(--mist);border-radius:7px;padding:10px 12px;font-size:12px;font-family:monospace;line-height:1.5;color:var(--ink);outline:none;resize:vertical;white-space:pre"></textarea>
     </div>
     <div class="mf">
@@ -4484,6 +4490,9 @@ function openClientModal(id, isLead){
     '<div class="g3" style="margin-top:10px">'+
     fs('fmar','Marital Status',['','Single','Married - ANC with accrual','Married - ANC without accrual','Married in COP','Life partner','Divorced','Widowed'],c.MaritalStatus)+
     fdp('fann','Marriage / Anniversary Date',c.Anniversary||'')+
+    fld('fancc','ANC Commencement Value — Client (R)',c.ANCCommClient||'')+
+    fld('fancsp','ANC Commencement Value — Spouse (R)',c.ANCCommSpouse||'')+
+    '<div style="grid-column:1/-1;font-size:10.5px;color:#889;margin-top:-6px">Commencement values as declared in the antenuptial contract, un-adjusted. Blank = not declared = deemed nil (s.6(4)(b), Matrimonial Property Act). CPI adjustment is applied at analysis time.</div>'+
     fs('fedu','Education Level',['','School - no matric','Matric','Diploma / Certificate','Degree','Post Graduate','Other'],c.Education||'')+
     fld('fqual','Qualification Detail',c.Qualification||'')+
     fs('fst','Status',['Active','Inactive'],c.Status||'Active')+
@@ -4779,7 +4788,21 @@ function launchContribCalc(clientId){
 // active policies (all non-empty fields + computed cover totals), the full
 // financial position, captured needs, and notes. Banking is deliberately
 // excluded — sensitive and not needed for FNA work.
-function buildFnaDataPack(cid){
+// Resolve the linked spouse's own client record ID (bidirectional: works
+// whether this client is the principal or the upgraded spouse). Returns null
+// when the spouse is not a client in their own right.
+function linkedSpouseClientId(cid){
+  var l = DB.links.find(function(x){
+    return x.Type==='Spouse' && x.IsClient==='Yes' && clean(x.ClientID) && (
+      String(x.PrincipalID)===String(cid) || String(x.ClientID)===String(cid)
+    );
+  });
+  if(!l) return null;
+  var sid = String(l.PrincipalID)===String(cid) ? String(l.ClientID) : String(l.PrincipalID);
+  return (sid && sid!==String(cid)) ? sid : null;
+}
+
+function buildFnaDataPack(cid, includeSpouse){
   var c = DB.clients.find(function(x){return String(x.ID)===String(cid);});
   if(!c) return '';
   var L = [];
@@ -4807,6 +4830,13 @@ function buildFnaDataPack(cid){
   kv('Smoker', c.Smoker);
   kv('Marital Status', maritalReadable(c.MaritalStatus));
   kv('Marriage / Anniversary Date', c.Anniversary);
+  if((c.MaritalStatus||'').indexOf('with accrual')>-1){
+    line('  ANC Commencement Value — Client (R): '+(clean(c.ANCCommClient)||'not captured — deemed nil if not declared in the ANC (s.6(4)(b) MPA)'));
+    line('  ANC Commencement Value — Spouse (R): '+(clean(c.ANCCommSpouse)||'not captured — deemed nil if not declared in the ANC (s.6(4)(b) MPA)'));
+  } else {
+    kv('ANC Commencement Value — Client (R)', c.ANCCommClient);
+    kv('ANC Commencement Value — Spouse (R)', c.ANCCommSpouse);
+  }
   kv('Occupation', c.Occupation);
   kv('Employer', c.Employer);
   kv('Gross Income per Month (R)', c.Income);
@@ -4838,64 +4868,70 @@ function buildFnaDataPack(cid){
     line('');
   }
 
-  // ── Policies ──
-  var pols = polsFor(cid).filter(function(p){ return p.Status!=='Replaced'; });
-  line('── POLICIES ('+pols.length+' active/current) ──');
-  if(!pols.length) line('  (none captured)');
-  var polSkip = {ID:1, ClientID:1, ReviewHistory:1, _pendingSave:1, LastAccessed:1, CapturedDate:1, ReplacedBy:1, ReplacedDate:1, ReplacedPolicyNo:1};
-  pols.forEach(function(p, i){
-    line('  ── Policy '+(i+1)+': '+(p.Insurer||'?')+' — '+(p.Type||'?')+(p.PolicyNo?' #'+p.PolicyNo:'')+' ──');
-    // Computed cover totals (sums all lump-benefit rows; legacy single fields can under-count)
-    try{
-      var dC = lumpSum(p,'Life Cover','BenDeath');
-      var dD = lumpSum(p,'Capital Disability','BenDisability');
-      var dDD = lumpSum(p,'Dread Disease / Severe Illness','BenDreadDisease');
-      if(dC)  line('  TotalDeathCover (computed): '+dC);
-      if(dD)  line('  TotalDisabilityCover (computed): '+dD);
-      if(dDD) line('  TotalDreadDiseaseCover (computed): '+dDD);
-    }catch(e){}
-    Object.keys(p).forEach(function(k){
-      if(polSkip[k]) return;
-      var v = p[k];
-      if(v===undefined || v===null || String(v).trim()==='' || String(v)==='None') return;
-      line('  '+k+': '+v);
-    });
-  });
-  line('');
-
-  // ── Financial Position ──
-  var fpRows = finposFor(cid).filter(function(r){ return r.Kind!=='need' && r.Kind!=='need_notes'; });
-  line('── FINANCIAL POSITION ('+fpRows.length+' items) ──');
-  if(!fpRows.length) line('  (none captured)');
-  var totA=0, totL=0;
-  FP_KINDS.forEach(function(k){
-    var items = fpRows.filter(function(r){ return r.Kind===k.kind; });
-    if(!items.length) return;
-    line('  ── '+k.label+' ──');
-    items.forEach(function(r){
-      var d = fpData(r);
-      line('  • '+(d.desc||'(no description)')+(r.UpdatedAt?'  [last updated '+r.UpdatedAt+']':''));
-      Object.keys(d).forEach(function(key){
-        if(key==='desc') return;
-        var v = d[key];
-        if(v===undefined || v===null || String(v).trim()==='') return;
-        line('      '+key+': '+v);
+  // ── Policies (reusable for the linked spouse appendix) ──
+  function packPolicies(forCid, prefix){
+    var pols = polsFor(forCid).filter(function(p){ return p.Status!=='Replaced'; });
+    line('── '+prefix+'POLICIES ('+pols.length+' active/current) ──');
+    if(!pols.length) line('  (none captured)');
+    var polSkip = {ID:1, ClientID:1, ReviewHistory:1, _pendingSave:1, LastAccessed:1, CapturedDate:1, ReplacedBy:1, ReplacedDate:1, ReplacedPolicyNo:1};
+    pols.forEach(function(p, i){
+      line('  ── Policy '+(i+1)+': '+(p.Insurer||'?')+' — '+(p.Type||'?')+(p.PolicyNo?' #'+p.PolicyNo:'')+' ──');
+      // Computed cover totals (sums all lump-benefit rows; legacy single fields can under-count)
+      try{
+        var dC = lumpSum(p,'Life Cover','BenDeath');
+        var dD = lumpSum(p,'Capital Disability','BenDisability');
+        var dDD = lumpSum(p,'Dread Disease / Severe Illness','BenDreadDisease');
+        if(dC)  line('  TotalDeathCover (computed): '+dC);
+        if(dD)  line('  TotalDisabilityCover (computed): '+dD);
+        if(dDD) line('  TotalDreadDiseaseCover (computed): '+dDD);
+      }catch(e){}
+      Object.keys(p).forEach(function(k){
+        if(polSkip[k]) return;
+        var v = p[k];
+        if(v===undefined || v===null || String(v).trim()==='' || String(v)==='None') return;
+        line('  '+k+': '+v);
       });
-      if(r.Kind==='liability'){ totL += fpN(d.balance); }
-      else if(r.Kind==='business'){
-        totA += fpN(d.value);
-        if(d.loanAcc==='Credit') totA += fpN(d.loanBal);
-        else if(d.loanAcc==='Debit') totL += fpN(d.loanBal);
-      } else {
-        totA += fpN(d.value);
-        totL += fpN(d.bondOut) + fpN(d.financeOut);
-      }
     });
-  });
-  if(fpRows.length){
-    line('  Totals (display arithmetic): Assets '+fpR(totA)+'  ·  Liabilities (incl. bonds/finance/debit loans) '+fpR(totL)+'  ·  Net '+fpR(totA-totL));
+    line('');
   }
-  line('');
+  packPolicies(cid, '');
+
+  // ── Financial Position (reusable for the linked spouse appendix) ──
+  function packFinpos(forCid, prefix){
+    var fpRows = finposFor(forCid).filter(function(r){ return r.Kind!=='need' && r.Kind!=='need_notes'; });
+    line('── '+prefix+'FINANCIAL POSITION ('+fpRows.length+' items) ──');
+    if(!fpRows.length) line('  (none captured)');
+    var totA=0, totL=0;
+    FP_KINDS.forEach(function(k){
+      var items = fpRows.filter(function(r){ return r.Kind===k.kind; });
+      if(!items.length) return;
+      line('  ── '+k.label+' ──');
+      items.forEach(function(r){
+        var d = fpData(r);
+        line('  • '+(d.desc||'(no description)')+(r.UpdatedAt?'  [last updated '+r.UpdatedAt+']':''));
+        Object.keys(d).forEach(function(key){
+          if(key==='desc') return;
+          var v = d[key];
+          if(v===undefined || v===null || String(v).trim()==='') return;
+          line('      '+key+': '+v);
+        });
+        if(r.Kind==='liability'){ totL += fpN(d.balance); }
+        else if(r.Kind==='business'){
+          totA += fpN(d.value);
+          if(d.loanAcc==='Credit') totA += fpN(d.loanBal);
+          else if(d.loanAcc==='Debit') totL += fpN(d.loanBal);
+        } else {
+          totA += fpN(d.value);
+          totL += fpN(d.bondOut) + fpN(d.financeOut);
+        }
+      });
+    });
+    if(fpRows.length){
+      line('  Totals (display arithmetic): Assets '+fpR(totA)+'  ·  Liabilities (incl. bonds/finance/debit loans) '+fpR(totL)+'  ·  Net '+fpR(totA-totL));
+    }
+    line('');
+  }
+  packFinpos(cid, '');
 
   // ── Needs ──
   var needRows = finposFor(cid).filter(function(r){ return r.Kind==='need'; });
@@ -4933,6 +4969,24 @@ function buildFnaDataPack(cid){
     line('');
   }
 
+  // ── Linked spouse appendix (opt-in) — context only, never an FNA subject ──
+  if(includeSpouse){
+    var spId = linkedSpouseClientId(cid);
+    var sp = spId ? DB.clients.find(function(x){ return String(x.ID)===String(spId); }) : null;
+    if(sp){
+      line('═══ LINKED SPOUSE — '+(sp.Name||'')+' (own client record) ═══');
+      line('Context for accrual & estate purposes ONLY — not an FNA subject. Captured needs deliberately excluded.');
+      kv('Date of Birth', sp.DOB);
+      var spAge2 = calcAge(sp.DOB);
+      if(spAge2!==null) kv('Current Age', spAge2);
+      kv('ID Number', sp.IDNumber);
+      kv('Gross Income per Month (R)', sp.Income);
+      line('');
+      packPolicies(spId, 'SPOUSE ');
+      packFinpos(spId, 'SPOUSE ');
+    }
+  }
+
   line('═══ END OF DATA PACK ═══');
   return L.join('\n');
 }
@@ -4940,7 +4994,21 @@ function buildFnaDataPack(cid){
 function copyFnaDataPack(cid){
   var c = DB.clients.find(function(x){return String(x.ID)===String(cid);});
   if(!c){ toast('Client not found','err'); return; }
-  var txt = buildFnaDataPack(cid);
+  // Spouse checkbox: only offered when the spouse is a client in their own right
+  window.FNA_PACK_CID = cid;
+  var spId = linkedSpouseClientId(cid);
+  var spWrap = document.getElementById('fnaPackSpouseWrap');
+  var spCb = document.getElementById('fnaPackSpouse');
+  if(spCb) spCb.checked = false;
+  if(spWrap){
+    spWrap.style.display = spId ? 'block' : 'none';
+    if(spId){
+      var sp = DB.clients.find(function(x){ return String(x.ID)===String(spId); });
+      var lblEl = document.getElementById('fnaPackSpouseLbl');
+      if(lblEl) lblEl.textContent = 'Include '+((sp&&sp.Name)||'linked spouse')+'\u2019s assets & policies (context for accrual/estate only — their needs are excluded)';
+    }
+  }
+  var txt = buildFnaDataPack(cid, false);
   document.getElementById('fnaPackT').textContent = 'FNA Data Pack — '+(c.Name||'');
   document.getElementById('fnaPackTxt').value = txt;
   document.getElementById('fnaPackMod').classList.add('open');
@@ -4950,6 +5018,16 @@ function copyFnaDataPack(cid){
       toast('Data pack copied — paste it to Claude','ok');
     }).catch(function(){ /* user can use the Copy button */ });
   }
+}
+
+// Rebuild the visible pack when the spouse checkbox is toggled
+function refreshFnaPack(){
+  var cid = window.FNA_PACK_CID;
+  if(!cid) return;
+  var spCb = document.getElementById('fnaPackSpouse');
+  var txt = buildFnaDataPack(cid, !!(spCb && spCb.checked));
+  document.getElementById('fnaPackTxt').value = txt;
+  toast(spCb && spCb.checked ? 'Spouse data added — copy again to include it' : 'Spouse data removed','ok');
 }
 
 function copyFnaPackToClipboard(){
@@ -5242,6 +5320,7 @@ function saveClient(openFNA){
   var c={ID:id,Name:name,MaidenName:g('fmdn')||'',CallingName:g('fcn')||name.split(' ')[0]||name,Title:g('fttl'),IDNumber:g('fi'),DOB:g('fd'),Cell:g('fc'),Email:g('fe'),
     Occupation:g('fo'),Employer:g('fem'),Income:g('finc')||'',TaxNo:g('ftx'),
     Anniversary:g('fann'),MaritalStatus:g('fmar'),Status:g('fst'),ReviewDate:g('fr'),
+    ANCCommClient:g('fancc')||'',ANCCommSpouse:g('fancsp')||'',
     HasWill:getRadio('fhaswill')||'',WillDate:g('fwilldate')||'',WillAttorney:g('fwillatt')||'',WillThroughMe:getRadio('fwillthrough')||'',WillNotes:g('fwillnotes')||'',
     Gender:getRadio('fgen')||g('fgen'),Smoker:getRadio('fsm')||g('fsm'),
     Education:g('fedu'),Qualification:g('fqual'),TelHome:g('ftelh'),TelWork:g('ftelw'),
