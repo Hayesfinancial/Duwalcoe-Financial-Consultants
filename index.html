@@ -1558,7 +1558,34 @@ var FAM_CLIENT = null;
 var FAM_TYPE = 'Spouse';
 
 function famFor(cid){
-  return DB.links.filter(function(l){ return String(l.PrincipalID)===String(cid); });
+  var own = DB.links.filter(function(l){ return String(l.PrincipalID)===String(cid); });
+  // Shared children: if this client is linked to a Spouse / Life Partner who is
+  // also a client, show that partner's Child rows on this card too. The child
+  // stays a single stored row under the card it was captured on — no data is
+  // duplicated, so an edit reflects on both cards. Children only: the
+  // partner's other links (parents, siblings, etc.) stay on their own card.
+  var spLink = own.find(function(l){
+    return (l.Type==='Spouse' || l.Type==='Life Partner') && l.IsClient==='Yes' && clean(l.ClientID);
+  });
+  if(!spLink) return own;
+  var spouseKids = DB.links.filter(function(l){
+    return String(l.PrincipalID)===String(spLink.ClientID) && l.Type==='Child';
+  });
+  if(!spouseKids.length) return own;
+  // De-duplicate against children already captured on this card: match on ID
+  // number when both rows have one, otherwise on name (case-insensitive).
+  function kidKey(l){
+    return {id:String(l.IDNumber||'').replace(/\D/g,''), nm:String(l.Name||'').trim().toLowerCase()};
+  }
+  var ownKidKeys = own.filter(function(l){ return l.Type==='Child'; }).map(kidKey);
+  var extra = spouseKids.filter(function(sk){
+    var k = kidKey(sk);
+    return !ownKidKeys.some(function(ok){
+      if(k.id && ok.id) return k.id===ok.id;
+      return !!k.nm && k.nm===ok.nm;
+    });
+  });
+  return own.concat(extra);
 }
 
 function openFamModal(cid, type){
@@ -1598,7 +1625,7 @@ function openFamModal(cid, type){
   document.getElementById('famModB').innerHTML =
     '<div class="g2">'+
     fld('fam_name', 'Full Name *', preN)+
-    fld('fam_id', 'ID Number', preId, 'text', 'data-autdob="1"')+
+    fld('fam_id', 'ID Number', preId, 'text', 'data-autdob="1" data-dobfield="fam_dob"')+
     fld('fam_dob', 'Date of Birth', preDob, 'date')+
     fld('fam_cell', 'Cell', preCell)+
     '</div>'+
