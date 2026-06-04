@@ -171,6 +171,17 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--cream);c
     </div>
   </div>
 </div>
+<div class="ov" id="fpMod">
+  <div class="modal" style="max-width:640px">
+    <div class="mh"><h3 id="fpModT">Financial Position Item</h3><button class="xb" data-close="1">✕</button></div>
+    <div class="mb" id="fpModB"></div>
+    <div class="mf">
+      <button class="btn b-gh sm" data-close="1">Cancel</button>
+      <button class="btn b-rd sm" id="delFpBtn" style="display:none" onclick="deleteFinPos()">🗑 Delete</button>
+      <button class="btn b-gd sm" data-save="finpos">💾 Save</button>
+    </div>
+  </div>
+</div>
 <div class="ov" id="doctorMod">
   <div class="modal" style="max-width:480px">
     <div class="mh"><h3 id="doctorModT">Doctor / Medical Contact</h3><button class="xb" data-close="1">✕</button></div>
@@ -274,7 +285,7 @@ var SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZ
 var SURL = SB_URL; // legacy alias — not used for JSONP any more
 
 // ══ STATE ════════════════════════════════════════════════════
-var DB = {clients:[], policies:[], tasks:[], roas:[], links:[]};
+var DB = {clients:[], policies:[], tasks:[], roas:[], links:[], finpos:[]};
 var PAGE = 'dash';
 var SEL = null;
 var CTAB = 'overview';
@@ -314,7 +325,7 @@ function syncNow() {
 
   // Load all core tables in parallel
   var loaded = {};
-  var needed = ['clients','policies','tasks','roas','familylinks','settings','notes'];
+  var needed = ['clients','policies','tasks','roas','familylinks','settings','notes','financial_position'];
   var done = 0;
 
   function checkDone(){
@@ -384,6 +395,19 @@ function syncNow() {
         if(ll._pendingSave){
           var _li=DB.links.findIndex(function(sl){return String(sl.ID)===String(ll.ID);});
           if(_li>=0) DB.links[_li]=ll; else DB.links.push(ll);
+        }
+      });
+    }catch(e){}
+
+    // Financial Position (assets & liabilities) — one row per item, JSON in Data column.
+    DB.finpos = loaded.financial_position||[];
+    // Re-apply any locally pending finpos saves so a failed save isn't wiped by a sync.
+    try{
+      var _ldbF=JSON.parse(localStorage.getItem('du_db')||'{}');
+      (_ldbF.finpos||[]).forEach(function(lf){
+        if(lf._pendingSave){
+          var _fi=DB.finpos.findIndex(function(sf){return String(sf.ID)===String(lf.ID);});
+          if(_fi>=0) DB.finpos[_fi]=lf; else DB.finpos.push(lf);
         }
       });
     }catch(e){}
@@ -487,6 +511,12 @@ function post(data, cb){
   }
   else if(action==='saveROA'){
     upsert('roas', data.roa, cb);
+  }
+  else if(action==='saveFinPos'){
+    // Financial Position item (asset/liability). _pendingSave is managed by
+    // saveFinPos() itself (same convention as savePolicy) — upsert() strips
+    // the flag before sending, but the caller passes a clean copy anyway.
+    upsert('financial_position', data.item, cb);
   }
   else if(action==='saveFamMember'){
     upsert('familylinks', data.member, cb);
@@ -1441,6 +1471,7 @@ function renderProfile(){
     '<div class="tabs">'+
     '<div class="tab'+(CTAB==='overview'?' on':'')+'" data-act="tab" data-tab="overview">Overview</div>'+
     '<div class="tab'+(CTAB==='policies'?' on':'')+'" data-act="tab" data-tab="policies">Policies ('+pols.filter(function(p){return p.Status!=='Replaced';}).length+')</div>'+
+    (function(){var fp=finposFor(c.ID);return '<div class="tab'+(CTAB==='finpos'?' on':'')+'" data-act="tab" data-tab="finpos">Financial Position'+(fp.length?' ('+fp.length+')':'')+'</div>';})()+
     (function(){var bks=[];try{bks=c.BankDetails?JSON.parse(c.BankDetails):[];}catch(e){}return '<div class="tab'+(CTAB==='banking'?' on':'')+'" data-act="tab" data-tab="banking">Banking'+(bks.length?' ('+bks.length+')':'')+'</div>';})()+
     '<div class="tab'+(CTAB==='docs'?' on':'')+'" data-act="tab" data-tab="docs">Documents</div>'+
     '<div class="tab'+(CTAB==='events'?' on':'')+'" data-act="tab" data-tab="events">Work Events</div>'+
@@ -1448,6 +1479,7 @@ function renderProfile(){
     '</div>'+
     (CTAB==='overview'?renderOverview(c,pols,roas,ctasks):
      CTAB==='policies'?renderPolicies(c,pols):
+     CTAB==='finpos'?renderFinPos(c):
      CTAB==='banking'?renderBanking(c):
      CTAB==='docs'?renderDocs(c):
      CTAB==='events'?renderEvents(c,pols):
@@ -2022,6 +2054,137 @@ function renderBanking(c){
       '</div>'+
       '</div></div>';
   }).join('');
+  return html;
+}
+
+// ══ FINANCIAL POSITION (assets & liabilities) ═══════════════════════════
+// One Supabase row per item in financial_position: {ID, ClientID, Kind, Data, UpdatedAt}.
+// Kind: 'property' | 'vehicle' | 'other' | 'liability'. All item fields live as
+// JSON in Data — new fields never need an ALTER TABLE (same safety model as fnadata).
+// Pure data capture: totals below are display arithmetic only, no projections.
+var FP_KINDS = [
+  {kind:'property',  label:'Properties',   icon:'🏠', add:'+ Add Property'},
+  {kind:'vehicle',   label:'Vehicles',     icon:'🚗', add:'+ Add Vehicle'},
+  {kind:'other',     label:'Other Assets', icon:'💼', add:'+ Add Asset'},
+  {kind:'liability', label:'Liabilities',  icon:'💳', add:'+ Add Liability'}
+];
+
+function finposFor(cid){
+  return DB.finpos.filter(function(r){ return String(r.ClientID)===String(cid); });
+}
+function fpData(row){
+  try{ return row.Data ? JSON.parse(row.Data) : {}; }catch(e){ return {}; }
+}
+// Tolerant number parse: "R 1,200,000" / "1200000.50" / "" → number (0 if unparsable)
+function fpN(v){
+  var x = parseFloat(String(v===undefined||v===null?'':v).replace(/[^0-9.\-]/g,''));
+  return isNaN(x) ? 0 : x;
+}
+// Money formatter that, unlike rnd(), shows R 0 and negatives honestly
+function fpR(n){
+  var v = Math.round(n);
+  var s = 'R ' + Math.abs(v).toLocaleString('en-ZA');
+  return v < 0 ? '−' + s : s;
+}
+function fpPassesToLabel(d){
+  if(!d.passesTo) return '—';
+  if(d.passesTo==='Named person') return d.passesToName ? d.passesToName : 'Named person (no name)';
+  return d.passesTo;
+}
+
+function renderFinPos(c){
+  var rows = finposFor(c.ID);
+  var byKind = {};
+  FP_KINDS.forEach(function(k){ byKind[k.kind]=[]; });
+  rows.forEach(function(r){ if(byKind[r.Kind]) byKind[r.Kind].push(r); });
+
+  // Totals — display arithmetic only
+  var totAssets=0, totLiabs=0;
+  rows.forEach(function(r){
+    var d = fpData(r);
+    if(r.Kind==='liability'){ totLiabs += fpN(d.balance); }
+    else {
+      totAssets += fpN(d.value);
+      totLiabs  += fpN(d.bondOut) + fpN(d.financeOut);
+    }
+  });
+  var net = totAssets - totLiabs;
+
+  var html =
+    '<div style="margin-bottom:16px;display:flex;justify-content:space-between;align-items:center">'+
+    '<h2 style="font-family:\'DM Serif Display\',serif;font-size:16px;color:var(--navy)">Financial Position</h2>'+
+    '<span style="font-size:11px;color:#999">Data capture only — no projections. Used as the source for FNA work.</span>'+
+    '</div>'+
+    '<div class="card" style="margin-bottom:14px"><div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;padding:14px 16px">'+
+    '<div><div style="font-size:10px;color:#999;text-transform:uppercase;letter-spacing:.4px">Total Assets</div><div style="font-weight:700;font-size:18px;color:var(--navy)">'+fpR(totAssets)+'</div></div>'+
+    '<div><div style="font-size:10px;color:#999;text-transform:uppercase;letter-spacing:.4px">Total Liabilities <span style="text-transform:none">(incl. bonds &amp; finance)</span></div><div style="font-weight:700;font-size:18px;color:var(--rose)">'+fpR(totLiabs)+'</div></div>'+
+    '<div><div style="font-size:10px;color:#999;text-transform:uppercase;letter-spacing:.4px">Net Position</div><div style="font-weight:700;font-size:18px;color:'+(net<0?'var(--rose)':'#2e7d5a')+'">'+fpR(net)+'</div></div>'+
+    '</div></div>';
+
+  FP_KINDS.forEach(function(k){
+    var items = byKind[k.kind];
+    html += '<div style="margin:18px 0 8px;display:flex;justify-content:space-between;align-items:center">'+
+      '<h3 style="font-family:\'DM Serif Display\',serif;font-size:14px;color:var(--navy)">'+k.icon+' '+k.label+(items.length?' ('+items.length+')':'')+'</h3>'+
+      '<button class="btn b-gd xs" data-act="add-finpos" data-id="'+c.ID+'" data-kind="'+k.kind+'">'+k.add+'</button>'+
+      '</div>';
+    if(!items.length){
+      html += '<div class="card" style="margin-bottom:10px"><div class="empty cb" style="padding:14px;font-size:12px">No '+k.label.toLowerCase()+' captured yet.</div></div>';
+      return;
+    }
+    html += items.map(function(r){
+      var d = fpData(r);
+      var pending = r._pendingSave ? '<span style="background:#fde8e8;color:var(--rose);border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700">⚠️ Not saved to server yet</span>' : '';
+      function cell(lbl,val){ return '<div><div style="font-size:10px;color:#999;text-transform:uppercase;letter-spacing:.3px">'+lbl+'</div><div style="font-weight:600;font-size:13px">'+(val||'—')+'</div></div>'; }
+      function money(v){ var s=String(v===undefined||v===null?'':v).trim(); return s===''?'—':fpR(fpN(s)); }
+      var badges = '';
+      if(d.owner) badges += '<span style="background:var(--sky);color:#fff;border-radius:10px;padding:2px 10px;font-size:11px;font-weight:600">'+d.owner+'</span>';
+      if(r.Kind==='property' && d.primaryRes==='Yes') badges += '<span style="background:#e8f5e9;color:#2e7d5a;border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700">Primary Residence</span>';
+      if(r.Kind==='other' && d.type) badges += '<span style="background:var(--gold);color:var(--navy);border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700">'+d.type+'</span>';
+      if(r.Kind!=='liability'){
+        if(d.soldDeath==='Yes')  badges += '<span style="background:#fff3e0;color:#9a6a1f;border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700">Sold at death</span>';
+        if(d.soldDisab==='Yes')  badges += '<span style="background:#fff3e0;color:#9a6a1f;border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700">Sold at disability</span>';
+      } else if(d.payOffDisab==='Yes'){
+        badges += '<span style="background:#fff3e0;color:#9a6a1f;border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700">Pay off if disabled</span>';
+      }
+      var cells = '';
+      var asAt = d.valueDate ? '<span style="font-size:10px;color:#999;font-weight:400"> as at '+fdate(d.valueDate)+'</span>' : '';
+      if(r.Kind==='property'){
+        cells = cell('Value', money(d.value)+asAt)+
+                cell('Bond Outstanding', money(d.bondOut))+
+                cell('Bond Payment /pm', money(d.bondPM))+
+                cell('Rental Income /pm', money(d.rentalPM))+
+                cell('Base Cost', money(d.baseCost))+
+                cell('Date Acquired', d.dateAcquired?fdate(d.dateAcquired):'—')+
+                cell('Passes to at Death', fpPassesToLabel(d));
+      } else if(r.Kind==='vehicle'){
+        cells = cell('Value', money(d.value)+asAt)+
+                cell('Finance Outstanding', money(d.financeOut))+
+                cell('Finance Payment /pm', money(d.financePM))+
+                cell('Passes to at Death', fpPassesToLabel(d));
+      } else if(r.Kind==='other'){
+        cells = cell('Value', money(d.value)+asAt)+
+                cell('Base Cost', money(d.baseCost))+
+                cell('Date Acquired', d.dateAcquired?fdate(d.dateAcquired):'—')+
+                cell('Passes to at Death', fpPassesToLabel(d));
+      } else {
+        cells = cell('Balance Outstanding', money(d.balance))+
+                cell('Payment /pm', money(d.paymentPM));
+      }
+      return '<div class="card" style="margin-bottom:10px">'+
+        '<div style="display:flex;justify-content:space-between;align-items:flex-start">'+
+        '<div style="flex:1">'+
+        '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">'+
+        '<span style="font-weight:700;font-size:15px">'+(d.desc||'—')+'</span>'+badges+pending+
+        '</div>'+
+        '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:6px 18px">'+cells+'</div>'+
+        (d.notes?'<div style="margin-top:8px;font-size:12px;color:#667;font-style:italic">'+d.notes+'</div>':'')+
+        '</div>'+
+        '<div style="flex-shrink:0;margin-left:12px">'+
+        '<button class="btn b-gh xs" data-act="edit-finpos" data-id="'+c.ID+'" data-fpid="'+r.ID+'">Edit</button>'+
+        '</div>'+
+        '</div></div>';
+    }).join('');
+  });
   return html;
 }
 
@@ -6270,6 +6433,200 @@ function deleteDoctor(cid, idx){
 var BANK_CLIENT_ID = null;
 var BANK_IDX = null;
 
+// ══ FINANCIAL POSITION MODAL ═════════════════════════════════════════════
+var FP_CLIENT_ID = null;
+var FP_KIND = null;
+var FP_EDIT_ID = null; // row ID when editing, null when adding
+
+function fpChk(id,lbl,val){
+  return '<div class="fld"><label style="display:flex;align-items:center;gap:8px;text-transform:none;font-size:13px;font-weight:600;cursor:pointer;letter-spacing:0;padding-top:18px">'+
+    '<input type="checkbox" id="'+id+'" style="width:auto"'+(val==='Yes'?' checked':'')+'>'+lbl+'</label></div>';
+}
+function fpChkVal(id){ var e=document.getElementById(id); return (e&&e.checked)?'Yes':'No'; }
+
+function openFinPosModal(cid, kind, fpid){
+  FP_CLIENT_ID = cid;
+  FP_KIND = kind;
+  FP_EDIT_ID = fpid || null;
+  var row = FP_EDIT_ID ? DB.finpos.find(function(r){return String(r.ID)===String(FP_EDIT_ID);}) : null;
+  if(FP_EDIT_ID && !row){ toast('Cannot find item to edit','err'); return; }
+  if(row) FP_KIND = row.Kind; // kind comes from the row when editing
+  var d = row ? fpData(row) : {};
+  var kindMeta = FP_KINDS.find(function(k){return k.kind===FP_KIND;}) || {label:'Item',icon:''};
+  var isLiab = FP_KIND==='liability';
+
+  // Name pool for "Passes to at death → Named person": family links + spouse name on record.
+  var names = famFor(cid).map(function(m){return m.Name;}).filter(Boolean);
+  var c = DB.clients.find(function(x){return String(x.ID)===String(cid);});
+  if(c && clean(c.SpouseName) && names.indexOf(c.SpouseName)<0) names.push(c.SpouseName);
+  var dataList = '<datalist id="fpNameList">'+names.map(function(n){return '<option value="'+n+'">';}).join('')+'</datalist>';
+
+  var ownerOpts = ['Client','Spouse','Joint'];
+  var otherTypeOpts = ['','Cash / Savings','Fixed Deposit','Shares / Unit Trusts','Business Interest','Loan Account','Crypto','Art / Collectibles','Household Contents','Other'];
+  var passOpts = ['Spouse','Estate','Named person'];
+
+  var html = '';
+  if(isLiab){
+    html =
+      fld('fpdesc','Description (e.g. Personal loan, Credit card)',d.desc||'')+
+      '<div class="g2">'+
+      fs('fpowner','Whose Debt',ownerOpts,d.owner||'Client')+
+      fld('fpbalance','Balance Outstanding (R)',d.balance||'')+
+      '</div>'+
+      '<div class="g2">'+
+      fld('fppaymentPM','Payment per Month (R)',d.paymentPM||'')+
+      fpChk('fppayOffDisab','Pay off if disabled',d.payOffDisab)+
+      '</div>'+
+      fld('fpnotes','Notes',d.notes||'','textarea');
+  } else {
+    var top =
+      fld('fpdesc','Description',d.desc||'')+
+      '<div class="g2">'+
+      fs('fpowner','Owner',ownerOpts,d.owner||'Client')+
+      (FP_KIND==='other'?fs('fptype','Asset Type',otherTypeOpts,d.type||''):'')+
+      '</div>'+
+      '<div class="g2">'+
+      fld('fpvalue','Current Value (R)',d.value||'')+
+      fld('fpvalueDate','Value as at',d.valueDate||'','date')+
+      '</div>';
+    var mid = '';
+    if(FP_KIND==='property'){
+      mid =
+        '<div class="g2">'+
+        fld('fpbaseCost','Base Cost (R) — for CGT',d.baseCost||'')+
+        fld('fpdateAcquired','Date Acquired',d.dateAcquired||'','date')+
+        '</div>'+
+        '<div class="g2">'+
+        fld('fpbondOut','Bond Outstanding (R)',d.bondOut||'')+
+        fld('fpbondPM','Bond Payment per Month (R)',d.bondPM||'')+
+        '</div>'+
+        '<div class="g2">'+
+        fld('fprentalPM','Rental Income per Month (R)',d.rentalPM||'')+
+        fpChk('fpprimaryRes','Primary residence',d.primaryRes)+
+        '</div>';
+    } else if(FP_KIND==='vehicle'){
+      mid =
+        '<div class="g2">'+
+        fld('fpfinanceOut','Finance Outstanding (R)',d.financeOut||'')+
+        fld('fpfinancePM','Finance Payment per Month (R)',d.financePM||'')+
+        '</div>';
+    } else { // other
+      mid =
+        '<div class="g2">'+
+        fld('fpbaseCost','Base Cost (R) — for CGT',d.baseCost||'')+
+        fld('fpdateAcquired','Date Acquired',d.dateAcquired||'','date')+
+        '</div>';
+    }
+    var death =
+      '<div class="g2">'+
+      fs('fppassesTo','Passes to at Death',passOpts,d.passesTo||'Estate')+
+      '<div class="fld" id="fpNameWrap" style="display:'+((d.passesTo||'Estate')==='Named person'?'flex':'none')+'">'+
+      '<label>Named Person</label>'+
+      '<input type="text" id="fppassesToName" list="fpNameList" value="'+clean(d.passesToName||'')+'" autocomplete="off" placeholder="Choose from family or type a name">'+
+      '</div>'+
+      '</div>'+
+      '<div class="g2">'+
+      fpChk('fpsoldDeath','Sold at death',d.soldDeath)+
+      fpChk('fpsoldDisab','Sold at disability',d.soldDisab)+
+      '</div>';
+    html = top + mid + death + fld('fpnotes','Notes',d.notes||'','textarea') + dataList;
+  }
+
+  var fpSingular = {property:'Property', vehicle:'Vehicle', other:'Other Asset', liability:'Liability'}[FP_KIND] || 'Item';
+  document.getElementById('fpModT').textContent = (FP_EDIT_ID?'Edit ':'Add ')+kindMeta.icon+' '+fpSingular;
+  document.getElementById('fpModB').innerHTML = html;
+  document.getElementById('delFpBtn').style.display = FP_EDIT_ID ? '' : 'none';
+  // Toggle the named-person field when "Passes to at Death" changes
+  var passSel = document.getElementById('fppassesTo');
+  if(passSel){
+    passSel.addEventListener('change', function(){
+      var w = document.getElementById('fpNameWrap');
+      if(w) w.style.display = passSel.value==='Named person' ? 'flex' : 'none';
+    });
+  }
+  document.getElementById('fpMod').classList.add('open');
+}
+
+function collectFinPosForm(){
+  var d = { desc:g('fpdesc'), owner:g('fpowner'), notes:g('fpnotes') };
+  if(FP_KIND==='liability'){
+    d.balance = g('fpbalance');
+    d.paymentPM = g('fppaymentPM');
+    d.payOffDisab = fpChkVal('fppayOffDisab');
+    return d;
+  }
+  d.value = g('fpvalue');
+  d.valueDate = g('fpvalueDate');
+  d.passesTo = g('fppassesTo');
+  d.passesToName = d.passesTo==='Named person' ? g('fppassesToName') : '';
+  d.soldDeath = fpChkVal('fpsoldDeath');
+  d.soldDisab = fpChkVal('fpsoldDisab');
+  if(FP_KIND==='property'){
+    d.baseCost = g('fpbaseCost'); d.dateAcquired = g('fpdateAcquired');
+    d.bondOut = g('fpbondOut'); d.bondPM = g('fpbondPM');
+    d.rentalPM = g('fprentalPM'); d.primaryRes = fpChkVal('fpprimaryRes');
+  } else if(FP_KIND==='vehicle'){
+    d.financeOut = g('fpfinanceOut'); d.financePM = g('fpfinancePM');
+  } else {
+    d.type = g('fptype');
+    d.baseCost = g('fpbaseCost'); d.dateAcquired = g('fpdateAcquired');
+  }
+  return d;
+}
+
+function saveFinPos(){
+  if(!g('fpdesc')){ toast('Description required','err'); return; }
+  var now = new Date().toISOString().slice(0,16).replace('T',' ');
+  var oldRow = FP_EDIT_ID ? DB.finpos.find(function(r){return String(r.ID)===String(FP_EDIT_ID);}) : null;
+  var row = {
+    ID: oldRow ? oldRow.ID : ('fp_'+Date.now()),
+    ClientID: FP_CLIENT_ID,
+    Kind: FP_KIND,
+    Data: JSON.stringify(collectFinPosForm()),
+    UpdatedAt: now
+  };
+  // Mark pending so a refresh before the server confirms doesn't lose the item
+  row._pendingSave = true;
+  if(oldRow){ var gi=DB.finpos.indexOf(oldRow); if(gi>=0) DB.finpos[gi]=row; }
+  else DB.finpos.push(row);
+  // Write to localStorage immediately — survives a refresh before server responds
+  try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
+  closeAll(); render();
+  var _rowForServer = JSON.parse(JSON.stringify(row));
+  delete _rowForServer._pendingSave;
+  post({action:'saveFinPos', item:_rowForServer}, function(res){
+    if(res && res.ok===1){
+      var _ci = DB.finpos.findIndex(function(x){return x.ID===row.ID;});
+      if(_ci>=0) DB.finpos[_ci] = _rowForServer;
+      try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
+      toast('Saved ✓','ok');
+      render(); // clear the "not saved yet" badge
+    } else {
+      // Server rejected — item stays in DB.finpos with _pendingSave:true, so the
+      // pending-save merge in syncNow() recovers it on the next reload. Error toast
+      // and console log already emitted by upsert(). Log the ID for traceability.
+      console.error('Financial Position item NOT saved to server. Retained locally with _pendingSave flag. ID:', row.ID, '— Kind:', row.Kind);
+    }
+  });
+}
+
+function deleteFinPos(){
+  var row = FP_EDIT_ID ? DB.finpos.find(function(r){return String(r.ID)===String(FP_EDIT_ID);}) : null;
+  if(!row){ toast('Cannot find item to delete','err'); return; }
+  var d = fpData(row);
+  if(!confirm('Permanently delete this item?\n\n'+(d.desc||row.Kind)+'\n\nThis cannot be undone.')) return;
+  var gi = DB.finpos.indexOf(row);
+  if(gi>=0) DB.finpos.splice(gi,1);
+  try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
+  closeAll(); render();
+  post({action:'deleteRow', sheet:'financial_position', id:row.ID}, function(res){
+    if(res && res.ok===1) toast('Item deleted','ok');
+    // On failure the DELETE FAILED toast from del() has already fired. The row is
+    // gone locally but still on the server — the next sync restores it, which is
+    // the safe direction (nothing is lost).
+  });
+}
+
 function openBankModal(cid, idx){
   BANK_CLIENT_ID = cid;
   BANK_IDX = (idx !== undefined && idx !== null) ? idx : null;
@@ -6896,6 +7253,7 @@ document.addEventListener('click', function(e){
       else if(save==='client-fna')saveClient(true);
       else if(save==='policy')savePolicy();
       else if(save==='bank')saveBank();
+      else if(save==='finpos')saveFinPos();
       else if(save==='doctor')saveDoctor();
       else if(save==='roa')saveROA();
       else if(save==='task')saveTask();
@@ -6922,6 +7280,8 @@ document.addEventListener('click', function(e){
         case 'edit-policy':    openPolicyModal(cid,parseInt(idx)); break;
         case 'pol-history':    openPolicyHistory(cid,parseInt(idx)); break;
         case 'add-bank':       openBankModal(id); break;
+        case 'add-finpos':     openFinPosModal(id, el.getAttribute('data-kind')); break;
+        case 'edit-finpos':    openFinPosModal(id, null, el.getAttribute('data-fpid')); break;
         case 'add-doctor':     openDoctorModal(id); break;
         case 'edit-doctor':    openDoctorModal(id,parseInt(idx)); break;
         case 'del-doctor':     deleteDoctor(id,parseInt(idx)); break;
