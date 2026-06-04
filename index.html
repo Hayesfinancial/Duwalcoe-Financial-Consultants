@@ -1471,7 +1471,8 @@ function renderProfile(){
     '<div class="tabs">'+
     '<div class="tab'+(CTAB==='overview'?' on':'')+'" data-act="tab" data-tab="overview">Overview</div>'+
     '<div class="tab'+(CTAB==='policies'?' on':'')+'" data-act="tab" data-tab="policies">Policies ('+pols.filter(function(p){return p.Status!=='Replaced';}).length+')</div>'+
-    (function(){var fp=finposFor(c.ID);return '<div class="tab'+(CTAB==='finpos'?' on':'')+'" data-act="tab" data-tab="finpos">Financial Position'+(fp.length?' ('+fp.length+')':'')+'</div>';})()+
+    (function(){var fp=finposFor(c.ID).filter(function(r){return r.Kind!=='need'&&r.Kind!=='need_notes';});return '<div class="tab'+(CTAB==='finpos'?' on':'')+'" data-act="tab" data-tab="finpos">Financial Position'+(fp.length?' ('+fp.length+')':'')+'</div>';})()+
+    (function(){var nd=finposFor(c.ID).filter(function(r){return r.Kind==='need';});return '<div class="tab'+(CTAB==='needs'?' on':'')+'" data-act="tab" data-tab="needs">Needs'+(nd.length?' ('+nd.length+')':'')+'</div>';})()+
     (function(){var bks=[];try{bks=c.BankDetails?JSON.parse(c.BankDetails):[];}catch(e){}return '<div class="tab'+(CTAB==='banking'?' on':'')+'" data-act="tab" data-tab="banking">Banking'+(bks.length?' ('+bks.length+')':'')+'</div>';})()+
     '<div class="tab'+(CTAB==='docs'?' on':'')+'" data-act="tab" data-tab="docs">Documents</div>'+
     '<div class="tab'+(CTAB==='events'?' on':'')+'" data-act="tab" data-tab="events">Work Events</div>'+
@@ -1480,6 +1481,7 @@ function renderProfile(){
     (CTAB==='overview'?renderOverview(c,pols,roas,ctasks):
      CTAB==='policies'?renderPolicies(c,pols):
      CTAB==='finpos'?renderFinPos(c):
+     CTAB==='needs'?renderNeeds(c):
      CTAB==='banking'?renderBanking(c):
      CTAB==='docs'?renderDocs(c):
      CTAB==='events'?renderEvents(c,pols):
@@ -2094,7 +2096,7 @@ function fpPassesToLabel(d){
 }
 
 function renderFinPos(c){
-  var rows = finposFor(c.ID);
+  var rows = finposFor(c.ID).filter(function(r){ return r.Kind!=='need' && r.Kind!=='need_notes'; });
   var byKind = {};
   FP_KINDS.forEach(function(k){ byKind[k.kind]=[]; });
   rows.forEach(function(r){ if(byKind[r.Kind]) byKind[r.Kind].push(r); });
@@ -2208,6 +2210,122 @@ function renderFinPos(c){
     }).join('');
   });
   return html;
+}
+
+// ══ NEEDS (client-stated needs for FNA work) ═════════════════════════════
+// Stored in the same financial_position table: Kind 'need' for need cards,
+// Kind 'need_notes' for the per-client discussion notes (one row, deterministic
+// ID 'fpnn_<clientId>' so saves upsert the same row). Pure capture — every
+// amount is the client's stated need, not an analysis result.
+var NEED_SCENARIOS = ['Death','Disability','Dread Disease','Retirement','Other'];
+var NEED_SCEN_STYLE = {
+  'Death':        'background:var(--navy);color:#fff',
+  'Disability':   'background:var(--sky);color:#fff',
+  'Dread Disease':'background:#9a1f1f;color:#fff',
+  'Retirement':   'background:var(--gold);color:var(--navy)',
+  'Other':        'background:#e0e0e0;color:#444'
+};
+
+function needNotesRowFor(cid){
+  return DB.finpos.find(function(r){ return String(r.ClientID)===String(cid) && r.Kind==='need_notes'; });
+}
+
+function renderNeeds(c){
+  var rows = finposFor(c.ID).filter(function(r){ return r.Kind==='need'; });
+  var notesRow = needNotesRowFor(c.ID);
+  var notesData = notesRow ? fpData(notesRow) : {};
+  var notesPending = (notesRow && notesRow._pendingSave) ? ' <span style="background:#fde8e8;color:var(--rose);border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700">⚠️ Not saved to server yet</span>' : '';
+  // Typed-but-unsaved notes survive re-renders (sync, saving a need card, etc.)
+  // via a draft scoped to this client — never carried across clients.
+  var draft = window._needNotesDraft;
+  var txtVal = (draft && String(draft.cid)===String(c.ID)) ? draft.text : (notesData.text||'');
+  var txtEsc = String(txtVal).replace(/&/g,'&amp;').replace(/</g,'&lt;');
+
+  var html =
+    '<div style="margin-bottom:16px;display:flex;justify-content:space-between;align-items:center">'+
+    '<h2 style="font-family:\'DM Serif Display\',serif;font-size:16px;color:var(--navy)">Client Needs</h2>'+
+    '<button class="btn b-gd sm" data-act="add-need" data-id="'+c.ID+'">+ Add Need</button>'+
+    '</div>'+
+    '<div class="card" style="margin-bottom:14px"><div style="padding:12px 16px">'+
+    '<div style="font-size:11px;font-weight:700;color:#667;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Needs Discussion Notes'+notesPending+'</div>'+
+    '<textarea id="fpNeedNotesTxt" oninput="window._needNotesDraft={cid:\''+c.ID+'\',text:this.value}" style="width:100%;min-height:70px;border:1.5px solid var(--mist);border-radius:7px;padding:8px 11px;font-size:13px;font-family:inherit;color:var(--ink);outline:none;resize:vertical" placeholder="Anything from the needs conversation that doesn\'t fit a card — the client\'s own words are often the most valuable.">'+txtEsc+'</textarea>'+
+    '<div style="margin-top:8px;text-align:right"><button class="btn b-gd xs" data-act="save-need-notes" data-id="'+c.ID+'">💾 Save Notes</button></div>'+
+    '</div></div>';
+
+  if(!rows.length){
+    html += '<div class="card"><div class="empty cb" style="padding:24px">No needs captured yet. Click + Add Need — e.g. "Spouse living expenses, R25,000/pm for 15 years".</div></div>';
+    return html;
+  }
+
+  NEED_SCENARIOS.forEach(function(scen){
+    var items = rows.filter(function(r){ return (fpData(r).scenario||'Other')===scen; });
+    if(!items.length) return;
+    html += '<div style="margin:18px 0 8px"><h3 style="font-family:\'DM Serif Display\',serif;font-size:14px;color:var(--navy)">'+scen+' ('+items.length+')</h3></div>';
+    html += items.map(function(r){
+      var d = fpData(r);
+      var pending = r._pendingSave ? '<span style="background:#fde8e8;color:var(--rose);border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700">⚠️ Not saved to server yet</span>' : '';
+      var isIncome = d.needType==='Monthly income';
+      var amtTxt;
+      var amtRaw = String(d.amount===undefined||d.amount===null?'':d.amount).trim();
+      if(amtRaw===''){ amtTxt = '—'; }
+      else if(isIncome){ amtTxt = fpR(fpN(amtRaw))+' /pm'+(d.years?' × '+d.years+' yrs':''); }
+      else { amtTxt = fpR(fpN(amtRaw)); }
+      function cell(lbl,val){ return '<div><div style="font-size:10px;color:#999;text-transform:uppercase;letter-spacing:.3px">'+lbl+'</div><div style="font-weight:600;font-size:13px">'+(val||'—')+'</div></div>'; }
+      var cells = cell(isIncome?'Income Need':'Capital Need', amtTxt);
+      if(isIncome) cells += cell('Escalation', d.esc?d.esc+'% p.a.':'Not specified — CPI assumed');
+      cells += cell('For Whom', fpPassesToLabel({passesTo:d.benTo, passesToName:d.benName}));
+      var typeBadge = '<span style="background:'+(isIncome?'#e8f0fe;color:#1a4f9c':'#e8f5e9;color:#2e7d5a')+';border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700">'+(isIncome?'Income /pm':'Once-off capital')+'</span>';
+      var scenBadge = '<span style="'+(NEED_SCEN_STYLE[scen]||NEED_SCEN_STYLE.Other)+';border-radius:10px;padding:2px 10px;font-size:11px;font-weight:600">'+scen+'</span>';
+      return '<div class="card" style="margin-bottom:10px">'+
+        '<div style="display:flex;justify-content:space-between;align-items:flex-start">'+
+        '<div style="flex:1">'+
+        '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">'+
+        '<span style="font-weight:700;font-size:15px">'+(d.desc||'—')+'</span>'+scenBadge+typeBadge+pending+
+        '</div>'+
+        '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:6px 18px">'+cells+'</div>'+
+        (d.notes?'<div style="margin-top:8px;font-size:12px;color:#667;font-style:italic">'+d.notes+'</div>':'')+
+        '</div>'+
+        '<div style="flex-shrink:0;margin-left:12px">'+
+        '<button class="btn b-gh xs" data-act="edit-finpos" data-id="'+c.ID+'" data-fpid="'+r.ID+'">Edit</button>'+
+        '</div>'+
+        '</div></div>';
+    }).join('');
+  });
+  return html;
+}
+
+// Save the needs discussion notes — same hardened pattern as saveFinPos.
+// Reads the textarea live from the rendered tab (no modal involved).
+function saveNeedNotes(cid){
+  var txtEl = document.getElementById('fpNeedNotesTxt');
+  if(!txtEl) return;
+  var now = new Date().toISOString().slice(0,16).replace('T',' ');
+  var existing = needNotesRowFor(cid);
+  var row = {
+    ID: existing ? existing.ID : ('fpnn_'+cid),
+    ClientID: cid,
+    Kind: 'need_notes',
+    Data: JSON.stringify({text: txtEl.value}),
+    UpdatedAt: now
+  };
+  row._pendingSave = true;
+  if(existing){ var gi=DB.finpos.indexOf(existing); if(gi>=0) DB.finpos[gi]=row; }
+  else DB.finpos.push(row);
+  try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
+  var _rowForServer = JSON.parse(JSON.stringify(row));
+  delete _rowForServer._pendingSave;
+  post({action:'saveFinPos', item:_rowForServer}, function(res){
+    if(res && res.ok===1){
+      var _ci = DB.finpos.findIndex(function(x){return x.ID===row.ID;});
+      if(_ci>=0) DB.finpos[_ci] = _rowForServer;
+      try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
+      if(window._needNotesDraft && String(window._needNotesDraft.cid)===String(cid)) window._needNotesDraft = null;
+      toast('Notes saved ✓','ok');
+    } else {
+      console.error('Need notes NOT saved to server. Retained locally with _pendingSave flag. ID:', row.ID);
+    }
+    // No render() here — never wipe the textarea under the user's cursor.
+  });
 }
 
 function renderROA(c,roas){
@@ -6488,7 +6606,37 @@ function openFinPosModal(cid, kind, fpid){
   var passOpts = ['Spouse','Estate','Named person'];
 
   var html = '';
-  if(isLiab){
+  if(FP_KIND==='need'){
+    var isIncomeNow = (d.needType||'Monthly income')==='Monthly income';
+    html =
+      fld('fpdesc','Description (e.g. Spouse living expenses, Education fund)',d.desc||'')+
+      '<div class="g2">'+
+      fs('fpscenario','Scenario',NEED_SCENARIOS,d.scenario||'Death')+
+      fs('fpneedType','Need Type',['Monthly income','Once-off capital'],d.needType||'Monthly income')+
+      '</div>'+
+      '<div class="g2">'+
+      fld('fpamount','Amount (R) — per month for income, lump sum for capital',d.amount||'')+
+      '<div class="fld" id="fpYearsWrap" style="display:'+(isIncomeNow?'flex':'none')+'">'+
+      '<label>For How Many Years</label>'+
+      '<input type="text" id="fpyears" value="'+clean(d.years||'')+'" autocomplete="off">'+
+      '</div>'+
+      '</div>'+
+      '<div class="g2">'+
+      '<div class="fld" id="fpEscWrap" style="display:'+(isIncomeNow?'flex':'none')+'">'+
+      '<label>Escalation % p.a. (blank = CPI assumed in the FNA)</label>'+
+      '<input type="text" id="fpesc" value="'+clean(d.esc||'')+'" autocomplete="off">'+
+      '</div>'+
+      fs('fpbenTo','For Whom',['','Spouse','Estate','Named person'],d.benTo||'')+
+      '</div>'+
+      '<div class="g2">'+
+      '<div class="fld" id="fpNameWrap" style="display:'+(d.benTo==='Named person'?'flex':'none')+'">'+
+      '<label>Named Person</label>'+
+      '<input type="text" id="fpbenName" list="fpNameList" value="'+clean(d.benName||'')+'" autocomplete="off" placeholder="Choose from family or type a name">'+
+      '</div>'+
+      '</div>'+
+      fld('fpnotes','Notes (the client\'s own words)',d.notes||'','textarea')+
+      dataList;
+  } else if(isLiab){
     html =
       fld('fpdesc','Description (e.g. Personal loan, Credit card)',d.desc||'')+
       '<div class="g2">'+
@@ -6569,8 +6717,8 @@ function openFinPosModal(cid, kind, fpid){
     html = top + mid + death + fld('fpnotes','Notes',d.notes||'','textarea') + dataList;
   }
 
-  var fpSingular = {property:'Property', vehicle:'Vehicle', other:'Other Asset', business:'Business Interest', liability:'Liability'}[FP_KIND] || 'Item';
-  document.getElementById('fpModT').textContent = (FP_EDIT_ID?'Edit ':'Add ')+kindMeta.icon+' '+fpSingular;
+  var fpSingular = {property:'Property', vehicle:'Vehicle', other:'Other Asset', business:'Business Interest', liability:'Liability', need:'Need'}[FP_KIND] || 'Item';
+  document.getElementById('fpModT').textContent = (FP_EDIT_ID?'Edit ':'Add ')+(FP_KIND==='need'?'🎯':kindMeta.icon)+' '+fpSingular;
   document.getElementById('fpModB').innerHTML = html;
   document.getElementById('delFpBtn').style.display = FP_EDIT_ID ? '' : 'none';
   // Toggle the named-person field when "Passes to at Death" changes
@@ -6581,11 +6729,41 @@ function openFinPosModal(cid, kind, fpid){
       if(w) w.style.display = passSel.value==='Named person' ? 'flex' : 'none';
     });
   }
+  // Need modal: toggle income-only fields on need type, named person on "For Whom"
+  var ntSel = document.getElementById('fpneedType');
+  if(ntSel){
+    ntSel.addEventListener('change', function(){
+      var inc = ntSel.value==='Monthly income';
+      var yw = document.getElementById('fpYearsWrap');
+      var ew = document.getElementById('fpEscWrap');
+      if(yw) yw.style.display = inc ? 'flex' : 'none';
+      if(ew) ew.style.display = inc ? 'flex' : 'none';
+    });
+  }
+  var btSel = document.getElementById('fpbenTo');
+  if(btSel){
+    btSel.addEventListener('change', function(){
+      var w = document.getElementById('fpNameWrap');
+      if(w) w.style.display = btSel.value==='Named person' ? 'flex' : 'none';
+    });
+  }
   document.getElementById('fpMod').classList.add('open');
 }
 
 function collectFinPosForm(){
   var d = { desc:g('fpdesc'), owner:g('fpowner'), notes:g('fpnotes') };
+  if(FP_KIND==='need'){
+    delete d.owner; // needs have "for whom" instead
+    d.scenario = g('fpscenario');
+    d.needType = g('fpneedType');
+    d.amount = g('fpamount');
+    var isInc = d.needType==='Monthly income';
+    d.years = isInc ? g('fpyears') : '';
+    d.esc   = isInc ? g('fpesc') : '';
+    d.benTo = g('fpbenTo');
+    d.benName = d.benTo==='Named person' ? g('fpbenName') : '';
+    return d;
+  }
   if(FP_KIND==='liability'){
     d.balance = g('fpbalance');
     d.paymentPM = g('fppaymentPM');
@@ -7326,6 +7504,8 @@ document.addEventListener('click', function(e){
         case 'add-bank':       openBankModal(id); break;
         case 'add-finpos':     openFinPosModal(id, el.getAttribute('data-kind')); break;
         case 'edit-finpos':    openFinPosModal(id, null, el.getAttribute('data-fpid')); break;
+        case 'add-need':       openFinPosModal(id, 'need'); break;
+        case 'save-need-notes':saveNeedNotes(id); break;
         case 'add-doctor':     openDoctorModal(id); break;
         case 'edit-doctor':    openDoctorModal(id,parseInt(idx)); break;
         case 'del-doctor':     deleteDoctor(id,parseInt(idx)); break;
