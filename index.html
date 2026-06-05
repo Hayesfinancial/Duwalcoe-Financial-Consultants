@@ -7986,7 +7986,7 @@ function astuteClassifyCovers(covers){
         type: fixedTerm ? 'Temporary IP' : 'Income Protection',
         label: cv.plan||'', amount: amt, prem: cv.prem||'',
         waiting: astuteMapWaiting(cv.elim), term: term,
-        esc:'', premEscType:'Fixed %', premEsc:'', benEsc:'', claimEsc:'',
+        esc:'', premEscType:'Fixed %', premEsc:'', benEsc:cv.benEsc||'', claimEsc:'',
         taxable:'No', convert:'No'
       });
       return;
@@ -8000,7 +8000,7 @@ function astuteClassifyCovers(covers){
     var t = 'Life Cover';
     if(nameStr.indexOf('disab')>=0 || nameStr.indexOf('impair')>=0) t = 'Capital Disability';
     else if(nameStr.indexOf('dread')>=0 || nameStr.indexOf('illness')>=0 || nameStr.indexOf('sever')>=0 || nameStr.indexOf('critical')>=0) t = 'Dread Disease / Severe Illness';
-    lumps.push({type:t, label:cv.plan||'', cover:cv.amt, prem:cv.prem||'', premEsc:'', benEsc:''});
+    lumps.push({type:t, label:cv.plan||'', cover:cv.amt, prem:cv.prem||'', premEsc:'', benEsc:cv.benEsc||''});
   });
   return {lumps:lumps, incomes:incomes, fee:fee};
 }
@@ -8080,7 +8080,7 @@ function parseAstuteXML(txt){
       if(life){
         var cvs = life.getElementsByTagName('Coverage');
         for(var ki=0; ki<cvs.length; ki++){
-          covers.push({
+          var cvObj = {
             plan: astuteTxt(cvs[ki],'PlanName'),
             code: astuteTxt(cvs[ki],'LifeCovTypeCode'),
             amt:  astuteTxt(cvs[ki],'CurrentAmt'),
@@ -8091,22 +8091,44 @@ function parseAstuteXML(txt){
             mode: astuteTxt(cvs[ki],'BenefitMode'),
             monthlyAmt: astuteTxt(cvs[ki],'MonthlyBenefitAmt'),
             period: astuteTxt(cvs[ki],'BenefitPeriod'),
-            elim: astuteTxt(cvs[ki],'EliminationPeriod')
-          });
+            elim: astuteTxt(cvs[ki],'EliminationPeriod'),
+            benEsc: ''
+          };
+          covers.push(cvObj);
           // Benefit CovOptions: OM (and others) export accelerated benefits
           // (e.g. Greenlight Severe Illness Comprehensive) as <CovOption>
           // elements INSIDE the parent <Coverage>, not as Coverages of their
           // own — dread disease was silently dropped in live data (caught by
           // Clinton, Jun 2026). A CovOption is a real insured benefit only
-          // when it carries an OptionAmt; escalation/admin options (Benefit
-          // Increase Provision tc=32, Annual Benefit Increase tc=4) carry
-          // OptionPct only and must NOT become benefit rows. Premium stays
-          // blank — it is bundled in the parent coverage's premium, so
-          // copying it would double-count.
+          // when it carries an OptionAmt; escalation options carry OptionPct
+          // only and are mapped to the parent row's benEsc below instead of
+          // becoming benefit rows. Benefit premium stays blank — it is
+          // bundled in the parent coverage's premium, so copying it would
+          // double-count.
           var opts = cvs[ki].getElementsByTagName('CovOption');
           for(var oi=0; oi<opts.length; oi++){
             var opt = opts[oi];
-            if(!(N(astuteTxt(opt,'OptionAmt'))>0)) continue;       // escalation/admin option — no benefit amount
+            // Escalation options (Benefit Increase Provision tc=32, Annual
+            // Benefit Increase tc=4): these carry the PARENT coverage's annual
+            // benefit increase, not a benefit of their own. Numeric % goes to
+            // the row's benEsc. CPI-linked (OptionPct 0 + AnnualIndexType
+            // 'Consumer Price Index Rate', seen on FMI) is noted on the row
+            // label instead — the schedule's Rpct() renders any non-numeric
+            // benEsc as '0%', which would misstate a CPI escalation as zero.
+            // Applied to the parent coverage row ONLY; never assumed onto
+            // accelerated CovOption benefit rows (verify against schedule).
+            var optTypeEl = opt.getElementsByTagName('LifeCovOptTypeCode')[0];
+            var optTc = optTypeEl ? (optTypeEl.getAttribute('tc')||'') : '';
+            var optTypeTxt = optTypeEl ? (optTypeEl.textContent||'') : '';
+            if(optTc==='32' || optTc==='4' || /benefit increase/i.test(optTypeTxt)){
+              var escPct = N(astuteTxt(opt,'OptionPct'));
+              if(escPct>0){ if(!cvObj.benEsc) cvObj.benEsc = String(escPct); }
+              else if(/consumer price|cpi/i.test(astuteTxt(opt,'AnnualIndexType')) && cvObj.plan.indexOf('CPI')<0){
+                cvObj.plan = (cvObj.plan?cvObj.plan+' · ':'')+'CPI benefit increases';
+              }
+              continue;
+            }
+            if(!(N(astuteTxt(opt,'OptionAmt'))>0)) continue;       // other admin option — no benefit amount
             var optStatus = astuteTxt(opt,'CovOptionStatus');
             if(optStatus && !astuteIsActive(optStatus)) continue;  // ceased/removed benefit option
             // Accelerated vs standalone (OM FSE extension IndicatorCode) —
