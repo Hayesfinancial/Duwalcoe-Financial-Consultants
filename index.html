@@ -1566,6 +1566,7 @@ function dr(lbl,val){ return '<div class="dr"><span class="dl">'+lbl+'</span><sp
 // ══ FAMILY / DEPENDANTS ══════════════════════════════════════
 var FAM_CLIENT = null;
 var FAM_TYPE = 'Spouse';
+var FAM_EDIT_ID = null; // set when editing one specific link row (e.g. a child) — null means add/spouse mode
 
 function famFor(cid){
   var own = DB.links.filter(function(l){ return String(l.PrincipalID)===String(cid); });
@@ -1598,14 +1599,21 @@ function famFor(cid){
   return own.concat(extra);
 }
 
-function openFamModal(cid, type){
+function openFamModal(cid, type, linkId){
   FAM_CLIENT = cid;
   FAM_TYPE = type || 'Spouse';
+  FAM_EDIT_ID = linkId || null;
   var c = DB.clients.find(function(x){ return String(x.ID)===String(cid); });
-  // If editing an existing spouse, prefer the live DB.links row over c.Spouse* (which
-  // can be stale and is the legacy storage). For new entries, fall back to c.Spouse*.
+  // If editing one specific link row (✎ Edit on a child/dependant row), use that
+  // exact row. Otherwise, for Spouse, fall back to the one-per-client spouse
+  // lookup — prefer the live DB.links row over c.Spouse* (which can be stale and
+  // is the legacy storage). For new entries, fall back to c.Spouse*.
   var existing = null;
-  if(FAM_TYPE === 'Spouse'){
+  if(FAM_EDIT_ID){
+    existing = DB.links.find(function(l){ return String(l.ID)===String(FAM_EDIT_ID); });
+    if(!existing) FAM_EDIT_ID = null; // stale id — fall through to add/spouse mode
+  }
+  if(!existing && FAM_TYPE === 'Spouse'){
     existing = DB.links.find(function(l){
       return String(l.PrincipalID)===String(cid) && l.Type==='Spouse';
     });
@@ -1653,11 +1661,16 @@ function saveFamMember(){
   // ID governs DOB: a valid SA ID is the authoritative source of the DOB.
   if(saIdValid(idnum)) dob = dobFromID(idnum.replace(/\D/g,''));
 
-  // Spouse is one-per-client. If one already exists in DB.links, update that
-  // row in place instead of creating a duplicate. Children can legitimately
-  // stack, so the duplicate guard only applies to Type === 'Spouse'.
+  // Resolve which existing row (if any) this save updates:
+  // 1. FAM_EDIT_ID — the ✎ Edit button on a specific row (children/dependants
+  //    can stack, so they must be matched by ID, never by type).
+  // 2. Spouse fallback — spouse is one-per-client, so if one already exists in
+  //    DB.links, update that row in place instead of creating a duplicate.
   var existing = null;
-  if(FAM_TYPE === 'Spouse'){
+  if(FAM_EDIT_ID){
+    existing = DB.links.find(function(l){ return String(l.ID)===String(FAM_EDIT_ID); });
+  }
+  if(!existing && FAM_TYPE === 'Spouse'){
     existing = DB.links.find(function(l){
       return String(l.PrincipalID) === String(FAM_CLIENT) && l.Type === 'Spouse';
     });
@@ -1693,6 +1706,7 @@ function saveFamMember(){
   // member — syncNow recovers it. upsert()/patch() clear the flag on a confirmed save.
   link._pendingSave = true;
   try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
+  FAM_EDIT_ID = null; // edit complete — next modal open decides its own mode
   closeAll();
   render();
   post({action: existing ? 'updateFamMember' : 'saveFamMember', member:link}, function(res){
@@ -2010,6 +2024,9 @@ function renderOverview(c,pols,roas,ctasks){
         (clean(liveDob)?' <span>🎂 '+fdate(liveDob)+'</span>':'')+
         (clean(liveCell)?' <span>📱 '+liveCell+'</span>':'')+
         '</div></div>'+
+        // ✎ Edit only on non-client rows: client-linked rows display LIVE values
+        // from the linked client's record, so edits belong on that client profile.
+        (isClient?'':'<button class="btn b-gh xs" data-act="edit-fam" data-id="'+m.ID+'" data-cid="'+c.ID+'" data-type="'+m.Type+'">✎ Edit</button>')+
         (isClient?
           '<button class="btn b-gh xs" data-act="open-client" data-id="'+m.ClientID+'">View Profile →</button>':
           '<button class="btn b-sg xs" data-act="upgrade-client" data-id="'+m.ID+'">Make Client</button>')+
@@ -8803,6 +8820,12 @@ document.addEventListener('click', function(e){
         case 'remove-child':   removeChild(id); break;
         case 'add-child':      openFamModal(id,'Child'); break;
         case 'upgrade-client':      upgradeToClient(id); break;
+        case 'edit-fam':
+          // Virtual spouse rows (built from the client record) have no link row —
+          // open the spouse modal in normal mode, which prefills from c.Spouse*.
+          if(String(id).indexOf('virtual_sp_')===0) openFamModal(cid, 'Spouse');
+          else openFamModal(cid, el.getAttribute('data-type'), id);
+          break;
         case 'remove-fam':          removeFamMember(id); break;
         case 'link-existing':       openLinkExistModal(id, 'Spouse'); break;
         case 'confirm-exist-link':  confirmExistLink(id); break;
