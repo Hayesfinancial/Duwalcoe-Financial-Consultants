@@ -7709,18 +7709,26 @@ function handleAstuteFile(inp){
 // Always a proposal only — the preview shows it in an editable dropdown.
 function astuteProposeType(productType, holdingName, funds){
   var s = (productType+' '+holdingName).toLowerCase();
-  var offshore = funds.some(function(f){ return /usd|gbp|eur|global|offshore|international/i.test(f.name); });
+  // Offshore = explicit currency markers only. Rand-denominated feeder funds
+  // routinely carry 'Global' in their names (e.g. Allan Gray Orbis Global
+  // Equity FF) and are NOT offshore policies.
+  var offshore = funds.some(function(f){ return /\busd\b|\bgbp\b|\beur\b|dollar|sterling/i.test(f.name); });
   if(s.indexOf('living annuity')>=0) return 'Living Annuity';
-  if(s.indexOf('life annuity')>=0 || s.indexOf('guaranteed annuity')>=0) return 'Life Annuity';
+  if(s.indexOf('life annuity')>=0 || s.indexOf('guaranteed annuity')>=0 || s.indexOf('income for life')>=0) return 'Life Annuity';
   if(s.indexOf('preservation')>=0) return s.indexOf('provident')>=0 ? 'Provident Preservation' : 'Pension Preservation';
   if(s.indexOf('retirement annuity')>=0) return 'Retirement Annuity';
   if(s.indexOf('provident')>=0) return 'Provident Fund';
   if(s.indexOf('pension')>=0) return 'Pension Fund';
+  // Bare 'Annuity' product type (OM Max Income etc.) = an annuity paying
+  // income, not an RA. Default Life Annuity — editable in the preview.
+  if(/\bannuity\b/.test(s)) return 'Life Annuity';
   if(s.indexOf('tax free')>=0 || s.indexOf('tax-free')>=0) return 'Tax Free Savings';
   if(s.indexOf('unit trust')>=0) return 'Unit Trust';
   if(s.indexOf('endowment')>=0) return offshore ? 'Offshore Endowment' : 'Endowment';
-  if(s.indexOf('flexible investment')>=0 || s.indexOf('investment plan')>=0) return offshore ? 'Offshore Flexible Investment' : 'Flexible Investment';
+  if(s.indexOf('flexible investment')>=0 || s.indexOf('investment plan')>=0 || s.indexOf('investment policy')>=0 || s.indexOf('cumulus invest')>=0) return offshore ? 'Offshore Flexible Investment' : 'Flexible Investment';
   if(s.indexOf('medical')>=0 || s.indexOf('health')>=0) return 'Medical Aid';
+  // Known SA risk product names that arrive with ProductType 'Unknown'
+  if(s.indexOf('myriad')>=0 || s.indexOf('greenlight')>=0 || s.indexOf('elevate')>=0 || s.indexOf('life select')>=0) return 'Life / Income Protector';
   if(s.indexOf('life')>=0 || s.indexOf('risk')>=0 || s.indexOf('protector')>=0 || s.indexOf('assurance')>=0) return 'Life / Income Protector';
   return 'Other';
 }
@@ -7759,6 +7767,64 @@ function astuteMapFreq(mode){
   if(s.indexOf('annu')>=0 || s.indexOf('year')>=0) return 'Annually';
   if(s.indexOf('single')>=0 || s.indexOf('once')>=0) return 'Once Off';
   return '';
+}
+
+// ── Risk coverage classification ──
+// Astute's ACORD data marks income benefits structurally: BenefitMode
+// 'Monthly' and/or MonthlyBenefitAmt. A coverage with those is an income
+// benefit row (Income Protection), NEVER a lump sum — regardless of the
+// word 'disability' in its name. (Mis-classification of 'Limited Disability
+// Income' as Capital Disability was a live bug, caught by Clinton Jun 2026.)
+function astuteMapWaiting(elim){
+  var s = String(elim||'').toLowerCase();
+  if(s.indexOf('7')>=0 || s.indexOf('seven')>=0) return '7 days';
+  if(s.indexOf('two week')>=0 || s.indexOf('2 week')>=0 || s.indexOf('14')>=0) return '2 weeks';
+  if(s.indexOf('one month')>=0 || s.indexOf('1 month')>=0 || s.indexOf('30')>=0) return '1 month';
+  if(s.indexOf('three month')>=0 || s.indexOf('3 month')>=0 || s.indexOf('90')>=0) return '3 months';
+  if(s.indexOf('six month')>=0 || s.indexOf('6 month')>=0 || s.indexOf('180')>=0) return '6 months';
+  if(s.indexOf('two year')>=0 || s.indexOf('2 year')>=0) return '2 years';
+  if(s.indexOf('one year')>=0 || s.indexOf('1 year')>=0) return '1 year';
+  return '1 month';
+}
+function astuteMapTerm(period, plan){
+  var s = String(period||'').toLowerCase();
+  if(s.indexOf('one year')>=0 || s.indexOf('1 year')>=0 || s.indexOf('12 month')>=0) return '1 year';
+  if(s.indexOf('two year')>=0 || s.indexOf('2 year')>=0 || s.indexOf('24 month')>=0) return '2 years';
+  if(s.indexOf('five year')>=0 || s.indexOf('5 year')>=0 || s.indexOf('60 month')>=0) return '5 years';
+  var both = s+' '+String(plan||'').toLowerCase();
+  if(both.indexOf('whole')>=0) return 'Whole of Life';
+  if(both.indexOf('55')>=0) return 'To age 55';
+  if(both.indexOf('60')>=0) return 'To age 60';
+  if(both.indexOf('70')>=0) return 'To age 70';
+  return 'To age 65';
+}
+// Split a holding's coverages into lump rows and income rows in the CRM's
+// own row shapes. Fee/cashback riders carry no benefit amount and fall out.
+function astuteClassifyCovers(covers){
+  var lumps = [], incomes = [];
+  covers.forEach(function(cv){
+    var isIncome = /month/i.test(cv.mode||'') || N(cv.monthlyAmt) > 0;
+    if(isIncome){
+      var amt = N(cv.monthlyAmt) ? cv.monthlyAmt : cv.amt;
+      if(!N(amt)) return;
+      var term = astuteMapTerm(cv.period, cv.plan);
+      var fixedTerm = ['1 year','2 years','5 years'].indexOf(term)>=0;
+      incomes.push({
+        type: fixedTerm ? 'Temporary IP' : 'Income Protection',
+        label: cv.plan||'', amount: amt, prem: cv.prem||'',
+        waiting: astuteMapWaiting(cv.elim), term: term,
+        esc:'', premEscType:'Fixed %', premEsc:'', benEsc:'', claimEsc:'',
+        taxable:'No', convert:'No'
+      });
+      return;
+    }
+    if(!N(cv.amt)) return; // fee / cashback riders carry premium only
+    var s = (cv.code+' '+cv.plan).toLowerCase(), t = 'Life Cover';
+    if(s.indexOf('disab')>=0 || s.indexOf('impair')>=0) t = 'Capital Disability';
+    else if(s.indexOf('dread')>=0 || s.indexOf('illness')>=0 || s.indexOf('sever')>=0 || s.indexOf('critical')>=0) t = 'Dread Disease / Severe Illness';
+    lumps.push({type:t, label:cv.plan||'', cover:cv.amt, prem:cv.prem||'', premEsc:'', benEsc:''});
+  });
+  return {lumps:lumps, incomes:incomes};
 }
 
 function parseAstuteXML(txt){
@@ -7840,7 +7906,14 @@ function parseAstuteXML(txt){
             plan: astuteTxt(cvs[ki],'PlanName'),
             code: astuteTxt(cvs[ki],'LifeCovTypeCode'),
             amt:  astuteTxt(cvs[ki],'CurrentAmt'),
-            prem: astuteTxt(cvs[ki],'ModalPremAmt')
+            prem: astuteTxt(cvs[ki],'ModalPremAmt'),
+            // Income-benefit signals (ACORD): BenefitMode 'Monthly' +
+            // MonthlyBenefitAmt structurally identify income protection —
+            // never classify income benefits by name-matching 'disability'.
+            mode: astuteTxt(cvs[ki],'BenefitMode'),
+            monthlyAmt: astuteTxt(cvs[ki],'MonthlyBenefitAmt'),
+            period: astuteTxt(cvs[ki],'BenefitPeriod'),
+            elim: astuteTxt(cvs[ki],'EliminationPeriod')
           });
         }
       }
@@ -7853,7 +7926,10 @@ function parseAstuteXML(txt){
       var productType = pol ? astuteTxt(pol,'ProductType') : '';
       var holdName = astuteTxt(h,'HoldingName');
       var polStatus = pol ? astuteTxt(pol,'PolicyStatus') : astuteTxt(h,'HoldingStatus');
-      var isActive = astuteIsActive(polStatus);
+      // 'Package' wrappers (e.g. OM Max Income) carry no values of their own —
+      // the actual products are sibling holdings. Listed but unticked.
+      var isPackage = /^package$/i.test(productType);
+      var isActive = astuteIsActive(polStatus) && !isPackage;
 
       // Fund value preference chain: Investment AccountValue → Life CashValueAmt
       // → sum of sub-account values → Coverage CurrentAmt (Discovery RAs carry
@@ -7901,6 +7977,7 @@ function parseAstuteXML(txt){
         polNo: pol ? astuteTxt(pol,'PolNumber') : (inv ? astuteTxt(inv,'AcctNum') : ''),
         astType: productType || holdName,
         astStatus: polStatus || 'Unknown',
+        isPackage: isPackage,
         type: astuteProposeType(productType, holdName, funds),
         status: isActive ? 'Active' : astuteMapStatus(polStatus),
         startDate: pol ? astuteTxt(pol,'EffDate') : (inv ? astuteTxt(inv,'AcctOpenDate') : ''),
@@ -7938,7 +8015,8 @@ function renderAstutePreview(){
       '<div style="font-weight:700;font-size:13.5px;color:var(--navy)">'+astuteEsc(r.insurer)+' — '+astuteEsc(r.product)+(r.polNo?' <span style="font-weight:400;color:#667">('+astuteEsc(r.polNo)+')</span>':'')+'</div>'+
       '<div style="font-size:11.5px;color:#667;margin-top:3px">Astute: '+astuteEsc(r.astType)+' · <span style="color:'+stCol+';font-weight:600">'+astuteEsc(r.astStatus)+'</span>'+
       (r.fundValue?' · Value R'+Number(r.fundValue).toLocaleString():'')+(r.premium?' · R'+r.premium+' '+astuteEsc(r.frequency||''):'')+
-      (r.startDate?' · from '+r.startDate:'')+(r.maturityDate?' to '+r.maturityDate:'')+'</div>';
+      (r.startDate?' · from '+r.startDate:'')+(r.maturityDate?' to '+r.maturityDate:'')+'</div>'+
+      (r.isPackage?'<div style="font-size:11.5px;color:#667;margin-top:4px">ℹ Package wrapper — the actual products are listed separately below it.</div>':'');
     if(r.include){
       html += '<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">'+
         '<label style="font-size:11px;color:#667">Import as<br><select onchange="ASTUTE_ROWS['+i+'].type=this.value" style="border:1.5px solid var(--mist);border-radius:7px;padding:6px 8px;font-family:inherit;font-size:12.5px;margin-top:2px">'+
@@ -7947,7 +8025,17 @@ function renderAstutePreview(){
         ['Active','Lapsed','Paid Up','Cancelled'].map(function(o){return '<option'+(r.status===o?' selected':'')+'>'+o+'</option>';}).join('')+'</select></label>'+
         '</div>';
       if(!r.ownerIsClient && r.ownerName) html += '<div style="font-size:11.5px;color:#92400e;margin-top:6px">⚠ Owner is '+astuteEsc(r.ownerName)+' — not this client. Imports with owner recorded.</div>';
-      if(r.covers.length && (r.type==='Life / Income Protector'||r.type==='Business Assurance')) html += '<div style="font-size:11.5px;color:#92400e;margin-top:6px">⚠ Risk benefits imported from Astute — verify amounts against the policy schedule.</div>';
+      if(r.covers.length && (r.type==='Life / Income Protector'||r.type==='Business Assurance')){
+        var cls = astuteClassifyCovers(r.covers);
+        if(cls.lumps.length || cls.incomes.length){
+          html += '<div style="font-size:11.5px;color:#475;margin-top:6px;line-height:1.6">';
+          cls.lumps.forEach(function(L){ html += '• '+astuteEsc(L.type)+': R'+Number(L.cover).toLocaleString()+(L.label?' <span style="color:#889">('+astuteEsc(L.label)+')</span>':'')+'<br>'; });
+          cls.incomes.forEach(function(I){ html += '• '+astuteEsc(I.type)+' (income): R'+Number(I.amount).toLocaleString()+'/month, '+astuteEsc(I.waiting)+' waiting, '+astuteEsc(I.term)+(I.label?' <span style="color:#889">('+astuteEsc(I.label)+')</span>':'')+'<br>'; });
+          html += '</div><div style="font-size:11.5px;color:#92400e">⚠ Risk benefits imported from Astute — verify amounts, waiting and benefit periods against the policy schedule.</div>';
+        }
+      } else if(!r.covers.length && (r.type==='Life / Income Protector'||r.type==='Business Assurance')){
+        html += '<div style="font-size:11.5px;color:#92400e;margin-top:6px">⚠ No benefit detail in the Astute data — capture cover amounts from the policy schedule after import.</div>';
+      }
       if(r.funds.length) html += '<div style="font-size:11px;color:#667;margin-top:6px">'+r.funds.length+' fund'+(r.funds.length>1?'s':'')+' → will be recorded in Notes with price dates.</div>';
       r.bens.forEach(function(b,bi){
         html += '<div style="background:#fff;border:1px solid var(--mist);border-radius:7px;padding:8px 10px;margin-top:8px">'+
@@ -8037,16 +8125,11 @@ function runAstuteImport(){
   }
   closeAll();
   rows.forEach(function(r,ri){
-    // Risk coverages → lump benefit rows (risk types only)
-    var lumps = [];
+    // Risk coverages → lump + income benefit rows (risk types only)
+    var lumps = [], incomes = [];
     if(r.type==='Life / Income Protector' || r.type==='Business Assurance'){
-      r.covers.forEach(function(cv){
-        if(!N(cv.amt)) return;
-        var s = (cv.code+' '+cv.plan).toLowerCase(), t = 'Life Cover';
-        if(s.indexOf('disab')>=0) t = 'Capital Disability';
-        else if(s.indexOf('dread')>=0 || s.indexOf('illness')>=0 || s.indexOf('sever')>=0) t = 'Dread Disease / Severe Illness';
-        lumps.push({type:t, label:cv.plan||'', cover:cv.amt, prem:'', premEsc:'', benEsc:''});
-      });
+      var cls = astuteClassifyCovers(r.covers);
+      lumps = cls.lumps; incomes = cls.incomes;
     }
     function lumpSum(t){ var s=0; lumps.forEach(function(x){if(x.type===t)s+=N(x.cover);}); return s?String(s):''; }
     var bensJson = JSON.stringify(r.bens.map(function(b){ return {type:b.benType, name:b.name, pct:b.pct}; }));
@@ -8081,7 +8164,7 @@ function runAstuteImport(){
       Notes:astuteFundsToNotes(r),
       Beneficiaries:bensJson,
       EstateRouting:'',
-      IncomeBenefits:'[]',
+      IncomeBenefits:JSON.stringify(incomes),
       // savePolicy meta
       ID:'p_'+Date.now()+'_'+ri, ClientID:ASTUTE_CID, LastUpdated:now, CapturedDate:now,
       ReplacedBy:'', ReplacedDate:'', ReplacedPolicyNo:'', Payer:'', ReviewHistory:''
