@@ -228,6 +228,16 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--cream);c
     <div class="mf"><button class="btn b-gh sm" data-close="1">Close</button></div>
   </div>
 </div>
+<div class="ov" id="astuteMod">
+  <div class="modal" style="max-width:880px">
+    <div class="mh"><h3 id="astuteModT">📥 Import from Astute</h3><button class="xb" data-close="1">✕</button></div>
+    <div class="mb" id="astuteModB"></div>
+    <div class="mf">
+      <button class="btn b-gh sm" data-close="1">Cancel</button>
+      <button class="btn b-gd sm" id="astuteImportBtn" style="display:none" onclick="runAstuteImport()">📥 Import Selected</button>
+    </div>
+  </div>
+</div>
 <div class="ov" id="tMod">
   <div class="modal" style="max-width:720px">
     <div class="mh"><h3>New Task</h3><button class="xb" data-close="1">✕</button></div>
@@ -2013,6 +2023,7 @@ function renderPolicies(c,pols){
     '<div class="ch"><h2>📄 Policies</h2>'+
     '<div style="display:flex;gap:8px">'+
     '<button class="btn b-gh sm" data-act="view-schedule" data-cid="'+c.ID+'">🖨 Print Schedule</button>'+
+    '<button class="btn b-gh sm" data-act="astute-import" data-cid="'+c.ID+'">📥 Import from Astute</button>'+
     '<button class="btn b-gd sm" data-act="open-new-policy" data-cid="'+c.ID+'">+ Add Policy</button></div></div>'+
     (function(){
       var active=pols.filter(function(p){return p.Status!=='Replaced';});
@@ -7635,6 +7646,465 @@ function deletePolicy(){
   });
 }
 
+// ══ ASTUTE CCP XML IMPORT ════════════════════════════════════════════════
+// Once-off initial-load tool: parses an Astute Consolidated Client Portfolio
+// XML (ACORD OLifE format) and creates policy cards via the same server-first
+// save path as savePolicy. Nothing is saved without explicit confirmation in
+// the preview — types, statuses and beneficiary tags are all editable there.
+// Fund holdings are written to Notes (no structured fund field by design —
+// CRM is record-keeping only; Claude reads Notes text in FNA chats).
+var ASTUTE_ROWS = [];   // parsed holdings (preview working state)
+var ASTUTE_CID  = null; // client being imported into
+
+var ASTUTE_TYPE_OPTS = ['Life / Income Protector','Business Assurance','Retirement Annuity','Pension Fund','Provident Fund','Pension Preservation','Provident Preservation','Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment','Unit Trust','Tax Free Savings','Guaranteed Endowment','Living Annuity','Life Annuity','Medical Aid','Other'];
+var ASTUTE_BEN_TYPES = ['Spouse','Life Partner','Child','Parent','Dependant','Trust','Estate','Other'];
+var ASTUTE_LINK_TYPES = ['Spouse','Child','Parent','Dependant','Other'];
+// Astute provider codes → display names (fallback when the carrier org party
+// is missing or generic). Codes observed in live CCP files Jun 2026.
+var ASTUTE_PROVIDERS = {OMU:'Old Mutual',LIB:'Liberty',MOM:'Momentum',MET:'Metropolitan',DSL:'Discovery Life',PPS:'PPS',ALT:'Hollard Life',ABSA:'ABSA Life',SLM:'Sanlam',NGL:'Nedbank Insurance',FMI:'Bidvest Life',ASP:'Assupol',FNB:'FNB',SET:'Sanlam Collective Investments',OMGP:'Old Mutual Wealth',MOMW:'Momentum Wealth',STLB:'STANLIB',AG:'Allan Gray',DSI:'Discovery Invest',ASPI:'Assupol Investment',INN:'INN8'};
+
+function astuteEsc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+function astuteNorm(s){ return String(s||'').toLowerCase().replace(/[^a-z]/g,''); }
+
+// First matching descendant tag's text within scope.
+function astuteTxt(el, tag){
+  if(!el) return '';
+  var n = el.getElementsByTagName(tag);
+  return n.length ? (n[0].textContent||'').trim() : '';
+}
+
+function openAstuteImport(cid){
+  ASTUTE_CID = cid;
+  ASTUTE_ROWS = [];
+  var c = DB.clients.find(function(x){return String(x.ID)===String(cid);});
+  document.getElementById('astuteModT').textContent = '📥 Import from Astute — ' + (c ? c.Name : '');
+  document.getElementById('astuteImportBtn').style.display = 'none';
+  document.getElementById('astuteModB').innerHTML =
+    '<div style="font-size:13px;color:#667;line-height:1.55;margin-bottom:12px">'+
+    'Select the <strong>XML download</strong> from Astute (not the PDF). Every policy found will be shown for review first — '+
+    'nothing is imported until you confirm. Active policies are ticked by default; matured / surrendered ones are listed but unticked. '+
+    'Check each proposed <strong>policy type</strong> and tag each <strong>beneficiary</strong> — the beneficiary tag drives estate-duty (s.4(q)) treatment in FNA work.</div>'+
+    '<input type="file" id="astuteFile" accept=".xml,text/xml" onchange="handleAstuteFile(this)" '+
+    'style="display:block;width:100%;border:1.5px dashed var(--mist);border-radius:8px;padding:18px;font-family:inherit;font-size:13px;background:var(--smoke);cursor:pointer">'+
+    '<div id="astutePreviewWrap"></div>';
+  document.getElementById('astuteMod').classList.add('open');
+}
+
+function handleAstuteFile(inp){
+  if(!inp.files || !inp.files[0]) return;
+  var f = inp.files[0];
+  var reader = new FileReader();
+  reader.onerror = function(){ toast('Could not read file','err'); };
+  reader.onload = function(){
+    try{ parseAstuteXML(String(reader.result)); }
+    catch(e){
+      console.error('Astute parse failed:', e);
+      toast('Could not parse this file — is it the Astute XML download?','err');
+    }
+  };
+  reader.readAsText(f);
+}
+
+// Propose a CRM policy type from Astute's ProductType / names / funds.
+// Always a proposal only — the preview shows it in an editable dropdown.
+function astuteProposeType(productType, holdingName, funds){
+  var s = (productType+' '+holdingName).toLowerCase();
+  var offshore = funds.some(function(f){ return /usd|gbp|eur|global|offshore|international/i.test(f.name); });
+  if(s.indexOf('living annuity')>=0) return 'Living Annuity';
+  if(s.indexOf('life annuity')>=0 || s.indexOf('guaranteed annuity')>=0) return 'Life Annuity';
+  if(s.indexOf('preservation')>=0) return s.indexOf('provident')>=0 ? 'Provident Preservation' : 'Pension Preservation';
+  if(s.indexOf('retirement annuity')>=0) return 'Retirement Annuity';
+  if(s.indexOf('provident')>=0) return 'Provident Fund';
+  if(s.indexOf('pension')>=0) return 'Pension Fund';
+  if(s.indexOf('tax free')>=0 || s.indexOf('tax-free')>=0) return 'Tax Free Savings';
+  if(s.indexOf('unit trust')>=0) return 'Unit Trust';
+  if(s.indexOf('endowment')>=0) return offshore ? 'Offshore Endowment' : 'Endowment';
+  if(s.indexOf('flexible investment')>=0 || s.indexOf('investment plan')>=0) return offshore ? 'Offshore Flexible Investment' : 'Flexible Investment';
+  if(s.indexOf('medical')>=0 || s.indexOf('health')>=0) return 'Medical Aid';
+  if(s.indexOf('life')>=0 || s.indexOf('risk')>=0 || s.indexOf('protector')>=0 || s.indexOf('assurance')>=0) return 'Life / Income Protector';
+  return 'Other';
+}
+
+function astuteMapStatus(astStatus){
+  var s = String(astStatus||'').toUpperCase();
+  if(s.indexOf('INACTIVE')<0 && (s.indexOf('ACTIVE')>=0 || s.indexOf('INFORCE')>=0 || s.indexOf('IN FORCE')>=0)) return 'Active';
+  if(s.indexOf('LAPS')>=0) return 'Lapsed';
+  if(s.indexOf('SURRENDER')>=0 || s.indexOf('CANCEL')>=0) return 'Cancelled';
+  return 'Paid Up'; // Matured, Early Retirement, Inactive, paid-up etc.
+}
+
+// True only for genuinely in-force statuses. NOTE: 'Inactive' contains the
+// substring 'active' — must be excluded explicitly (caught in live-data test).
+function astuteIsActive(s){
+  var u = String(s||'').toUpperCase();
+  if(u.indexOf('INACTIVE')>=0) return false;
+  return u.indexOf('ACTIVE')>=0 || u.indexOf('INFORCE')>=0 || u.indexOf('IN FORCE')>=0;
+}
+
+// Token-subset name match: every word of the shorter name appears in the
+// longer one. Handles Astute's middle names ('Devadasen Mogambary Moodley'
+// vs CRM 'Devadasen Moodley') and surname-only entries ('MOODLEY').
+function astuteNameMatch(a, b){
+  var ta = String(a||'').toLowerCase().split(/[^a-z]+/).filter(Boolean);
+  var tb = String(b||'').toLowerCase().split(/[^a-z]+/).filter(Boolean);
+  if(!ta.length || !tb.length) return false;
+  var small = ta.length<=tb.length ? ta : tb, big = ta.length<=tb.length ? tb : ta;
+  return small.every(function(t){ return big.indexOf(t)>=0; });
+}
+
+function astuteMapFreq(mode){
+  var s = String(mode||'').toLowerCase();
+  if(s.indexOf('month')>=0) return 'Monthly';
+  if(s.indexOf('quarter')>=0) return 'Quarterly';
+  if(s.indexOf('annu')>=0 || s.indexOf('year')>=0) return 'Annually';
+  if(s.indexOf('single')>=0 || s.indexOf('once')>=0) return 'Once Off';
+  return '';
+}
+
+function parseAstuteXML(txt){
+  var dom = new DOMParser().parseFromString(txt, 'text/xml');
+  if(dom.getElementsByTagName('parsererror').length){ toast('File is not valid XML','err'); return; }
+  var contents = dom.getElementsByTagName('Content');
+  if(!contents.length){ toast('No provider data found in this file','err'); return; }
+
+  var c = DB.clients.find(function(x){return String(x.ID)===String(ASTUTE_CID);});
+  // Known people for beneficiary matching: spouse on the client record + family links.
+  var known = [];
+  if(c && clean(c.SpouseName)) known.push(c.SpouseName.trim());
+  DB.links.filter(function(l){ return String(l.PrincipalID)===String(ASTUTE_CID) || String(l.ClientID)===String(ASTUTE_CID); })
+    .forEach(function(l){ if(l.Name && l.Name.trim()) known.push(l.Name.trim()); });
+
+  ASTUTE_ROWS = [];
+  for(var ci=0; ci<contents.length; ci++){
+    var content = contents[ci];
+    var provCode = content.getAttribute('ProviderName') || content.getAttribute('ProviderCode') || '';
+
+    // Build this provider's party map: id → {name, dob, isOrg}
+    var parties = {};
+    var pEls = content.getElementsByTagName('Party');
+    for(var pi=0; pi<pEls.length; pi++){
+      var pe = pEls[pi], pid = pe.getAttribute('id'); if(!pid) continue;
+      var person = pe.getElementsByTagName('Person')[0];
+      var org = pe.getElementsByTagName('Organization')[0];
+      if(person){
+        var nm = ((astuteTxt(person,'FirstName')+' '+astuteTxt(person,'LastName')).trim()) || astuteTxt(person,'FullName');
+        parties[pid] = {name:nm, dob:astuteTxt(person,'BirthDate'), isOrg:false};
+      } else if(org){
+        parties[pid] = {name:(astuteTxt(org,'DBA')||astuteTxt(org,'FullName')||astuteTxt(org,'AbbrName')).trim(), dob:'', isOrg:true};
+      }
+    }
+
+    // Relations: holding id → [{name, dob, role, pct}]
+    var rels = {};
+    var rEls = content.getElementsByTagName('Relation');
+    for(var ri=0; ri<rEls.length; ri++){
+      var re = rEls[ri];
+      var hid = re.getAttribute('OriginatingObjectID');
+      var tid = re.getAttribute('RelatedObjectID');
+      var party = parties[tid];
+      if(!hid || !party) continue;
+      if(!rels[hid]) rels[hid] = [];
+      rels[hid].push({name:party.name, dob:party.dob, isOrg:party.isOrg, role:astuteTxt(re,'RelationRoleCode'), pct:astuteTxt(re,'InterestPercent')});
+    }
+
+    var holdings = content.getElementsByTagName('Holding');
+    for(var hi=0; hi<holdings.length; hi++){
+      var h = holdings[hi];
+      var hid2 = h.getAttribute('id') || '';
+      var pol = h.getElementsByTagName('Policy')[0];
+      var inv = h.getElementsByTagName('Investment')[0];
+      var life = pol ? pol.getElementsByTagName('Life')[0] : null;
+
+      // Funds (sub-accounts)
+      var funds = [];
+      if(inv){
+        var subs = inv.getElementsByTagName('SubAccount');
+        for(var si=0; si<subs.length; si++){
+          funds.push({
+            name: astuteTxt(subs[si],'ProductFullName'),
+            units: astuteTxt(subs[si],'CurrNumberUnits'),
+            price: astuteTxt(subs[si],'UnitValue'),
+            value: astuteTxt(subs[si],'TotValue'),
+            alloc: astuteTxt(subs[si],'AllocPercent'),
+            asOf:  astuteTxt(subs[si],'AsOfDate')
+          });
+        }
+      }
+
+      // Coverages (risk benefits live here on risk products)
+      var covers = [];
+      if(life){
+        var cvs = life.getElementsByTagName('Coverage');
+        for(var ki=0; ki<cvs.length; ki++){
+          covers.push({
+            plan: astuteTxt(cvs[ki],'PlanName'),
+            code: astuteTxt(cvs[ki],'LifeCovTypeCode'),
+            amt:  astuteTxt(cvs[ki],'CurrentAmt'),
+            prem: astuteTxt(cvs[ki],'ModalPremAmt')
+          });
+        }
+      }
+
+      // Carrier display name: precise provider-code map first, org party second.
+      var carrierPartyId = pol ? pol.getAttribute('CarrierPartyID') : (inv ? inv.getAttribute('CarrierPartyID') : '');
+      var carrierParty = parties[carrierPartyId];
+      var insurer = ASTUTE_PROVIDERS[provCode] || (carrierParty && carrierParty.isOrg ? carrierParty.name : '') || provCode;
+
+      var productType = pol ? astuteTxt(pol,'ProductType') : '';
+      var holdName = astuteTxt(h,'HoldingName');
+      var polStatus = pol ? astuteTxt(pol,'PolicyStatus') : astuteTxt(h,'HoldingStatus');
+      var isActive = astuteIsActive(polStatus);
+
+      // Fund value preference chain: Investment AccountValue → Life CashValueAmt
+      // → sum of sub-account values → Coverage CurrentAmt (Discovery RAs carry
+      // the total only on the coverage). Holding AssetValue last resort.
+      var fundVal = inv ? astuteTxt(inv,'AccountValue') : '';
+      if(!N(fundVal) && life) fundVal = astuteTxt(life,'CashValueAmt');
+      if(!N(fundVal) && funds.length){ var fsum=0; funds.forEach(function(f){fsum+=N(f.value);}); if(fsum) fundVal=String(fsum); }
+      if(!N(fundVal) && covers.length && !/life|risk|protector/i.test(productType)) fundVal = covers[0].amt;
+      if(!N(fundVal)) fundVal = astuteTxt(h,'AssetValue');
+
+      // Pot values (Two-Pot) from OLifEExtension — positive values only.
+      // Matured Momentum RAs carry junk residues of minus a few cents; those
+      // must not enter the record (caught in live-data test).
+      function posVal(v){ return N(v)>0 ? v : ''; }
+      var savPot = posVal(astuteTxt(h,'SavingsPotValue')), retPot = posVal(astuteTxt(h,'RetirementPotValue')), vestPot = posVal(astuteTxt(h,'VestedPotValue'));
+
+      // People on the policy
+      var hrels = rels[hid2] || [];
+      var ownerRel = null, insuredRel = null, bens = [];
+      hrels.forEach(function(r){
+        var role = (r.role||'').toLowerCase();
+        if(!ownerRel && role.indexOf('owner')>=0 && !r.isOrg) ownerRel = r;
+        if(!insuredRel && (role.indexOf('insured')>=0 || role.indexOf('life assured')>=0) && !r.isOrg) insuredRel = r;
+        if(role==='beneficiary' && !r.isOrg && r.name){
+          // Dedupe identical beneficiary relations within one holding
+          var dup = bens.some(function(b){ return astuteNorm(b.name)===astuteNorm(r.name); });
+          if(!dup){
+            var matched = known.some(function(k){ return astuteNameMatch(k, r.name); });
+            bens.push({name:r.name, dob:r.dob, pct:r.pct||'', benType:'Other', matched:matched, createLink:!matched, linkType:'Other'});
+          }
+        }
+      });
+      var clientName = c ? c.Name : '';
+      var ownerIsClient = !ownerRel || astuteNameMatch(ownerRel.name, clientName);
+      // Insured recorded only when a genuinely different person from the client
+      var insuredDiff = (insuredRel && !astuteNameMatch(insuredRel.name, clientName)) ? insuredRel.name : '';
+
+      var premAmt = pol ? astuteTxt(pol,'PaymentAmt') : '';
+      if(!N(premAmt) && covers.length) premAmt = covers[0].prem;
+
+      ASTUTE_ROWS.push({
+        include: isActive,
+        insurer: insurer,
+        product: holdName || (covers[0] ? covers[0].plan : '') || productType,
+        polNo: pol ? astuteTxt(pol,'PolNumber') : (inv ? astuteTxt(inv,'AcctNum') : ''),
+        astType: productType || holdName,
+        astStatus: polStatus || 'Unknown',
+        type: astuteProposeType(productType, holdName, funds),
+        status: isActive ? 'Active' : astuteMapStatus(polStatus),
+        startDate: pol ? astuteTxt(pol,'EffDate') : (inv ? astuteTxt(inv,'AcctOpenDate') : ''),
+        maturityDate: pol ? astuteTxt(pol,'TermDate') : '',
+        premium: N(premAmt) ? premAmt : '',
+        frequency: astuteMapFreq(pol ? astuteTxt(pol,'PaymentMode') : ''),
+        premEsc: pol ? astuteTxt(pol,'PremiumIndexRate') : '',
+        fundValue: N(fundVal) ? fundVal : '',
+        surrValue: life ? astuteTxt(life,'NetSurrValueAmt') : '',
+        totalInvested: life ? astuteTxt(life,'TotCumPremAmt') : '',
+        savingsPot: savPot, retirementPot: retPot, vestedPot: vestPot,
+        retireAge: astuteTxt(h,'RetireAge'),
+        ownerIsClient: ownerIsClient,
+        ownerName: ownerRel ? ownerRel.name : '',
+        insuredName: insuredDiff,
+        funds: funds,
+        covers: covers,
+        bens: bens
+      });
+    }
+  }
+
+  if(!ASTUTE_ROWS.length){ toast('No policies found in this file','err'); return; }
+  renderAstutePreview();
+}
+
+function renderAstutePreview(){
+  var html = '<div style="font-size:12px;color:#667;margin:14px 0 10px">'+ASTUTE_ROWS.length+' holdings found. Tick what to import, set the type, and tag beneficiaries:</div>';
+  ASTUTE_ROWS.forEach(function(r,i){
+    var stCol = /active/i.test(r.astStatus) ? '#2e7d32' : '#b45309';
+    html += '<div style="background:var(--smoke);border-radius:8px;padding:12px 14px;margin-bottom:10px;'+(r.include?'':'opacity:.6')+'">'+
+      '<div style="display:flex;gap:10px;align-items:flex-start">'+
+      '<input type="checkbox" '+(r.include?'checked':'')+' onchange="ASTUTE_ROWS['+i+'].include=this.checked;renderAstutePreview()" style="width:17px;height:17px;margin-top:2px;cursor:pointer;accent-color:var(--sage);flex-shrink:0">'+
+      '<div style="flex:1;min-width:0">'+
+      '<div style="font-weight:700;font-size:13.5px;color:var(--navy)">'+astuteEsc(r.insurer)+' — '+astuteEsc(r.product)+(r.polNo?' <span style="font-weight:400;color:#667">('+astuteEsc(r.polNo)+')</span>':'')+'</div>'+
+      '<div style="font-size:11.5px;color:#667;margin-top:3px">Astute: '+astuteEsc(r.astType)+' · <span style="color:'+stCol+';font-weight:600">'+astuteEsc(r.astStatus)+'</span>'+
+      (r.fundValue?' · Value R'+Number(r.fundValue).toLocaleString():'')+(r.premium?' · R'+r.premium+' '+astuteEsc(r.frequency||''):'')+
+      (r.startDate?' · from '+r.startDate:'')+(r.maturityDate?' to '+r.maturityDate:'')+'</div>';
+    if(r.include){
+      html += '<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">'+
+        '<label style="font-size:11px;color:#667">Import as<br><select onchange="ASTUTE_ROWS['+i+'].type=this.value" style="border:1.5px solid var(--mist);border-radius:7px;padding:6px 8px;font-family:inherit;font-size:12.5px;margin-top:2px">'+
+        ASTUTE_TYPE_OPTS.map(function(o){return '<option'+(r.type===o?' selected':'')+'>'+o+'</option>';}).join('')+'</select></label>'+
+        '<label style="font-size:11px;color:#667">Status<br><select onchange="ASTUTE_ROWS['+i+'].status=this.value" style="border:1.5px solid var(--mist);border-radius:7px;padding:6px 8px;font-family:inherit;font-size:12.5px;margin-top:2px">'+
+        ['Active','Lapsed','Paid Up','Cancelled'].map(function(o){return '<option'+(r.status===o?' selected':'')+'>'+o+'</option>';}).join('')+'</select></label>'+
+        '</div>';
+      if(!r.ownerIsClient && r.ownerName) html += '<div style="font-size:11.5px;color:#92400e;margin-top:6px">⚠ Owner is '+astuteEsc(r.ownerName)+' — not this client. Imports with owner recorded.</div>';
+      if(r.covers.length && (r.type==='Life / Income Protector'||r.type==='Business Assurance')) html += '<div style="font-size:11.5px;color:#92400e;margin-top:6px">⚠ Risk benefits imported from Astute — verify amounts against the policy schedule.</div>';
+      if(r.funds.length) html += '<div style="font-size:11px;color:#667;margin-top:6px">'+r.funds.length+' fund'+(r.funds.length>1?'s':'')+' → will be recorded in Notes with price dates.</div>';
+      r.bens.forEach(function(b,bi){
+        html += '<div style="background:#fff;border:1px solid var(--mist);border-radius:7px;padding:8px 10px;margin-top:8px">'+
+          '<div style="font-size:12.5px;font-weight:600;color:var(--ink)">Beneficiary: '+astuteEsc(b.name)+(b.pct?' ('+astuteEsc(b.pct)+'%)':'')+(b.dob?' <span style="font-weight:400;color:#667">b. '+b.dob+'</span>':'')+'</div>'+
+          '<div style="display:flex;gap:10px;margin-top:6px;flex-wrap:wrap;align-items:flex-end">'+
+          '<label style="font-size:11px;color:#667">Beneficiary type (drives s.4(q))<br><select onchange="ASTUTE_ROWS['+i+'].bens['+bi+'].benType=this.value" style="border:1.5px solid var(--mist);border-radius:7px;padding:6px 8px;font-family:inherit;font-size:12.5px;margin-top:2px">'+
+          ASTUTE_BEN_TYPES.map(function(o){return '<option'+(b.benType===o?' selected':'')+'>'+o+'</option>';}).join('')+'</select></label>';
+        if(b.matched){
+          html += '<div style="font-size:11.5px;color:#2e7d32;padding-bottom:8px">✓ Matched to existing family link</div>';
+        } else {
+          html += '<label style="font-size:11.5px;color:var(--ink);display:flex;align-items:center;gap:6px;padding-bottom:8px;cursor:pointer">'+
+            '<input type="checkbox" '+(b.createLink?'checked':'')+' onchange="ASTUTE_ROWS['+i+'].bens['+bi+'].createLink=this.checked;renderAstutePreview()" style="width:15px;height:15px;cursor:pointer;accent-color:var(--sage)">Not in family links — create as</label>';
+          if(b.createLink){
+            html += '<label style="font-size:11px;color:#667">Relationship<br><select onchange="ASTUTE_ROWS['+i+'].bens['+bi+'].linkType=this.value" style="border:1.5px solid var(--mist);border-radius:7px;padding:6px 8px;font-family:inherit;font-size:12.5px;margin-top:2px">'+
+              ASTUTE_LINK_TYPES.map(function(o){return '<option'+(b.linkType===o?' selected':'')+'>'+o+'</option>';}).join('')+'</select></label>';
+          }
+        }
+        html += '</div></div>';
+      });
+    }
+    html += '</div></div></div>';
+  });
+  document.getElementById('astutePreviewWrap').innerHTML = html;
+  var selCount = ASTUTE_ROWS.filter(function(r){return r.include;}).length;
+  var btn = document.getElementById('astuteImportBtn');
+  btn.style.display = selCount ? '' : 'none';
+  btn.textContent = '📥 Import '+selCount+' Polic'+(selCount===1?'y':'ies');
+}
+
+function astuteFundsToNotes(r){
+  var lines = [];
+  lines.push('Imported from Astute CCP on '+new Date().toISOString().slice(0,10)+'.');
+  if(r.astType && r.astType!==r.type) lines.push('Astute product type: '+r.astType+'.');
+  if(r.funds.length){
+    lines.push('Funds at import:');
+    r.funds.forEach(function(f){
+      var l = '• '+f.name;
+      if(N(f.units) && N(f.price)) l += ' — '+Number(f.units).toLocaleString()+' units @ '+f.price;
+      if(N(f.value)) l += ' = R'+Number(f.value).toLocaleString();
+      if(f.alloc) l += ' ('+f.alloc+'%)';
+      if(f.asOf) l += ' (as at '+f.asOf+')';
+      lines.push(l);
+    });
+  }
+  if(r.covers.length && (r.type==='Life / Income Protector'||r.type==='Business Assurance')) lines.push('Risk benefits imported from Astute — verify against policy schedule.');
+  return lines.join('\n');
+}
+
+function runAstuteImport(){
+  var rows = ASTUTE_ROWS.filter(function(r){return r.include;});
+  if(!rows.length){ toast('Nothing selected to import','err'); return; }
+  var now = new Date().toISOString().slice(0,10);
+  var c = DB.clients.find(function(x){return String(x.ID)===String(ASTUTE_CID);});
+
+  // ── 1. Family links: dedupe by name across all selected policies ──
+  var linkMap = {}; // normName → {name, dob, linkType}
+  rows.forEach(function(r){ r.bens.forEach(function(b){
+    if(!b.matched && b.createLink){
+      var k = astuteNorm(b.name);
+      if(!linkMap[k]) linkMap[k] = {name:b.name, dob:b.dob||'', linkType:b.linkType||'Other'};
+    }
+  });});
+  var spouseExists = !!(c && clean(c.SpouseName)) || DB.links.some(function(l){ return String(l.PrincipalID)===String(ASTUTE_CID) && l.Type==='Spouse'; });
+  var li = 0, linksCreated = 0;
+  Object.keys(linkMap).forEach(function(k){
+    var lk = linkMap[k];
+    if(lk.linkType==='Spouse' && spouseExists){
+      console.warn('Astute import: spouse link already exists — not creating duplicate for', lk.name);
+      return;
+    }
+    if(lk.linkType==='Spouse') spouseExists = true;
+    var link = {ID:'fam_'+Date.now()+'_'+(li++), PrincipalID:ASTUTE_CID, Name:lk.name, IDNumber:'', DOB:lk.dob, Cell:'', Email:'', Type:lk.linkType, IsClient:'No', ClientID:''};
+    link._pendingSave = true;
+    DB.links.push(link);
+    linksCreated++;
+    post({action:'saveFamMember', member:link}, function(){});
+  });
+
+  // ── 2. Policies: full collectPolicyForm key shape + savePolicy meta ──
+  var saved = 0, failed = 0, done = 0, total = rows.length;
+  function finish(){
+    try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
+    render();
+    var msg = saved+' of '+total+' policies imported'+(linksCreated?' · '+linksCreated+' family link'+(linksCreated>1?'s':'')+' created':'');
+    if(failed) toast('⚠️ '+msg+' — '+failed+' failed to reach server (kept locally, will retry on sync)','err');
+    else toast(msg+' ✓','ok');
+  }
+  closeAll();
+  rows.forEach(function(r,ri){
+    // Risk coverages → lump benefit rows (risk types only)
+    var lumps = [];
+    if(r.type==='Life / Income Protector' || r.type==='Business Assurance'){
+      r.covers.forEach(function(cv){
+        if(!N(cv.amt)) return;
+        var s = (cv.code+' '+cv.plan).toLowerCase(), t = 'Life Cover';
+        if(s.indexOf('disab')>=0) t = 'Capital Disability';
+        else if(s.indexOf('dread')>=0 || s.indexOf('illness')>=0 || s.indexOf('sever')>=0) t = 'Dread Disease / Severe Illness';
+        lumps.push({type:t, label:cv.plan||'', cover:cv.amt, prem:'', premEsc:'', benEsc:''});
+      });
+    }
+    function lumpSum(t){ var s=0; lumps.forEach(function(x){if(x.type===t)s+=N(x.cover);}); return s?String(s):''; }
+    var bensJson = JSON.stringify(r.bens.map(function(b){ return {type:b.benType, name:b.name, pct:b.pct}; }));
+
+    var pol = {
+      Insurer:r.insurer, Product:r.product, PolicyNo:r.polNo, Type:r.type,
+      StartDate:r.startDate, ClientIsOwner:(r.ownerIsClient?'Yes':'No'), Owner:(r.ownerIsClient?'':r.ownerName), Status:r.status, EstateDutiable:'',
+      AdvisorOfRecord:'Yes', CountsForAUM:'Yes',
+      BizType:'', LifeAssuredType:'', LifeAssured:'', LoanAmount:'', KeyPosition:'',
+      Premium:r.premium, Frequency:r.frequency,
+      PremEscalation:r.premEsc, BenEscalation:'',
+      BenDeath:lumpSum('Life Cover'), BenDisability:lumpSum('Capital Disability'), BenDreadDisease:lumpSum('Dread Disease / Severe Illness'),
+      DreadDiseaseType:'Lump Sum',
+      DreadDiseaseNotes:(function(){ var ls=lumps.filter(function(x){return x.type==='Dread Disease / Severe Illness'&&x.label;}).map(function(x){return x.label;}); return ls.join(' · '); })(),
+      LumpBenefits:JSON.stringify(lumps),
+      BenSurrenderValue:r.surrValue, BenFundValue:r.fundValue, BenMaturityValue:'',
+      MaturityDate:r.maturityDate, MaturityAge:'', maturityAge:'', RetirementAge:r.retireAge||'',
+      VestedValue:r.vestedPot||'', NonVestedValue:'',
+      RetirementComponent:r.retirementPot||'', SavingsComponent:r.savingsPot||'',
+      IllustrativeRate:'', PremGrowthRate:'', GrowthRate:'',
+      TotalInvested:r.totalInvested, TotalWithdrawn:'',
+      WithdrawSavingsPot:'', IncludeInRetirement:'', ContinuePastMaturity:'',
+      PaysIncome:'',
+      MedPlan:'', MedLives:'',
+      BenLAIncome:'', DrawdownRate:'', LABonus:'',
+      BenLifeAnnuityIncome:'', LifeAnnuityGuarYrs:'',
+      LAIncomeTaxable:'Yes',
+      Insured:r.insuredName||'',
+      PayerType:'', PayerName:'',
+      PensionableSalary:'', MemberContribPct:'', EmployerContribPct:'', AnnualAdminFees:'',
+      HasGroupRisk:'', GroupRiskApproved:'', GroupRiskBenefits:'[]',
+      Notes:astuteFundsToNotes(r),
+      Beneficiaries:bensJson,
+      EstateRouting:'',
+      IncomeBenefits:'[]',
+      // savePolicy meta
+      ID:'p_'+Date.now()+'_'+ri, ClientID:ASTUTE_CID, LastUpdated:now, CapturedDate:now,
+      ReplacedBy:'', ReplacedDate:'', ReplacedPolicyNo:'', Payer:'', ReviewHistory:''
+    };
+    pol._pendingSave = true;
+    DB.policies.push(pol);
+    try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
+    var clean_ = JSON.parse(JSON.stringify(pol)); delete clean_._pendingSave;
+    post({action:'savePolicy', policy:clean_}, function(res){
+      if(res && res.ok===1){
+        var gi = DB.policies.findIndex(function(x){return x.ID===pol.ID;});
+        if(gi>=0) DB.policies[gi]=clean_;
+        saved++;
+      } else {
+        failed++;
+        console.error('Astute import: policy NOT saved to server, kept locally with _pendingSave. ID:', pol.ID, '—', pol.Insurer, pol.PolicyNo);
+      }
+      done++;
+      if(done===total) finish();
+    });
+  });
+}
+
 function logAnnualReview(){
   // Use the original snapshot taken when modal was first opened
   if(!window.POL_ORIGINAL_SNAP){toast('Cannot log review — please close and reopen the policy','err');return;}
@@ -8044,6 +8514,7 @@ document.addEventListener('click', function(e){
         case 'go-clients':     goPage('clients'); break;
         case 'go-clients-no-will': window.CLIENT_LIST_FILTER='nowill'; goPage('clients'); break;
         case 'open-new-policy':openPolicyModal(cid); break;
+        case 'astute-import':  openAstuteImport(cid); break;
         case 'edit-policy':    openPolicyModal(cid,parseInt(idx)); break;
         case 'pol-history':    openPolicyHistory(cid,parseInt(idx)); break;
         case 'add-bank':       openBankModal(id); break;
