@@ -5693,6 +5693,12 @@ function buildPolicyForm(p){
     }
   }
 
+  // POLICY FEE — monthly admin/policy fee charged by the insurer, separate
+  // from benefit premiums (e.g. Hollard R25 p/m, OM legacy R5/R20). Shown on
+  // every card; most investments won't have one — leave blank. On risk
+  // policies it is included in the auto-summed Total Premium.
+  html+='<div class="g2">'+fld('pfee','Policy Fee (p/m — blank if none)',p.PolicyFee,'text',(isRisk||isBiz)?'oninput="riskPremAutoSum()"':'')+'<div></div></div>';
+
   // RISK COVER
   if(isRisk||isBiz){
     // Seed POL_LUMP_ROWS from legacy single fields if rows are empty
@@ -6849,6 +6855,9 @@ function riskPremAutoSum(){
   POL_LUMP_ROWS.forEach(function(r){ total += parseFloat(r.prem||0)||0; });
   // Sum income row premiums (if present)
   POL_INCOME_ROWS.forEach(function(r){ total += parseFloat(r.prem||0)||0; });
+  // Add the policy fee — part of the real debit order but not a benefit premium
+  var feeEl = document.getElementById('pfee');
+  if(feeEl) total += parseFloat(String(feeEl.value).replace(/[^0-9.]/g,''))||0;
   var hid = document.getElementById('ppm');
   var disp = document.getElementById('ppm_display');
   if(hid) hid.value = total > 0 ? String(Math.round(total*100)/100) : '';
@@ -6981,6 +6990,7 @@ function collectPolicyForm(){
     CountsForAUM:(document.getElementById('pb_aum')?(document.getElementById('pb_aum').checked?'Yes':'No'):'Yes'),
     BizType:g('pbiztype'),LifeAssuredType:(document.getElementById('plifeassured_type')?document.getElementById('plifeassured_type').value:''),LifeAssured:g('plifeassured'),LoanAmount:'',KeyPosition:g('pkeypos'),
     Premium:g('ppm'),Frequency:g('pfreq'),
+    PolicyFee:g('pfee'),
     // For risk policies escalations live on rows; use first lump row for policy-level field
     // For other types read the single escalation fields as before
     PremEscalation:(function(){
@@ -7798,11 +7808,19 @@ function astuteMapTerm(period, plan){
   if(both.indexOf('70')>=0) return 'To age 70';
   return 'To age 65';
 }
-// Split a holding's coverages into lump rows and income rows in the CRM's
-// own row shapes. Fee/cashback riders carry no benefit amount and fall out.
+// Split a holding's coverages into lump rows, income rows and a policy fee,
+// in the CRM's own row shapes. Fee riders ('Policy Fee') carry premium only
+// and go to the PolicyFee field; other premium-only riders (CashBack, waiver
+// etc.) become Other Lump Sum rows so their premium isn't silently dropped.
 function astuteClassifyCovers(covers){
-  var lumps = [], incomes = [];
+  var lumps = [], incomes = [], fee = 0;
   covers.forEach(function(cv){
+    var nameStr = (cv.code+' '+cv.plan).toLowerCase();
+    // Policy/admin fee rider — premium only, not a benefit
+    if(/policy fee|admin fee|administration fee/.test(nameStr)){
+      fee += N(cv.prem);
+      return;
+    }
     var isIncome = /month/i.test(cv.mode||'') || N(cv.monthlyAmt) > 0;
     if(isIncome){
       var amt = N(cv.monthlyAmt) ? cv.monthlyAmt : cv.amt;
@@ -7818,13 +7836,18 @@ function astuteClassifyCovers(covers){
       });
       return;
     }
-    if(!N(cv.amt)) return; // fee / cashback riders carry premium only
-    var s = (cv.code+' '+cv.plan).toLowerCase(), t = 'Life Cover';
-    if(s.indexOf('disab')>=0 || s.indexOf('impair')>=0) t = 'Capital Disability';
-    else if(s.indexOf('dread')>=0 || s.indexOf('illness')>=0 || s.indexOf('sever')>=0 || s.indexOf('critical')>=0) t = 'Dread Disease / Severe Illness';
+    if(!N(cv.amt)){
+      // Premium-bearing rider without a benefit amount (CashBack, premium
+      // waiver, etc.) — keep its premium on an Other Lump Sum row.
+      if(N(cv.prem)) lumps.push({type:'Other Lump Sum', label:cv.plan||'', cover:'', prem:cv.prem, premEsc:'', benEsc:''});
+      return;
+    }
+    var t = 'Life Cover';
+    if(nameStr.indexOf('disab')>=0 || nameStr.indexOf('impair')>=0) t = 'Capital Disability';
+    else if(nameStr.indexOf('dread')>=0 || nameStr.indexOf('illness')>=0 || nameStr.indexOf('sever')>=0 || nameStr.indexOf('critical')>=0) t = 'Dread Disease / Severe Illness';
     lumps.push({type:t, label:cv.plan||'', cover:cv.amt, prem:cv.prem||'', premEsc:'', benEsc:''});
   });
-  return {lumps:lumps, incomes:incomes};
+  return {lumps:lumps, incomes:incomes, fee:fee};
 }
 
 function parseAstuteXML(txt){
@@ -7985,6 +8008,7 @@ function parseAstuteXML(txt){
         premium: N(premAmt) ? premAmt : '',
         frequency: astuteMapFreq(pol ? astuteTxt(pol,'PaymentMode') : ''),
         premEsc: pol ? astuteTxt(pol,'PremiumIndexRate') : '',
+        polFee: pol ? astuteTxt(pol,'PolFee') : '',
         fundValue: N(fundVal) ? fundVal : '',
         surrValue: life ? astuteTxt(life,'NetSurrValueAmt') : '',
         totalInvested: life ? astuteTxt(life,'TotCumPremAmt') : '',
@@ -8027,10 +8051,13 @@ function renderAstutePreview(){
       if(!r.ownerIsClient && r.ownerName) html += '<div style="font-size:11.5px;color:#92400e;margin-top:6px">⚠ Owner is '+astuteEsc(r.ownerName)+' — not this client. Imports with owner recorded.</div>';
       if(r.covers.length && (r.type==='Life / Income Protector'||r.type==='Business Assurance')){
         var cls = astuteClassifyCovers(r.covers);
-        if(cls.lumps.length || cls.incomes.length){
+        if(cls.lumps.length || cls.incomes.length || cls.fee){
           html += '<div style="font-size:11.5px;color:#475;margin-top:6px;line-height:1.6">';
-          cls.lumps.forEach(function(L){ html += '• '+astuteEsc(L.type)+': R'+Number(L.cover).toLocaleString()+(L.label?' <span style="color:#889">('+astuteEsc(L.label)+')</span>':'')+'<br>'; });
+          cls.lumps.forEach(function(L){
+            html += '• '+astuteEsc(L.type)+': '+(N(L.cover)?'R'+Number(L.cover).toLocaleString():'premium-only rider'+(N(L.prem)?' R'+L.prem+' p/m':''))+(L.label?' <span style="color:#889">('+astuteEsc(L.label)+')</span>':'')+'<br>';
+          });
           cls.incomes.forEach(function(I){ html += '• '+astuteEsc(I.type)+' (income): R'+Number(I.amount).toLocaleString()+'/month, '+astuteEsc(I.waiting)+' waiting, '+astuteEsc(I.term)+(I.label?' <span style="color:#889">('+astuteEsc(I.label)+')</span>':'')+'<br>'; });
+          if(cls.fee || N(r.polFee)) html += '• Policy fee: R'+(Math.round((cls.fee+N(r.polFee))*100)/100)+' p/m<br>';
           html += '</div><div style="font-size:11.5px;color:#92400e">⚠ Risk benefits imported from Astute — verify amounts, waiting and benefit periods against the policy schedule.</div>';
         }
       } else if(!r.covers.length && (r.type==='Life / Income Protector'||r.type==='Business Assurance')){
@@ -8125,12 +8152,14 @@ function runAstuteImport(){
   }
   closeAll();
   rows.forEach(function(r,ri){
-    // Risk coverages → lump + income benefit rows (risk types only)
-    var lumps = [], incomes = [];
+    // Risk coverages → lump + income benefit rows + policy fee (risk types only)
+    var lumps = [], incomes = [], coverFee = 0;
     if(r.type==='Life / Income Protector' || r.type==='Business Assurance'){
       var cls = astuteClassifyCovers(r.covers);
-      lumps = cls.lumps; incomes = cls.incomes;
+      lumps = cls.lumps; incomes = cls.incomes; coverFee = cls.fee;
     }
+    // Policy fee: PolFee tag on the policy + any fee riders found above
+    var policyFee = N(r.polFee) + coverFee;
     function lumpSum(t){ var s=0; lumps.forEach(function(x){if(x.type===t)s+=N(x.cover);}); return s?String(s):''; }
     var bensJson = JSON.stringify(r.bens.map(function(b){ return {type:b.benType, name:b.name, pct:b.pct}; }));
 
@@ -8140,6 +8169,7 @@ function runAstuteImport(){
       AdvisorOfRecord:'Yes', CountsForAUM:'Yes',
       BizType:'', LifeAssuredType:'', LifeAssured:'', LoanAmount:'', KeyPosition:'',
       Premium:r.premium, Frequency:r.frequency,
+      PolicyFee:(policyFee>0?String(Math.round(policyFee*100)/100):''),
       PremEscalation:r.premEsc, BenEscalation:'',
       BenDeath:lumpSum('Life Cover'), BenDisability:lumpSum('Capital Disability'), BenDreadDisease:lumpSum('Dread Disease / Severe Illness'),
       DreadDiseaseType:'Lump Sum',
