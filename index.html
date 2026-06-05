@@ -8093,6 +8093,38 @@ function parseAstuteXML(txt){
             period: astuteTxt(cvs[ki],'BenefitPeriod'),
             elim: astuteTxt(cvs[ki],'EliminationPeriod')
           });
+          // Benefit CovOptions: OM (and others) export accelerated benefits
+          // (e.g. Greenlight Severe Illness Comprehensive) as <CovOption>
+          // elements INSIDE the parent <Coverage>, not as Coverages of their
+          // own — dread disease was silently dropped in live data (caught by
+          // Clinton, Jun 2026). A CovOption is a real insured benefit only
+          // when it carries an OptionAmt; escalation/admin options (Benefit
+          // Increase Provision tc=32, Annual Benefit Increase tc=4) carry
+          // OptionPct only and must NOT become benefit rows. Premium stays
+          // blank — it is bundled in the parent coverage's premium, so
+          // copying it would double-count.
+          var opts = cvs[ki].getElementsByTagName('CovOption');
+          for(var oi=0; oi<opts.length; oi++){
+            var opt = opts[oi];
+            if(!(N(astuteTxt(opt,'OptionAmt'))>0)) continue;       // escalation/admin option — no benefit amount
+            var optStatus = astuteTxt(opt,'CovOptionStatus');
+            if(optStatus && !astuteIsActive(optStatus)) continue;  // ceased/removed benefit option
+            // Accelerated vs standalone (OM FSE extension IndicatorCode) —
+            // lump rows have no structured field for this, so it travels in
+            // the label and lands in DreadDiseaseNotes for FNA exports.
+            var optInd = astuteTxt(opt,'IndicatorCode');
+            var optPlan = (astuteTxt(opt,'PlanName') || astuteTxt(opt,'LifeCovOptTypeCode')) + (/accelerat/i.test(optInd)?' (Accelerated)':'');
+            covers.push({
+              plan: optPlan,
+              code: astuteTxt(opt,'LifeCovOptTypeCode'),
+              amt:  astuteTxt(opt,'OptionAmt'),
+              prem: '',
+              mode: astuteTxt(opt,'BenefitMode'),
+              monthlyAmt: astuteTxt(opt,'MonthlyBenefitAmt'),
+              period: astuteTxt(opt,'BenefitPeriod'),
+              elim: astuteTxt(opt,'EliminationPeriod')
+            });
+          }
         }
       }
 
