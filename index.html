@@ -1701,6 +1701,72 @@ function saveFamMember(){
   });
 }
 
+// Remove a family link (spouse, child, dependant, or client-to-client link).
+// Deletes the familylinks row only — never deletes anyone's client record or
+// policies. For client-to-client links, offers to remove the matching reverse
+// link(s) so the other client's card doesn't keep a one-sided link.
+function removeFamMember(linkId){
+  var link = DB.links.find(function(l){ return String(l.ID)===String(linkId); });
+  if(!link) return;
+  var principal = DB.clients.find(function(x){ return String(x.ID)===String(link.PrincipalID); });
+  if(!confirm('Remove '+(link.Name||'this person')+' ('+(link.Type||'family member')+') from '+(principal?principal.Name+"'s":'this')+' family card?\n\nThis only removes the family link — it does NOT delete anyone\'s client record or policies.')) return;
+
+  var toDelete = [link];
+
+  // Client-to-client link: offer to remove the matching reverse link(s) too.
+  // filter (not find) so duplicate reverse rows are cleaned up in one go.
+  if(link.IsClient==='Yes' && link.ClientID){
+    var reverses = DB.links.filter(function(l){
+      return String(l.PrincipalID)===String(link.ClientID) &&
+             String(l.ClientID)===String(link.PrincipalID);
+    });
+    if(reverses.length){
+      var other = DB.clients.find(function(x){ return String(x.ID)===String(link.ClientID); });
+      if(confirm('Also remove the matching link on '+(other?other.Name:'the linked client')+"'s family card?\n\nOK = remove both directions (full unlink)\nCancel = remove only this side")){
+        toDelete = toDelete.concat(reverses);
+      }
+    }
+  }
+
+  // Remove locally first so the card updates immediately.
+  var ids = toDelete.map(function(l){ return String(l.ID); });
+  DB.links = DB.links.filter(function(l){ return ids.indexOf(String(l.ID))<0; });
+
+  // If that was the LAST Spouse link and the client record still carries spouse
+  // details, clear them too — otherwise renderOverview rebuilds the spouse as a
+  // virtual entry from SpouseName on the client record and the removal appears
+  // not to have worked. (Removing one of two duplicate Spouse links leaves the
+  // other in place, so this branch is skipped in the duplicate-cleanup case.)
+  if(link.Type==='Spouse' && principal && clean(principal.SpouseName)){
+    var stillHasSpouse = DB.links.some(function(l){
+      return String(l.PrincipalID)===String(link.PrincipalID) && l.Type==='Spouse';
+    });
+    if(!stillHasSpouse){
+      principal.SpouseName=''; principal.SpouseIDNumber=''; principal.SpouseDOB='';
+      principal.SpouseCell=''; principal.SpouseEmail='';
+      post({action:'saveClient', client:principal}, function(res){
+        if(!(res && res.ok)) toast('⚠️ Could not clear spouse details on the client record — the spouse may reappear after a sync. Try again or press Sync.','err');
+      });
+    }
+  }
+
+  try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
+  render();
+
+  // Delete on the server, checking every response (silent-failure rule).
+  var remaining = toDelete.length, failed = 0;
+  toDelete.forEach(function(l){
+    post({action:'deleteRow', sheet:'familylinks', id:l.ID}, function(res){
+      if(!(res && res.ok)) failed++;
+      remaining--;
+      if(remaining===0){
+        if(failed) toast('⚠️ '+failed+' link(s) could not be deleted on the server — they may reappear after a sync. Check your connection and try again.','err');
+        else toast(toDelete.length>1?'Links removed (both directions)':'Link removed','ok');
+      }
+    });
+  });
+}
+
 function upgradeToClient(linkId){
   var lnk = DB.links.find(function(l){ return String(l.ID)===String(linkId); });
   // Handle virtual spouse entry (from client record, not yet in DB.links)
@@ -1774,56 +1840,103 @@ function searchLinkExist(q) {
   }).join('');
 }
 
+// In-flight lock: prevents a double-click on the Link button creating two
+// pairs while the server check below is still running.
+var _linkBusy = false;
+
 function confirmExistLink(linkedClientId) {
+  if(_linkBusy) return;
   var rel = document.getElementById('linkExistRel').value;
   var linked = DB.clients.find(function(x){ return String(x.ID)===String(linkedClientId); });
   var principal = DB.clients.find(function(x){ return String(x.ID)===String(LINK_EXIST_CLIENT); });
   if(!linked || !principal) return;
+  _linkBusy = true;
 
-  // Link A -> B (principal's family card shows the linked client)
-  var linkAB = {
-    ID: 'fam_' + Date.now(),
-    PrincipalID: LINK_EXIST_CLIENT,
-    Name: linked.Name,
-    IDNumber: linked.IDNumber||'',
-    DOB: linked.DOB||'',
-    Cell: linked.Cell||'',
-    Email: linked.Email||'',
-    Type: rel,
-    IsClient: 'Yes',
-    ClientID: linkedClientId
-  };
+  // DUPLICATE GUARD — check the SERVER, not just the local cache.
+  // The local cache can be stale when two machines work at once (Tracy links
+  // the couple, Clinton's unsynced laptop doesn't know, links them again —
+  // the June 2026 Naraidu duplicate). Pull the current familylinks rows for
+  // both clients first, merge anything we didn't have, then decide.
+  var orFilter = encodeURIComponent('(PrincipalID.eq.'+LINK_EXIST_CLIENT+',PrincipalID.eq.'+linkedClientId+')');
+  sbFetch('GET', '/rest/v1/familylinks?or='+orFilter+'&select=*', null, function(rows, err){
+    if(!err && Array.isArray(rows)){
+      rows.forEach(function(r){
+        var i = DB.links.findIndex(function(l){ return String(l.ID)===String(r.ID); });
+        if(i>=0){ if(!DB.links[i]._pendingSave) DB.links[i]=r; }
+        else DB.links.push(r);
+      });
+    }
+    // else: server unreachable — fall back to the local cache below so linking
+    // still works offline. The guard is best-effort in that case.
 
-  // Link B -> A (linked client's family card shows the principal)
-  var linkBA = {
-    ID: 'fam_' + (Date.now()+1),
-    PrincipalID: linkedClientId,
-    Name: principal.Name,
-    IDNumber: principal.IDNumber||'',
-    DOB: principal.DOB||'',
-    Cell: principal.Cell||'',
-    Email: principal.Email||'',
-    Type: rel,
-    IsClient: 'Yes',
-    ClientID: LINK_EXIST_CLIENT
-  };
+    var fwdExists = DB.links.find(function(l){
+      return String(l.PrincipalID)===String(LINK_EXIST_CLIENT) &&
+             String(l.ClientID)===String(linkedClientId);
+    });
+    var revExists = DB.links.find(function(l){
+      return String(l.PrincipalID)===String(linkedClientId) &&
+             String(l.ClientID)===String(LINK_EXIST_CLIENT);
+    });
 
-  // Check if reverse link already exists to avoid duplicates
-  var reverseExists = DB.links.find(function(l){
-    return String(l.PrincipalID)===String(linkedClientId) &&
-           String(l.ClientID)===String(LINK_EXIST_CLIENT);
+    if(fwdExists && revExists){
+      _linkBusy = false;
+      try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
+      closeAll();
+      render();
+      toast(linked.Name+' is already linked to '+principal.Name+' — no duplicate created','err');
+      return;
+    }
+
+    // Create only the direction(s) that don't already exist.
+    var linkAB = fwdExists ? null : {
+      ID: 'fam_' + Date.now(),
+      PrincipalID: LINK_EXIST_CLIENT,
+      Name: linked.Name,
+      IDNumber: linked.IDNumber||'',
+      DOB: linked.DOB||'',
+      Cell: linked.Cell||'',
+      Email: linked.Email||'',
+      Type: rel,
+      IsClient: 'Yes',
+      ClientID: linkedClientId
+    };
+    var linkBA = revExists ? null : {
+      ID: 'fam_' + (Date.now()+1),
+      PrincipalID: linkedClientId,
+      Name: principal.Name,
+      IDNumber: principal.IDNumber||'',
+      DOB: principal.DOB||'',
+      Cell: principal.Cell||'',
+      Email: principal.Email||'',
+      Type: rel,
+      IsClient: 'Yes',
+      ClientID: LINK_EXIST_CLIENT
+    };
+
+    if(linkAB) DB.links.push(linkAB);
+    if(linkBA) DB.links.push(linkBA);
+    try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
+    closeAll();
+    render();
+
+    // Save with ok-checks (silent-failure rule). upsert() flags _pendingSave on
+    // the local row if a save fails, so syncNow recovers it.
+    var pending = 0, anyFail = false;
+    function donePost(res){
+      if(!(res && res.ok)) anyFail = true;
+      pending--;
+      if(pending===0){
+        _linkBusy = false;
+        if(anyFail) toast('⚠️ Could not reach server — link kept locally and will retry on next sync. It is NOT lost.','err');
+        else toast(linked.Name + ' linked as ' + rel,'ok');
+      }
+    }
+    if(linkAB){ pending++; }
+    if(linkBA){ pending++; }
+    if(linkAB) post({action:'saveFamMember', member:linkAB}, donePost);
+    if(linkBA) post({action:'saveFamMember', member:linkBA}, donePost);
+    if(pending===0) _linkBusy = false;
   });
-
-  DB.links.push(linkAB);
-  if(!reverseExists) DB.links.push(linkBA);
-  closeAll();
-  render();
-  post({action:'saveFamMember', member:linkAB}, function(){
-    toast(linked.Name + ' linked as ' + rel,'ok');
-  });
-  if(!reverseExists){
-    post({action:'saveFamMember', member:linkBA}, function(){});
-  }
 }
 
 function renderOverview(c,pols,roas,ctasks){
@@ -1900,6 +2013,9 @@ function renderOverview(c,pols,roas,ctasks){
         (isClient?
           '<button class="btn b-gh xs" data-act="open-client" data-id="'+m.ClientID+'">View Profile →</button>':
           '<button class="btn b-sg xs" data-act="upgrade-client" data-id="'+m.ID+'">Make Client</button>')+
+        // Virtual spouse entries (built from the client record, not in DB.links) have
+        // no familylinks row to delete — edit the client record to change those.
+        (m._virtual?'':'<button class="btn b-gh xs" data-act="remove-fam" data-id="'+m.ID+'" title="Remove this family link" style="color:#b23">✕ Remove</button>')+
         '</div>';
     }).join('')+
     '</div>')+
@@ -8687,6 +8803,7 @@ document.addEventListener('click', function(e){
         case 'remove-child':   removeChild(id); break;
         case 'add-child':      openFamModal(id,'Child'); break;
         case 'upgrade-client':      upgradeToClient(id); break;
+        case 'remove-fam':          removeFamMember(id); break;
         case 'link-existing':       openLinkExistModal(id, 'Spouse'); break;
         case 'confirm-exist-link':  confirmExistLink(id); break;
         case 'tab':            CTAB=el.getAttribute('data-tab'); window._selectedEvent=null; render(); break;
