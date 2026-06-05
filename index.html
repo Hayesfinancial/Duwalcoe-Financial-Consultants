@@ -6019,11 +6019,20 @@ function buildPolicyForm(p){
 
   // RELATIONS
   html+=sec('Insured & Beneficiaries');
-  // Pre-fill Life Assured with client name if empty
+  // Pre-fill Life Assured with client name if empty. Editable — the life
+  // assured / annuitant is NOT always the client (joint-life annuities,
+  // policies on a spouse's life, key-person cover, etc.).
   var clientForInsured = DB.clients.find(function(x){return String(x.ID)===String(EPC);})||{};
   var insuredVal = p.Insured || clientForInsured.Name || '';
+  var _insNames = {};
+  if(clientForInsured.Name) _insNames[clientForInsured.Name.trim()]=true;
+  if(clean(clientForInsured.SpouseName)) _insNames[clientForInsured.SpouseName.trim()]=true;
+  DB.links.filter(function(l){return String(l.PrincipalID)===String(EPC)||String(l.ClientID)===String(EPC);})
+    .forEach(function(l){ if(l.Name&&l.Name.trim()) _insNames[l.Name.trim()]=true; });
   html+='<div class="g2">';
-  html+='<div class="fld"><label>Life Assured / Insured</label><div style="padding:8px 11px;background:var(--smoke);border:1.5px solid var(--mist);border-radius:7px;font-size:13px;color:var(--ink)">'+insuredVal+'</div><input type="hidden" id="pins" value="'+insuredVal+'"></div>';
+  html+='<div class="fld"><label>Life Assured / Insured / Annuitant</label>'+
+    '<datalist id="pins_names">'+Object.keys(_insNames).map(function(n){return '<option value="'+n.replace(/"/g,'&quot;')+'"></option>';}).join('')+'</datalist>'+
+    '<input type="text" id="pins" value="'+insuredVal.replace(/"/g,'&quot;')+'" list="pins_names" autocomplete="off"></div>';
   // PAYER — structured (PayerType / PayerName). Legacy `Payer` free-text
   // field preserved as read-only reference if present but PayerType unset.
   // Defaults: personal policies → Client, Business Assurance → Company.
@@ -7971,11 +7980,19 @@ function parseAstuteXML(txt){
 
       // People on the policy
       var hrels = rels[hid2] || [];
-      var ownerRel = null, insuredRel = null, bens = [];
+      var ownerRel = null, insuredRel = null, jointRel = null, bens = [];
       hrels.forEach(function(r){
         var role = (r.role||'').toLowerCase();
         if(!ownerRel && role.indexOf('owner')>=0 && !r.isOrg) ownerRel = r;
-        if(!insuredRel && (role.indexOf('insured')>=0 || role.indexOf('life assured')>=0) && !r.isOrg) insuredRel = r;
+        // Life roles: Annuitant / Insured / Life Assured. 'Joint Insured' and
+        // 'Joint Annuitant' are the SECOND life on joint-life products — never
+        // let them shadow the primary (live bug on a joint-life annuity where
+        // 'Joint Insured' appeared before 'Insured' in the data).
+        var isLifeRole = role.indexOf('annuitant')>=0 || role.indexOf('insured')>=0 || role.indexOf('life assured')>=0;
+        if(isLifeRole && !r.isOrg){
+          if(role.indexOf('joint')>=0){ if(!jointRel) jointRel = r; }
+          else { if(!insuredRel) insuredRel = r; }
+        }
         if(role==='beneficiary' && !r.isOrg && r.name){
           // Dedupe identical beneficiary relations within one holding
           var dup = bens.some(function(b){ return astuteNorm(b.name)===astuteNorm(r.name); });
@@ -7985,10 +8002,14 @@ function parseAstuteXML(txt){
           }
         }
       });
+      // Only-joint edge case: treat the joint life as primary rather than losing it
+      if(!insuredRel && jointRel){ insuredRel = jointRel; jointRel = null; }
       var clientName = c ? c.Name : '';
       var ownerIsClient = !ownerRel || astuteNameMatch(ownerRel.name, clientName);
       // Insured recorded only when a genuinely different person from the client
       var insuredDiff = (insuredRel && !astuteNameMatch(insuredRel.name, clientName)) ? insuredRel.name : '';
+      // Joint life recorded when a different person from the primary
+      var jointLife = (jointRel && (!insuredRel || astuteNorm(jointRel.name)!==astuteNorm(insuredRel.name))) ? jointRel : null;
 
       var premAmt = pol ? astuteTxt(pol,'PaymentAmt') : '';
       if(!N(premAmt) && covers.length) premAmt = covers[0].prem;
@@ -8017,6 +8038,7 @@ function parseAstuteXML(txt){
         ownerIsClient: ownerIsClient,
         ownerName: ownerRel ? ownerRel.name : '',
         insuredName: insuredDiff,
+        jointLife: jointLife ? (jointLife.name + (jointLife.dob ? ' (DOB '+jointLife.dob+')' : '')) : '',
         funds: funds,
         covers: covers,
         bens: bens
@@ -8049,6 +8071,8 @@ function renderAstutePreview(){
         ['Active','Lapsed','Paid Up','Cancelled'].map(function(o){return '<option'+(r.status===o?' selected':'')+'>'+o+'</option>';}).join('')+'</select></label>'+
         '</div>';
       if(!r.ownerIsClient && r.ownerName) html += '<div style="font-size:11.5px;color:#92400e;margin-top:6px">⚠ Owner is '+astuteEsc(r.ownerName)+' — not this client. Imports with owner recorded.</div>';
+      if(r.insuredName) html += '<div style="font-size:11.5px;color:#92400e;margin-top:6px">⚠ Life assured / annuitant is '+astuteEsc(r.insuredName)+' — not this client. Imports into the Life Assured field.</div>';
+      if(r.jointLife) html += '<div style="font-size:11.5px;color:#667;margin-top:4px">ℹ Joint life: '+astuteEsc(r.jointLife)+' — recorded in Notes.</div>';
       if(r.covers.length && (r.type==='Life / Income Protector'||r.type==='Business Assurance')){
         var cls = astuteClassifyCovers(r.covers);
         if(cls.lumps.length || cls.incomes.length || cls.fee){
@@ -8096,6 +8120,7 @@ function astuteFundsToNotes(r){
   var lines = [];
   lines.push('Imported from Astute CCP on '+new Date().toISOString().slice(0,10)+'.');
   if(r.astType && r.astType!==r.type) lines.push('Astute product type: '+r.astType+'.');
+  if(r.jointLife) lines.push('Joint life: '+r.jointLife+'.');
   if(r.funds.length){
     lines.push('Funds at import:');
     r.funds.forEach(function(f){
