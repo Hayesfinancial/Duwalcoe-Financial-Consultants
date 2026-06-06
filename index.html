@@ -7968,7 +7968,7 @@ function astuteMapTerm(period, plan){
 // and go to the PolicyFee field; other premium-only riders (CashBack, waiver
 // etc.) become Other Lump Sum rows so their premium isn't silently dropped.
 function astuteClassifyCovers(covers){
-  var lumps = [], incomes = [], fee = 0;
+  var lumps = [], incomes = [], fee = 0, ddNotes = [];
   covers.forEach(function(cv){
     var nameStr = (cv.code+' '+cv.plan).toLowerCase();
     // Policy/admin fee rider — premium only, not a benefit
@@ -7992,17 +7992,35 @@ function astuteClassifyCovers(covers){
       return;
     }
     if(!N(cv.amt)){
-      // Premium-bearing rider without a benefit amount (CashBack, premium
-      // waiver, etc.) — keep its premium on an Other Lump Sum row.
-      if(N(cv.prem)) lumps.push({type:'Other Lump Sum', label:cv.plan||'', cover:'', prem:cv.prem, premEsc:'', benEsc:''});
+      if(N(cv.prem)){
+        // Premium-bearing rider without a benefit amount (CashBack, premium
+        // waiver, etc.) — keep its premium on an Other Lump Sum row.
+        lumps.push({type:'Other Lump Sum', label:cv.plan||'', cover:'', prem:cv.prem, premEsc:'', benEsc:''});
+      } else if(/top[\s-]?up|extended|extender/i.test(cv.plan)){
+        // Qualitative dread/disability option rider (no rand amount in Astute
+        // feed) — e.g. Liberty Living Lifestyle Top-Up Option, Extended Option.
+        // Record as a note on the dread disease benefit rather than a lump row.
+        ddNotes.push(cv.plan);
+      }
       return;
     }
     var t = 'Life Cover';
-    if(nameStr.indexOf('disab')>=0 || nameStr.indexOf('impair')>=0) t = 'Capital Disability';
-    else if(nameStr.indexOf('dread')>=0 || nameStr.indexOf('illness')>=0 || nameStr.indexOf('sever')>=0 || nameStr.indexOf('critical')>=0) t = 'Dread Disease / Severe Illness';
+    // Capital Disability: generic keywords + OOD (Own Occupation Disability)
+    // suffix + Liberty's Absolute Protector disability brand name.
+    if(nameStr.indexOf('disab')>=0 || nameStr.indexOf('impair')>=0 ||
+       /\bood\b/.test(nameStr) || /absolute protector/.test(nameStr)){
+      t = 'Capital Disability';
+    }
+    // Dread Disease / Severe Illness: generic keywords + trauma (common SA
+    // term) + Liberty's Living Lifestyle brand for their dread benefit.
+    else if(nameStr.indexOf('dread')>=0 || nameStr.indexOf('illness')>=0 ||
+            nameStr.indexOf('sever')>=0 || nameStr.indexOf('critical')>=0 ||
+            nameStr.indexOf('trauma')>=0 || /living lifestyle/.test(nameStr)){
+      t = 'Dread Disease / Severe Illness';
+    }
     lumps.push({type:t, label:cv.plan||'', cover:cv.amt, prem:cv.prem||'', premEsc:'', benEsc:cv.benEsc||''});
   });
-  return {lumps:lumps, incomes:incomes, fee:fee};
+  return {lumps:lumps, incomes:incomes, fee:fee, ddNotes:ddNotes};
 }
 
 function parseAstuteXML(txt){
@@ -8282,6 +8300,7 @@ function renderAstutePreview(){
           });
           cls.incomes.forEach(function(I){ html += '• '+astuteEsc(I.type)+' (income): R'+Number(I.amount).toLocaleString()+'/month, '+astuteEsc(I.waiting)+' waiting, '+astuteEsc(I.term)+(I.label?' <span style="color:#889">('+astuteEsc(I.label)+')</span>':'')+'<br>'; });
           if(cls.fee || N(r.polFee)) html += '• Policy fee: R'+(Math.round((cls.fee+N(r.polFee))*100)/100)+' p/m<br>';
+          if(cls.ddNotes.length) html += '• Dread disease options (no rand value in Astute): '+cls.ddNotes.map(astuteEsc).join(', ')+' — will be added to dread disease notes.<br>';
           html += '</div><div style="font-size:11.5px;color:#92400e">⚠ Risk benefits imported from Astute — verify amounts, waiting and benefit periods against the policy schedule.</div>';
         }
       } else if(!r.covers.length && (r.type==='Life / Income Protector'||r.type==='Business Assurance')){
@@ -8398,7 +8417,7 @@ function runAstuteImport(){
       PremEscalation:r.premEsc, BenEscalation:'',
       BenDeath:lumpSum('Life Cover'), BenDisability:lumpSum('Capital Disability'), BenDreadDisease:lumpSum('Dread Disease / Severe Illness'),
       DreadDiseaseType:'Lump Sum',
-      DreadDiseaseNotes:(function(){ var ls=lumps.filter(function(x){return x.type==='Dread Disease / Severe Illness'&&x.label;}).map(function(x){return x.label;}); return ls.join(' · '); })(),
+      DreadDiseaseNotes:(function(){ var ls=lumps.filter(function(x){return x.type==='Dread Disease / Severe Illness'&&x.label;}).map(function(x){return x.label;}); var all=ls.concat(cls.ddNotes||[]); return all.join(' · '); })(),
       LumpBenefits:JSON.stringify(lumps),
       BenSurrenderValue:r.surrValue, BenFundValue:r.fundValue, BenMaturityValue:'',
       MaturityDate:r.maturityDate, MaturityAge:'', maturityAge:'', RetirementAge:r.retireAge||'',
