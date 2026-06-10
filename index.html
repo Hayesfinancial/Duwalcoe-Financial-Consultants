@@ -1640,7 +1640,11 @@ function openFamModal(cid, type, linkId){
     if(saIdValid(preId)) preDob = dobFromID(String(preId).replace(/\D/g,''));
     else if(!preDob && preId.length >= 6) preDob = dobFromID(preId);
   }
+  // Relationship is editable here: set it on add, or reclassify on edit.
+  // Default to the existing row's stored type, else the type the modal opened in.
+  var curType = (existing && clean(existing.Type)) ? existing.Type : FAM_TYPE;
   document.getElementById('famModB').innerHTML =
+    fs('fam_rel', 'Relationship', ['Spouse','Life Partner','Child','Parent','Sibling','Other'], curType)+
     '<div class="g2">'+
     fld('fam_name', 'Full Name *', preN)+
     fld('fam_id', 'ID Number', preId, 'text', 'data-autdob="1" data-dobfield="fam_dob"')+
@@ -1658,6 +1662,10 @@ function saveFamMember(){
   var idnum = document.getElementById('fam_id') ? document.getElementById('fam_id').value.trim() : '';
   var cell = document.getElementById('fam_cell') ? document.getElementById('fam_cell').value.trim() : '';
   var email = document.getElementById('fam_email') ? document.getElementById('fam_email').value.trim() : '';
+  // Relationship selector (in the modal) governs the link's Type on both new and
+  // edited rows. Fall back to the modal's open-type if the field is somehow absent.
+  var relType = document.getElementById('fam_rel') ? document.getElementById('fam_rel').value : FAM_TYPE;
+  if(!clean(relType)) relType = FAM_TYPE;
   // ID governs DOB: a valid SA ID is the authoritative source of the DOB.
   if(saIdValid(idnum)) dob = dobFromID(idnum.replace(/\D/g,''));
 
@@ -1676,6 +1684,20 @@ function saveFamMember(){
     });
   }
 
+  // Spouse is one-per-client (the Edit-Spouse button, the virtual-spouse fallback
+  // and the §4(q) logic all assume this). Block creating/reclassifying to a SECOND
+  // spouse — the user must reclassify or remove the existing one first.
+  if(relType === 'Spouse'){
+    var otherSpouse = DB.links.find(function(l){
+      return String(l.PrincipalID)===String(FAM_CLIENT) && l.Type==='Spouse'
+        && (!existing || String(l.ID)!==String(existing.ID));
+    });
+    if(otherSpouse){
+      toast('This client already has a spouse ('+(clean(otherSpouse.Name)||'unnamed')+'). Reclassify or remove that one first.','err');
+      return;
+    }
+  }
+
   var link;
   if(existing){
     existing.Name = name;
@@ -1683,6 +1705,7 @@ function saveFamMember(){
     existing.DOB = dob;
     existing.Cell = cell;
     existing.Email = email;
+    existing.Type = relType;
     // Preserve IsClient / ClientID — don't reset an upgraded spouse back to non-client.
     link = existing;
   } else {
@@ -1695,7 +1718,7 @@ function saveFamMember(){
       DOB: dob,
       Cell: cell,
       Email: email,
-      Type: FAM_TYPE,
+      Type: relType,
       IsClient: 'No',
       ClientID: ''
     };
@@ -1710,8 +1733,8 @@ function saveFamMember(){
   closeAll();
   render();
   post({action: existing ? 'updateFamMember' : 'saveFamMember', member:link}, function(res){
-    if(res && res.ok){ toast(FAM_TYPE + (existing ? ' updated' : ' saved'), 'ok'); }
-    else { toast('⚠️ Could not reach server — '+FAM_TYPE+' kept locally and will retry on next sync. It is NOT lost.','err'); }
+    if(res && res.ok){ toast(relType + (existing ? ' updated' : ' saved'), 'ok'); }
+    else { toast('⚠️ Could not reach server — '+relType+' kept locally and will retry on next sync. It is NOT lost.','err'); }
   });
 }
 
