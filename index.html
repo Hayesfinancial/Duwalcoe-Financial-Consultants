@@ -359,8 +359,8 @@ function sbFetch(method, path, body, cb){
     .catch(function(e){ console.error('Supabase fetch error:', e); if(cb) cb(null, e.message); });
 }
 
-function syncNow() {
-  setSS('ld');
+function syncNow(quiet) {
+  if(!quiet) setSS('ld');
 
   // Load all core tables in parallel
   var loaded = {};
@@ -465,9 +465,14 @@ function syncNow() {
     }catch(e){}
 
     try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
-    setSS('ok');
+    if(!quiet) setSS('ok');
+    // Quiet (background) sync: preserve scroll so a silent re-render doesn't jump
+    // the page someone is reading. render() resets scroll via innerHTML; we restore
+    // it in the same tick, before paint, so the jump is invisible.
+    var _qy = quiet ? window.scrollY : 0;
     render();
-    toast('Synced — ' + DB.clients.length + ' clients','ok');
+    if(quiet){ try{ window.scrollTo(0, _qy); }catch(e){} }
+    else toast('Synced — ' + DB.clients.length + ' clients','ok');
   }
 
   needed.forEach(function(table){
@@ -476,6 +481,33 @@ function syncNow() {
       checkDone();
     });
   });
+}
+
+// ── Background auto-refresh ───────────────────────────────────
+// Keeps every browser current: changes made by another user (Tracy, Courtney,
+// Clinton) appear without a manual Sync or page reload. Fires on a 30s timer
+// and whenever the tab regains focus. It NEVER interrupts an edit — it skips
+// its turn if any modal is open, if the cursor is in any field (incl. the
+// notepad and search box), or if the tab is hidden. Throttled so closely
+// spaced triggers (focus + visibilitychange together) don't double-fetch.
+function maybeAutoSync(){
+  if(document.hidden) return;                                 // hidden tab — pointless
+  if(document.querySelectorAll('.ov.open').length) return;    // a modal is open
+  var ae = document.activeElement;
+  if(ae){
+    var tag = (ae.tagName||'').toLowerCase();
+    if(tag==='input'||tag==='textarea'||tag==='select'||ae.isContentEditable) return;
+  }
+  if(Date.now() - (window._lastAutoSync||0) < 5000) return;   // throttle
+  window._lastAutoSync = Date.now();
+  syncNow(true);                                              // quiet: no toast, no pill flicker
+}
+function installAutoSync(){
+  if(window._autoSyncInstalled) return;                       // install once only
+  window._autoSyncInstalled = true;
+  setInterval(maybeAutoSync, 30000);                          // every ~30s
+  window.addEventListener('focus', maybeAutoSync);            // instant when tab regains focus
+  document.addEventListener('visibilitychange', function(){ if(!document.hidden) maybeAutoSync(); });
 }
 
 // post() — maps every legacy action to a direct Supabase call
@@ -10138,6 +10170,9 @@ function bootApp(){
   } catch(e){}
   // Then sync from sheet in background
   syncNow();
+  // Keep every browser current: silently re-pull on a timer and on tab focus,
+  // so changes by another user appear without a manual Sync or hard refresh.
+  installAutoSync();
   // Attach persistent search listener
   var _si = document.getElementById('dashSearch');
   if(_si){
