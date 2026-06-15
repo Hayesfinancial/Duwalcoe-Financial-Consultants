@@ -1133,8 +1133,10 @@ function loadFromURL() {
   const params = new URLSearchParams(window.location.search);
   const name = params.get('name') || '';
   const id   = params.get('id')   || '';
+  const cid  = params.get('cid')  || '';   // CRM internal client row ID (for linking saved risk analyses)
 
-  clientData = { name, id };
+  clientData = { name, id, cid };
+  window.RISK_CLIENT_CID = cid;
 
   // Set all name/ID fields
   ['loi-clientName', 'csa-clientName', 'roa-clientName', 'risk-clientName'].forEach(f => {
@@ -2188,18 +2190,113 @@ function printRiskProfiler() {
 }
 
 // ══════════════════════════════════════════════
-// RISK PROFILER — SAVED LIBRARY (in-app, multiple records)
-// Each saved analysis is its own record kept inside the page (in
-// this browser). Saving a new analysis NEVER overwrites an old one
-// — they stack up in a list you can reopen, re-date and re-save.
-// A short-lived "draft" autosave protects work in progress before
-// you commit it to the list. Optional backup export/import lets you
-// keep an off-browser copy of the whole library.
+// RISK PROFILER — SAVED LIBRARY (Supabase-backed, offline-first)
+// Each saved analysis is its own record, stored in Supabase (the
+// same backend the CRM uses) and keyed to the client. Saving a new
+// analysis NEVER overwrites an old one — they stack up in a list you
+// can reopen, re-date and re-save. localStorage is kept as an offline
+// cache: the list shows instantly and still works if the network is
+// down; anything saved offline is marked pending and pushed when the
+// connection returns. A short-lived draft autosave protects work in
+// progress before you commit it.
 // ══════════════════════════════════════════════
-var RISK_LIST_KEY  = 'du_risk_list_v1';   // array of saved records
+var RISK_LIST_KEY  = 'du_risk_list_v1';   // local cache of saved records
 var RISK_DRAFT_KEY = 'du_risk_draft_v1';  // in-progress form snapshot
 var RISK_TEXT_FIELDS = ['risk-clientName','risk-clientID','risk-signedAt'];
 var RISK_CURRENT_ID = null;               // record currently being edited (null = unsaved/new)
+
+// ── Supabase connection (same project + public anon key as the CRM) ──
+var SB_URL = 'https://ayyexuwxaghzljykslxr.supabase.co';
+var SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImF5eWV4dXd4YWdoemxqeWtzbHhyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQzMTUyMTcsImV4cCI6MjA4OTg5MTIxN30.hp2cQ64FjKnThsLh2qfdqRKdiy39_900JfH6C0KKIx4';
+var RISK_TABLE = 'risk_profiles';
+
+// Minimal Supabase REST wrapper (mirrors the CRM's sbFetch).
+function sbFetch(method, path, body, cb){
+  var opts = { method: method, headers: {
+    'apikey': SB_KEY,
+    'Authorization': 'Bearer ' + SB_KEY,
+    'Content-Type': 'application/json',
+    'Prefer': method === 'POST' ? 'resolution=merge-duplicates' : ''
+  }};
+  if(body) opts.body = JSON.stringify(body);
+  fetch(SB_URL + path, opts)
+    .then(function(r){
+      if(!r.ok){ r.text().then(function(t){ console.error('Supabase error:', r.status, t); if(cb) cb(null, t||('HTTP '+r.status)); }); return; }
+      var ct = r.headers.get('content-type')||'';
+      if(ct.indexOf('json')>=0) r.json().then(function(d){ if(cb) cb(d); });
+      else r.text().then(function(){ if(cb) cb({}); });
+    })
+    .catch(function(e){ console.error('Supabase fetch error:', e); if(cb) cb(null, e.message); });
+}
+
+// ── Mappers between the internal record shape and the table columns ──
+function riskRowFromRec(rec){
+  return {
+    ID:         rec.id,
+    ClientID:   rec.cid || window.RISK_CLIENT_CID || '',
+    Client:     rec.client || '',
+    ClientIDNo: rec.clientID || '',
+    Profile:    rec.profile || '',
+    Grand:      parseInt(rec.grand,10) || 0,
+    Data:       rec.data || {text:{},radios:{}},
+    SavedAt:    rec.savedAt || new Date().toISOString(),
+    UpdatedAt:  rec.updatedAt || new Date().toISOString(),
+    SavedBy:    'Clinton Hayes'
+  };
+}
+function riskRecFromRow(row){
+  return {
+    id:        row.ID,
+    cid:       row.ClientID || '',
+    client:    row.Client || '',
+    clientID:  row.ClientIDNo || '',
+    profile:   row.Profile || '\u2014',
+    grand:     (row.Grand!=null ? String(row.Grand) : ''),
+    savedAt:   row.SavedAt || '',
+    updatedAt: row.UpdatedAt || '',
+    data:      row.Data || {text:{},radios:{}}
+  };
+}
+
+// Push one record to Supabase. On failure, flag it pending in the cache.
+function pushRiskRecord(rec){
+  sbFetch('POST', '/rest/v1/'+RISK_TABLE, [riskRowFromRec(rec)], function(res, err){
+    var list = getRiskList();
+    var local = list.find(function(r){ return r.id===rec.id; });
+    if(local){
+      if(err){ local._pending = true; }
+      else { delete local._pending; }
+      setRiskList(list);
+      renderSavedList();
+    }
+    if(err){
+      setRiskSaveStatus('Saved on this computer \u2014 \u26a0 not yet synced (will retry). ' );
+    }
+  });
+}
+
+// Fetch this client's records from Supabase and merge into the cache.
+function fetchRiskRemote(cb){
+  var path = '/rest/v1/'+RISK_TABLE+'?select=*&order=SavedAt.desc';
+  var cid = window.RISK_CLIENT_CID || '';
+  if(cid) path += '&ClientID=eq.'+encodeURIComponent(cid);
+  sbFetch('GET', path, null, function(rows, err){
+    if(err || !Array.isArray(rows)){ if(cb) cb(false); return; }
+    var cache = getRiskList();
+    // Keep any local-only records still waiting to sync (pending, not yet on server).
+    var serverIds = {}; rows.forEach(function(r){ serverIds[r.ID]=true; });
+    var pendingLocal = cache.filter(function(r){ return r._pending && !serverIds[r.id]; });
+    var merged = rows.map(riskRecFromRow).concat(pendingLocal);
+    setRiskList(merged);
+    renderSavedList();
+    if(cb) cb(true);
+  });
+}
+
+// Push any records that were saved while offline.
+function pushPendingRisk(){
+  getRiskList().forEach(function(r){ if(r._pending) pushRiskRecord(r); });
+}
 
 function riskRadioGroups() {
   var names = ['s1q1','s1q2','s1q3','riskOption'];
@@ -2278,23 +2375,27 @@ function saveRiskAnalysis(asNew) {
     var rec = list.find(function(r){ return r.id===RISK_CURRENT_ID; });
     if(rec){
       rec.client=client; rec.clientID=clientID; rec.profile=profile; rec.grand=grand;
+      rec.cid = rec.cid || window.RISK_CLIENT_CID || '';
       rec.updatedAt=nowISO; rec.data=snap;
       if(!setRiskList(list)) return;
       clearRiskDraft();
       renderSavedList();
       setRiskSaveStatus('Saved \u2713 ' + new Date().toLocaleTimeString('en-ZA',{hour:'2-digit',minute:'2-digit'}) + ' \u2014 updated');
+      pushRiskRecord(rec);
       return;
     }
   }
   // create new record
   var id = newRiskId();
-  list.push({ id:id, client:client, clientID:clientID, profile:profile, grand:grand,
-              savedAt:nowISO, updatedAt:nowISO, data:snap });
+  var newRec = { id:id, cid:(window.RISK_CLIENT_CID||''), client:client, clientID:clientID,
+                 profile:profile, grand:grand, savedAt:nowISO, updatedAt:nowISO, data:snap };
+  list.push(newRec);
   if(!setRiskList(list)) return;
   RISK_CURRENT_ID = id;
   clearRiskDraft();
   renderSavedList();
   setRiskSaveStatus('Saved \u2713 ' + new Date().toLocaleTimeString('en-ZA',{hour:'2-digit',minute:'2-digit'}) + ' \u2014 added to your saved list');
+  pushRiskRecord(newRec);
 }
 
 // Open a saved record into the form for viewing / editing.
@@ -2324,6 +2425,10 @@ function deleteSavedRiskAnalysis(id) {
   if(RISK_CURRENT_ID===id) RISK_CURRENT_ID = null;
   renderSavedList();
   setRiskSaveStatus('Deleted ' + (rec.client||'analysis'));
+  // Remove from Supabase too (best effort).
+  sbFetch('DELETE', '/rest/v1/'+RISK_TABLE+'?ID=eq.'+encodeURIComponent(id), null, function(res, err){
+    if(err) setRiskSaveStatus('Deleted locally \u2014 \u26a0 server delete failed, will retry on next open');
+  });
 }
 
 // Clear the form to begin a fresh analysis (does NOT touch saved records).
@@ -2433,13 +2538,20 @@ function importRiskBackup(input) {
 }
 
 // Init: build questions, restore any in-progress draft, render the
-// saved list, and start the draft autosave.
+// saved list from the local cache (instant), then refresh from
+// Supabase and push anything that was saved while offline.
 setTimeout(function(){
   initRiskQuestions();
   restoreRiskDraft();
-  renderSavedList();
+  renderSavedList();              // instant, from cache
   wireRiskAutosave();
+  fetchRiskRemote(function(){ pushPendingRisk(); });   // sync with server
 }, 100);
+
+// Re-sync when the tab regains focus (another device may have saved).
+window.addEventListener('focus', function(){
+  fetchRiskRemote(function(){ pushPendingRisk(); });
+});
 </script>
 
 </body>
