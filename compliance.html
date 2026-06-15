@@ -922,7 +922,16 @@
     <!-- ═══ RISK PROFILER TAB ═══ -->
     <div class="tab-content" id="tab-risk">
       <div class="section-title">Risk Profiler</div>
-      <div class="section-desc">Complete each section. Scores calculate automatically. Print or download when done.</div>
+      <div class="section-desc">Complete each section. Scores calculate automatically. Save to keep it in your list, or print when done.</div>
+
+      <!-- SAVED ANALYSES LIBRARY -->
+      <div style="margin-bottom:1.2rem;padding:0.9rem 1rem;background:#f7f8fb;border:1px solid var(--border);border-radius:8px">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px">
+          <div style="font-weight:700;color:var(--navy);font-size:0.9rem">📚 Saved Risk Analyses</div>
+          <button type="button" onclick="newRiskAnalysis()" style="background:var(--navy);color:#fff;border:none;border-radius:6px;padding:6px 12px;font-size:0.76rem;font-weight:600;cursor:pointer;font-family:inherit">🆕 New blank</button>
+        </div>
+        <div id="risk-saved-list"></div>
+      </div>
 
       <div class="field-group" style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
         <div><label>Client Full Name</label><input type="text" id="risk-clientName" placeholder="Client name" oninput="calcRisk();updatePreviews()"></div>
@@ -1018,12 +1027,17 @@
       </div>
 
       <div style="margin-top:1rem;display:flex;flex-wrap:wrap;align-items:center;gap:10px">
-        <button class="download-btn gold" onclick="downloadRiskProfile()" style="width:auto;margin-top:0;flex:0 0 auto" title="Save this profile as a file you keep (e.g. in the client's Drive folder) so it is never lost and can be reopened later">💾 Save to file</button>
-        <button class="download-btn" onclick="document.getElementById('risk-file-input').click()" style="width:auto;margin-top:0;flex:0 0 auto" title="Open a previously saved Risk Profiler file to view or update it">📂 Open saved file</button>
-        <button class="download-btn" onclick="printRiskProfiler()" style="width:auto;margin-top:0;flex:1 1 auto">🖨 Print Risk Profiler</button>
-        <input type="file" id="risk-file-input" accept="application/json,.json" style="display:none" onchange="openRiskProfileFile(this)">
-        <button type="button" onclick="clearRiskProfile()" style="background:none;border:none;color:#9a1f1f;font-size:0.78rem;cursor:pointer;text-decoration:underline;font-family:inherit;padding:4px" title="Clears only the auto-saved browser copy — your saved files are not affected">Clear browser copy</button>
+        <button class="download-btn gold" onclick="saveRiskAnalysis(false)" style="width:auto;margin-top:0;flex:0 0 auto" title="Save this analysis in the program. Updates the one you're editing, or adds a new one to your saved list.">💾 Save</button>
+        <button class="download-btn" onclick="saveRiskAnalysis(true)" style="width:auto;margin-top:0;flex:0 0 auto" title="Keep the analysis you opened and store this as a separate new record — use this for a yearly review.">🗂 Save as new</button>
+        <button class="download-btn" onclick="newRiskAnalysis()" style="width:auto;margin-top:0;flex:0 0 auto" title="Clear the form to start a fresh analysis. Your saved analyses are not affected.">🆕 New</button>
+        <button class="download-btn" onclick="printRiskProfiler()" style="width:auto;margin-top:0;flex:1 1 auto">🖨 Print</button>
         <span id="risk-save-status" style="flex-basis:100%;font-size:0.78rem;color:var(--navy);opacity:0.8;text-align:right"></span>
+      </div>
+      <div style="margin-top:8px;font-size:0.74rem;color:#778;display:flex;flex-wrap:wrap;gap:14px;align-items:center">
+        <span style="opacity:0.8">Backup (optional, off-browser copy):</span>
+        <a href="javascript:void(0)" onclick="exportRiskBackup()" style="color:var(--navy);text-decoration:underline">⬇ Export all saved</a>
+        <a href="javascript:void(0)" onclick="document.getElementById('risk-backup-input').click()" style="color:var(--navy);text-decoration:underline">⬆ Restore from backup</a>
+        <input type="file" id="risk-backup-input" accept="application/json,.json" style="display:none" onchange="importRiskBackup(this)">
       </div>
     </div>
 
@@ -2174,15 +2188,18 @@ function printRiskProfiler() {
 }
 
 // ══════════════════════════════════════════════
-// RISK PROFILER — SAVE / AUTOSAVE / RESTORE
-// Persists every answer to this browser so a closed or refreshed
-// tab can be recovered. Keyed per client (ID first, then name) so
-// each client's profile is stored separately and won't overwrite
-// another's. Autosave captures every answer; restore runs when the
-// same client's compliance page is reopened.
+// RISK PROFILER — SAVED LIBRARY (in-app, multiple records)
+// Each saved analysis is its own record kept inside the page (in
+// this browser). Saving a new analysis NEVER overwrites an old one
+// — they stack up in a list you can reopen, re-date and re-save.
+// A short-lived "draft" autosave protects work in progress before
+// you commit it to the list. Optional backup export/import lets you
+// keep an off-browser copy of the whole library.
 // ══════════════════════════════════════════════
-var RISK_SAVE_PREFIX = 'du_risk_profile::';
+var RISK_LIST_KEY  = 'du_risk_list_v1';   // array of saved records
+var RISK_DRAFT_KEY = 'du_risk_draft_v1';  // in-progress form snapshot
 var RISK_TEXT_FIELDS = ['risk-clientName','risk-clientID','risk-signedAt'];
+var RISK_CURRENT_ID = null;               // record currently being edited (null = unsaved/new)
 
 function riskRadioGroups() {
   var names = ['s1q1','s1q2','s1q3','riskOption'];
@@ -2191,17 +2208,9 @@ function riskRadioGroups() {
   return names;
 }
 
-// Storage key for the current client — prefer ID, fall back to name.
-function riskSaveKey() {
-  var idEl = document.getElementById('risk-clientID');
-  var nmEl = document.getElementById('risk-clientName');
-  var id   = idEl ? (idEl.value||'').trim()   : '';
-  var name = nmEl ? (nmEl.value||'').trim()   : '';
-  return RISK_SAVE_PREFIX + (id || name || 'unspecified').toLowerCase();
-}
-
+// Snapshot the whole questionnaire into a plain object.
 function collectRiskProfile() {
-  var data = { _saved: new Date().toISOString(), text:{}, radios:{} };
+  var data = { text:{}, radios:{} };
   RISK_TEXT_FIELDS.forEach(function(id){
     var el = document.getElementById(id);
     if(el) data.text[id] = el.value;
@@ -2213,32 +2222,13 @@ function collectRiskProfile() {
   return data;
 }
 
-function setRiskSaveStatus(msg) {
-  var el = document.getElementById('risk-save-status');
-  if(el) el.textContent = msg;
-}
-
-// Manual save (button). silent=true is used by autosave to stay quiet on success.
-function saveRiskProfile(silent) {
-  try {
-    localStorage.setItem(riskSaveKey(), JSON.stringify(collectRiskProfile()));
-    setRiskSaveStatus('Saved \u2713 ' + new Date().toLocaleTimeString('en-ZA',{hour:'2-digit',minute:'2-digit'}));
-    return true;
-  } catch(e) {
-    setRiskSaveStatus('\u26a0 Could not save \u2014 browser storage may be blocked (private window?)');
-    return false;
-  }
-}
-
-// Restore the saved profile for the current client. No-op if nothing is stored.
-// Apply a profile object (from storage OR a loaded file) to the form.
+// Apply a snapshot back onto the form (full replace, not merge).
 function applyRiskProfile(data) {
   if(!data) return false;
   Object.keys(data.text||{}).forEach(function(id){
     var el = document.getElementById(id);
     if(el) el.value = data.text[id];
   });
-  // Clear any currently-checked answers first so a load fully replaces, not merges.
   riskRadioGroups().forEach(function(nm){
     var cur = document.querySelector('input[name="'+nm+'"]:checked');
     if(cur) cur.checked = false;
@@ -2254,105 +2244,200 @@ function applyRiskProfile(data) {
   return true;
 }
 
-function restoreRiskProfile() {
-  var raw;
-  try { raw = localStorage.getItem(riskSaveKey()); } catch(e){ return false; }
+function setRiskSaveStatus(msg) {
+  var el = document.getElementById('risk-save-status');
+  if(el) el.textContent = msg;
+}
+
+// ── The saved library (localStorage-backed) ────────────────────
+function getRiskList() {
+  try { var raw = localStorage.getItem(RISK_LIST_KEY); return raw ? (JSON.parse(raw)||[]) : []; }
+  catch(e){ return []; }
+}
+function setRiskList(list) {
+  try { localStorage.setItem(RISK_LIST_KEY, JSON.stringify(list)); return true; }
+  catch(e){ setRiskSaveStatus('\u26a0 Could not save \u2014 browser storage may be blocked (private window?)'); return false; }
+}
+function newRiskId() {
+  return 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2,6);
+}
+
+// Save the current form. asNew=true always creates a separate record
+// (use it for a yearly review after opening last year's). Otherwise it
+// updates the record you're editing, or creates the first one.
+function saveRiskAnalysis(asNew) {
+  var snap = collectRiskProfile();
+  var nowISO = new Date().toISOString();
+  var client  = (document.getElementById('risk-clientName')||{}).value || '';
+  var clientID= (document.getElementById('risk-clientID')||{}).value || '';
+  var profile = (document.getElementById('riskProfile')||{}).textContent || '\u2014';
+  var grand   = (document.getElementById('riskGrandTotal')||{}).textContent || '';
+  var list = getRiskList();
+
+  if(!asNew && RISK_CURRENT_ID) {
+    var rec = list.find(function(r){ return r.id===RISK_CURRENT_ID; });
+    if(rec){
+      rec.client=client; rec.clientID=clientID; rec.profile=profile; rec.grand=grand;
+      rec.updatedAt=nowISO; rec.data=snap;
+      if(!setRiskList(list)) return;
+      clearRiskDraft();
+      renderSavedList();
+      setRiskSaveStatus('Saved \u2713 ' + new Date().toLocaleTimeString('en-ZA',{hour:'2-digit',minute:'2-digit'}) + ' \u2014 updated');
+      return;
+    }
+  }
+  // create new record
+  var id = newRiskId();
+  list.push({ id:id, client:client, clientID:clientID, profile:profile, grand:grand,
+              savedAt:nowISO, updatedAt:nowISO, data:snap });
+  if(!setRiskList(list)) return;
+  RISK_CURRENT_ID = id;
+  clearRiskDraft();
+  renderSavedList();
+  setRiskSaveStatus('Saved \u2713 ' + new Date().toLocaleTimeString('en-ZA',{hour:'2-digit',minute:'2-digit'}) + ' \u2014 added to your saved list');
+}
+
+// Open a saved record into the form for viewing / editing.
+function openSavedRiskAnalysis(id) {
+  var rec = getRiskList().find(function(r){ return r.id===id; });
+  if(!rec) { setRiskSaveStatus('\u26a0 That saved analysis could not be found'); return; }
+  applyRiskProfile(rec.data);
+  RISK_CURRENT_ID = id;
+  clearRiskDraft();
+  renderSavedList();
+  var when = rec.savedAt ? new Date(rec.savedAt) : null;
+  setRiskSaveStatus('Opened ' + (rec.client||'analysis') + (when ? ' \u2014 saved ' + when.toLocaleString('en-ZA',{day:'2-digit',month:'short',year:'numeric'}) : '') + '. Edit and Save, or use \u201cSave as new\u201d to keep both.');
+  // bring the form into view
+  var anchor = document.getElementById('risk-clientName');
+  if(anchor && anchor.scrollIntoView) anchor.scrollIntoView({behavior:'smooth', block:'center'});
+}
+
+// Delete a saved record (asks first).
+function deleteSavedRiskAnalysis(id) {
+  var list = getRiskList();
+  var rec = list.find(function(r){ return r.id===id; });
+  if(!rec) return;
+  var label = (rec.client||'this analysis') + (rec.savedAt ? ' (' + new Date(rec.savedAt).toLocaleDateString('en-ZA',{day:'2-digit',month:'short',year:'numeric'}) + ')' : '');
+  if(!confirm('Delete the saved Risk Analysis for ' + label + '?\n\nThis cannot be undone.')) return;
+  list = list.filter(function(r){ return r.id!==id; });
+  setRiskList(list);
+  if(RISK_CURRENT_ID===id) RISK_CURRENT_ID = null;
+  renderSavedList();
+  setRiskSaveStatus('Deleted ' + (rec.client||'analysis'));
+}
+
+// Clear the form to begin a fresh analysis (does NOT touch saved records).
+function newRiskAnalysis() {
+  if(!confirm('Start a new blank Risk Analysis?\n\nYour saved analyses are kept. Any unsaved changes on screen will be cleared.')) return;
+  RISK_TEXT_FIELDS.forEach(function(id){ var el=document.getElementById(id); if(el) el.value=''; });
+  riskRadioGroups().forEach(function(nm){ var cur=document.querySelector('input[name="'+nm+'"]:checked'); if(cur) cur.checked=false; });
+  // keep the client name/ID that the page was opened with, if any
+  loadFromURL();
+  RISK_CURRENT_ID = null;
+  clearRiskDraft();
+  calcRisk(); updatePreviews(); renderSavedList();
+  setRiskSaveStatus('New blank analysis \u2014 fill it in, then Save');
+  var anchor = document.getElementById('risk-clientName');
+  if(anchor && anchor.scrollIntoView) anchor.scrollIntoView({behavior:'smooth', block:'center'});
+}
+
+// Render the list of saved analyses into its panel.
+function renderSavedList() {
+  var box = document.getElementById('risk-saved-list');
+  if(!box) return;
+  var list = getRiskList().slice().sort(function(a,b){
+    return new Date(b.savedAt||0) - new Date(a.savedAt||0);
+  });
+  if(!list.length){
+    box.innerHTML = '<div style="font-size:0.8rem;color:#667;padding:8px 2px">No saved analyses yet. Fill in the questionnaire below and click <strong>Save</strong> \u2014 it will appear here.</div>';
+    return;
+  }
+  var rows = list.map(function(r){
+    var when = r.savedAt ? new Date(r.savedAt).toLocaleDateString('en-ZA',{day:'2-digit',month:'short',year:'numeric'}) : '';
+    var active = (r.id===RISK_CURRENT_ID);
+    return '<div style="display:flex;align-items:center;gap:8px;padding:7px 8px;border:1px solid '+(active?'var(--gold)':'var(--border)')+';border-radius:7px;margin-bottom:6px;background:'+(active?'#fffdf4':'#fff')+'">'
+      + '<div style="flex:1;min-width:0">'
+      +   '<div style="font-weight:600;font-size:0.84rem;color:var(--navy);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+(escapeHtml(r.client)||'(no name)')+(active?' <span style="color:var(--gold);font-weight:700">\u2022 editing</span>':'')+'</div>'
+      +   '<div style="font-size:0.74rem;color:#667">'+escapeHtml(r.profile||'\u2014')+' \u00b7 saved '+when+'</div>'
+      + '</div>'
+      + '<button type="button" onclick="openSavedRiskAnalysis(\''+r.id+'\')" style="background:var(--navy);color:#fff;border:none;border-radius:6px;padding:6px 12px;font-size:0.76rem;font-weight:600;cursor:pointer;font-family:inherit">Open</button>'
+      + '<button type="button" onclick="deleteSavedRiskAnalysis(\''+r.id+'\')" title="Delete" style="background:none;border:none;color:#9a1f1f;font-size:0.95rem;cursor:pointer;padding:4px 6px">\u2715</button>'
+      + '</div>';
+  }).join('');
+  box.innerHTML = rows;
+}
+
+function escapeHtml(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];}); }
+
+// ── Draft autosave (protects work in progress, before you Save) ──
+function saveRiskDraft() {
+  try { localStorage.setItem(RISK_DRAFT_KEY, JSON.stringify({ when:new Date().toISOString(), cur:RISK_CURRENT_ID, data:collectRiskProfile() })); } catch(e){}
+}
+function clearRiskDraft() { try { localStorage.removeItem(RISK_DRAFT_KEY); } catch(e){} }
+function restoreRiskDraft() {
+  var raw; try { raw = localStorage.getItem(RISK_DRAFT_KEY); } catch(e){ return false; }
   if(!raw) return false;
-  var data;
-  try { data = JSON.parse(raw); } catch(e){ return false; }
-  if(!data) return false;
-  applyRiskProfile(data);
-  var when = data._saved ? new Date(data._saved) : null;
-  setRiskSaveStatus(when ? 'Restored \u2014 last saved ' + when.toLocaleString('en-ZA',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}) : 'Restored saved profile');
+  var d; try { d = JSON.parse(raw); } catch(e){ return false; }
+  if(!d || !d.data) return false;
+  applyRiskProfile(d.data);
+  RISK_CURRENT_ID = d.cur || null;
   return true;
 }
 
-// ── SAVE TO FILE / OPEN FROM FILE ──────────────────────────────
-// The permanent, never-lost copy: a small file the adviser keeps
-// (e.g. in the client's Drive folder). Re-openable a year later to
-// re-date and edit. The printed PDF stays the signed human record;
-// this file is the editable working copy.
-
-// Build a friendly, dated filename: "Risk Profiler - Craig Tibshraeny - 2026-06-15"
-function riskFileBaseName() {
-  var nmEl = document.getElementById('risk-clientName');
-  var name = (nmEl && nmEl.value.trim()) ? nmEl.value.trim() : 'Client';
-  var safe = name.replace(/[^a-zA-Z0-9 _-]/g,'').replace(/\s+/g,' ').trim();
-  var d = new Date();
-  var stamp = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
-  return 'Risk Profiler - ' + safe + ' - ' + stamp;
+var _riskDraftTimer = null;
+function autosaveRiskDraft() {
+  clearTimeout(_riskDraftTimer);
+  _riskDraftTimer = setTimeout(saveRiskDraft, 400);
+}
+function wireRiskAutosave() {
+  var tab = document.getElementById('tab-risk');
+  if(!tab) return;
+  tab.addEventListener('input',  autosaveRiskDraft);
+  tab.addEventListener('change', autosaveRiskDraft);
 }
 
-function downloadRiskProfile() {
+// ── Optional backup: export / import the WHOLE library to a file ─
+function exportRiskBackup() {
   try {
-    var data = collectRiskProfile();
-    data._client = (document.getElementById('risk-clientName')||{}).value || '';
-    data._profile = (document.getElementById('riskProfile')||{}).textContent || '';
-    var blob = new Blob([JSON.stringify(data, null, 2)], {type:'application/json'});
+    var payload = { _type:'duwalcoe-risk-backup', exportedAt:new Date().toISOString(), records:getRiskList() };
+    var blob = new Blob([JSON.stringify(payload,null,2)], {type:'application/json'});
     var url = URL.createObjectURL(blob);
     var a = document.createElement('a');
+    var d = new Date();
     a.href = url;
-    a.download = riskFileBaseName() + '.json';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+    a.download = 'Duwalcoe Risk Analyses backup - ' + d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0') + '.json';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
     setTimeout(function(){ URL.revokeObjectURL(url); }, 1000);
-    // Also keep the in-browser convenience copy in sync.
-    saveRiskProfile(true);
-    setRiskSaveStatus('Saved to file: ' + a.download);
-  } catch(e) {
-    setRiskSaveStatus('\u26a0 Could not create the file');
-  }
+    setRiskSaveStatus('Backup downloaded (' + getRiskList().length + ' saved)');
+  } catch(e){ setRiskSaveStatus('\u26a0 Could not create the backup file'); }
 }
-
-// Triggered by the hidden file input's change event.
-function openRiskProfileFile(input) {
+function importRiskBackup(input) {
   var file = input && input.files && input.files[0];
   if(!file) return;
   var reader = new FileReader();
   reader.onload = function(ev){
-    var data;
-    try { data = JSON.parse(ev.target.result); }
-    catch(e){ setRiskSaveStatus('\u26a0 That file is not a saved Risk Profiler'); input.value=''; return; }
-    if(!data || (!data.text && !data.radios)){
-      setRiskSaveStatus('\u26a0 That file is not a saved Risk Profiler'); input.value=''; return;
-    }
-    applyRiskProfile(data);
-    saveRiskProfile(true); // persist the loaded profile under the current client key too
-    var when = data._saved ? new Date(data._saved) : null;
-    setRiskSaveStatus('Opened ' + file.name + (when ? ' (originally saved ' + when.toLocaleString('en-ZA',{day:'2-digit',month:'short',year:'numeric'}) + ')' : '') + ' \u2014 update the date and Save to file again to keep this year\u2019s version.');
-    input.value = ''; // allow re-opening the same file again later
+    var payload; try { payload = JSON.parse(ev.target.result); } catch(e){ setRiskSaveStatus('\u26a0 That is not a valid backup file'); input.value=''; return; }
+    var incoming = (payload && payload.records) ? payload.records : (Array.isArray(payload) ? payload : null);
+    if(!incoming){ setRiskSaveStatus('\u26a0 That is not a Risk Analyses backup'); input.value=''; return; }
+    var list = getRiskList();
+    var byId = {}; list.forEach(function(r){ byId[r.id]=r; });
+    var added=0, updated=0;
+    incoming.forEach(function(r){ if(!r||!r.id) return; if(byId[r.id]) updated++; else added++; byId[r.id]=r; });
+    var merged = Object.keys(byId).map(function(k){ return byId[k]; });
+    setRiskList(merged); renderSavedList();
+    setRiskSaveStatus('Backup restored \u2014 ' + added + ' added, ' + updated + ' updated');
+    input.value='';
   };
   reader.onerror = function(){ setRiskSaveStatus('\u26a0 Could not read that file'); input.value=''; };
   reader.readAsText(file);
 }
 
-// Remove the saved copy for the current client (on-screen answers are untouched).
-function clearRiskProfile() {
-  if(!confirm('Clear the saved Risk Profiler answers for this client from this browser?\n\nThe answers currently on screen stay until you reload the page.')) return;
-  try { localStorage.removeItem(riskSaveKey()); } catch(e){}
-  setRiskSaveStatus('Saved copy cleared');
-}
-
-// Debounced autosave so every answer is captured without hammering storage.
-var _riskSaveTimer = null;
-function autosaveRiskProfile() {
-  clearTimeout(_riskSaveTimer);
-  _riskSaveTimer = setTimeout(function(){ saveRiskProfile(true); }, 400);
-}
-
-// Event delegation on the tab catches the dynamically-built Section 2 & 3 rows too.
-function wireRiskAutosave() {
-  var tab = document.getElementById('tab-risk');
-  if(!tab) return;
-  tab.addEventListener('input',  autosaveRiskProfile);
-  tab.addEventListener('change', autosaveRiskProfile);
-}
-
-// Init risk questions, then restore any saved answers and start autosaving.
+// Init: build questions, restore any in-progress draft, render the
+// saved list, and start the draft autosave.
 setTimeout(function(){
   initRiskQuestions();
-  restoreRiskProfile();
+  restoreRiskDraft();
+  renderSavedList();
   wireRiskAutosave();
 }, 100);
 </script>
