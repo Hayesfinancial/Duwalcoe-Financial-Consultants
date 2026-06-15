@@ -1017,9 +1017,12 @@
         </div>
       </div>
 
-      <button class="download-btn" onclick="printRiskProfiler()" style="margin-top:1rem">
-        🖨 Print Risk Profiler
-      </button>
+      <div style="margin-top:1rem;display:flex;flex-wrap:wrap;align-items:center;gap:10px">
+        <button class="download-btn gold" onclick="saveRiskProfile(false)" style="width:auto;margin-top:0;flex:0 0 auto" title="Save these answers to this browser so they can be recovered later">💾 Save</button>
+        <button class="download-btn" onclick="printRiskProfiler()" style="width:auto;margin-top:0;flex:1 1 auto">🖨 Print Risk Profiler</button>
+        <button type="button" onclick="clearRiskProfile()" style="background:none;border:none;color:#9a1f1f;font-size:0.78rem;cursor:pointer;text-decoration:underline;font-family:inherit;padding:4px">Clear saved copy</button>
+        <span id="risk-save-status" style="flex-basis:100%;font-size:0.78rem;color:var(--navy);opacity:0.8;text-align:right"></span>
+      </div>
     </div>
 
   </div><!-- /form-panel -->
@@ -2168,8 +2171,117 @@ function printRiskProfiler() {
   win.document.close();
 }
 
-// Init risk questions on page load
-setTimeout(initRiskQuestions, 100);
+// ══════════════════════════════════════════════
+// RISK PROFILER — SAVE / AUTOSAVE / RESTORE
+// Persists every answer to this browser so a closed or refreshed
+// tab can be recovered. Keyed per client (ID first, then name) so
+// each client's profile is stored separately and won't overwrite
+// another's. Autosave captures every answer; restore runs when the
+// same client's compliance page is reopened.
+// ══════════════════════════════════════════════
+var RISK_SAVE_PREFIX = 'du_risk_profile::';
+var RISK_TEXT_FIELDS = ['risk-clientName','risk-clientID','risk-signedAt'];
+
+function riskRadioGroups() {
+  var names = ['s1q1','s1q2','s1q3','riskOption'];
+  for(var i=1;i<=8;i++) names.push('s2q'+i);   // Section 2: 7 Likert + Q8
+  for(var j=1;j<=9;j++) names.push('s3q'+j);   // Section 3: 9 Likert
+  return names;
+}
+
+// Storage key for the current client — prefer ID, fall back to name.
+function riskSaveKey() {
+  var idEl = document.getElementById('risk-clientID');
+  var nmEl = document.getElementById('risk-clientName');
+  var id   = idEl ? (idEl.value||'').trim()   : '';
+  var name = nmEl ? (nmEl.value||'').trim()   : '';
+  return RISK_SAVE_PREFIX + (id || name || 'unspecified').toLowerCase();
+}
+
+function collectRiskProfile() {
+  var data = { _saved: new Date().toISOString(), text:{}, radios:{} };
+  RISK_TEXT_FIELDS.forEach(function(id){
+    var el = document.getElementById(id);
+    if(el) data.text[id] = el.value;
+  });
+  riskRadioGroups().forEach(function(nm){
+    var el = document.querySelector('input[name="'+nm+'"]:checked');
+    data.radios[nm] = el ? el.value : '';
+  });
+  return data;
+}
+
+function setRiskSaveStatus(msg) {
+  var el = document.getElementById('risk-save-status');
+  if(el) el.textContent = msg;
+}
+
+// Manual save (button). silent=true is used by autosave to stay quiet on success.
+function saveRiskProfile(silent) {
+  try {
+    localStorage.setItem(riskSaveKey(), JSON.stringify(collectRiskProfile()));
+    setRiskSaveStatus('Saved \u2713 ' + new Date().toLocaleTimeString('en-ZA',{hour:'2-digit',minute:'2-digit'}));
+    return true;
+  } catch(e) {
+    setRiskSaveStatus('\u26a0 Could not save \u2014 browser storage may be blocked (private window?)');
+    return false;
+  }
+}
+
+// Restore the saved profile for the current client. No-op if nothing is stored.
+function restoreRiskProfile() {
+  var raw;
+  try { raw = localStorage.getItem(riskSaveKey()); } catch(e){ return false; }
+  if(!raw) return false;
+  var data;
+  try { data = JSON.parse(raw); } catch(e){ return false; }
+  if(!data) return false;
+
+  Object.keys(data.text||{}).forEach(function(id){
+    var el = document.getElementById(id);
+    if(el) el.value = data.text[id];
+  });
+  Object.keys(data.radios||{}).forEach(function(nm){
+    var val = data.radios[nm];
+    if(val==='' || val==null) return;
+    var el = document.querySelector('input[name="'+nm+'"][value="'+val+'"]');
+    if(el) el.checked = true;
+  });
+  calcRisk();
+  updatePreviews();
+  var when = data._saved ? new Date(data._saved) : null;
+  setRiskSaveStatus(when ? 'Restored \u2014 last saved ' + when.toLocaleString('en-ZA',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}) : 'Restored saved profile');
+  return true;
+}
+
+// Remove the saved copy for the current client (on-screen answers are untouched).
+function clearRiskProfile() {
+  if(!confirm('Clear the saved Risk Profiler answers for this client from this browser?\n\nThe answers currently on screen stay until you reload the page.')) return;
+  try { localStorage.removeItem(riskSaveKey()); } catch(e){}
+  setRiskSaveStatus('Saved copy cleared');
+}
+
+// Debounced autosave so every answer is captured without hammering storage.
+var _riskSaveTimer = null;
+function autosaveRiskProfile() {
+  clearTimeout(_riskSaveTimer);
+  _riskSaveTimer = setTimeout(function(){ saveRiskProfile(true); }, 400);
+}
+
+// Event delegation on the tab catches the dynamically-built Section 2 & 3 rows too.
+function wireRiskAutosave() {
+  var tab = document.getElementById('tab-risk');
+  if(!tab) return;
+  tab.addEventListener('input',  autosaveRiskProfile);
+  tab.addEventListener('change', autosaveRiskProfile);
+}
+
+// Init risk questions, then restore any saved answers and start autosaving.
+setTimeout(function(){
+  initRiskQuestions();
+  restoreRiskProfile();
+  wireRiskAutosave();
+}, 100);
 </script>
 
 </body>
