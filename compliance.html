@@ -1018,9 +1018,11 @@
       </div>
 
       <div style="margin-top:1rem;display:flex;flex-wrap:wrap;align-items:center;gap:10px">
-        <button class="download-btn gold" onclick="saveRiskProfile(false)" style="width:auto;margin-top:0;flex:0 0 auto" title="Save these answers to this browser so they can be recovered later">💾 Save</button>
+        <button class="download-btn gold" onclick="downloadRiskProfile()" style="width:auto;margin-top:0;flex:0 0 auto" title="Save this profile as a file you keep (e.g. in the client's Drive folder) so it is never lost and can be reopened later">💾 Save to file</button>
+        <button class="download-btn" onclick="document.getElementById('risk-file-input').click()" style="width:auto;margin-top:0;flex:0 0 auto" title="Open a previously saved Risk Profiler file to view or update it">📂 Open saved file</button>
         <button class="download-btn" onclick="printRiskProfiler()" style="width:auto;margin-top:0;flex:1 1 auto">🖨 Print Risk Profiler</button>
-        <button type="button" onclick="clearRiskProfile()" style="background:none;border:none;color:#9a1f1f;font-size:0.78rem;cursor:pointer;text-decoration:underline;font-family:inherit;padding:4px">Clear saved copy</button>
+        <input type="file" id="risk-file-input" accept="application/json,.json" style="display:none" onchange="openRiskProfileFile(this)">
+        <button type="button" onclick="clearRiskProfile()" style="background:none;border:none;color:#9a1f1f;font-size:0.78rem;cursor:pointer;text-decoration:underline;font-family:inherit;padding:4px" title="Clears only the auto-saved browser copy — your saved files are not affected">Clear browser copy</button>
         <span id="risk-save-status" style="flex-basis:100%;font-size:0.78rem;color:var(--navy);opacity:0.8;text-align:right"></span>
       </div>
     </div>
@@ -2229,17 +2231,17 @@ function saveRiskProfile(silent) {
 }
 
 // Restore the saved profile for the current client. No-op if nothing is stored.
-function restoreRiskProfile() {
-  var raw;
-  try { raw = localStorage.getItem(riskSaveKey()); } catch(e){ return false; }
-  if(!raw) return false;
-  var data;
-  try { data = JSON.parse(raw); } catch(e){ return false; }
+// Apply a profile object (from storage OR a loaded file) to the form.
+function applyRiskProfile(data) {
   if(!data) return false;
-
   Object.keys(data.text||{}).forEach(function(id){
     var el = document.getElementById(id);
     if(el) el.value = data.text[id];
+  });
+  // Clear any currently-checked answers first so a load fully replaces, not merges.
+  riskRadioGroups().forEach(function(nm){
+    var cur = document.querySelector('input[name="'+nm+'"]:checked');
+    if(cur) cur.checked = false;
   });
   Object.keys(data.radios||{}).forEach(function(nm){
     var val = data.radios[nm];
@@ -2249,9 +2251,80 @@ function restoreRiskProfile() {
   });
   calcRisk();
   updatePreviews();
+  return true;
+}
+
+function restoreRiskProfile() {
+  var raw;
+  try { raw = localStorage.getItem(riskSaveKey()); } catch(e){ return false; }
+  if(!raw) return false;
+  var data;
+  try { data = JSON.parse(raw); } catch(e){ return false; }
+  if(!data) return false;
+  applyRiskProfile(data);
   var when = data._saved ? new Date(data._saved) : null;
   setRiskSaveStatus(when ? 'Restored \u2014 last saved ' + when.toLocaleString('en-ZA',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}) : 'Restored saved profile');
   return true;
+}
+
+// ── SAVE TO FILE / OPEN FROM FILE ──────────────────────────────
+// The permanent, never-lost copy: a small file the adviser keeps
+// (e.g. in the client's Drive folder). Re-openable a year later to
+// re-date and edit. The printed PDF stays the signed human record;
+// this file is the editable working copy.
+
+// Build a friendly, dated filename: "Risk Profiler - Craig Tibshraeny - 2026-06-15"
+function riskFileBaseName() {
+  var nmEl = document.getElementById('risk-clientName');
+  var name = (nmEl && nmEl.value.trim()) ? nmEl.value.trim() : 'Client';
+  var safe = name.replace(/[^a-zA-Z0-9 _-]/g,'').replace(/\s+/g,' ').trim();
+  var d = new Date();
+  var stamp = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+  return 'Risk Profiler - ' + safe + ' - ' + stamp;
+}
+
+function downloadRiskProfile() {
+  try {
+    var data = collectRiskProfile();
+    data._client = (document.getElementById('risk-clientName')||{}).value || '';
+    data._profile = (document.getElementById('riskProfile')||{}).textContent || '';
+    var blob = new Blob([JSON.stringify(data, null, 2)], {type:'application/json'});
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = riskFileBaseName() + '.json';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function(){ URL.revokeObjectURL(url); }, 1000);
+    // Also keep the in-browser convenience copy in sync.
+    saveRiskProfile(true);
+    setRiskSaveStatus('Saved to file: ' + a.download);
+  } catch(e) {
+    setRiskSaveStatus('\u26a0 Could not create the file');
+  }
+}
+
+// Triggered by the hidden file input's change event.
+function openRiskProfileFile(input) {
+  var file = input && input.files && input.files[0];
+  if(!file) return;
+  var reader = new FileReader();
+  reader.onload = function(ev){
+    var data;
+    try { data = JSON.parse(ev.target.result); }
+    catch(e){ setRiskSaveStatus('\u26a0 That file is not a saved Risk Profiler'); input.value=''; return; }
+    if(!data || (!data.text && !data.radios)){
+      setRiskSaveStatus('\u26a0 That file is not a saved Risk Profiler'); input.value=''; return;
+    }
+    applyRiskProfile(data);
+    saveRiskProfile(true); // persist the loaded profile under the current client key too
+    var when = data._saved ? new Date(data._saved) : null;
+    setRiskSaveStatus('Opened ' + file.name + (when ? ' (originally saved ' + when.toLocaleString('en-ZA',{day:'2-digit',month:'short',year:'numeric'}) + ')' : '') + ' \u2014 update the date and Save to file again to keep this year\u2019s version.');
+    input.value = ''; // allow re-opening the same file again later
+  };
+  reader.onerror = function(){ setRiskSaveStatus('\u26a0 Could not read that file'); input.value=''; };
+  reader.readAsText(file);
 }
 
 // Remove the saved copy for the current client (on-screen answers are untouched).
