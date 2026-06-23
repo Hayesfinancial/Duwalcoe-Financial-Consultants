@@ -9622,13 +9622,21 @@ function openPolicySchedule(cid){
         // unlabelled policies.
         var _lumps=[]; try{ _lumps=p.LumpBenefits?JSON.parse(p.LumpBenefits):[]; }catch(e){}
         function lumpBreakdown(matchTypes){
-          var rows=_lumps.filter(function(r){return matchTypes.indexOf(r.type)>-1 && N(r.cover)>0 && r.label;});
+          var rows=_lumps.filter(function(r){return matchTypes.indexOf(r.type)>-1 && N(r.cover)>0 && (r.label || N(r.prem)>0);});
           if(rows.length===0) return '';
-          // Only show breakdown when there's more than one labelled row, OR
-          // when the single row has a meaningful label worth surfacing.
-          return '<div style="font-size:10px;color:#888;font-weight:400;margin-top:2px;line-height:1.4">'
-                 + rows.map(function(r){return escHtml(r.label)+': '+R(r.cover);}).join('<br>')
-                 + '</div>';
+          var multi = rows.length > 1;
+          return '<div style="font-size:10px;color:#888;font-weight:400;margin-top:2px;line-height:1.6">'
+            + rows.map(function(r){
+                var parts=[];
+                if(r.label) parts.push(escHtml(r.label));
+                // Multi-row: repeat cover so each row can be distinguished.
+                // Single row: cover is already shown in bold above — don't repeat it.
+                if(multi) parts.push(R(r.cover));
+                // Per-benefit premium — shown whenever captured, regardless of single/multi.
+                if(N(r.prem)>0) parts.push('<span style="color:#2e7d5a;font-weight:600">R\u00a0'+Math.round(N(r.prem)).toLocaleString('en-ZA')+'\u00a0/pm</span>');
+                return parts.length ? parts.join('\u00a0\u00b7\u00a0') : '';
+              }).filter(Boolean).join('<br>')
+            + '</div>';
         }
         // Use lumpSum() to compute the aggregate directly from LumpBenefits JSON
         // — self-healing: multi-row policies show correct sums even if the legacy
@@ -9777,8 +9785,14 @@ function openPolicySchedule(cid){
 
       // Income benefits summary
       if(incBens.length){
-        var ipStr=incBens.map(function(r){return (r.label||r.type||'IP')+' '+R(r.amount)+'/pm'+(r.waiting?' (wait '+r.waiting+')':'');}).join(' · ');
-        details.push('<span style="font-size:11px;color:#888">Income Benefit: </span><span style="font-size:12px">'+ipStr+'</span>');
+        var ipStr=incBens.map(function(r){
+          var s=(r.label||r.type||'IP')+' <strong>'+R(r.amount)+'/pm</strong>';
+          if(r.waiting) s+=' (wait\u00a0'+r.waiting+')';
+          if(r.term)    s+=' (benefit\u00a0'+r.term+')';
+          if(N(r.prem)>0) s+=' <span style="color:#2e7d5a;font-weight:600">\u00b7\u00a0prem\u00a0R\u00a0'+Math.round(N(r.prem)).toLocaleString('en-ZA')+'\u00a0/pm</span>';
+          return s;
+        }).join('<br>');
+        details.push('<span style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.3px">Income Benefit: </span><span style="font-size:12px">'+ipStr+'</span>');
       }
 
       if(p.Notes) details.push('<span style="font-size:11px;color:#888;font-style:italic">'+p.Notes+'</span>');
