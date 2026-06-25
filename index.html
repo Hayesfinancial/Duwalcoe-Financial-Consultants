@@ -1125,6 +1125,7 @@ function renderDash(){
   var willsUnasked   = 0; // ⚪ HasWill empty (not yet asked)
   var willsAnyKind   = 0; // kept for backward compat with other code referring to it
   active.forEach(function(c){
+    if(c.ClientType==='Company') return; // companies don't have wills — skip the will buckets
     if(c.HasWill==='Yes'){
       willsAnyKind++;
       if(c.WillThroughMe==='Yes') willsThroughMe++;
@@ -1540,6 +1541,12 @@ function renderProfile(){
     (clean(c.DOB)?'<span>🎂 '+fdate(c.DOB)+(calcAge(c.DOB)!==null?' · <strong style="color:#fff">Age '+calcAge(c.DOB)+'</strong>':'')+'</span>':'')+
     (clean(c.Cell)?'<span>📱 '+c.Cell+'</span>':'')+
     (clean(c.Email)?'<span>✉️ '+c.Email+'</span>':'')+
+    (c.ClientType==='Company'&&clean(c.RegNo)?'<span>🏢 Reg '+c.RegNo+'</span>':'')+
+    (c.ClientType==='Company'&&clean(c.VatNo)?'<span>🧾 VAT '+c.VatNo+'</span>':'')+
+    (c.ClientType==='Company'&&clean(c.ContactPerson)?'<span>👤 '+c.ContactPerson+'</span>':'')+
+    (c.ClientType==='Company'&&clean(c.CompanyTel)?'<span>☎️ '+c.CompanyTel+'</span>':'')+
+    (c.ClientType==='Company'&&clean(c.ContactCell)?'<span>📱 '+c.ContactCell+'</span>':'')+
+    (c.ClientType==='Company'&&clean(c.ContactEmail)?'<span>✉️ '+c.ContactEmail+'</span>':'')+
     '</div></div>'+
     '<div style="display:flex;flex-direction:column;gap:8px;align-items:flex-end">'+
     (c.IsLead==='Yes'?'<span style="background:#fef3c7;color:#d97706;border-radius:10px;padding:3px 12px;font-size:11px;font-weight:700">🎯 Lead</span>':'')+
@@ -4727,10 +4734,40 @@ function openClientModal(id, isLead){
     '</div>'+
     '<input type="hidden" id="fisleadst" value="'+(c.IsLead||'No')+'">'+
     '</div>'+
-    // SECTION: Personal
-    '<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:1px;padding:4px 0 8px;border-bottom:2px solid var(--gold);margin-bottom:14px">Personal Details</div>'+
+    // RECORD TYPE TOGGLE — Individual (default) / Company. Selecting Company hides the
+    // personal-only fields, reveals a Company Details block, and relaxes the Gender/Smoker
+    // requirement on save. setClientType() (below) drives the show/hide on the live modal.
+    '<div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;padding:10px 14px;background:#f5f7fa;border-radius:10px;border:1.5px solid var(--mist)">'+
+    '<span style="font-size:13px;font-weight:700;color:var(--navy)">Record type</span>'+
+    '<div style="display:flex;gap:0;border:1.5px solid var(--mist);border-radius:8px;overflow:hidden;margin-left:auto">'+
+    '<button type="button" id="btnTypeIndiv" onclick="setClientType(\'Individual\')" style="padding:5px 16px;font-size:12px;font-weight:700;border:none;cursor:pointer;font-family:inherit">👤 Individual</button>'+
+    '<button type="button" id="btnTypeCompany" onclick="setClientType(\'Company\')" style="padding:5px 16px;font-size:12px;font-weight:700;border:none;border-left:1.5px solid var(--mist);cursor:pointer;font-family:inherit">🏢 Company</button>'+
+    '</div>'+
+    '<input type="hidden" id="fclienttype" value="'+(c.ClientType||'Individual')+'">'+
+    '</div>'+
+    // SECTION: Details — Name + Status are shared by both record types.
+    '<div id="detailsHdr" style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:1px;padding:4px 0 8px;border-bottom:2px solid var(--gold);margin-bottom:14px">Personal Details</div>'+
     '<div class="g3">'+
-    fld('fn','Full Name *',c.Name)+
+    '<div class="fld"><label id="fnLabel">Full Name *</label><input type="text" id="fn" value="'+clean(c.Name)+'" autocomplete="off"></div>'+
+    fs('fst','Status',['Active','Inactive'],c.Status||'Active')+
+    '</div>'+
+    // Company Details — shown only when record type = Company (toggled by setClientType).
+    '<div class="cmCompany" style="display:none">'+
+    '<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:1px;padding:4px 0 8px;border-bottom:2px solid var(--gold);margin:18px 0 14px">Company Details</div>'+
+    '<div class="g3">'+
+    fld('fregno','Registration Number',c.RegNo||'')+
+    fld('fvatno','VAT Number',c.VatNo||'')+
+    fld('fctel','Company Telephone',c.CompanyTel||'')+
+    '</div>'+
+    '<div class="g3" style="margin-top:10px">'+
+    fld('fcperson','Contact Person',c.ContactPerson||'')+
+    fld('fccell','Contact Person Tel',c.ContactCell||'')+
+    fld('fcemail','Contact Person Email',c.ContactEmail||'')+
+    '</div>'+
+    '</div>'+
+    // Personal-only fields — wrapped in .cmIndiv so they hide together for companies.
+    '<div class="cmIndiv">'+
+    '<div class="g3" style="margin-top:10px">'+
     fld('fmdn','Maiden Name',c.MaidenName||'')+
     fld('fcn','Calling Name',c.CallingName||(c.Name?c.Name.split(' ')[0]:'')||'')+
     fs('fttl','Title',['','Mr.','Mrs.','Ms.','Miss','Dr.','Prof.','Rev.','Adv.'],c.Title||'')+
@@ -4752,10 +4789,9 @@ function openClientModal(id, isLead){
     '<div style="grid-column:1/-1;font-size:10.5px;color:#889;margin-top:-6px">Commencement values as declared in the antenuptial contract, un-adjusted. Blank = not declared = deemed nil (s.6(4)(b), Matrimonial Property Act). CPI adjustment is applied at analysis time.</div>'+
     fs('fedu','Education Level',['','School - no matric','Matric','Diploma / Certificate','Degree','Post Graduate','Other'],c.Education||'')+
     fld('fqual','Qualification Detail',c.Qualification||'')+
-    fs('fst','Status',['Active','Inactive'],c.Status||'Active')+
     '</div>'+
 
-    // SECTION: Contact & Work
+    // SECTION: Contact & Work (personal-only — inside .cmIndiv)
     '<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:1px;padding:4px 0 8px;border-bottom:2px solid var(--gold);margin:18px 0 14px">Employment & Income</div>'+
     '<div class="g3">'+
     fld('fo','Occupation',c.Occupation)+
@@ -4823,6 +4859,7 @@ function openClientModal(id, isLead){
     '<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:1px;padding:4px 0 8px;border-bottom:2px solid var(--gold);margin:18px 0 14px">Children</div>'+
     '<div id="childRows"><div style="color:#aaa;font-size:12px;padding:4px 0">No children added</div></div>'+
     '<button class="btn b-gh sm" data-act="add-child-row" style="margin-top:8px">+ Add Child</button>'+
+    '</div>'+
     // SECTION: Address
     '<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:1px;padding:4px 0 8px;border-bottom:2px solid var(--gold);margin:18px 0 14px">Address & Other</div>'+
     fld('fadr','Physical Address (FICA)',c.Address)+
@@ -4853,6 +4890,9 @@ function openClientModal(id, isLead){
   renderEditDocs();
 
   document.getElementById('cMod').classList.add('open');
+
+  // Apply the record-type view (Individual default / Company) to the freshly-built modal.
+  setClientType(c.ClientType||'Individual');
 
   // Auto-derive DOB from ID if DOB field is blank
   // Also pre-fill spouse fields from DB.links if not on client record
@@ -4917,6 +4957,27 @@ function openClientModal(id, isLead){
     mf.innerHTML = '<button class="btn b-gh sm" data-close="1">Cancel</button>'+
       '<button class="btn b-gd sm" data-save="client">💾 Save Client</button>';
   }
+}
+
+// Toggle the client-intake modal between Individual and Company views.
+// Individual: personal fields visible (.cmIndiv), company block hidden (.cmCompany).
+// Company: the reverse, the Name label becomes "Company / Registered Name", and the
+// Gender/Smoker requirement is relaxed in saveClient(). Scoped to #cModB so it can never
+// touch elements elsewhere on the page.
+function setClientType(val){
+  var isCo = (val==='Company');
+  var h = document.getElementById('fclienttype'); if(h) h.value = val;
+  document.querySelectorAll('#cModB .cmIndiv').forEach(function(el){ el.style.display = isCo?'none':''; });
+  document.querySelectorAll('#cModB .cmCompany').forEach(function(el){ el.style.display = isCo?'':'none'; });
+  var nl = document.getElementById('fnLabel'); if(nl) nl.textContent = isCo ? 'Company / Registered Name *' : 'Full Name *';
+  var dh = document.getElementById('detailsHdr'); if(dh) dh.textContent = isCo ? 'Company' : 'Personal Details';
+  var bi = document.getElementById('btnTypeIndiv'), bc = document.getElementById('btnTypeCompany');
+  if(bi && bc){
+    bi.style.background = isCo ? '#f5f7fa' : 'var(--navy)';  bi.style.color = isCo ? '#889' : '#fff';
+    bc.style.background = isCo ? 'var(--navy)' : '#f5f7fa';  bc.style.color = isCo ? '#fff' : '#889';
+  }
+  // Doctors are individual-only; Banking stays (companies have accounts).
+  var ds = document.getElementById('editDocSec'); if(ds) ds.style.display = isCo ? 'none' : '';
 }
 
 
@@ -5004,6 +5065,15 @@ function buildComplianceUrl(c){
   if(c.DOB)      params.set('dob',  c.DOB);
   if(c.Cell)     params.set('cell', c.Cell);
   if(c.Email)    params.set('email',c.Email);
+  // Company fields — only meaningful when ClientType=Company; compliance.html reads these
+  // to print the company name + contact person's tel/email on the LOI / CSA / ROA.
+  if(c.ClientType)    params.set('ctype',   c.ClientType);
+  if(c.RegNo)         params.set('regno',   c.RegNo);
+  if(c.VatNo)         params.set('vatno',   c.VatNo);
+  if(c.CompanyTel)    params.set('ctel',    c.CompanyTel);
+  if(c.ContactPerson) params.set('cperson', c.ContactPerson);
+  if(c.ContactCell)   params.set('ccell',   c.ContactCell);
+  if(c.ContactEmail)  params.set('cemail',  c.ContactEmail);
   return base + '?' + params.toString();
 }
 
@@ -5558,8 +5628,10 @@ function saveClient(openFNA){
   var name=g('fn');
   if(!name){toast('Name is required','err');return;}
   var isLead = g('fisleadst')==='Yes';
-  if(!isLead && !getRadio('fgen')&&!g('fgen')){toast('Please select Gender','err');return;}
-  if(!isLead && !getRadio('fsm')&&!g('fsm')){toast('Please select Smoker status','err');return;}
+  var ctype = g('fclienttype')||'Individual';
+  var isCompany = (ctype==='Company');
+  if(!isLead && !isCompany && !getRadio('fgen')&&!g('fgen')){toast('Please select Gender','err');return;}
+  if(!isLead && !isCompany && !getRadio('fsm')&&!g('fsm')){toast('Please select Smoker status','err');return;}
   var id=EC||('new_'+Date.now());
 
   // Duplicate check — only for new clients, not edits
@@ -5588,7 +5660,8 @@ function saveClient(openFNA){
     Gender:getRadio('fgen')||g('fgen'),Smoker:getRadio('fsm')||g('fsm'),
     Education:g('fedu'),Qualification:g('fqual'),TelHome:g('ftelh'),TelWork:g('ftelw'),
     SpouseName:g('fspname'),SpouseIDNumber:g('fspid'),SpouseDOB:g('fspdob'),SpouseCell:g('fspcell'),SpouseEmail:g('fspemail'),
-    Address:g('fadr'),POBox:g('fpobox')||'',DriveUrl:g('fdr'),Notes:'',RiskCategory:g('frc'),Adviser:cu(),IsLead:g('fisleadst')||'No'};
+    Address:g('fadr'),POBox:g('fpobox')||'',DriveUrl:g('fdr'),Notes:'',RiskCategory:g('frc'),Adviser:cu(),IsLead:g('fisleadst')||'No',
+    ClientType:ctype,RegNo:g('fregno')||'',VatNo:g('fvatno')||'',CompanyTel:g('fctel')||'',ContactPerson:g('fcperson')||'',ContactCell:g('fccell')||'',ContactEmail:g('fcemail')||''};
   // ID governs DOB: a 13-digit SA ID that passes the checksum is the
   // authoritative source of the date of birth (client and spouse alike).
   if(saIdValid(c.IDNumber))       c.DOB       = dobFromID(String(c.IDNumber).replace(/\D/g,''));
@@ -5633,7 +5706,7 @@ function saveClient(openFNA){
   else DB.clients.push(c);
 
   // Save children as family members
-  if(NEW_CHILDREN && NEW_CHILDREN.length){
+  if(!isCompany && NEW_CHILDREN && NEW_CHILDREN.length){
     NEW_CHILDREN.forEach(function(ch){
       var chname = document.getElementById('chname_'+ch.id);
       var chdob = document.getElementById('chdob_'+ch.id);
@@ -5650,7 +5723,7 @@ function saveClient(openFNA){
   }
 
   // Save spouse as family member if name entered
-  if(g('fspname')){
+  if(!isCompany && g('fspname')){
     var existing = DB.links.find(function(l){ return String(l.PrincipalID)===String(id) && l.Type==='Spouse'; });
     if(!existing){
       var spLink = {ID:'fam_sp_'+Date.now(), PrincipalID:id,
