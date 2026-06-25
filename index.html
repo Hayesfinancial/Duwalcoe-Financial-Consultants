@@ -4759,6 +4759,14 @@ function openClientModal(id, isLead){
     fld('fvatno','VAT Number',c.VatNo||'')+
     fld('fctel','Company Telephone',c.CompanyTel||'')+
     '</div>'+
+    // Contact-person lookup — search existing clients & family members and auto-fill the
+    // name / tel / email below, so they never have to be re-keyed or guessed. The three
+    // fields stay editable for anyone not already in the system.
+    '<div class="fld" style="grid-column:1/-1;position:relative;margin-top:10px">'+
+    '<label>🔍 Find existing person <span style="font-weight:400;text-transform:none;color:#889;font-size:10px">— search clients &amp; family to auto-fill the contact details below</span></label>'+
+    '<input type="text" id="fcpsearch" autocomplete="off" placeholder="Type a name…" oninput="contactSearch(this.value)" onblur="setTimeout(function(){var b=document.getElementById(\'fcpresults\');if(b)b.style.display=\'none\';},200)">'+
+    '<div id="fcpresults" style="display:none;position:absolute;left:0;right:0;top:100%;z-index:50;background:#fff;border:1.5px solid var(--mist);border-top:none;border-radius:0 0 8px 8px;max-height:240px;overflow:auto;box-shadow:0 8px 20px rgba(0,0,0,.12)"></div>'+
+    '</div>'+
     '<div class="g3" style="margin-top:10px">'+
     fld('fcperson','Contact Person',c.ContactPerson||'')+
     fld('fccell','Contact Person Tel',c.ContactCell||'')+
@@ -4978,6 +4986,51 @@ function setClientType(val){
   }
   // Doctors are individual-only; Banking stays (companies have accounts).
   var ds = document.getElementById('editDocSec'); if(ds) ds.style.display = isCo ? 'none' : '';
+}
+
+// Contact-person lookup for the company card. Searches existing clients AND family
+// members by name, deduped, and on click fills the Contact Person / Tel / Email fields.
+// Pure UX convenience — it copies the values in; the fields remain freely editable, so a
+// contact who isn't in the CRM yet can still be typed manually.
+function contactSearch(q){
+  var box = document.getElementById('fcpresults');
+  if(!box) return;
+  q = (q||'').trim().toLowerCase();
+  if(q.length < 2){ box.style.display='none'; box.innerHTML=''; return; }
+  var seen = {}, cands = [];
+  DB.clients.forEach(function(c){
+    if(c.IsLead==='Yes' || c.ClientType==='Company') return; // people only
+    var nm = c.Name||''; if(!nm) return;
+    var key = (nm+'|'+(c.Email||'')).toLowerCase();
+    if(seen[key]) return; seen[key]=1;
+    cands.push({name:nm, cell:c.Cell||'', email:c.Email||'', src:'Client'});
+  });
+  (DB.links||[]).forEach(function(m){
+    var nm = m.Name||''; if(!nm) return;
+    var key = (nm+'|'+(m.Email||'')).toLowerCase();
+    if(seen[key]) return; seen[key]=1;
+    cands.push({name:nm, cell:m.Cell||'', email:m.Email||'', src:(m.Type||'Family')});
+  });
+  var res = cands.filter(function(x){ return x.name.toLowerCase().indexOf(q)>=0; }).slice(0,8);
+  box.style.display='block';
+  if(!res.length){ box.innerHTML='<div style="padding:10px 11px;color:#889;font-size:12px">No match — type the details manually below.</div>'; return; }
+  box.innerHTML = res.map(function(x){
+    var meta = [x.email, x.cell].filter(Boolean).join('  ·  ') || 'no contact details on file';
+    return '<div onclick="pickContact(this.dataset.name,this.dataset.cell,this.dataset.email)" '+
+      'data-name="'+escHtml(x.name)+'" data-cell="'+escHtml(x.cell)+'" data-email="'+escHtml(x.email)+'" '+
+      'style="padding:9px 11px;cursor:pointer;border-bottom:1px solid var(--smoke)" '+
+      'onmouseover="this.style.background=\'#f5f7fa\'" onmouseout="this.style.background=\'#fff\'">'+
+      '<div style="font-weight:600;font-size:13px">'+escHtml(x.name)+' <span style="font-weight:400;color:#889;font-size:10px">'+escHtml(x.src)+'</span></div>'+
+      '<div style="font-size:11px;color:#889">'+escHtml(meta)+'</div>'+
+      '</div>';
+  }).join('');
+}
+function pickContact(name, cell, email){
+  var n=document.getElementById('fcperson'); if(n) n.value = name  || '';
+  var t=document.getElementById('fccell');   if(t) t.value = cell  || '';
+  var e=document.getElementById('fcemail');  if(e) e.value = email || '';
+  var s=document.getElementById('fcpsearch'); if(s) s.value = '';
+  var box=document.getElementById('fcpresults'); if(box){ box.style.display='none'; box.innerHTML=''; }
 }
 
 

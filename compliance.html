@@ -1134,8 +1134,16 @@ function loadFromURL() {
   const name = params.get('name') || '';
   const id   = params.get('id')   || '';
   const cid  = params.get('cid')  || '';   // CRM internal client row ID (for linking saved risk analyses)
+  // Company fields (present only when the CRM client is ClientType=Company).
+  const ctype   = params.get('ctype')   || 'Individual';
+  const regno   = params.get('regno')   || '';
+  const vatno   = params.get('vatno')   || '';
+  const ctel    = params.get('ctel')    || '';
+  const cperson = params.get('cperson') || '';
+  const ccell   = params.get('ccell')   || '';
+  const cemail  = params.get('cemail')  || '';
 
-  clientData = { name, id, cid };
+  clientData = { name, id, cid, ctype, regno, vatno, ctel, cperson, ccell, cemail };
   window.RISK_CLIENT_CID = cid;
 
   // Set all name/ID fields
@@ -1180,6 +1188,28 @@ function radio(name) {
   return el ? el.value.toUpperCase() : '—';
 }
 
+// ── Company-client helpers ───────────────────────────────────────────────
+// Populated from the URL params handed over by the CRM (buildComplianceUrl).
+// All three documents call these; they return empty for individuals, so the
+// individual output is byte-for-byte unchanged.
+function isCompanyClient() { return (clientData.ctype || 'Individual') === 'Company'; }
+function companyContactLines() {
+  if (!isCompanyClient()) return [];
+  const out = [];
+  if (clientData.regno)   out.push('Reg No: ' + clientData.regno);
+  if (clientData.vatno)   out.push('VAT No: ' + clientData.vatno);
+  if (clientData.cperson) out.push('Contact: ' + clientData.cperson);
+  const tel = clientData.ccell || clientData.ctel; // contact person's tel, else company line
+  if (tel)                out.push('Tel: ' + tel);
+  if (clientData.cemail)  out.push('Email: ' + clientData.cemail);
+  return out;
+}
+function companyContactHTML() {
+  const lines = companyContactLines();
+  if (!lines.length) return '';
+  return `<p style="font-size:8px;margin:2px 0 6px;color:#333">${lines.join(' &nbsp;·&nbsp; ')}</p>`;
+}
+
 // ══════════════════════════════════════════════
 // TABS
 // ══════════════════════════════════════════════
@@ -1215,6 +1245,7 @@ function renderLOIPreview() {
   const date = v('csa-date') || '[Date]';
   return `${logoRow()}
   <h1>Letter of Introduction</h1>
+  ${isCompanyClient() ? `<p style="margin:2px 0"><strong>To:</strong> ${name}</p>${companyContactHTML()}` : ''}
   <p>In complying with FAIS legislation, I would like to bring the following information to your attention.</p>
   <p>My name is <strong>Clinton Hayes</strong> (ID 7101175266088) representative of Duwalcoe Financial Consultants CC FSB No: 9978, and my contact details are as follows:</p>
   <table style="margin:6px 0;font-size:7.5px">
@@ -1296,7 +1327,8 @@ function renderCSAPreview() {
   return `${logoRow()}
   <h1>Client Service Agreement</h1>
   <p>Between</p>
-  <p><strong>${name} ${id}</strong></p>
+  <p><strong>${name}${isCompanyClient() ? '' : ' ' + id}</strong></p>
+  ${companyContactHTML()}
   <p>And</p>
   <p><strong>Duwalcoe Financial Consultants cc FSB No. 9978</strong></p>
   <p><strong>1.</strong> In accordance with the Financial Advisors and Intermediary Services Act and the General Code of Conduct for Financial Services Intermediaries it is my/our duty as an authorized financial services provider to inform you, as a valued client of my/our business, of some of your principle rights in terms of the aforementioned legislation:</p>
@@ -1383,6 +1415,7 @@ function renderROAPreview() {
     <tr><td style="width:50%"><strong>Client Name:</strong> ${name}</td><td><strong>Advisor Name:</strong> Clinton Hayes</td></tr>
     <tr><td><strong>Date:</strong> ${date}</td><td><strong>FSP No:</strong> 9978</td></tr>
   </tbody></table>
+  ${companyContactHTML()}
   <p style="font-size:7.5px;font-style:italic;border:1px solid #ddd;padding:4px;background:#fafafa">In terms of the Financial Advisory and Intermediary Services Act, we are required to provide you, the client, with a <strong>Record of Advice</strong>. This document is intended as confirmation of the advisory process that you recently undertook with your advisor. If you have any questions in respect of the content, please contact your advisor. You are entitled to <strong>a copy of this document for your own records</strong>.</p>
 
   <h2>SECTION A: Summary of Information Obtained from the Client</h2>
@@ -1614,6 +1647,15 @@ function downloadLOI() {
       f.setY(f.y() + 1.5);
     }
 
+    // Company addressee block (companies only; individual LOI is unchanged).
+    if (isCompanyClient()) {
+      doc.setFontSize(9); doc.setFont('helvetica','bold'); doc.setTextColor(...NAVY);
+      doc.text('To: ' + name, margin, f.y()); f.setY(f.y() + 5);
+      doc.setFont('helvetica','normal'); doc.setFontSize(8); doc.setTextColor(...BLACK);
+      companyContactLines().forEach(function(l){ f.checkPage(5); doc.text(l, margin, f.y()); f.setY(f.y() + 4); });
+      f.setY(f.y() + 2);
+    }
+
     bodyText('In complying with FAIS legislation, I would like to bring the following information to your attention.');
     bodyText('My name is Clinton Hayes (ID 7101175266088) representative of Duwalcoe Financial Consultants CC FSB No: 9978, and my contact details are as follows:');
 
@@ -1748,8 +1790,9 @@ function downloadCSA() {
 
     bodyText(`Between`);
     doc.setFont('helvetica','bold'); doc.setFontSize(8.5); doc.setTextColor(...NAVY);
-    doc.text(`${name}  ${id}`, margin, f.y()); f.setY(f.y() + 5);
+    doc.text(`${name}${isCompanyClient() ? '' : '  ' + id}`, margin, f.y()); f.setY(f.y() + 5);
     doc.setFont('helvetica','normal'); doc.setTextColor(...BLACK);
+    companyContactLines().forEach(function(l){ f.checkPage(5); doc.setFontSize(8); doc.text(l, margin, f.y()); f.setY(f.y() + 4); });
     bodyText('And');
     doc.setFont('helvetica','bold'); doc.setTextColor(...NAVY);
     doc.text('Duwalcoe Financial Consultants cc  FSB No. 9978', margin, f.y()); f.setY(f.y() + 7);
@@ -1855,6 +1898,14 @@ function downloadROA() {
       ['Date', date],
       ['FSP No.', '9978'],
     ]);
+
+    // Company contact details (companies only; empty for individuals).
+    companyContactLines().forEach(function(l){
+      f.checkPage(5);
+      doc.setFontSize(8); doc.setFont('helvetica','normal'); doc.setTextColor(...f.BLACK);
+      doc.text(l, f.margin, f.y()); f.setY(f.y() + 4);
+    });
+    if (companyContactLines().length) f.setY(f.y() + 1);
 
     // Full FAIS disclaimer box
     f.checkPage(18);
