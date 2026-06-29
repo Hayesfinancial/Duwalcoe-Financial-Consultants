@@ -5888,6 +5888,9 @@ function buildPolicyForm(p){
   var isGuarEndow=(type==='Guaranteed Endowment');
   var isMed=type==='Medical Aid';
   var isBiz=type==='Business Assurance';
+  // Detect company client — affects which sections are shown on investment cards
+  var _polClient = DB.clients.find(function(x){ return String(x.ID)===String(EPC); })||{};
+  var isCompanyClient = (_polClient.ClientType==='Company');
   // _isOnceOff defined here so it's available in ALL sections below
   var _freq=p.Frequency||'Monthly';
   var _isOnceOff=_freq==='Once Off'||_freq==='Paid Up';
@@ -6171,12 +6174,16 @@ function buildPolicyForm(p){
       html+='<div class="g2">'+fld('pb_matval','Maturity Value',p.BenMaturityValue,'text','oninput=""')+fdp('pb_matdate','Maturity Date',_matDateInit)+'</div>';
       // Hint shown when maturity value cannot be calculated (e.g. past date, missing inputs)
       html+='<div id="pb_matval_hint" style="font-size:11px;color:#b54708;margin:-4px 0 8px 0;display:none"></div>';
-      // Maturity Age — read-only display, auto-derived from Maturity Date and client DOB
-      html+='<div class="g2">';
-      html+='<div class="fld"><label>Maturity Age <span style="font-size:10px;color:#889;font-weight:400">(auto from date + client DOB)</span></label>';
-      html+='<div style="padding:8px 11px;background:var(--smoke);border:1.5px solid var(--mist);border-radius:7px;font-size:13px;font-weight:700;color:var(--navy)" id="pb_matage_display">—</div>';
-      html+='<input type="hidden" id="pb_matage" value="'+(_matAgeInit||'')+'"></div>';
-      html+='<div></div></div>';
+      // Maturity Age — only meaningful for natural persons; hidden for company clients
+      if(!isCompanyClient){
+        html+='<div class="g2">';
+        html+='<div class="fld"><label>Maturity Age <span style="font-size:10px;color:#889;font-weight:400">(auto from date + client DOB)</span></label>';
+        html+='<div style="padding:8px 11px;background:var(--smoke);border:1.5px solid var(--mist);border-radius:7px;font-size:13px;font-weight:700;color:var(--navy)" id="pb_matage_display">—</div>';
+        html+='<input type="hidden" id="pb_matage" value="'+(_matAgeInit||'')+'"></div>';
+        html+='<div></div></div>';
+      } else {
+        html+='<input type="hidden" id="pb_matage" value="">';
+      }
       html+='<div class="g2">';
       html+='<div class="fld"><label>Growth Rate % <span style="font-size:10px;color:#889;font-weight:400">(used for projection)</span></label>';
       html+='<div style="position:relative"><input id="pb_growrate" type="text" value="'+(p.GrowthRate||p.PremGrowthRate||p.IllustrativeRate||'')+'" placeholder="e.g. 8.5" oninput="invCalcMaturity()" ';
@@ -6204,7 +6211,7 @@ function buildPolicyForm(p){
       var _gainBg=_gain>=0?'#f0fdf4':'#fef2f2';
       html+='<div style="padding:8px 11px;background:'+_gainBg+';border:1.5px solid var(--mist);border-radius:7px;font-size:13px;font-weight:700;color:'+_gainCol+'" id="inv_gain_display">'+(_net>0&&_fv>0?'R '+Math.round(_gain).toLocaleString('en-ZA')+' ('+_gainPct+'%)':'—')+'</div></div>';
       html+='</div>';
-      if(['Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment','Unit Trust'].indexOf(type)>=0){
+      if(['Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment','Unit Trust'].indexOf(type)>=0 && !isCompanyClient){
         // ── Retirement Planning Treatment ──
         // Two policy-level decisions for discretionary investments:
         //   IncludeInRetirement: should this policy count as retirement capital
@@ -6369,21 +6376,24 @@ function buildPolicyForm(p){
   }
 
   // RELATIONS
-  html+=sec('Insured & Beneficiaries');
+  html+=sec(isCompanyClient ? 'Life Assured & Premium Payer' : 'Insured & Beneficiaries');
   // Pre-fill Life Assured with client name if empty. Editable — the life
   // assured / annuitant is NOT always the client (joint-life annuities,
   // policies on a spouse's life, key-person cover, etc.).
+  // For company clients the life assured is a natural person (e.g. director/key person).
   var clientForInsured = DB.clients.find(function(x){return String(x.ID)===String(EPC);})||{};
-  var insuredVal = p.Insured || clientForInsured.Name || '';
+  var insuredVal = p.Insured || (isCompanyClient ? '' : clientForInsured.Name) || '';
   var _insNames = {};
-  if(clientForInsured.Name) _insNames[clientForInsured.Name.trim()]=true;
+  if(!isCompanyClient && clientForInsured.Name) _insNames[clientForInsured.Name.trim()]=true;
   if(clean(clientForInsured.SpouseName)) _insNames[clientForInsured.SpouseName.trim()]=true;
   DB.links.filter(function(l){return String(l.PrincipalID)===String(EPC)||String(l.ClientID)===String(EPC);})
     .forEach(function(l){ if(l.Name&&l.Name.trim()) _insNames[l.Name.trim()]=true; });
   html+='<div class="g2">';
-  html+='<div class="fld"><label>Life Assured / Insured / Annuitant</label>'+
+  html+='<div class="fld"><label>'+(isCompanyClient ? 'Life Assured (natural person on whose life the policy is written)' : 'Life Assured / Insured / Annuitant')+'</label>'+
     '<datalist id="pins_names">'+Object.keys(_insNames).map(function(n){return '<option value="'+n.replace(/"/g,'&quot;')+'"></option>';}).join('')+'</datalist>'+
-    '<input type="text" id="pins" value="'+insuredVal.replace(/"/g,'&quot;')+'" list="pins_names" autocomplete="off"></div>';
+    '<input type="text" id="pins" value="'+insuredVal.replace(/"/g,'&quot;')+'" list="pins_names" autocomplete="off"'+(isCompanyClient?' placeholder="e.g. director or key person name"':'')+'>'+
+    (isCompanyClient?'<div style="font-size:11px;color:#667;margin-top:4px">Company-owned policy — enter the natural person whose life is insured, not the company name.</div>':'')+
+    '</div>';
   // PAYER — structured (PayerType / PayerName). Legacy `Payer` free-text
   // field preserved as read-only reference if present but PayerType unset.
   // Defaults: personal policies → Client, Business Assurance → Company.
@@ -6424,34 +6434,37 @@ function buildPolicyForm(p){
   html+=_legacyPayerNudge;
   html+='</div>';
   html+='</div>';
-  html+=sec('Beneficiaries');
-  html+='<div style="font-size:11px;color:#889;margin-bottom:6px">'+
-    'Beneficiary type determines estate duty treatment. Percentages should total 100%.<br>'+
-    '<span style="color:#2e7d32;font-weight:600">Spouse / Life Partner</span> = 4(q) deductible &nbsp;·&nbsp; '+
-    '<span style="color:#b45309;font-weight:600">Estate</span> = dutiable, funds estate expenses &nbsp;·&nbsp; '+
-    '<span style="color:#c62828;font-weight:600">Third Party</span> = dutiable, apportionable'+
-    '</div>';
-  html+='<div id="polBensWrap">'+renderPolBens()+'</div>';
-  html+='<button type="button" class="btn b-gh sm" style="margin-top:6px" onclick="addPolBen()">+ Add Beneficiary</button>';
-
-  // Death proceeds routing — investment-type policies only. Determines whether the
-  // fund value pays the nominee directly (bypasses estate, no executor fee) or
-  // falls into the estate and is willed to the beneficiary (net of executor fee /
-  // CGT / duty). Risk routes by beneficiary type; RA/Pension/etc. are s.37C by law,
-  // so the control is not shown for those. Default is set by type when the field is
-  // blank — existing policies are never silently mutated; the value is only written
-  // when the policy is saved.
-  if(isInv||isGuarEndow||isLA||isLifeAnn){
-    var _routingDefault = (['Flexible Investment','Offshore Flexible Investment','Unit Trust','Tax Free Savings'].indexOf(type)>=0) ? 'Estate' : 'Direct';
-    var _effRouting = p.EstateRouting || _routingDefault;
-    html+=sec('Death Proceeds Routing');
-    html+='<div class="fld">'+
-      '<select id="pestrouting" style="border:1.5px solid var(--mist);border-radius:7px;padding:8px 11px;font-family:inherit;font-size:13px;background:#fff;width:100%">'+
-      '<option value="Direct"'+(_effRouting==='Direct'?' selected':'')+'>Pays nominee directly — bypasses estate (gross to beneficiary, no executor fee)</option>'+
-      '<option value="Estate"'+(_effRouting==='Estate'?' selected':'')+'>Falls into estate — willed to beneficiary (net of executor fee, CGT &amp; duty)</option>'+
-      '</select>'+
-      (type==='Tax Free Savings'?'<div style="font-size:11px;color:#b45309;margin-top:5px">Bank / unit-trust TFS → <strong>estate</strong> · endowment TFS → set to <strong>Direct</strong>.</div>':'')+
+  if(!isCompanyClient){
+    // ── Personal estate beneficiaries — not applicable to company-owned policies
+    html+=sec('Beneficiaries');
+    html+='<div style="font-size:11px;color:#889;margin-bottom:6px">'+
+      'Beneficiary type determines estate duty treatment. Percentages should total 100%.<br>'+
+      '<span style="color:#2e7d32;font-weight:600">Spouse / Life Partner</span> = 4(q) deductible &nbsp;·&nbsp; '+
+      '<span style="color:#b45309;font-weight:600">Estate</span> = dutiable, funds estate expenses &nbsp;·&nbsp; '+
+      '<span style="color:#c62828;font-weight:600">Third Party</span> = dutiable, apportionable'+
       '</div>';
+    html+='<div id="polBensWrap">'+renderPolBens()+'</div>';
+    html+='<button type="button" class="btn b-gh sm" style="margin-top:6px" onclick="addPolBen()">+ Add Beneficiary</button>';
+
+    // Death proceeds routing — investment-type policies only. Determines whether the
+    // fund value pays the nominee directly (bypasses estate, no executor fee) or
+    // falls into the estate and is willed to the beneficiary (net of executor fee /
+    // CGT / duty). Risk routes by beneficiary type; RA/Pension/etc. are s.37C by law,
+    // so the control is not shown for those. Default is set by type when the field is
+    // blank — existing policies are never silently mutated; the value is only written
+    // when the policy is saved.
+    if(isInv||isGuarEndow||isLA||isLifeAnn){
+      var _routingDefault = (['Flexible Investment','Offshore Flexible Investment','Unit Trust','Tax Free Savings'].indexOf(type)>=0) ? 'Estate' : 'Direct';
+      var _effRouting = p.EstateRouting || _routingDefault;
+      html+=sec('Death Proceeds Routing');
+      html+='<div class="fld">'+
+        '<select id="pestrouting" style="border:1.5px solid var(--mist);border-radius:7px;padding:8px 11px;font-family:inherit;font-size:13px;background:#fff;width:100%">'+
+        '<option value="Direct"'+(_effRouting==='Direct'?' selected':'')+'>Pays nominee directly — bypasses estate (gross to beneficiary, no executor fee)</option>'+
+        '<option value="Estate"'+(_effRouting==='Estate'?' selected':'')+'>Falls into estate — willed to beneficiary (net of executor fee, CGT &amp; duty)</option>'+
+        '</select>'+
+        (type==='Tax Free Savings'?'<div style="font-size:11px;color:#b45309;margin-top:5px">Bank / unit-trust TFS → <strong>estate</strong> · endowment TFS → set to <strong>Direct</strong>.</div>':'')+
+        '</div>';
+    }
   }
 
   // NOTES
@@ -7119,23 +7132,29 @@ function invCalcMaturity(){
   if(isNaN(matDate)){ out.value=''; setHint('Maturity date is invalid.'); return; }
 
   var c = DB.clients.find(function(x){ return String(x.ID)===String(EPC); });
-  if(!c || !clean(c.DOB)){ out.value=''; setHint('Client DOB missing — cannot derive maturity age.'); return; }
+  var _isCompanyClientMat = c && c.ClientType === 'Company';
 
-  // Parse DOB safely
-  var _dp = String(c.DOB).split(/[T ]/)[0].split(/[-\/]/);
-  if(_dp.length<3){ out.value=''; setHint('Client DOB is incomplete.'); return; }
-  var dob = new Date(parseInt(_dp[0]), parseInt(_dp[1])-1, parseInt(_dp[2]));
-  if(isNaN(dob)){ out.value=''; setHint('Client DOB is invalid.'); return; }
+  if(_isCompanyClientMat){
+    // Company client — no DOB, no maturity age. Project value only.
+    if(ageDisplay) ageDisplay.textContent='N/A';
+    if(ageHidden) ageHidden.value='';
+  } else {
+    if(!c || !clean(c.DOB)){ out.value=''; setHint('Client DOB missing — cannot derive maturity age.'); return; }
+    // Parse DOB safely
+    var _dp = String(c.DOB).split(/[T ]/)[0].split(/[-\/]/);
+    if(_dp.length<3){ out.value=''; setHint('Client DOB is incomplete.'); return; }
+    var dob = new Date(parseInt(_dp[0]), parseInt(_dp[1])-1, parseInt(_dp[2]));
+    if(isNaN(dob)){ out.value=''; setHint('Client DOB is invalid.'); return; }
+    // Derive maturity age (whole years) from DOB → maturity date
+    var matAge = matDate.getFullYear() - dob.getFullYear();
+    if(matDate.getMonth() < dob.getMonth() || (matDate.getMonth()===dob.getMonth() && matDate.getDate() < dob.getDate())) matAge--;
+    if(ageDisplay) ageDisplay.textContent = (matAge>0 && !isNaN(matAge)) ? String(matAge) : '—';
+    if(ageHidden) ageHidden.value = (matAge>0 && !isNaN(matAge)) ? String(matAge) : '';
+  }
 
   var today = new Date(); today.setHours(0,0,0,0);
   // Years from today to maturity (fractional)
   var yrs = (matDate.getTime() - today.getTime()) / (365.25*86400000);
-
-  // Derive maturity age (whole years) from DOB → maturity date
-  var matAge = matDate.getFullYear() - dob.getFullYear();
-  if(matDate.getMonth() < dob.getMonth() || (matDate.getMonth()===dob.getMonth() && matDate.getDate() < dob.getDate())) matAge--;
-  if(ageDisplay) ageDisplay.textContent = (matAge>0 && !isNaN(matAge)) ? String(matAge) : '—';
-  if(ageHidden) ageHidden.value = (matAge>0 && !isNaN(matAge)) ? String(matAge) : '';
 
   if(yrs<=0){ out.value=''; setHint('Maturity date is in the past — projection unavailable.'); return; }
   if(!fv){   out.value=''; setHint('Enter the Current Fund Value to project maturity.'); return; }
