@@ -492,6 +492,14 @@ function syncNow(quiet) {
 // notepad and search box), or if the tab is hidden. Throttled so closely
 // spaced triggers (focus + visibilitychange together) don't double-fetch.
 function maybeAutoSync(){
+  // While a client profile is open, never auto-refresh. A background re-pull calls
+  // render(), which tears down and rebuilds the entire profile via innerHTML — that
+  // is the "screen goes blank then reopens on the same client" flicker. Skipping it
+  // here also removes any risk of a mid-view rebuild or a delayed notepad overwrite
+  // clobbering work in progress. Fresh data is still one click away via "Sync Now",
+  // or by leaving and re-entering the client. Dashboard and clients-list pages keep
+  // auto-refreshing as before.
+  if(PAGE==='client') return;
   if(document.hidden) return;                                 // hidden tab — pointless
   if(document.querySelectorAll('.ov.open').length) return;    // a modal is open
   var ae = document.activeElement;
@@ -1504,7 +1512,15 @@ function clientTable(list,mini,isLeads){
 // CLIENT PROFILE
 function renderProfile(){
   var c=DB.clients.find(function(x){return String(x.ID)===String(SEL);});
-  if(!c){goPage('clients');return '';}
+  if(!c){
+    // Client not found in the current data set (e.g. a manual Sync Now replaced the
+    // array, or the record was deleted on the server). Do NOT call goPage() here — it
+    // would render() the clients list and then this function returns '', which the
+    // outer render() writes into #main, blanking the screen. Instead correct the page
+    // state and return the clients-list markup directly so #main paints in one pass.
+    PAGE='clients'; SEL=null;
+    return renderClients();
+  }
   var pols=polsFor(c.ID), roas=roasFor(c.ID), ctasks=tasksFor(c.Name);
   return '<div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">'+
     '<button class="btn b-gh sm" onclick="CTAB===\'overview\'?goPage(\'clients\'):( CTAB=\'overview\',render())">← Back</button>'+
