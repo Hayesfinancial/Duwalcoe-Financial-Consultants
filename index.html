@@ -238,6 +238,16 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--cream);c
     </div>
   </div>
 </div>
+<div class="ov" id="pcMod">
+  <div class="modal" style="max-width:860px">
+    <div class="mh"><h3>📥 Paste from Claude</h3><button class="xb" data-close="1">✕</button></div>
+    <div class="mb" id="pcModB"></div>
+    <div class="mf">
+      <button class="btn b-gh sm" data-close="1">Cancel</button>
+      <button class="btn b-gd sm" id="pcImportBtn" style="display:none" onclick="runPasteClaudeImport()">💾 Import</button>
+    </div>
+  </div>
+</div>
 <div class="ov" id="tMod">
   <div class="modal" style="max-width:720px">
     <div class="mh"><h3>New Task</h3><button class="xb" data-close="1">✕</button></div>
@@ -1150,6 +1160,7 @@ function renderDash(){
   '<div style="display:flex;align-items:center;gap:10px">'+
   '<button class="btn b-gd sm" data-act="open-new-client">+ Client</button>'+
   '<button class="btn b-gh sm" data-act="open-new-lead">🎯 Lead</button>'+
+  '<button class="btn b-gd sm" data-act="paste-claude" title="Dictate a client to Claude, then paste the block back here — no typing">📥 Paste from Claude</button>'+
   '<button class="btn b-gh sm" data-act="sync">🔄 Sync</button>'+
   '</div></div>'+
 
@@ -8107,6 +8118,239 @@ function deletePolicy(){
   });
 }
 
+// ══ PASTE FROM CLAUDE — VOICE / DICTATION INTAKE ═════════════════════════
+// Clinton dictates a client to Claude (phone, car, wherever); Claude returns a
+// JSON block in the agreed contract (see project doc "Duwalcoe_Voice_Intake_
+// Format"). This tool extracts that block tolerantly (strips prose/code
+// fences), previews EVERY field — creating a new client OR updating an existing
+// one matched by SA ID / name — and on confirm saves via the same server-first
+// path as saveClient. Nothing is written until you confirm. Needs / open
+// questions land in Notes (record-keeping only, per house rule — Claude reads
+// Notes text back in FNA chats, exactly like Astute fund holdings).
+var PC_PARSED=null;   // normalised payload from last successful preview
+var PC_TARGET=null;   // existing client being updated (reference), or null
+var PC_MODE=null;     // 'create' | 'update'
+
+// Only these keys are imported; anything else in the block is ignored.
+var PC_FIELDS=[
+  ['Name','Full name'],['CallingName','Calling name'],['Title','Title'],['MaidenName','Maiden name'],
+  ['IDNumber','ID number'],['DOB','Date of birth'],['Gender','Gender'],['Smoker','Smoker'],
+  ['Cell','Cell'],['Email','Email'],['TelHome','Tel (home)'],['TelWork','Tel (work)'],
+  ['Occupation','Occupation'],['Employer','Employer'],['Income','Income (R/month)'],
+  ['TaxNo','Tax number'],['Education','Education'],['Qualification','Qualification'],
+  ['MaritalStatus','Marital status'],['Anniversary','Anniversary'],['Address','Address'],['POBox','PO Box'],
+  ['HasWill','Has will'],['WillDate','Will date'],['WillAttorney','Will attorney'],['WillThroughMe','Will through me'],['WillNotes','Will notes'],
+  ['SpouseName','Spouse name'],['SpouseIDNumber','Spouse ID'],['SpouseDOB','Spouse DOB'],
+  ['SpouseCell','Spouse cell'],['SpouseEmail','Spouse email'],['SpouseWorks','Spouse works'],['SpouseOccupation','Spouse occupation'],['SpouseIncome','Spouse income (R/month)'],
+  ['RiskCategory','Risk category'],['Status','Status'],['IsLead','Lead?'],['ClientType','Record type'],['ReviewDate','Review date'],
+  ['RegNo','Reg no'],['VatNo','VAT no'],['CompanyTel','Company tel'],['ContactPerson','Contact person'],['ContactCell','Contact cell'],['ContactEmail','Contact email']
+];
+
+function openPasteClaude(){
+  PC_PARSED=null; PC_TARGET=null; PC_MODE=null;
+  document.getElementById('pcImportBtn').style.display='none';
+  document.getElementById('pcModB').innerHTML=
+    '<div style="font-size:13px;color:#667;line-height:1.55;margin-bottom:10px">'+
+    'Paste the client block Claude gave you (from your dictation), then tap <strong>Preview</strong>. '+
+    'Every field is shown for review first — <strong>nothing is saved until you confirm</strong>. '+
+    'A block whose ID number or name matches an existing record <strong>updates</strong> that client; otherwise a <strong>new</strong> one is created.</div>'+
+    '<textarea id="pcInput" placeholder="Paste the block from Claude here…" oninput="pcClearPreview()" style="width:100%;min-height:170px;border:1.5px solid var(--mist);border-radius:8px;padding:12px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px;line-height:1.5;resize:vertical"></textarea>'+
+    '<div style="margin-top:10px"><button class="btn b-nv sm" onclick="pcPreview()">👁 Preview</button></div>'+
+    '<div id="pcPreviewWrap"></div>';
+  document.getElementById('pcMod').classList.add('open');
+  setTimeout(function(){var t=document.getElementById('pcInput'); if(t) t.focus();},60);
+}
+
+function pcClearPreview(){
+  PC_PARSED=null; PC_TARGET=null; PC_MODE=null;
+  var b=document.getElementById('pcImportBtn'); if(b) b.style.display='none';
+  var w=document.getElementById('pcPreviewWrap'); if(w) w.innerHTML='';
+}
+
+// Tolerant extract: drop code fences, then parse the outermost {...}.
+function pcExtractJson(raw){
+  if(!raw) return null;
+  var s=String(raw).replace(/```[a-zA-Z]*/g,'').replace(/```/g,'').trim();
+  var a=s.indexOf('{'), b=s.lastIndexOf('}');
+  if(a<0||b<0||b<=a) return null;
+  try{ return JSON.parse(s.slice(a,b+1)); }catch(e){ return null; }
+}
+
+// Accept {client:{…}} wrapper or a bare client object; fold a nested spouse.
+function pcNormalize(obj){
+  if(!obj||typeof obj!=='object') return null;
+  var client=(obj.client&&typeof obj.client==='object')?obj.client:obj;
+  var sp=(obj.spouse&&typeof obj.spouse==='object')?obj.spouse:null;
+  if(sp){
+    if(sp.Name!=null&&client.SpouseName==null) client.SpouseName=sp.Name;
+    if(sp.IDNumber!=null&&client.SpouseIDNumber==null) client.SpouseIDNumber=sp.IDNumber;
+    if(sp.DOB!=null&&client.SpouseDOB==null) client.SpouseDOB=sp.DOB;
+    if(sp.Cell!=null&&client.SpouseCell==null) client.SpouseCell=sp.Cell;
+    if(sp.Email!=null&&client.SpouseEmail==null) client.SpouseEmail=sp.Email;
+    if(sp.Occupation!=null&&client.SpouseOccupation==null) client.SpouseOccupation=sp.Occupation;
+    if(sp.Income!=null&&client.SpouseIncome==null) client.SpouseIncome=sp.Income;
+    if(client.SpouseWorks==null) client.SpouseWorks='Yes';
+  }
+  return { client:client,
+    children:Array.isArray(obj.children)?obj.children:[],
+    needs:Array.isArray(obj.needs)?obj.needs:[],
+    flags:Array.isArray(obj.flags)?obj.flags:[],
+    notes:(typeof obj.notes==='string')?obj.notes:'' };
+}
+
+function pcFindExisting(client){
+  var idnum=String(client.IDNumber||'').replace(/\D/g,'');
+  if(idnum){
+    var byId=DB.clients.find(function(x){ return String(x.IDNumber||'').replace(/\D/g,'')===idnum; });
+    if(byId) return byId;
+  }
+  var nm=String(client.Name||'').toLowerCase().trim();
+  if(nm){
+    var byName=DB.clients.find(function(x){ return String(x.Name||'').toLowerCase().trim()===nm; });
+    if(byName) return byName;
+  }
+  return null;
+}
+
+// Build the Notes text block (free notes + needs + open flags).
+function pcBuildNotes(payload){
+  var parts=[];
+  if(payload.notes) parts.push(String(payload.notes).trim());
+  if(payload.needs.length){
+    var lines=['NEEDS / FNA (captured from dictation '+new Date().toLocaleDateString('en-ZA',{day:'2-digit',month:'short',year:'numeric'})+'):'];
+    payload.needs.forEach(function(n){
+      if(typeof n==='string'){ lines.push('• '+n); return; }
+      var who=n.beneficiary||n.who||'';
+      var desc=n.need||n.description||n.type||'';
+      var seg=[who,desc].filter(Boolean).join(' — ');
+      var tail=[];
+      if(n.amount!=null&&n.amount!=='') tail.push('R'+n.amount+'/month');
+      else if(n.monthly!=null&&n.monthly!=='') tail.push('R'+n.monthly+'/month');
+      if(n.years!=null&&n.years!=='') tail.push(n.years+' years');
+      else if(n.term!=null&&n.term!=='') tail.push(n.term+' years');
+      lines.push('• '+(seg||'Need')+(tail.length?' : '+tail.join(', '):''));
+    });
+    parts.push(lines.join('\n'));
+  }
+  if(payload.flags.length){
+    parts.push('OPEN QUESTIONS (flagged, not assumed):\n'+payload.flags.map(function(x){return '• '+x;}).join('\n'));
+  }
+  return parts.join('\n\n');
+}
+
+function pcPreview(){
+  var wrap=document.getElementById('pcPreviewWrap');
+  var raw=document.getElementById('pcInput').value;
+  var obj=pcExtractJson(raw);
+  var fail=function(msg){
+    wrap.innerHTML='<div style="margin-top:12px;padding:12px 14px;background:#fde8e8;border-left:3px solid var(--rose);border-radius:8px;font-size:12.5px;color:#9e2a2b">'+msg+'</div>';
+    document.getElementById('pcImportBtn').style.display='none';
+    PC_PARSED=null;
+  };
+  if(!obj) return fail('Couldn\'t read a valid client block. Paste the whole thing Claude gave you, including the { and } braces.');
+  var payload=pcNormalize(obj);
+  if(!payload||!payload.client||!(payload.client.Name||payload.client.IDNumber)) return fail('The block was read but has no client name or ID number — nothing to import.');
+
+  var cl=payload.client;
+  if(saIdValid(cl.IDNumber)) cl.DOB=dobFromID(String(cl.IDNumber).replace(/\D/g,''));
+  if(saIdValid(cl.SpouseIDNumber)) cl.SpouseDOB=dobFromID(String(cl.SpouseIDNumber).replace(/\D/g,''));
+
+  var existing=pcFindExisting(cl);
+  PC_PARSED=payload; PC_TARGET=existing||null; PC_MODE=existing?'update':'create';
+
+  var html='';
+  if(existing) html+='<div style="margin-top:14px;padding:10px 14px;background:#fffbeb;border-left:3px solid #d97706;border-radius:8px;font-size:12.5px;color:#92400e"><strong>⚠ Updating existing client:</strong> '+astuteEsc(existing.Name)+'. Only the fields below change; everything else on the record is kept.</div>';
+  else html+='<div style="margin-top:14px;padding:10px 14px;background:#f0fdf4;border-left:3px solid #16a34a;border-radius:8px;font-size:12.5px;color:#065f46"><strong>✓ New '+((cl.IsLead==='Yes')?'lead':'client')+'</strong> will be created.</div>';
+
+  html+='<table style="width:100%;border-collapse:collapse;margin-top:10px;font-size:12.5px">'+
+    '<tr style="background:var(--smoke)"><th style="text-align:left;padding:6px 8px;color:var(--navy)">Field</th>'+(existing?'<th style="text-align:left;padding:6px 8px;color:#889">Current</th>':'')+'<th style="text-align:left;padding:6px 8px;color:var(--navy)">'+(existing?'New':'Value')+'</th></tr>';
+  var anyRow=false;
+  PC_FIELDS.forEach(function(f){
+    var key=f[0]; if(cl[key]==null||cl[key]==='') return;
+    anyRow=true;
+    var changed=existing && String(existing[key]||'')!==String(cl[key]);
+    html+='<tr style="border-top:1px solid var(--mist)'+(changed?';background:#fffdf5':'')+'">'+
+      '<td style="padding:6px 8px;color:#667">'+f[1]+'</td>'+
+      (existing?'<td style="padding:6px 8px;color:#aaa">'+astuteEsc(existing[key]||'')+'</td>':'')+
+      '<td style="padding:6px 8px;color:var(--navy);font-weight:600">'+astuteEsc(cl[key])+(changed?' <span style="color:#d97706;font-size:11px">changed</span>':'')+'</td></tr>';
+  });
+  if(!anyRow) html+='<tr><td colspan="3" style="padding:8px;color:#889">No recognised fields.</td></tr>';
+  html+='</table>';
+
+  if(payload.children.length){
+    html+='<div style="margin-top:12px;font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:1px">Children / dependants</div><ul style="margin:6px 0 0;padding-left:18px;font-size:12.5px;color:var(--navy)">';
+    payload.children.forEach(function(ch){
+      var nm=astuteEsc(ch.Name||ch.name||''); if(!nm) return;
+      var extra=[]; if(ch.DOB||ch.dob) extra.push(astuteEsc(ch.DOB||ch.dob)); if(ch.IDNumber||ch.id) extra.push(astuteEsc(ch.IDNumber||ch.id));
+      html+='<li>'+nm+(extra.length?' <span style="color:#889">('+extra.join(' · ')+')</span>':'')+'</li>';
+    });
+    html+='</ul>';
+  }
+
+  var noteText=pcBuildNotes(payload);
+  if(noteText){
+    html+='<div style="margin-top:12px;font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:1px">Notes to be '+((existing&&existing.Notes)?'appended':'saved')+'</div>'+
+      '<pre style="margin:6px 0 0;padding:10px 12px;background:var(--smoke);border-radius:8px;font-size:12px;white-space:pre-wrap;color:#334;font-family:ui-monospace,Menlo,Consolas,monospace">'+astuteEsc(noteText)+'</pre>';
+  }
+
+  wrap.innerHTML=html;
+  var btn=document.getElementById('pcImportBtn');
+  btn.style.display='';
+  btn.textContent=existing?('💾 Update '+String(existing.Name).split(' ')[0]):('💾 Create '+((cl.IsLead==='Yes')?'Lead':'Client'));
+}
+
+function runPasteClaudeImport(){
+  if(!PC_PARSED){ toast('Nothing to import — tap Preview first','err'); return; }
+  var src=PC_PARSED.client, existing=PC_TARGET;
+  var c=existing?JSON.parse(JSON.stringify(existing)):{ID:'new_'+Date.now(),Name:'',IsLead:'No',ClientType:'Individual',Status:'Active',Adviser:cu(),Notes:'',BankDetails:'[]',Doctors:'[]'};
+  PC_FIELDS.forEach(function(f){ var k=f[0]; if(src[k]!=null&&src[k]!=='') c[k]=String(src[k]); });
+  if(!c.Name){ toast('No client name — cannot import','err'); return; }
+  if(!c.Adviser) c.Adviser=cu();
+  if(!c.ClientType) c.ClientType='Individual';
+  if(!c.Status) c.Status='Active';
+  if(!c.IsLead) c.IsLead='No';
+  if(!c.CallingName) c.CallingName=(String(c.Name).split(' ')[0]||c.Name);
+  if(saIdValid(c.IDNumber)) c.DOB=dobFromID(String(c.IDNumber).replace(/\D/g,''));
+  if(saIdValid(c.SpouseIDNumber)) c.SpouseDOB=dobFromID(String(c.SpouseIDNumber).replace(/\D/g,''));
+  if(c.BankDetails==null) c.BankDetails='[]';
+  if(c.Doctors==null) c.Doctors='[]';
+  var addNotes=pcBuildNotes(PC_PARSED);
+  if(addNotes) c.Notes=(existing&&existing.Notes)?(String(existing.Notes).replace(/\s+$/,'')+'\n\n'+addNotes):addNotes;
+
+  var i=DB.clients.findIndex(function(x){return String(x.ID)===String(c.ID);});
+  if(i>=0) DB.clients[i]=c; else DB.clients.push(c);
+
+  // Spouse family link (mirror saveClient)
+  if(c.SpouseName){
+    var spEx=DB.links.find(function(l){return String(l.PrincipalID)===String(c.ID)&&l.Type==='Spouse';});
+    if(!spEx){
+      var spLink={ID:'fam_sp_'+Date.now(),PrincipalID:c.ID,Name:c.SpouseName,IDNumber:c.SpouseIDNumber||'',DOB:c.SpouseDOB||'',Cell:c.SpouseCell||'',Email:c.SpouseEmail||'',Type:'Spouse',IsClient:'No',ClientID:''};
+      DB.links.push(spLink); post({action:'saveFamMember',member:spLink});
+    } else {
+      spEx.Name=c.SpouseName; spEx.IDNumber=c.SpouseIDNumber||spEx.IDNumber||''; spEx.DOB=c.SpouseDOB||spEx.DOB||''; spEx.Cell=c.SpouseCell||spEx.Cell||''; spEx.Email=c.SpouseEmail||spEx.Email||'';
+      post({action:'updateFamMember',member:spEx});
+    }
+  }
+  // Children links
+  (PC_PARSED.children||[]).forEach(function(ch,ci){
+    var nm=String(ch.Name||ch.name||'').trim(); if(!nm) return;
+    var exCh=DB.links.find(function(l){return String(l.PrincipalID)===String(c.ID)&&l.Type==='Child'&&String(l.Name).toLowerCase().trim()===nm.toLowerCase();});
+    if(exCh) return; // don't duplicate a child already linked
+    var link={ID:'fam_'+Date.now()+'_'+ci,PrincipalID:c.ID,Name:nm,IDNumber:ch.IDNumber||ch.id||'',DOB:ch.DOB||ch.dob||'',Cell:'',Email:'',Type:'Child',IsClient:'No',ClientID:''};
+    DB.links.push(link); post({action:'saveFamMember',member:link});
+  });
+
+  var savedId=c.ID, wasUpdate=!!existing;
+  closeAll();
+  c._pendingSave=true;
+  try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
+  openClient(savedId);
+  post({action:'saveClient',client:c},function(res){
+    try{ if(res&&res.ok&&c._pendingSave) delete c._pendingSave; localStorage.setItem('du_db',JSON.stringify(DB)); }catch(e){}
+  });
+  toast((wasUpdate?'Updated ':'Created ')+c.Name,'ok');
+}
+
 // ══ ASTUTE CCP XML IMPORT ════════════════════════════════════════════════
 // Once-off initial-load tool: parses an Astute Consolidated Client Portfolio
 // XML (ACORD OLifE format) and creates policy cards via the same server-first
@@ -9168,6 +9412,7 @@ document.addEventListener('click', function(e){
         case 'edit-client':    openClientModal(id); break;
         case 'open-new-client':openClientModal(); break;
         case 'open-new-lead':  openClientModal(null, true); break;
+        case 'paste-claude':   openPasteClaude(); break;
         case 'id-dob-audit':   openIdAudit(); break;
         case 'id-audit-fix':   idAuditFix(el.getAttribute('data-fixkey')); break;
         case 'id-audit-fix-all': idAuditFixAll(); break;
