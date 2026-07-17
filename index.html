@@ -8212,6 +8212,35 @@ function pcFindExisting(client){
   return null;
 }
 
+// Derive gender from the SA ID, default the title ("male is Mr. unless otherwise
+// indicated"), and normalise marital status to the CRM's exact dropdown options —
+// which is where this CRM stores the marriage regime (COP / ANC with / without accrual).
+function pcDeriveDefaults(c){
+  var digits=String(c.IDNumber||'').replace(/\D/g,'');
+  // Gender from SA ID (7th digit: 0–4 female, 5–9 male) when not supplied
+  if((!c.Gender||c.Gender==='') && digits.length===13){
+    c.Gender = (+digits.charAt(6) >= 5) ? 'Male' : 'Female';
+  }
+  // Snap marital status to one of the CRM's options (its dropdown carries the regime)
+  if(c.MaritalStatus){
+    var m=String(c.MaritalStatus).toLowerCase();
+    if(m.indexOf('cop')>=0 || m.indexOf('community of property')>=0 || m.indexOf('in community')>=0) c.MaritalStatus='Married in COP';
+    else if(m.indexOf('without accrual')>=0 || m.indexOf('no accrual')>=0 || m.indexOf('excluding accrual')>=0) c.MaritalStatus='Married - ANC without accrual';
+    else if(m.indexOf('with accrual')>=0 || (m.indexOf('anc')>=0 && m.indexOf('accrual')>=0)) c.MaritalStatus='Married - ANC with accrual';
+    else if(m.indexOf('life partner')>=0 || m.indexOf('partner')>=0) c.MaritalStatus='Life partner';
+    else if(m==='single') c.MaritalStatus='Single';
+    else if(m==='divorced') c.MaritalStatus='Divorced';
+    else if(m.indexOf('widow')>=0) c.MaritalStatus='Widowed';
+    else if(m==='married') c.MaritalStatus=''; // regime not given — leave blank so it isn't stuck on an invalid value (should be flagged)
+  }
+  // Default title from gender (+ marital) only when not explicitly supplied
+  if((!c.Title||c.Title==='') && c.Gender){
+    if(c.Gender==='Male') c.Title='Mr.';
+    else if(c.Gender==='Female') c.Title = (String(c.MaritalStatus||'').toLowerCase().indexOf('married')>=0) ? 'Mrs.' : 'Ms.';
+  }
+  return c;
+}
+
 // Build the Notes text block (free notes + needs + open flags).
 function pcBuildNotes(payload){
   var parts=[];
@@ -8254,6 +8283,7 @@ function pcPreview(){
   var cl=payload.client;
   if(saIdValid(cl.IDNumber)) cl.DOB=dobFromID(String(cl.IDNumber).replace(/\D/g,''));
   if(saIdValid(cl.SpouseIDNumber)) cl.SpouseDOB=dobFromID(String(cl.SpouseIDNumber).replace(/\D/g,''));
+  pcDeriveDefaults(cl);
 
   var existing=pcFindExisting(cl);
   PC_PARSED=payload; PC_TARGET=existing||null; PC_MODE=existing?'update':'create';
@@ -8312,6 +8342,7 @@ function runPasteClaudeImport(){
   if(!c.CallingName) c.CallingName=(String(c.Name).split(' ')[0]||c.Name);
   if(saIdValid(c.IDNumber)) c.DOB=dobFromID(String(c.IDNumber).replace(/\D/g,''));
   if(saIdValid(c.SpouseIDNumber)) c.SpouseDOB=dobFromID(String(c.SpouseIDNumber).replace(/\D/g,''));
+  pcDeriveDefaults(c);
   if(c.BankDetails==null) c.BankDetails='[]';
   if(c.Doctors==null) c.Doctors='[]';
   var addNotes=pcBuildNotes(PC_PARSED);
