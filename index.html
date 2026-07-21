@@ -1765,6 +1765,7 @@ function saveFamMember(){
     }
   }
 
+  var _prevType = existing ? existing.Type : null;
   var link;
   if(existing){
     existing.Name = name;
@@ -1790,6 +1791,44 @@ function saveFamMember(){
       ClientID: ''
     };
     DB.links.push(link);
+  }
+
+  // ── Keep the client record's Spouse* fields in step with the family card ──
+  // A spouse is stored in TWO places: the familylinks row (edited here) AND the
+  // client record's SpouseName/SpouseIDNumber/SpouseDOB/... The client edit form,
+  // the FNA data pack, the ID Audit and the estate/4(q) logic all read the client
+  // record copy — so a spouse entered on the family card MUST be mirrored back,
+  // otherwise the ID/DOB typed here is invisible everywhere else (and drops out of
+  // the FNA printout). This mirrors the reverse sync saveClient already does.
+  var _principal = DB.clients.find(function(x){ return String(x.ID)===String(FAM_CLIENT); });
+  if(_principal){
+    var _isClientSpouse = (link.IsClient==='Yes' && clean(link.ClientID));
+    if(relType==='Spouse' && !_isClientSpouse){
+      // Non-client spouse: the family-link row is the master; copy it onto the
+      // client record so every other screen reads the same details.
+      _principal.SpouseName     = name;
+      _principal.SpouseIDNumber = idnum;
+      _principal.SpouseDOB      = dob;
+      _principal.SpouseCell     = cell;
+      _principal.SpouseEmail    = email;
+      _principal._pendingSave   = true;
+      post({action:'saveClient', client:_principal}, function(res){
+        if(!(res && res.ok)) toast('⚠️ Spouse saved to the family card, but the client record could not be updated — press Sync so the FNA printout stays correct.','err');
+      });
+    } else if(_prevType==='Spouse' && relType!=='Spouse'){
+      // This row was the spouse and has just been reclassified (e.g. Spouse →
+      // Child). If no other spouse link remains, clear the client record's legacy
+      // spouse fields so a stale "virtual spouse" doesn't reappear on the card.
+      var _stillSpouse = DB.links.some(function(l){
+        return String(l.PrincipalID)===String(FAM_CLIENT) && l.Type==='Spouse';
+      });
+      if(!_stillSpouse && clean(_principal.SpouseName)){
+        _principal.SpouseName=''; _principal.SpouseIDNumber=''; _principal.SpouseDOB='';
+        _principal.SpouseCell=''; _principal.SpouseEmail='';
+        _principal._pendingSave = true;
+        post({action:'saveClient', client:_principal});
+      }
+    }
   }
 
   // Flag pending + persist locally so a refresh or failed save can't wipe this family
