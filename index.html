@@ -368,12 +368,12 @@ var TC = '';    // task client name
 // ══ NETWORK (Supabase) ═══════════════════════════════════════
 
 // Core Supabase REST helper — fetch wrapper used by all operations
-function sbFetch(method, path, body, cb){
+function sbFetch(method, path, body, cb, _retried){
   var opts = {
     method: method,
     headers: {
       'apikey': SB_KEY,
-      'Authorization': 'Bearer ' + SB_KEY,
+      'Authorization': 'Bearer ' + sbBearer(),
       'Content-Type': 'application/json',
       'Prefer': method === 'POST' ? 'resolution=merge-duplicates' : ''
     }
@@ -381,6 +381,11 @@ function sbFetch(method, path, body, cb){
   if(body) opts.body = JSON.stringify(body);
   fetch(SB_URL + path, opts)
     .then(function(r){
+      // 401/403 usually means the access token just expired — refresh once and retry.
+      if((r.status===401 || r.status===403) && !_retried && SB_AUTH.refresh){
+        refreshThen(function(){ sbFetch(method, path, body, cb, true); });
+        return;
+      }
       if(!r.ok){ r.text().then(function(t){ console.error('Supabase error:', r.status, t); if(cb) cb(null, t); }); return; }
       var ct = r.headers.get('content-type')||'';
       if(ct.indexOf('json')>=0) r.json().then(function(d){ if(cb) cb(d); });
@@ -388,6 +393,73 @@ function sbFetch(method, path, body, cb){
     })
     .catch(function(e){ console.error('Supabase fetch error:', e); if(cb) cb(null, e.message); });
 }
+
+// ══ SUPABASE AUTH (per-user login; replaces the old shared PIN) ══
+// Each staff member signs in with their own email + password. The returned
+// access token rides as the Bearer on every database and storage request, so
+// once RLS is locked to authenticated users the public anon key alone reads
+// nothing. Tokens live in sessionStorage (cleared when the tab closes) and are
+// refreshed quietly in the background. No password is ever stored in this file.
+var SB_AUTH = { token:null, refresh:null, exp:0 };
+var _sbRefreshTimer = null;
+function sbBearer(){ return SB_AUTH.token || SB_KEY; }
+function sbLoggedIn(){ return !!SB_AUTH.token && Date.now() < SB_AUTH.exp; }
+function sbHydrate(){
+  try{
+    SB_AUTH.token   = sessionStorage.getItem('sb_at') || null;
+    SB_AUTH.refresh = sessionStorage.getItem('sb_rt') || null;
+    SB_AUTH.exp     = parseInt(sessionStorage.getItem('sb_exp')||'0',10) || 0;
+  }catch(e){}
+}
+function sbSetSession(d){
+  SB_AUTH.token   = d.access_token;
+  SB_AUTH.refresh = d.refresh_token || SB_AUTH.refresh;
+  SB_AUTH.exp     = Date.now() + ((d.expires_in||3600)*1000);
+  try{
+    sessionStorage.setItem('sb_at', SB_AUTH.token);
+    if(SB_AUTH.refresh) sessionStorage.setItem('sb_rt', SB_AUTH.refresh);
+    sessionStorage.setItem('sb_exp', String(SB_AUTH.exp));
+  }catch(e){}
+  scheduleRefresh();
+}
+function sbClearSession(){
+  SB_AUTH.token=null; SB_AUTH.refresh=null; SB_AUTH.exp=0;
+  try{ sessionStorage.removeItem('sb_at'); sessionStorage.removeItem('sb_rt'); sessionStorage.removeItem('sb_exp'); }catch(e){}
+  if(_sbRefreshTimer){ clearTimeout(_sbRefreshTimer); _sbRefreshTimer=null; }
+}
+function scheduleRefresh(){
+  if(_sbRefreshTimer) clearTimeout(_sbRefreshTimer);
+  var ms = SB_AUTH.exp - Date.now() - 60000;   // refresh ~1 min before expiry
+  if(ms < 5000) ms = 5000;
+  _sbRefreshTimer = setTimeout(sbDoRefresh, ms);
+}
+function sbDoRefresh(){
+  refreshThen(function(ok){ if(ok===false) sbForceLogin(); });  // refresh rejected → sign in again
+}
+function refreshThen(cb){
+  if(!SB_AUTH.refresh){ if(cb) cb(false); return; }
+  fetch(SB_URL+'/auth/v1/token?grant_type=refresh_token', {
+    method:'POST', headers:{'apikey':SB_KEY,'Content-Type':'application/json'},
+    body:JSON.stringify({refresh_token:SB_AUTH.refresh})
+  }).then(function(r){ return r.json().then(function(d){ return {ok:r.ok,d:d}; }); })
+    .then(function(res){
+      if(res.ok && res.d.access_token){ sbSetSession(res.d); if(cb) cb(true); }
+      else { if(cb) cb(false); }                              // invalid/expired refresh token
+    })
+    .catch(function(){ scheduleRefresh(); if(cb) cb(null); }); // network blip: keep session, retry later
+}
+function sbLogin(email, password){
+  return fetch(SB_URL+'/auth/v1/token?grant_type=password', {
+    method:'POST', headers:{'apikey':SB_KEY,'Content-Type':'application/json'},
+    body:JSON.stringify({email:email, password:password})
+  }).then(function(r){ return r.json().then(function(d){ return {ok:r.ok,d:d}; }); })
+    .then(function(res){
+      if(res.ok && res.d.access_token){ sbSetSession(res.d); return {ok:true, user:res.d.user}; }
+      return {ok:false, error:(res.d && (res.d.error_description||res.d.msg||res.d.error))||'Sign-in failed'};
+    })
+    .catch(function(){ return {ok:false, error:'Network error — check your connection.'}; });
+}
+function sbForceLogin(){ sbClearSession(); try{ location.reload(); }catch(e){} }
 
 function syncNow(quiet) {
   if(!quiet) setSS('ld');
@@ -3128,7 +3200,7 @@ function uploadClientDoc(clientId, docKey, docLabel, file, isReplace, signedDate
       method: 'POST',
       headers: {
         'apikey': SB_KEY,
-        'Authorization': 'Bearer ' + SB_KEY,
+        'Authorization': 'Bearer ' + sbBearer(),
         'Content-Type': file.type || 'application/octet-stream',
         'x-upsert': 'true'
       },
@@ -3182,7 +3254,7 @@ function viewClientDoc(docId){
     method: 'POST',
     headers: {
       'apikey': SB_KEY,
-      'Authorization': 'Bearer ' + SB_KEY,
+      'Authorization': 'Bearer ' + sbBearer(),
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({expiresIn: 60})
@@ -3222,7 +3294,7 @@ function deleteDocRecord(doc, cb){
   // Step 1: delete the storage file (but don't fail the whole delete if storage 404s)
   fetch(SB_URL+'/storage/v1/object/client-documents/'+encodeURI(doc.FilePath), {
     method: 'DELETE',
-    headers: {'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY}
+    headers: {'apikey': SB_KEY, 'Authorization': 'Bearer ' + sbBearer()}
   }).then(function(){
     // Step 2: delete the DB row
     sbFetch('DELETE', '/rest/v1/client_documents?ID=eq.'+encodeURIComponent(doc.ID), null, function(res, err){
@@ -3989,7 +4061,7 @@ function deleteEvent(eventId, clientId){
   var deletePromises = docs.map(function(d){
     return fetch(SB_URL+'/storage/v1/object/client-documents/'+encodeURI(d.FilePath), {
       method:'DELETE',
-      headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY}
+      headers:{'apikey':SB_KEY,'Authorization':'Bearer '+sbBearer()}
     }).catch(function(){}); // don't fail if storage already gone
   });
   Promise.all(deletePromises).then(function(){
@@ -4056,7 +4128,7 @@ function uploadEventDoc(eventId, clientId, docKey, docLabel, file, isReplace){
     fetch(SB_URL+'/storage/v1/object/client-documents/'+encodeURI(path), {
       method:'POST',
       headers:{
-        'apikey':SB_KEY, 'Authorization':'Bearer '+SB_KEY,
+        'apikey':SB_KEY, 'Authorization':'Bearer '+sbBearer(),
         'Content-Type': file.type || 'application/octet-stream',
         'x-upsert':'true'
       },
@@ -4096,7 +4168,7 @@ function viewEventDoc(docId){
   if(!doc){ alert('Document not found'); return; }
   fetch(SB_URL+'/storage/v1/object/sign/client-documents/'+encodeURI(doc.FilePath), {
     method:'POST',
-    headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json'},
+    headers:{'apikey':SB_KEY,'Authorization':'Bearer '+sbBearer(),'Content-Type':'application/json'},
     body: JSON.stringify({expiresIn:60})
   }).then(function(r){
     if(!r.ok) return r.text().then(function(t){ throw new Error('Sign failed: '+r.status+' '+t); });
@@ -4122,7 +4194,7 @@ function deleteEventDoc(docId, eventId){
 function deleteEventDocRecord(doc, cb){
   fetch(SB_URL+'/storage/v1/object/client-documents/'+encodeURI(doc.FilePath), {
     method:'DELETE',
-    headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY}
+    headers:{'apikey':SB_KEY,'Authorization':'Bearer '+sbBearer()}
   }).then(function(){
     sbFetch('DELETE','/rest/v1/work_event_documents?ID=eq.'+encodeURIComponent(doc.ID), null, function(res, err){
       if(cb) cb(!err);
@@ -4224,7 +4296,7 @@ function uploadTaskDoc(taskId, file){
   fetch(SB_URL+'/storage/v1/object/client-documents/'+encodeURI(path), {
     method:'POST',
     headers:{
-      'apikey':SB_KEY, 'Authorization':'Bearer '+SB_KEY,
+      'apikey':SB_KEY, 'Authorization':'Bearer '+sbBearer(),
       'Content-Type': file.type || 'application/octet-stream',
       'x-upsert':'true'
     },
@@ -4261,7 +4333,7 @@ function viewTaskDoc(docId){
   if(!doc){ alert('Document not found'); return; }
   fetch(SB_URL+'/storage/v1/object/sign/client-documents/'+encodeURI(doc.FilePath), {
     method:'POST',
-    headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json'},
+    headers:{'apikey':SB_KEY,'Authorization':'Bearer '+sbBearer(),'Content-Type':'application/json'},
     body: JSON.stringify({expiresIn:60})
   }).then(function(r){
     if(!r.ok) return r.text().then(function(t){ throw new Error('Sign failed: '+r.status+' '+t); });
@@ -4280,7 +4352,7 @@ function deleteTaskDoc(docId, taskId){
   if(!doc){ return; }
   fetch(SB_URL+'/storage/v1/object/client-documents/'+encodeURI(doc.FilePath), {
     method:'DELETE',
-    headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY}
+    headers:{'apikey':SB_KEY,'Authorization':'Bearer '+sbBearer()}
   }).then(function(){
     sbFetch('DELETE','/rest/v1/task_documents?ID=eq.'+encodeURIComponent(doc.ID), null, function(res, err){
       if(err){ toast('Delete failed','err'); }
@@ -9583,8 +9655,7 @@ document.addEventListener('click', function(e){
         case 'toggle-replaced':   window.SHOW_REPLACED_POLS=!window.SHOW_REPLACED_POLS; render(); break;
         case 'replace-policy':    replacePolicy(el.getAttribute('data-cid'),parseInt(el.getAttribute('data-idx'))); break;
         case 'view-schedule':     openPolicySchedule(el.getAttribute('data-cid')); break;
-        case 'select-user':    selectUser(el.getAttribute('data-user')); break;
-        case 'logout':         sessionStorage.removeItem('du_auth'); location.reload(); break;
+        case 'logout':         sbForceLogin(); break;
         case 'del-task':       delTask(id); break;
         case 'add-spouse':     openFamModal(id,'Spouse'); break;
         case 'add-child-row':  addChildRow(); break;
@@ -11364,92 +11435,86 @@ document.getElementById('userSel').addEventListener('change',function(){
 
 // ══ BOOT ═════════════════════════════════════════════════════
 function checkAuth(){
-  var auth = sessionStorage.getItem('du_auth');
-  if(auth==='ok') return true;
+  sbHydrate();
+  if(sbLoggedIn()){ scheduleRefresh(); return true; }
+  // Token expired but we still hold a refresh token → try to resume silently.
+  if(SB_AUTH.refresh){
+    refreshThen(function(){
+      if(sbLoggedIn()){ var sh=document.querySelector('.shell'); if(sh) sh.style.display=''; bootApp(); }
+      else showLoginScreen();
+    });
+    return false; // bootApp is triggered by the async callback on success
+  }
+  showLoginScreen();
+  return false;
+}
+
+// Map a login email to the app's internal user label where we can be certain.
+// Only Clinton is safe to auto-map; the other two stay on the manual selector
+// so we never mislabel — renaming the Wife/Daughter options would break the
+// historical task data keyed to them.
+function emailToUser(email){
+  email=(email||'').toLowerCase();
+  if(email.indexOf('clinton')>=0) return 'Clinton';
+  return null;
+}
+
+function showLoginScreen(){
   var shell = document.querySelector('.shell');
   if(shell) shell.style.display='none';
+  var lastEmail=''; try{ lastEmail=localStorage.getItem('du_login_email')||''; }catch(e){}
+  var esc=function(t){ return String(t==null?'':t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); };
   var lock = document.createElement('div');
   lock.id = 'lockScreen';
   lock.style.cssText = 'position:fixed;inset:0;background:var(--navy);display:flex;align-items:center;justify-content:center;z-index:99999;flex-direction:column;gap:20px';
   lock.innerHTML = '<div style="text-align:center">'+
     '<div style="font-family:Georgia,serif;font-size:28px;color:var(--gold);margin-bottom:4px">Duwalcoe</div>'+
     '<div style="font-family:Georgia,serif;font-size:16px;color:#fff;font-style:italic;margin-bottom:24px">Practice Manager</div>'+
-    '<div style="background:rgba(255,255,255,.08);border-radius:12px;padding:28px 32px;min-width:280px">'+
-    '<div style="color:#8899bb;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:1px;margin-bottom:12px">Enter Access Code</div>'+
-    '<input id="pinInput" type="password" maxlength="10" placeholder="••••" style="width:100%;text-align:center;font-size:24px;letter-spacing:8px;border:2px solid #334466;border-radius:8px;padding:12px;background:rgba(255,255,255,.05);color:#fff;outline:none;font-family:inherit">'+
-    '<div id="pinErr" style="color:var(--rose);font-size:12px;margin-top:8px;min-height:16px"></div>'+
-    '<button id="pinBtn" style="width:100%;margin-top:12px;background:var(--gold);color:#fff;border:none;border-radius:8px;padding:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">Access</button>'+
+    '<div style="background:rgba(255,255,255,.08);border-radius:12px;padding:28px 32px;min-width:300px;text-align:left">'+
+      '<div style="color:#8899bb;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:1px;margin-bottom:14px">Staff Sign In</div>'+
+      '<label style="color:#ccd6ee;font-size:12px;font-weight:600">Email</label>'+
+      '<input id="loginEmail" type="email" autocomplete="username" value="'+esc(lastEmail)+'" style="width:100%;margin:5px 0 12px;font-size:15px;border:2px solid #334466;border-radius:8px;padding:11px;background:rgba(255,255,255,.05);color:#fff;outline:none;font-family:inherit">'+
+      '<label style="color:#ccd6ee;font-size:12px;font-weight:600">Password</label>'+
+      '<input id="loginPass" type="password" autocomplete="current-password" style="width:100%;margin:5px 0 4px;font-size:15px;border:2px solid #334466;border-radius:8px;padding:11px;background:rgba(255,255,255,.05);color:#fff;outline:none;font-family:inherit">'+
+      '<div id="loginErr" style="color:#ff9a9a;font-size:12px;min-height:16px;margin:4px 0"></div>'+
+      '<button id="loginBtn" style="width:100%;margin-top:6px;background:var(--gold);color:#fff;border:none;border-radius:8px;padding:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">Sign In</button>'+
     '</div>'+
-    '<div style="color:#445577;font-size:11px;margin-top:16px">FSP No: 9978 · Duwalcoe Financial Consultants CC</div>'+
+    '<div style="color:#445577;font-size:11px;margin-top:16px;text-align:center">FSP No: 9978 · Duwalcoe Financial Consultants CC</div>'+
     '</div>';
   document.body.appendChild(lock);
-  setTimeout(function(){ var p=document.getElementById('pinInput'); if(p)p.focus(); },100);
-  document.getElementById('pinBtn').addEventListener('click', tryPin);
-  document.getElementById('pinInput').addEventListener('keydown', function(e){ if(e.key==='Enter') tryPin(); });
-  return false;
-}
 
-function tryPin(){
-  var val=document.getElementById('pinInput').value;
-  if(val==='6551'){
-    var lock=document.getElementById('lockScreen');
-    var html='<div style="text-align:center">';
-    html+='<div style="font-family:Georgia,serif;font-size:28px;color:#a8b938;margin-bottom:4px">Duwalcoe</div>';
-    html+='<div style="font-family:Georgia,serif;font-size:16px;color:#fff;margin-bottom:24px">Practice Manager</div>';
-    html+='<div style="background:rgba(255,255,255,.08);border-radius:12px;padding:28px 32px;min-width:280px">';
-    html+='<div style="color:#8899bb;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:1px;margin-bottom:16px">Who are you?</div>';
-    html+='<div style="display:flex;flex-direction:column;gap:10px">';
-    html+='<button style="background:rgba(255,255,255,.08);border:1.5px solid #334466;border-radius:8px;padding:14px;color:#fff;font-size:15px;font-weight:600;cursor:pointer;font-family:inherit" data-act="select-user" data-user="Clinton">Clinton</button>';
-    html+='<button style="background:rgba(255,255,255,.08);border:1.5px solid #334466;border-radius:8px;padding:14px;color:#fff;font-size:15px;font-weight:600;cursor:pointer;font-family:inherit" data-act="select-user" data-user="Wife">Wife</button>';
-    html+='<button style="background:rgba(255,255,255,.08);border:1.5px solid #334466;border-radius:8px;padding:14px;color:#fff;font-size:15px;font-weight:600;cursor:pointer;font-family:inherit" data-act="select-user" data-user="Daughter">Daughter</button>';
-    html+='</div></div>';
-    html+='<div style="color:#445577;font-size:11px;margin-top:16px">FSP No: 9978</div>';
-    html+='</div>';
-    lock.innerHTML=html;
-  } else {
-    document.getElementById('pinErr').textContent='Incorrect code — please try again';
-    document.getElementById('pinInput').value='';
-    document.getElementById('pinInput').focus();
-  }
-}
-
-function selectUser(name){
-  sessionStorage.setItem('du_auth','ok');
-  sessionStorage.setItem('du_auth_domain', location.hostname);
-  localStorage.setItem('du_user', name);
-  window.DASH_USER_FILTER = name;
-  window.TASK_USER_FILTER = name;
-  var lock=document.getElementById('lockScreen');
-  if(lock) lock.remove();
-  var shell=document.querySelector('.shell');
-  if(shell) shell.style.display='';
-  var sel=document.getElementById('userSel');
-  if(sel) sel.value=name;
-  // Sign in to Supabase silently — required for RLS
-  // Wait for token before booting so RLS doesn't block the initial data load
-  // Clear any stale/expired token first
-  sessionStorage.removeItem('sb_token');
-  window._sbAuthed = false;
-  if(!window._sbAuthed){
-    fetch(SB_URL+'/auth/v1/token?grant_type=password', {
-      method:'POST',
-      headers:{'apikey':SB_KEY,'Content-Type':'application/json'},
-      body:JSON.stringify({email:'clinton@duwalcoe.co.za',password:'Irrlmwvm1*2'})
-    }).then(function(r){return r.json();}).then(function(d){
-      if(d.access_token){
-        window._sbAuthed = true;
-        window._sbToken = d.access_token;
-        sessionStorage.setItem('sb_token', d.access_token);
+  function doLogin(){
+    var email=(document.getElementById('loginEmail').value||'').trim();
+    var pass=document.getElementById('loginPass').value||'';
+    var err=document.getElementById('loginErr');
+    var btn=document.getElementById('loginBtn');
+    if(!email || !pass){ err.textContent='Enter your email and password.'; return; }
+    btn.disabled=true; btn.textContent='Signing in…';
+    sbLogin(email, pass).then(function(res){
+      if(res.ok){
+        try{ localStorage.setItem('du_login_email', email); }catch(e){}
+        var nm=emailToUser(email);
+        if(nm){ try{ localStorage.setItem('du_user', nm); }catch(e){} }
+        var l=document.getElementById('lockScreen'); if(l) l.remove();
+        var sh=document.querySelector('.shell'); if(sh) sh.style.display='';
+        var sel=document.getElementById('userSel'); if(sel && nm) sel.value=nm;
+        bootApp();
+      } else {
+        err.textContent = /confirm/i.test(res.error||'')
+          ? 'That account isn’t confirmed yet — in Supabase, tick “Auto Confirm User”.'
+          : 'Email or password is incorrect.';
+        btn.disabled=false; btn.textContent='Sign In';
       }
-      bootApp(); // boot AFTER token is ready
-    }).catch(function(){
-      // If auth fails, boot anyway so cached data still shows
-      bootApp();
     });
-  } else {
-    bootApp();
   }
+  document.getElementById('loginBtn').addEventListener('click', doLogin);
+  document.getElementById('loginPass').addEventListener('keydown', function(e){ if(e.key==='Enter') doLogin(); });
+  document.getElementById('loginEmail').addEventListener('keydown', function(e){ if(e.key==='Enter') document.getElementById('loginPass').focus(); });
+  setTimeout(function(){ var f=document.getElementById(lastEmail?'loginPass':'loginEmail'); if(f) f.focus(); },100);
 }
+
+// (Removed) The old PIN gate and the hard-coded Supabase password login
+// have been replaced by the real per-user sign-in in showLoginScreen().
 
 function bootApp(){
   // Version stamp - wipe stale recent-client data from old builds
@@ -11497,8 +11562,8 @@ function bootApp(){
   }
 }
 
-// Clear any stale auth from other domains
-try{ if(sessionStorage.getItem('du_auth_domain')!==location.hostname){ sessionStorage.removeItem('du_auth'); sessionStorage.setItem('du_auth_domain',location.hostname); } }catch(e){}
+// Clear any stale auth/session tokens if the app is opened on a different host.
+try{ if(sessionStorage.getItem('du_auth_domain')!==location.hostname){ sessionStorage.removeItem('du_auth'); sessionStorage.removeItem('sb_at'); sessionStorage.removeItem('sb_rt'); sessionStorage.removeItem('sb_exp'); sessionStorage.setItem('du_auth_domain',location.hostname); } }catch(e){}
 document.getElementById('todayLbl').textContent=
   new Date().toLocaleDateString('en-ZA',{weekday:'long',day:'numeric',month:'long'});
 var su=localStorage.getItem('du_user');
