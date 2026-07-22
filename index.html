@@ -124,6 +124,7 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--cream);c
     <div class="ni on" data-nav="dash">🏠 Dashboard</div>
     <div class="ni" data-nav="clients">👥 Clients</div>
     <div class="ni" data-nav="tasks">✅ Tasks <span id="tbadge" style="margin-left:auto;background:var(--rose);color:#fff;border-radius:10px;padding:1px 7px;font-size:10px;display:none"></span></div>
+    <div class="ni" data-nav="suppliers">🏢 Suppliers</div>
     <div class="ndiv"></div>
     <div class="nsec">Tools</div>
     <div class="ni" data-act="fna-new">📊 Launch FNA (new client)</div>
@@ -168,6 +169,17 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--cream);c
     <div class="mf">
       <button class="btn b-gh sm" data-close="1">Cancel</button>
       <button class="btn b-gd sm" data-save="bank">💾 Save Account</button>
+    </div>
+  </div>
+</div>
+<div class="ov" id="supMod">
+  <div class="modal" style="max-width:560px">
+    <div class="mh"><h3 id="supModT">Supplier</h3><button class="xb" data-close="1">✕</button></div>
+    <div class="mb" id="supModB"></div>
+    <div class="mf">
+      <button class="btn b-gh sm" data-close="1">Cancel</button>
+      <button class="btn b-rd sm" id="delSupBtn" style="display:none" onclick="deleteSupplier()">🗑 Delete</button>
+      <button class="btn b-gd sm" data-save="supplier">💾 Save Supplier</button>
     </div>
   </div>
 </div>
@@ -993,6 +1005,7 @@ function render(){
   if(PAGE==='dash')     m.innerHTML=renderDash();
   else if(PAGE==='clients') m.innerHTML=renderClients();
   else if(PAGE==='client')  m.innerHTML=renderProfile();
+  else if(PAGE==='suppliers') m.innerHTML=renderSuppliers();
   else if(PAGE==='tasks'){  if(!window.TASK_USER_FILTER) window.TASK_USER_FILTER=cu(); m.innerHTML=renderTasks();}
   // Restore dashboard search value
   if(_dashQ){
@@ -9513,6 +9526,7 @@ document.addEventListener('click', function(e){
       else if(save==='task')saveTask();
       else if(save==='fam')saveFamMember();
       else if(save==='task-log')saveTaskLog();
+      else if(save==='supplier')saveSupplier();
       return;
     }
     if(nav){goPage(nav);return;}
@@ -9653,12 +9667,310 @@ document.addEventListener('click', function(e){
           unlinkPolicy(el.getAttribute('data-lid'), el.getAttribute('data-eid'));
           break;
         case 'sync':           syncNow(); break;
+        case 'add-supplier':   openSupplierModal(); break;
+        case 'edit-supplier':  openSupplierModal(el.getAttribute('data-id')); break;
+        case 'del-supplier':   deleteSupplier(el.getAttribute('data-id')); break;
+        case 'copy':           copyText(el.getAttribute('data-copy')); break;
       }
       return;
     }
     el=el.parentElement;
   }
 });
+
+// ══════════════════════════════════════════════════════════════
+// SUPPLIERS & BROKER CODES
+// Practice-level reference (NOT per-client): the phone numbers and
+// broker codes Clinton needs with each life-insurance provider.
+// One card per insurer; each card holds a free-form list of labelled
+// phone numbers and a free-form list of labelled broker codes, plus a
+// notes field. The whole thing is stored as a single JSON blob in the
+// shared `settings` table (Key='suppliers') so it syncs across every
+// device and user — exactly the pattern editing_locks already uses.
+// localStorage['du_suppliers'] is an offline cache so the page shows
+// instantly and still works with no network (the coffee-shop case).
+// ══════════════════════════════════════════════════════════════
+var SUP_KEY   = 'suppliers';        // settings.Key for the JSON blob
+var SUP_CACHE = 'du_suppliers';     // localStorage cache key
+var SUPPLIERS = (function(){ try{ return JSON.parse(localStorage.getItem(SUP_CACHE)||'null'); }catch(e){ return null; } })();
+var SUP_LOADED  = false;            // have we heard back from the server yet?
+var SUP_LOADING = false;            // GET in flight — avoid double fetch
+var SUP_EDIT_ID = null;             // id of supplier open in the modal (null = new)
+var EDIT_SUP    = null;             // working copy while the modal is open
+var SUP_SRCH    = '';               // current search filter on the suppliers page
+
+function supUid(){ return 'sup_'+Date.now().toString(36)+'_'+Math.floor(Math.random()*1e6).toString(36); }
+
+// Fresh, empty-but-labelled seed cards for the seven big SA life insurers
+// Clinton pre-loaded. Discovery carries the sub-brands he named; the rest
+// get a single phone row plus the two codes every house issues.
+function supSeed(){
+  function mk(name, phones, codes){
+    return { id:supUid(), name:name,
+      phones:phones.map(function(l){ return {label:l, number:''}; }),
+      codes:codes.map(function(l){ return {label:l, value:''}; }),
+      notes:'' };
+  }
+  var HOUSE=['Broker house code','Personal broker code'];
+  return [
+    mk('Discovery',  ['Discovery Life','Discovery Invest','Discovery Health','Discovery 360'], HOUSE),
+    mk('Momentum',   ['Momentum Life','Momentum Investments'], HOUSE),
+    mk('Old Mutual', ['Old Mutual'], HOUSE),
+    mk('Liberty',    ['Liberty'], HOUSE),
+    mk('Sanlam',     ['Sanlam'], HOUSE),
+    mk('Hollard',    ['Hollard'], HOUSE),
+    mk('PPS',        ['PPS'], HOUSE)
+  ];
+}
+
+function cacheSuppliers(){ try{ localStorage.setItem(SUP_CACHE, JSON.stringify(SUPPLIERS||[])); }catch(e){} }
+
+// Load from the shared settings table. The server is the source of truth.
+// On a genuine first-ever load (server reachable, no blob yet, no cache) we
+// seed the seven cards and persist them so they sync. Offline falls back to
+// the local cache; if there's nothing at all we seed in memory so the page
+// isn't blank, and a later save (or a successful load) persists it.
+function loadSuppliers(){
+  if(SUP_LOADING) return;
+  SUP_LOADING = true;
+  sbFetch('GET','/rest/v1/settings?Key=eq.'+SUP_KEY+'&select=*',null,function(rows,err){
+    SUP_LOADING = false;
+    SUP_LOADED  = true;
+    if(err===undefined && rows){
+      if(rows[0] && rows[0].Value){
+        try{ SUPPLIERS = JSON.parse(rows[0].Value)||[]; }catch(e){ SUPPLIERS = SUPPLIERS||[]; }
+        cacheSuppliers();
+      } else if(!SUPPLIERS || !SUPPLIERS.length){
+        // Server reachable but no record yet → first-time setup.
+        SUPPLIERS = supSeed(); cacheSuppliers(); persistSuppliers();
+      }
+    } else if(!SUPPLIERS){
+      // Offline / error and nothing cached — seed in memory only.
+      SUPPLIERS = supSeed();
+    }
+    if(PAGE==='suppliers') render();
+  });
+}
+
+// Write the whole blob back to the shared settings table. POST upserts via
+// the merge-duplicates Prefer header sbFetch already sets for POST, so this
+// overwrites the single Key='suppliers' row rather than stacking duplicates.
+function persistSuppliers(cb){
+  cacheSuppliers();
+  sbFetch('POST','/rest/v1/settings',[{Key:SUP_KEY, Value:JSON.stringify(SUPPLIERS||[])}],function(res,err){
+    if(cb) cb(err);
+  });
+}
+
+// ── Clipboard (the whole point: copy a code in one tap) ──────────
+function copyText(t){
+  t = (t==null) ? '' : String(t);
+  function ok(){ toast('Copied: '+t,'ok'); }
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(t).then(ok, function(){ supFallbackCopy(t, ok); });
+  } else {
+    supFallbackCopy(t, ok);
+  }
+}
+function supFallbackCopy(t, ok){
+  try{
+    var ta=document.createElement('textarea');
+    ta.value=t; ta.style.position='fixed'; ta.style.top='-1000px'; ta.style.opacity='0';
+    document.body.appendChild(ta); ta.focus(); ta.select();
+    document.execCommand('copy'); document.body.removeChild(ta);
+    if(ok) ok();
+  }catch(e){ toast('Could not copy — long-press the code to copy','err'); }
+}
+
+// ── Page render ──────────────────────────────────────────────────
+function renderSuppliers(){
+  if(!SUP_LOADED) loadSuppliers();               // lazy refresh on first view
+  var list = SUPPLIERS || [];
+  var h = '';
+  h += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">'+
+    '<h1 style="font-family:\'DM Serif Display\',serif;font-size:22px;color:var(--navy)">🏢 Suppliers &amp; Broker Codes ('+list.length+')</h1>'+
+    '<button class="btn b-gd sm" data-act="add-supplier">+ Add Supplier</button>'+
+    '</div>';
+  h += '<div style="font-size:12px;color:#889;margin-bottom:14px">Provider phone numbers and your broker codes — house &amp; personal. Tap any code to copy it.'+
+    (SUP_LOADED?'':' <span style="color:#bbb">· syncing…</span>')+'</div>';
+  h += '<div style="margin-bottom:16px"><input id="supSearch" type="text" placeholder="Search supplier, number or code…" value="'+escHtml(SUP_SRCH)+'" '+
+    'oninput="SUP_SRCH=this.value; var g=document.getElementById(\'supGrid\'); if(g) g.innerHTML=supCardsHtml();" '+
+    'style="width:100%;max-width:420px;border:1.5px solid var(--mist);border-radius:8px;padding:9px 13px;font-size:13px;font-family:inherit;outline:none"></div>';
+  h += '<div id="supGrid">'+supCardsHtml()+'</div>';
+  return h;
+}
+
+// Only the grid re-renders on each keystroke, so the search box keeps focus.
+function supCardsHtml(){
+  var list = SUPPLIERS || [];
+  var q = (SUP_SRCH||'').toLowerCase().trim();
+  if(!list.length){
+    return '<div class="card"><div class="cb" style="text-align:center;color:#889;padding:44px 20px">No suppliers yet. Click <strong>+ Add Supplier</strong> to create your first card.</div></div>';
+  }
+  var shown = !q ? list : list.filter(function(s){
+    if((s.name||'').toLowerCase().indexOf(q)>=0) return true;
+    if((s.notes||'').toLowerCase().indexOf(q)>=0) return true;
+    if((s.phones||[]).some(function(p){ return (p.label||'').toLowerCase().indexOf(q)>=0 || String(p.number||'').toLowerCase().indexOf(q)>=0; })) return true;
+    if((s.codes||[]).some(function(cd){ return (cd.label||'').toLowerCase().indexOf(q)>=0 || String(cd.value||'').toLowerCase().indexOf(q)>=0; })) return true;
+    return false;
+  });
+  if(!shown.length){
+    return '<div class="card"><div class="cb" style="text-align:center;color:#889;padding:30px 20px">No suppliers match &ldquo;'+escHtml(SUP_SRCH)+'&rdquo;.</div></div>';
+  }
+  return '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:16px">'+
+    shown.map(supCard).join('')+'</div>';
+}
+
+function supCard(s){
+  var codes  = (s.codes||[]).filter(function(cd){ return (cd.label||'').trim() || String(cd.value||'').trim(); });
+  var phones = (s.phones||[]).filter(function(p){ return (p.label||'').trim() || String(p.number||'').trim(); });
+  var h = '<div class="card" style="display:flex;flex-direction:column;overflow:hidden">';
+  h += '<div style="display:flex;align-items:center;justify-content:space-between;padding:13px 16px;border-bottom:1px solid var(--smoke)">'+
+      '<div style="font-family:\'DM Serif Display\',serif;font-size:18px;color:var(--navy)">'+escHtml(s.name||'Unnamed')+'</div>'+
+      '<button class="btn b-gh xs" data-act="edit-supplier" data-id="'+escHtml(s.id)+'">✎ Edit</button>'+
+    '</div>';
+  h += '<div style="padding:13px 16px;display:flex;flex-direction:column;gap:14px">';
+
+  // Broker codes first — this is the priority lookup.
+  h += '<div><div style="font-size:10px;font-weight:700;color:#889;text-transform:uppercase;letter-spacing:1px;margin-bottom:7px">Broker Codes</div>';
+  if(codes.length){
+    h += codes.map(function(cd){
+      var val = String(cd.value||'').trim();
+      var lbl = escHtml(cd.label||'Code');
+      if(!val){
+        return '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:6px 0;border-bottom:1px dashed var(--smoke)">'+
+          '<span style="font-size:12px;color:#667">'+lbl+'</span>'+
+          '<span style="font-size:12px;color:#c4c4c4;font-style:italic">not set</span></div>';
+      }
+      return '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:6px 0;border-bottom:1px dashed var(--smoke)">'+
+        '<span style="font-size:12px;color:#667">'+lbl+'</span>'+
+        '<button data-act="copy" data-copy="'+escHtml(val)+'" title="Copy code" '+
+          'style="display:inline-flex;align-items:center;gap:6px;background:#f0f5d0;color:#4a5a00;border:1px solid #d5dd9a;border-radius:6px;padding:4px 10px;font-size:13px;font-weight:700;font-family:ui-monospace,Menlo,monospace;cursor:pointer">'+
+          escHtml(val)+' <span style="font-size:11px;opacity:.65">📋</span></button>'+
+        '</div>';
+    }).join('');
+  } else {
+    h += '<div style="font-size:12px;color:#c4c4c4;font-style:italic">No codes yet</div>';
+  }
+  h += '</div>';
+
+  // Phone numbers.
+  h += '<div><div style="font-size:10px;font-weight:700;color:#889;text-transform:uppercase;letter-spacing:1px;margin-bottom:7px">Phone Numbers</div>';
+  if(phones.length){
+    h += phones.map(function(p){
+      var num = String(p.number||'').trim();
+      var lbl = escHtml(p.label||'Phone');
+      if(!num){
+        return '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:5px 0">'+
+          '<span style="font-size:12px;color:#667">'+lbl+'</span>'+
+          '<span style="font-size:12px;color:#c4c4c4;font-style:italic">—</span></div>';
+      }
+      var tel = num.replace(/[^0-9+]/g,'');
+      return '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:5px 0">'+
+        '<span style="font-size:12px;color:#667">'+lbl+'</span>'+
+        '<span style="display:inline-flex;align-items:center;gap:8px">'+
+          '<a href="tel:'+escHtml(tel)+'" style="font-size:13px;color:var(--sky);text-decoration:none;font-weight:600">'+escHtml(num)+'</a>'+
+          '<button data-act="copy" data-copy="'+escHtml(num)+'" title="Copy number" style="background:none;border:none;cursor:pointer;font-size:13px;opacity:.55;padding:0">📋</button>'+
+        '</span></div>';
+    }).join('');
+  } else {
+    h += '<div style="font-size:12px;color:#c4c4c4;font-style:italic">No numbers yet</div>';
+  }
+  h += '</div>';
+
+  if((s.notes||'').trim()){
+    h += '<div style="background:#f8f9f2;border:1px solid var(--smoke);border-radius:7px;padding:9px 11px;font-size:12px;color:#556;white-space:pre-wrap">'+escHtml(s.notes)+'</div>';
+  }
+
+  h += '</div></div>';
+  return h;
+}
+
+// ── Editor modal (mirrors the EDIT_BANKS dynamic-row pattern) ────
+function openSupplierModal(id){
+  var src = id ? (SUPPLIERS||[]).find(function(s){ return String(s.id)===String(id); }) : null;
+  SUP_EDIT_ID = src ? src.id : null;
+  EDIT_SUP = src ? JSON.parse(JSON.stringify(src))
+                 : { id:supUid(), name:'', phones:[{label:'',number:''}],
+                     codes:[{label:'Broker house code',value:''},{label:'Personal broker code',value:''}], notes:'' };
+  if(!EDIT_SUP.phones || !EDIT_SUP.phones.length) EDIT_SUP.phones=[{label:'',number:''}];
+  if(!EDIT_SUP.codes  || !EDIT_SUP.codes.length)  EDIT_SUP.codes=[{label:'',value:''}];
+  document.getElementById('supModT').textContent = src ? 'Edit Supplier' : 'Add Supplier';
+  document.getElementById('delSupBtn').style.display = src ? '' : 'none';
+  document.getElementById('supModB').innerHTML =
+    '<div class="fld" style="margin-bottom:16px"><label>Supplier / Company Name</label>'+
+      '<input type="text" id="supName" value="'+escHtml(EDIT_SUP.name||'')+'" placeholder="e.g. Discovery" autocomplete="off"></div>'+
+    '<div style="font-size:10px;font-weight:700;color:#889;text-transform:uppercase;letter-spacing:1px;margin:0 0 8px">Broker Codes</div>'+
+    '<div id="supCodeRows"></div>'+
+    '<button type="button" class="btn b-gh xs" onclick="addSupCode()" style="margin:2px 0 18px">+ Add code</button>'+
+    '<div style="font-size:10px;font-weight:700;color:#889;text-transform:uppercase;letter-spacing:1px;margin:0 0 8px">Phone Numbers</div>'+
+    '<div id="supPhoneRows"></div>'+
+    '<button type="button" class="btn b-gh xs" onclick="addSupPhone()" style="margin:2px 0 18px">+ Add phone</button>'+
+    '<div class="fld"><label>Notes (optional)</label>'+
+      '<textarea id="supNotes" placeholder="e.g. portal login, BDM name &amp; cell, special instructions">'+escHtml(EDIT_SUP.notes||'')+'</textarea></div>';
+  renderSupCodeRows();
+  renderSupPhoneRows();
+  document.getElementById('supMod').classList.add('open');
+  var nm=document.getElementById('supName'); if(nm && !src) nm.focus();
+}
+
+// Rows write straight into EDIT_SUP on each keystroke (oninput), so adding or
+// removing a row never loses what's already typed in the others.
+function renderSupCodeRows(){
+  var c=document.getElementById('supCodeRows'); if(!c) return;
+  if(!EDIT_SUP.codes.length){ c.innerHTML='<div style="font-size:12px;color:#c4c4c4;font-style:italic;margin-bottom:8px">No codes — add one below.</div>'; return; }
+  c.innerHTML = EDIT_SUP.codes.map(function(cd,i){
+    return '<div style="display:grid;grid-template-columns:1fr 1fr auto;gap:8px;margin-bottom:8px;align-items:center">'+
+      '<input type="text" value="'+escHtml(cd.label||'')+'" placeholder="Label (e.g. House code)" oninput="EDIT_SUP.codes['+i+'].label=this.value" autocomplete="off" style="border:1.5px solid var(--mist);border-radius:7px;padding:7px 10px;font-size:13px;font-family:inherit;width:100%">'+
+      '<input type="text" value="'+escHtml(cd.value||'')+'" placeholder="Code" oninput="EDIT_SUP.codes['+i+'].value=this.value" autocomplete="off" style="border:1.5px solid var(--mist);border-radius:7px;padding:7px 10px;font-size:13px;font-family:ui-monospace,Menlo,monospace;width:100%">'+
+      '<button type="button" onclick="removeSupCode('+i+')" title="Remove" style="background:none;border:none;cursor:pointer;color:var(--rose);font-size:20px;line-height:1;padding:0 4px">&times;</button>'+
+      '</div>';
+  }).join('');
+}
+function renderSupPhoneRows(){
+  var c=document.getElementById('supPhoneRows'); if(!c) return;
+  if(!EDIT_SUP.phones.length){ c.innerHTML='<div style="font-size:12px;color:#c4c4c4;font-style:italic;margin-bottom:8px">No numbers — add one below.</div>'; return; }
+  c.innerHTML = EDIT_SUP.phones.map(function(p,i){
+    return '<div style="display:grid;grid-template-columns:1fr 1fr auto;gap:8px;margin-bottom:8px;align-items:center">'+
+      '<input type="text" value="'+escHtml(p.label||'')+'" placeholder="Label (e.g. Discovery Life)" oninput="EDIT_SUP.phones['+i+'].label=this.value" autocomplete="off" style="border:1.5px solid var(--mist);border-radius:7px;padding:7px 10px;font-size:13px;font-family:inherit;width:100%">'+
+      '<input type="text" value="'+escHtml(p.number||'')+'" placeholder="Number" oninput="EDIT_SUP.phones['+i+'].number=this.value" autocomplete="off" style="border:1.5px solid var(--mist);border-radius:7px;padding:7px 10px;font-size:13px;font-family:inherit;width:100%">'+
+      '<button type="button" onclick="removeSupPhone('+i+')" title="Remove" style="background:none;border:none;cursor:pointer;color:var(--rose);font-size:20px;line-height:1;padding:0 4px">&times;</button>'+
+      '</div>';
+  }).join('');
+}
+function addSupCode(){ EDIT_SUP.codes.push({label:'',value:''}); renderSupCodeRows(); }
+function removeSupCode(i){ EDIT_SUP.codes.splice(i,1); renderSupCodeRows(); }
+function addSupPhone(){ EDIT_SUP.phones.push({label:'',number:''}); renderSupPhoneRows(); }
+function removeSupPhone(i){ EDIT_SUP.phones.splice(i,1); renderSupPhoneRows(); }
+
+function saveSupplier(){
+  if(!EDIT_SUP) return;
+  var name=g('supName');
+  if(!name){ toast('Supplier name is required','err'); return; }
+  EDIT_SUP.name  = name;
+  var nt=document.getElementById('supNotes'); EDIT_SUP.notes = nt ? nt.value : '';
+  // Drop rows that are entirely blank so saved data stays clean.
+  EDIT_SUP.codes  = (EDIT_SUP.codes||[]).filter(function(cd){ return (cd.label||'').trim() || String(cd.value||'').trim(); });
+  EDIT_SUP.phones = (EDIT_SUP.phones||[]).filter(function(p){ return (p.label||'').trim() || String(p.number||'').trim(); });
+  if(!SUPPLIERS) SUPPLIERS=[];
+  var idx=SUPPLIERS.findIndex(function(s){ return String(s.id)===String(EDIT_SUP.id); });
+  if(idx>=0) SUPPLIERS[idx]=EDIT_SUP; else SUPPLIERS.push(EDIT_SUP);
+  closeAll();
+  render();
+  persistSuppliers(function(err){ toast(err?'Saved on this device — will sync when back online':'Supplier saved','ok'); });
+}
+
+function deleteSupplier(id){
+  var target = (id!==undefined && id!==null && id!=='') ? id : SUP_EDIT_ID;
+  if(target===undefined || target===null) return;
+  var s=(SUPPLIERS||[]).find(function(x){ return String(x.id)===String(target); });
+  if(!s) return;
+  if(!confirm('Delete supplier “'+(s.name||'')+'”? This removes its saved phone numbers and codes.')) return;
+  SUPPLIERS=(SUPPLIERS||[]).filter(function(x){ return String(x.id)!==String(target); });
+  closeAll();
+  render();
+  persistSuppliers(function(err){ toast(err?'Deleted on this device — will sync when back online':'Supplier deleted','ok'); });
+}
 
 function openPolicySchedule(cid){
   var c=DB.clients.find(function(x){return String(x.ID)===String(cid);});
@@ -10789,6 +11101,8 @@ function bootApp(){
   // Keep every browser current: silently re-pull on a timer and on tab focus,
   // so changes by another user appear without a manual Sync or hard refresh.
   installAutoSync();
+  // Load the practice-level Suppliers & broker-codes reference in the background.
+  loadSuppliers();
   // Attach persistent search listener
   var _si = document.getElementById('dashSearch');
   if(_si){
