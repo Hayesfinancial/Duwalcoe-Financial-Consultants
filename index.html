@@ -9709,6 +9709,7 @@ function supSeed(){
     return { id:supUid(), name:name,
       phones:phones.map(function(l){ return {label:l, number:''}; }),
       codes:codes.map(function(l){ return {label:l, value:''}; }),
+      logins:[{label:'Broker portal', username:'', password:''}],
       notes:'' };
   }
   var HOUSE=['Broker house code','Personal broker code'];
@@ -9782,6 +9783,17 @@ function supFallbackCopy(t, ok){
   }catch(e){ toast('Could not copy — long-press the code to copy','err'); }
 }
 
+// Reveal / hide a masked password on a card. The real value lives in the
+// span's data-pw attribute; we swap the visible text between it and dots.
+function togglePw(id){
+  var el=document.getElementById(id); if(!el) return;
+  if(el.getAttribute('data-shown')==='1'){
+    el.textContent='••••••••'; el.setAttribute('data-shown','0');
+  } else {
+    el.textContent=el.getAttribute('data-pw')||''; el.setAttribute('data-shown','1');
+  }
+}
+
 // ── Page render ──────────────────────────────────────────────────
 function renderSuppliers(){
   if(!SUP_LOADED) loadSuppliers();               // lazy refresh on first view
@@ -9791,9 +9803,9 @@ function renderSuppliers(){
     '<h1 style="font-family:\'DM Serif Display\',serif;font-size:22px;color:var(--navy)">🏢 Suppliers &amp; Broker Codes ('+list.length+')</h1>'+
     '<button class="btn b-gd sm" data-act="add-supplier">+ Add Supplier</button>'+
     '</div>';
-  h += '<div style="font-size:12px;color:#889;margin-bottom:14px">Provider phone numbers and your broker codes — house &amp; personal. Tap any code to copy it.'+
+  h += '<div style="font-size:12px;color:#889;margin-bottom:14px">Provider phone numbers, your broker codes, and portal logins. Tap any code or password to copy it.'+
     (SUP_LOADED?'':' <span style="color:#bbb">· syncing…</span>')+'</div>';
-  h += '<div style="margin-bottom:16px"><input id="supSearch" type="text" placeholder="Search supplier, number or code…" value="'+escHtml(SUP_SRCH)+'" '+
+  h += '<div style="margin-bottom:16px"><input id="supSearch" type="text" placeholder="Search supplier, number, code or login…" value="'+escHtml(SUP_SRCH)+'" '+
     'oninput="SUP_SRCH=this.value; var g=document.getElementById(\'supGrid\'); if(g) g.innerHTML=supCardsHtml();" '+
     'style="width:100%;max-width:420px;border:1.5px solid var(--mist);border-radius:8px;padding:9px 13px;font-size:13px;font-family:inherit;outline:none"></div>';
   h += '<div id="supGrid">'+supCardsHtml()+'</div>';
@@ -9812,6 +9824,8 @@ function supCardsHtml(){
     if((s.notes||'').toLowerCase().indexOf(q)>=0) return true;
     if((s.phones||[]).some(function(p){ return (p.label||'').toLowerCase().indexOf(q)>=0 || String(p.number||'').toLowerCase().indexOf(q)>=0; })) return true;
     if((s.codes||[]).some(function(cd){ return (cd.label||'').toLowerCase().indexOf(q)>=0 || String(cd.value||'').toLowerCase().indexOf(q)>=0; })) return true;
+    // Login label + username are searchable; passwords deliberately are not.
+    if((s.logins||[]).some(function(lg){ return (lg.label||'').toLowerCase().indexOf(q)>=0 || String(lg.username||'').toLowerCase().indexOf(q)>=0; })) return true;
     return false;
   });
   if(!shown.length){
@@ -9854,6 +9868,44 @@ function supCard(s){
   }
   h += '</div>';
 
+  // Portal logins — username + masked password (reveal + copy). Passwords are
+  // masked on screen by default; copy works without revealing so you can paste
+  // straight into the provider's site.
+  var logins = (s.logins||[]).filter(function(lg){ return (lg.label||'').trim() || (lg.username||'').trim() || (lg.password||'').trim(); });
+  h += '<div><div style="font-size:10px;font-weight:700;color:#889;text-transform:uppercase;letter-spacing:1px;margin-bottom:7px">Portal Logins</div>';
+  if(logins.length){
+    h += logins.map(function(lg, li){
+      var lbl = escHtml((lg.label||'Login').trim()||'Login');
+      var user = String(lg.username||'').trim();
+      var pw = String(lg.password||'');
+      var pid = 'pw_'+escHtml(s.id)+'_'+li;
+      var row = '<div style="padding:7px 0;border-bottom:1px dashed var(--smoke)">'+
+        '<div style="font-size:12px;color:#667;font-weight:600;margin-bottom:4px">'+lbl+'</div>';
+      // Username line
+      row += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:3px">'+
+        '<span style="font-size:11px;color:#99a;min-width:34px">User</span>'+
+        (user
+          ? '<span style="flex:1;font-size:12.5px;font-family:ui-monospace,Menlo,monospace;color:#334;word-break:break-all">'+escHtml(user)+'</span>'+
+            '<button data-act="copy" data-copy="'+escHtml(user)+'" title="Copy username" style="background:none;border:none;cursor:pointer;font-size:13px;opacity:.55;padding:0">📋</button>'
+          : '<span style="flex:1;font-size:12px;color:#c4c4c4;font-style:italic">—</span>')+
+        '</div>';
+      // Password line
+      row += '<div style="display:flex;align-items:center;gap:8px">'+
+        '<span style="font-size:11px;color:#99a;min-width:34px">Pass</span>'+
+        (pw
+          ? '<span id="'+pid+'" data-pw="'+escHtml(pw)+'" data-shown="0" style="flex:1;font-size:13px;font-family:ui-monospace,Menlo,monospace;color:#334;word-break:break-all">••••••••</span>'+
+            '<button type="button" onclick="togglePw(\''+pid+'\')" title="Show / hide" style="background:none;border:none;cursor:pointer;font-size:13px;opacity:.55;padding:0">👁</button>'+
+            '<button data-act="copy" data-copy="'+escHtml(pw)+'" title="Copy password" style="background:none;border:none;cursor:pointer;font-size:13px;opacity:.55;padding:0">📋</button>'
+          : '<span style="flex:1;font-size:12px;color:#c4c4c4;font-style:italic">not set</span>')+
+        '</div>';
+      row += '</div>';
+      return row;
+    }).join('');
+  } else {
+    h += '<div style="font-size:12px;color:#c4c4c4;font-style:italic">No logins yet</div>';
+  }
+  h += '</div>';
+
   // Phone numbers.
   h += '<div><div style="font-size:10px;font-weight:700;color:#889;text-transform:uppercase;letter-spacing:1px;margin-bottom:7px">Phone Numbers</div>';
   if(phones.length){
@@ -9892,9 +9944,11 @@ function openSupplierModal(id){
   SUP_EDIT_ID = src ? src.id : null;
   EDIT_SUP = src ? JSON.parse(JSON.stringify(src))
                  : { id:supUid(), name:'', phones:[{label:'',number:''}],
-                     codes:[{label:'Broker house code',value:''},{label:'Personal broker code',value:''}], notes:'' };
+                     codes:[{label:'Broker house code',value:''},{label:'Personal broker code',value:''}],
+                     logins:[{label:'Broker portal',username:'',password:''}], notes:'' };
   if(!EDIT_SUP.phones || !EDIT_SUP.phones.length) EDIT_SUP.phones=[{label:'',number:''}];
   if(!EDIT_SUP.codes  || !EDIT_SUP.codes.length)  EDIT_SUP.codes=[{label:'',value:''}];
+  if(!EDIT_SUP.logins || !EDIT_SUP.logins.length) EDIT_SUP.logins=[{label:'Broker portal',username:'',password:''}];
   document.getElementById('supModT').textContent = src ? 'Edit Supplier' : 'Add Supplier';
   document.getElementById('delSupBtn').style.display = src ? '' : 'none';
   document.getElementById('supModB').innerHTML =
@@ -9903,12 +9957,17 @@ function openSupplierModal(id){
     '<div style="font-size:10px;font-weight:700;color:#889;text-transform:uppercase;letter-spacing:1px;margin:0 0 8px">Broker Codes</div>'+
     '<div id="supCodeRows"></div>'+
     '<button type="button" class="btn b-gh xs" onclick="addSupCode()" style="margin:2px 0 18px">+ Add code</button>'+
+    '<div style="font-size:10px;font-weight:700;color:#889;text-transform:uppercase;letter-spacing:1px;margin:0 0 4px">Portal Logins</div>'+
+    '<div style="font-size:11px;color:#a09a8c;margin:0 0 8px">Saved to your shared practice database — visible to anyone with CRM access.</div>'+
+    '<div id="supLoginRows"></div>'+
+    '<button type="button" class="btn b-gh xs" onclick="addSupLogin()" style="margin:2px 0 18px">+ Add login</button>'+
     '<div style="font-size:10px;font-weight:700;color:#889;text-transform:uppercase;letter-spacing:1px;margin:0 0 8px">Phone Numbers</div>'+
     '<div id="supPhoneRows"></div>'+
     '<button type="button" class="btn b-gh xs" onclick="addSupPhone()" style="margin:2px 0 18px">+ Add phone</button>'+
     '<div class="fld"><label>Notes (optional)</label>'+
-      '<textarea id="supNotes" placeholder="e.g. portal login, BDM name &amp; cell, special instructions">'+escHtml(EDIT_SUP.notes||'')+'</textarea></div>';
+      '<textarea id="supNotes" placeholder="e.g. BDM name &amp; cell, special instructions">'+escHtml(EDIT_SUP.notes||'')+'</textarea></div>';
   renderSupCodeRows();
+  renderSupLoginRows();
   renderSupPhoneRows();
   document.getElementById('supMod').classList.add('open');
   var nm=document.getElementById('supName'); if(nm && !src) nm.focus();
@@ -9943,6 +10002,34 @@ function removeSupCode(i){ EDIT_SUP.codes.splice(i,1); renderSupCodeRows(); }
 function addSupPhone(){ EDIT_SUP.phones.push({label:'',number:''}); renderSupPhoneRows(); }
 function removeSupPhone(i){ EDIT_SUP.phones.splice(i,1); renderSupPhoneRows(); }
 
+// Login rows: label on its own line, then username + a masked password with a
+// show/hide eye. Values write into EDIT_SUP live (oninput) so add/remove never
+// loses typing. The password field starts as type=password (also stops browser
+// autofill from dumping the wrong saved login in).
+function renderSupLoginRows(){
+  var c=document.getElementById('supLoginRows'); if(!c) return;
+  if(!EDIT_SUP.logins.length){ c.innerHTML='<div style="font-size:12px;color:#c4c4c4;font-style:italic;margin-bottom:8px">No logins — add one below.</div>'; return; }
+  c.innerHTML = EDIT_SUP.logins.map(function(lg,i){
+    var pwId='supLoginPw_'+i;
+    return '<div style="border:1px solid var(--smoke);border-radius:8px;padding:10px;margin-bottom:8px">'+
+      '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">'+
+        '<input type="text" value="'+escHtml(lg.label||'')+'" placeholder="Portal name (e.g. Discovery portal)" oninput="EDIT_SUP.logins['+i+'].label=this.value" autocomplete="off" style="flex:1;border:1.5px solid var(--mist);border-radius:7px;padding:7px 10px;font-size:13px;font-family:inherit">'+
+        '<button type="button" onclick="removeSupLogin('+i+')" title="Remove login" style="background:none;border:none;cursor:pointer;color:var(--rose);font-size:20px;line-height:1;padding:0 2px">&times;</button>'+
+      '</div>'+
+      '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">'+
+        '<input type="text" value="'+escHtml(lg.username||'')+'" placeholder="Username" oninput="EDIT_SUP.logins['+i+'].username=this.value" autocomplete="off" style="border:1.5px solid var(--mist);border-radius:7px;padding:7px 10px;font-size:13px;font-family:ui-monospace,Menlo,monospace;width:100%">'+
+        '<div style="position:relative;display:flex;align-items:center">'+
+          '<input id="'+pwId+'" type="password" value="'+escHtml(lg.password||'')+'" placeholder="Password" oninput="EDIT_SUP.logins['+i+'].password=this.value" autocomplete="new-password" style="border:1.5px solid var(--mist);border-radius:7px;padding:7px 34px 7px 10px;font-size:13px;font-family:ui-monospace,Menlo,monospace;width:100%">'+
+          '<button type="button" onclick="toggleInputPw(\''+pwId+'\')" title="Show / hide" style="position:absolute;right:6px;background:none;border:none;cursor:pointer;font-size:14px;opacity:.55;padding:2px">👁</button>'+
+        '</div>'+
+      '</div>'+
+      '</div>';
+  }).join('');
+}
+function addSupLogin(){ EDIT_SUP.logins.push({label:'',username:'',password:''}); renderSupLoginRows(); }
+function removeSupLogin(i){ EDIT_SUP.logins.splice(i,1); renderSupLoginRows(); }
+function toggleInputPw(id){ var el=document.getElementById(id); if(!el) return; el.type = (el.type==='password') ? 'text' : 'password'; }
+
 function saveSupplier(){
   if(!EDIT_SUP) return;
   var name=g('supName');
@@ -9952,6 +10039,7 @@ function saveSupplier(){
   // Drop rows that are entirely blank so saved data stays clean.
   EDIT_SUP.codes  = (EDIT_SUP.codes||[]).filter(function(cd){ return (cd.label||'').trim() || String(cd.value||'').trim(); });
   EDIT_SUP.phones = (EDIT_SUP.phones||[]).filter(function(p){ return (p.label||'').trim() || String(p.number||'').trim(); });
+  EDIT_SUP.logins = (EDIT_SUP.logins||[]).filter(function(lg){ return (lg.label||'').trim() || (lg.username||'').trim() || (lg.password||'').trim(); });
   if(!SUPPLIERS) SUPPLIERS=[];
   var idx=SUPPLIERS.findIndex(function(s){ return String(s.id)===String(EDIT_SUP.id); });
   if(idx>=0) SUPPLIERS[idx]=EDIT_SUP; else SUPPLIERS.push(EDIT_SUP);
@@ -9965,7 +10053,7 @@ function deleteSupplier(id){
   if(target===undefined || target===null) return;
   var s=(SUPPLIERS||[]).find(function(x){ return String(x.id)===String(target); });
   if(!s) return;
-  if(!confirm('Delete supplier “'+(s.name||'')+'”? This removes its saved phone numbers and codes.')) return;
+  if(!confirm('Delete supplier “'+(s.name||'')+'”? This removes its saved phone numbers, codes and logins.')) return;
   SUPPLIERS=(SUPPLIERS||[]).filter(function(x){ return String(x.id)!==String(target); });
   closeAll();
   render();
