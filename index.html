@@ -183,6 +183,13 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--cream);c
     </div>
   </div>
 </div>
+<div class="ov" id="supCryptoMod">
+  <div class="modal" style="max-width:440px">
+    <div class="mh"><h3 id="supCryptoT">Password Lock</h3><button class="xb" data-close="1">✕</button></div>
+    <div class="mb" id="supCryptoB"></div>
+    <div class="mf" id="supCryptoF"></div>
+  </div>
+</div>
 <div class="ov" id="fpMod">
   <div class="modal" style="max-width:640px">
     <div class="mh"><h3 id="fpModT">Financial Position Item</h3><button class="xb" data-close="1">✕</button></div>
@@ -9699,6 +9706,22 @@ var SUP_EDIT_ID = null;             // id of supplier open in the modal (null = 
 var EDIT_SUP    = null;             // working copy while the modal is open
 var SUP_SRCH    = '';               // current search filter on the suppliers page
 
+// ── Password-lock (vault) state ──────────────────────────────────
+// Portal passwords are encrypted at rest with AES-GCM. The key is derived
+// from a master password via PBKDF2 and held ONLY in memory for the session
+// (SUP_CRYPTOKEY) — never written to disk or the database. The database stores
+// only: a random salt, PBKDF2 iteration count, and a verifier ciphertext
+// (SUP_CRYPTO_CFG, in the settings row 'suppliers_crypto'). Each stored
+// password becomes the string  'enc:1:<base64 iv>:<base64 ciphertext>'.
+var SUP_CRYPTO_KEY    = 'suppliers_crypto';   // settings.Key for the vault config
+var SUP_CRYPTO_CACHE  = 'du_sup_crypto';      // localStorage cache of the config
+var SUP_CRYPTO_CFG    = null;                 // {v,salt,iters,verify} or null (not set up)
+var SUP_CRYPTOKEY     = null;                 // in-memory CryptoKey while unlocked
+var SUP_CRYPTO_LOADED = false;                // have we fetched the config yet?
+var SUP_AFTER_UNLOCK  = null;                 // action to resume after a successful unlock
+var SUP_VERIFY_TOKEN  = 'duwalcoe-vault-verify-v1';
+function supCryptoAvailable(){ return !!(window.crypto && window.crypto.subtle && window.TextEncoder); }
+
 function supUid(){ return 'sup_'+Date.now().toString(36)+'_'+Math.floor(Math.random()*1e6).toString(36); }
 
 // Fresh, empty-but-labelled seed cards for the seven big SA life insurers
@@ -9764,14 +9787,19 @@ function persistSuppliers(cb){
 }
 
 // ── Clipboard (the whole point: copy a code in one tap) ──────────
-function copyText(t){
+// supRawCopy writes to the clipboard and calls ok() on success — the caller
+// controls the toast (so passwords can confirm without echoing the value).
+function supRawCopy(t, ok){
   t = (t==null) ? '' : String(t);
-  function ok(){ toast('Copied: '+t,'ok'); }
   if(navigator.clipboard && navigator.clipboard.writeText){
     navigator.clipboard.writeText(t).then(ok, function(){ supFallbackCopy(t, ok); });
   } else {
     supFallbackCopy(t, ok);
   }
+}
+function copyText(t){
+  t = (t==null) ? '' : String(t);
+  supRawCopy(t, function(){ toast('Copied: '+t,'ok'); });
 }
 function supFallbackCopy(t, ok){
   try{
@@ -9783,8 +9811,8 @@ function supFallbackCopy(t, ok){
   }catch(e){ toast('Could not copy — long-press the code to copy','err'); }
 }
 
-// Reveal / hide a masked password on a card. The real value lives in the
-// span's data-pw attribute; we swap the visible text between it and dots.
+// Reveal / hide a masked PLAINTEXT password (legacy, pre-lock) on a card. The
+// value lives in the span's data-pw attribute; swap text between it and dots.
 function togglePw(id){
   var el=document.getElementById(id); if(!el) return;
   if(el.getAttribute('data-shown')==='1'){
@@ -9794,15 +9822,228 @@ function togglePw(id){
   }
 }
 
+// ══════════════════════════════════════════════════════════════
+// PASSWORD LOCK (VAULT) — AES-GCM encryption via Web Crypto
+// ══════════════════════════════════════════════════════════════
+function supB64enc(buf){ var b=new Uint8Array(buf), s=''; for(var i=0;i<b.length;i++) s+=String.fromCharCode(b[i]); return btoa(s); }
+function supB64dec(str){ var bin=atob(str), u=new Uint8Array(bin.length); for(var i=0;i<bin.length;i++) u[i]=bin.charCodeAt(i); return u; }
+function supIsEnc(v){ return typeof v==='string' && v.indexOf('enc:1:')===0; }
+
+// Derive an AES-GCM key from a master password + salt via PBKDF2 (SHA-256).
+function supDeriveKey(pass, saltU8, iters){
+  var enc=new TextEncoder();
+  return crypto.subtle.importKey('raw', enc.encode(pass), {name:'PBKDF2'}, false, ['deriveKey'])
+    .then(function(base){
+      return crypto.subtle.deriveKey(
+        {name:'PBKDF2', salt:saltU8, iterations:iters, hash:'SHA-256'},
+        base, {name:'AES-GCM', length:256}, false, ['encrypt','decrypt']);
+    });
+}
+// Encrypt a string → 'enc:1:<b64 iv>:<b64 ct>'. Fresh random IV each time.
+function supEncrypt(key, plaintext){
+  var iv=crypto.getRandomValues(new Uint8Array(12));
+  return crypto.subtle.encrypt({name:'AES-GCM', iv:iv}, key, new TextEncoder().encode(String(plaintext)))
+    .then(function(ct){ return 'enc:1:'+supB64enc(iv)+':'+supB64enc(ct); });
+}
+// Decrypt an 'enc:1:...' token → plaintext string. Rejects if key/data wrong.
+function supDecrypt(key, token){
+  var p=String(token).split(':'); // ['enc','1',ivB64,ctB64]
+  if(p.length!==4) return Promise.reject(new Error('bad token'));
+  return crypto.subtle.decrypt({name:'AES-GCM', iv:supB64dec(p[2])}, key, supB64dec(p[3]))
+    .then(function(pt){ return new TextDecoder().decode(pt); });
+}
+
+// ── Vault config load / persist (settings row 'suppliers_crypto') ──
+function loadSupCrypto(){
+  SUP_CRYPTO_LOADED=true;
+  try{ var c=JSON.parse(localStorage.getItem(SUP_CRYPTO_CACHE)||'null'); if(c) SUP_CRYPTO_CFG=c; }catch(e){}
+  sbFetch('GET','/rest/v1/settings?Key=eq.'+SUP_CRYPTO_KEY+'&select=*',null,function(rows,err){
+    if(err===undefined && rows){
+      if(rows[0] && rows[0].Value){
+        try{ SUP_CRYPTO_CFG=JSON.parse(rows[0].Value); localStorage.setItem(SUP_CRYPTO_CACHE, rows[0].Value); }catch(e){}
+      } else {
+        // Server authoritatively has no vault → not set up (or was reset).
+        SUP_CRYPTO_CFG=null; SUP_CRYPTOKEY=null;
+        try{ localStorage.removeItem(SUP_CRYPTO_CACHE); }catch(e){}
+      }
+    } // else offline: keep whatever the cache gave us
+    if(PAGE==='suppliers') render();
+  });
+}
+function persistSupCrypto(cb){
+  try{ localStorage.setItem(SUP_CRYPTO_CACHE, JSON.stringify(SUP_CRYPTO_CFG)); }catch(e){}
+  sbFetch('POST','/rest/v1/settings',[{Key:SUP_CRYPTO_KEY, Value:JSON.stringify(SUP_CRYPTO_CFG)}],function(res,err){ if(cb) cb(err); });
+}
+
+// ── Card reveal / copy for ENCRYPTED passwords (async decrypt) ────
+function supRequestUnlock(){ openCryptoModal('unlock'); }
+function revealPw(id){
+  var el=document.getElementById(id); if(!el) return;
+  if(el.getAttribute('data-shown')==='1'){ el.textContent='••••••••'; el.setAttribute('data-shown','0'); return; }
+  if(!SUP_CRYPTOKEY){ supRequestUnlock(); return; }
+  supDecrypt(SUP_CRYPTOKEY, el.getAttribute('data-pwenc')).then(function(pt){
+    el.textContent=pt; el.setAttribute('data-shown','1');
+  }).catch(function(){ toast('Could not decrypt — try unlocking again','err'); });
+}
+function copyPw(id){
+  var el=document.getElementById(id); if(!el) return;
+  if(!SUP_CRYPTOKEY){ supRequestUnlock(); return; }
+  supDecrypt(SUP_CRYPTOKEY, el.getAttribute('data-pwenc')).then(function(pt){
+    supRawCopy(pt, function(){ toast('Password copied','ok'); });   // never echo the value in the toast
+  }).catch(function(){ toast('Could not decrypt','err'); });
+}
+
+// ── Vault modal (setup / unlock / change) ────────────────────────
+function supPwField(id,label){
+  return '<div class="fld" style="margin-bottom:10px"><label>'+label+'</label>'+
+    '<div style="position:relative;display:flex;align-items:center">'+
+      '<input id="'+id+'" type="password" autocomplete="off" style="width:100%;padding-right:34px">'+
+      '<button type="button" onclick="toggleInputPw(\''+id+'\')" title="Show / hide" style="position:absolute;right:6px;background:none;border:none;cursor:pointer;font-size:14px;opacity:.55;padding:2px">👁</button>'+
+    '</div></div>';
+}
+function openCryptoModal(mode){
+  if(!supCryptoAvailable()){ toast('Encryption needs a secure (https) connection','err'); return; }
+  var b='', f='', title='';
+  if(mode==='setup'){
+    title='Set Master Password';
+    b = '<div style="font-size:13px;color:#556;margin-bottom:12px">Set a <strong>master password</strong> to encrypt every portal password. It is never stored — anyone (you or your staff) who knows it can unlock the passwords; anyone who doesn’t, can’t.</div>'+
+        '<div style="background:#fff7e6;border:1px solid #f0c674;border-radius:8px;padding:10px 12px;font-size:12px;color:#7a5b00;margin-bottom:14px">⚠ There is <strong>no recovery</strong>. If this master password is forgotten, the stored portal passwords cannot be read and must be reset with each provider.</div>'+
+        supPwField('cryptoP1','Master password')+
+        supPwField('cryptoP2','Confirm master password')+
+        '<div id="cryptoErr" style="color:var(--rose);font-size:12px;min-height:16px;margin-top:4px"></div>';
+    f = '<button class="btn b-gh sm" data-close="1">Cancel</button>'+
+        '<button class="btn b-gd sm" onclick="supDoSetup()">🔒 Lock passwords</button>';
+  } else if(mode==='unlock'){
+    title='Unlock Passwords';
+    b = '<div style="font-size:13px;color:#556;margin-bottom:12px">Enter the <strong>master password</strong> to unlock portal passwords for this session.</div>'+
+        supPwField('cryptoP1','Master password')+
+        '<div id="cryptoErr" style="color:var(--rose);font-size:12px;min-height:16px;margin-top:4px"></div>'+
+        '<div style="margin-top:8px"><button type="button" onclick="supForgot()" style="background:none;border:none;color:#99a;font-size:11px;text-decoration:underline;cursor:pointer;padding:0">Forgotten the master password?</button></div>';
+    f = '<button class="btn b-gh sm" data-close="1">Cancel</button>'+
+        '<button class="btn b-gd sm" onclick="supDoUnlock()">🔓 Unlock</button>';
+  } else { // change
+    title='Change Master Password';
+    b = '<div style="font-size:13px;color:#556;margin-bottom:12px">Choose a new master password. Every stored password is re-encrypted with it.</div>'+
+        supPwField('cryptoP1','New master password')+
+        supPwField('cryptoP2','Confirm new master password')+
+        '<div id="cryptoErr" style="color:var(--rose);font-size:12px;min-height:16px;margin-top:4px"></div>';
+    f = '<button class="btn b-gh sm" data-close="1">Cancel</button>'+
+        '<button class="btn b-gd sm" onclick="supDoChange()">Save new password</button>';
+  }
+  document.getElementById('supCryptoT').textContent=title;
+  document.getElementById('supCryptoB').innerHTML=b;
+  document.getElementById('supCryptoF').innerHTML=f;
+  document.getElementById('supCryptoMod').classList.add('open');
+  var p=document.getElementById('cryptoP1'); if(p) p.focus();
+}
+
+// Encrypt any still-plaintext passwords in place (used on first setup).
+function supEncryptAllPlaintext(key){
+  var tasks=[];
+  (SUPPLIERS||[]).forEach(function(s){ (s.logins||[]).forEach(function(lg){
+    var pw=lg.password||'';
+    if(pw && !supIsEnc(pw)){ tasks.push(supEncrypt(key, pw).then(function(tok){ lg.password=tok; })); }
+  }); });
+  return Promise.all(tasks);
+}
+
+function supDoSetup(){
+  var p1=g('cryptoP1'), p2=g('cryptoP2'), err=document.getElementById('cryptoErr');
+  if(p1.length<6){ err.textContent='Use at least 6 characters.'; return; }
+  if(p1!==p2){ err.textContent='The two passwords do not match.'; return; }
+  var salt=crypto.getRandomValues(new Uint8Array(16)), iters=250000;
+  supDeriveKey(p1, salt, iters).then(function(key){
+    return supEncrypt(key, SUP_VERIFY_TOKEN).then(function(verify){
+      SUP_CRYPTOKEY=key;
+      SUP_CRYPTO_CFG={v:1, salt:supB64enc(salt), iters:iters, verify:verify};
+      return supEncryptAllPlaintext(key).then(function(){
+        persistSupCrypto();
+        persistSuppliers(function(){ closeAll(); render(); toast('Passwords locked & encrypted','ok'); });
+      });
+    });
+  }).catch(function(e){ err.textContent='Could not set up: '+(e&&e.message||e); });
+}
+
+function supDoUnlock(){
+  var p1=g('cryptoP1'), err=document.getElementById('cryptoErr');
+  if(!SUP_CRYPTO_CFG){ err.textContent='No lock is configured.'; return; }
+  supDeriveKey(p1, supB64dec(SUP_CRYPTO_CFG.salt), SUP_CRYPTO_CFG.iters||250000).then(function(key){
+    return supDecrypt(key, SUP_CRYPTO_CFG.verify).then(function(tok){
+      if(tok===SUP_VERIFY_TOKEN){
+        SUP_CRYPTOKEY=key;
+        var after=SUP_AFTER_UNLOCK; SUP_AFTER_UNLOCK=null;
+        closeAll(); render(); toast('Passwords unlocked','ok');
+        if(after) after();
+      } else { err.textContent='Incorrect master password.'; }
+    }).catch(function(){ err.textContent='Incorrect master password.'; });
+  }).catch(function(e){ err.textContent='Unlock failed: '+(e&&e.message||e); });
+}
+
+function supDoChange(){
+  var p1=g('cryptoP1'), p2=g('cryptoP2'), err=document.getElementById('cryptoErr');
+  if(!SUP_CRYPTOKEY){ err.textContent='Unlock first.'; return; }
+  if(p1.length<6){ err.textContent='Use at least 6 characters.'; return; }
+  if(p1!==p2){ err.textContent='The two passwords do not match.'; return; }
+  // Decrypt all with the current key, then re-encrypt with a new key + salt.
+  var plains=[], decTasks=[];
+  (SUPPLIERS||[]).forEach(function(s){ (s.logins||[]).forEach(function(lg){
+    if(supIsEnc(lg.password)){ decTasks.push(supDecrypt(SUP_CRYPTOKEY, lg.password).then(function(pt){ plains.push({lg:lg, pw:pt}); })); }
+  }); });
+  var salt=crypto.getRandomValues(new Uint8Array(16)), iters=250000;
+  Promise.all(decTasks).then(function(){
+    return supDeriveKey(p1, salt, iters).then(function(newKey){
+      return supEncrypt(newKey, SUP_VERIFY_TOKEN).then(function(verify){
+        return Promise.all(plains.map(function(o){ return supEncrypt(newKey, o.pw).then(function(tok){ o.lg.password=tok; }); }))
+          .then(function(){
+            SUP_CRYPTOKEY=newKey; SUP_CRYPTO_CFG={v:1, salt:supB64enc(salt), iters:iters, verify:verify};
+            persistSupCrypto();
+            persistSuppliers(function(){ closeAll(); render(); toast('Master password changed','ok'); });
+          });
+      });
+    });
+  }).catch(function(e){ err.textContent='Change failed: '+(e&&e.message||e); });
+}
+
+// Forgotten master password: unrecoverable by design. Clear encrypted
+// passwords (usernames/codes/phones are kept) and remove the vault config so
+// a fresh master password can be set.
+function supForgot(){
+  if(!confirm('Reset the master password?\n\nThe stored portal passwords are encrypted and CANNOT be recovered — they will be permanently cleared. Usernames, codes and phone numbers are kept.\n\nContinue?')) return;
+  (SUPPLIERS||[]).forEach(function(s){ (s.logins||[]).forEach(function(lg){ if(supIsEnc(lg.password)) lg.password=''; }); });
+  SUP_CRYPTO_CFG=null; SUP_CRYPTOKEY=null;
+  try{ localStorage.removeItem(SUP_CRYPTO_CACHE); }catch(e){}
+  sbFetch('DELETE','/rest/v1/settings?Key=eq.'+SUP_CRYPTO_KEY, null, function(){});
+  persistSuppliers(function(){ closeAll(); render(); toast('Master password reset — stored passwords cleared','ok'); });
+}
+
+function supLock(){ SUP_CRYPTOKEY=null; render(); toast('Passwords locked','ok'); }
+
 // ── Page render ──────────────────────────────────────────────────
 function renderSuppliers(){
   if(!SUP_LOADED) loadSuppliers();               // lazy refresh on first view
+  if(!SUP_CRYPTO_LOADED) loadSupCrypto();        // and the vault config
   var list = SUPPLIERS || [];
+  // Lock control reflects vault state: not set up / locked / unlocked.
+  var lockCtl='';
+  if(supCryptoAvailable()){
+    if(!SUP_CRYPTO_CFG){
+      lockCtl='<button class="btn b-gh sm" onclick="openCryptoModal(\'setup\')" title="Encrypt portal passwords with a master password">🔒 Lock passwords</button>';
+    } else if(!SUP_CRYPTOKEY){
+      lockCtl='<button class="btn b-gh sm" onclick="openCryptoModal(\'unlock\')" title="Unlock portal passwords for this session">🔓 Unlock</button>';
+    } else {
+      lockCtl='<span style="display:inline-flex;gap:6px;align-items:center">'+
+        '<span class="bx bx-sg" title="Passwords are unlocked for this session">🔓 Unlocked</span>'+
+        '<button class="btn b-gh sm" onclick="supLock()">🔒 Lock now</button>'+
+        '<button class="btn b-gh sm" onclick="openCryptoModal(\'change\')">Change password</button>'+
+        '</span>';
+    }
+  }
   var h = '';
-  h += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">'+
+  h += '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:4px">'+
     '<h1 style="font-family:\'DM Serif Display\',serif;font-size:22px;color:var(--navy)">🏢 Suppliers &amp; Broker Codes ('+list.length+')</h1>'+
+    '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">'+lockCtl+
     '<button class="btn b-gd sm" data-act="add-supplier">+ Add Supplier</button>'+
-    '</div>';
+    '</div></div>';
   h += '<div style="font-size:12px;color:#889;margin-bottom:14px">Provider phone numbers, your broker codes, and portal logins. Tap any code or password to copy it.'+
     (SUP_LOADED?'':' <span style="color:#bbb">· syncing…</span>')+'</div>';
   h += '<div style="margin-bottom:16px"><input id="supSearch" type="text" placeholder="Search supplier, number, code or login…" value="'+escHtml(SUP_SRCH)+'" '+
@@ -9889,15 +10130,29 @@ function supCard(s){
             '<button data-act="copy" data-copy="'+escHtml(user)+'" title="Copy username" style="background:none;border:none;cursor:pointer;font-size:13px;opacity:.55;padding:0">📋</button>'
           : '<span style="flex:1;font-size:12px;color:#c4c4c4;font-style:italic">—</span>')+
         '</div>';
-      // Password line
+      // Password line — encryption-aware.
+      //  • empty            → "not set"
+      //  • encrypted + unlocked → masked, with async reveal + copy
+      //  • encrypted + locked   → a lock chip that opens the unlock modal
+      //  • plaintext (legacy, before the vault was set up) → masked reveal/copy
+      var pwCell;
+      if(!pw){
+        pwCell='<span style="flex:1;font-size:12px;color:#c4c4c4;font-style:italic">not set</span>';
+      } else if(supIsEnc(pw)){
+        if(SUP_CRYPTOKEY){
+          pwCell='<span id="'+pid+'" data-pwenc="'+escHtml(pw)+'" data-shown="0" style="flex:1;font-size:13px;font-family:ui-monospace,Menlo,monospace;color:#334;word-break:break-all">••••••••</span>'+
+            '<button type="button" onclick="revealPw(\''+pid+'\')" title="Show / hide" style="background:none;border:none;cursor:pointer;font-size:13px;opacity:.55;padding:0">👁</button>'+
+            '<button type="button" onclick="copyPw(\''+pid+'\')" title="Copy password" style="background:none;border:none;cursor:pointer;font-size:13px;opacity:.55;padding:0">📋</button>';
+        } else {
+          pwCell='<button type="button" onclick="supRequestUnlock()" title="Unlock to view" style="flex:1;text-align:left;background:none;border:none;cursor:pointer;font-size:12.5px;color:#a8843a;padding:0">🔒 Locked — tap to unlock</button>';
+        }
+      } else {
+        pwCell='<span id="'+pid+'" data-pw="'+escHtml(pw)+'" data-shown="0" style="flex:1;font-size:13px;font-family:ui-monospace,Menlo,monospace;color:#334;word-break:break-all">••••••••</span>'+
+          '<button type="button" onclick="togglePw(\''+pid+'\')" title="Show / hide" style="background:none;border:none;cursor:pointer;font-size:13px;opacity:.55;padding:0">👁</button>'+
+          '<button data-act="copy" data-copy="'+escHtml(pw)+'" title="Copy password" style="background:none;border:none;cursor:pointer;font-size:13px;opacity:.55;padding:0">📋</button>';
+      }
       row += '<div style="display:flex;align-items:center;gap:8px">'+
-        '<span style="font-size:11px;color:#99a;min-width:34px">Pass</span>'+
-        (pw
-          ? '<span id="'+pid+'" data-pw="'+escHtml(pw)+'" data-shown="0" style="flex:1;font-size:13px;font-family:ui-monospace,Menlo,monospace;color:#334;word-break:break-all">••••••••</span>'+
-            '<button type="button" onclick="togglePw(\''+pid+'\')" title="Show / hide" style="background:none;border:none;cursor:pointer;font-size:13px;opacity:.55;padding:0">👁</button>'+
-            '<button data-act="copy" data-copy="'+escHtml(pw)+'" title="Copy password" style="background:none;border:none;cursor:pointer;font-size:13px;opacity:.55;padding:0">📋</button>'
-          : '<span style="flex:1;font-size:12px;color:#c4c4c4;font-style:italic">not set</span>')+
-        '</div>';
+        '<span style="font-size:11px;color:#99a;min-width:34px">Pass</span>'+ pwCell +'</div>';
       row += '</div>';
       return row;
     }).join('');
@@ -9939,7 +10194,14 @@ function supCard(s){
 }
 
 // ── Editor modal (mirrors the EDIT_BANKS dynamic-row pattern) ────
+// If the vault is configured but the session is locked, unlock first (so we
+// can decrypt existing passwords into the fields and re-encrypt on save).
 function openSupplierModal(id){
+  if(SUP_CRYPTO_CFG && !SUP_CRYPTOKEY){
+    SUP_AFTER_UNLOCK = function(){ openSupplierModal(id); };
+    openCryptoModal('unlock');
+    return;
+  }
   var src = id ? (SUPPLIERS||[]).find(function(s){ return String(s.id)===String(id); }) : null;
   SUP_EDIT_ID = src ? src.id : null;
   EDIT_SUP = src ? JSON.parse(JSON.stringify(src))
@@ -9949,6 +10211,17 @@ function openSupplierModal(id){
   if(!EDIT_SUP.phones || !EDIT_SUP.phones.length) EDIT_SUP.phones=[{label:'',number:''}];
   if(!EDIT_SUP.codes  || !EDIT_SUP.codes.length)  EDIT_SUP.codes=[{label:'',value:''}];
   if(!EDIT_SUP.logins || !EDIT_SUP.logins.length) EDIT_SUP.logins=[{label:'Broker portal',username:'',password:''}];
+  // Decrypt encrypted passwords into plaintext for editing (in-memory only),
+  // then build the modal. supDecrypt is async, so we wait for all of them.
+  var decTasks=[];
+  EDIT_SUP.logins.forEach(function(lg){
+    if(supIsEnc(lg.password) && SUP_CRYPTOKEY){
+      decTasks.push(supDecrypt(SUP_CRYPTOKEY, lg.password).then(function(pt){ lg.password=pt; }, function(){ lg.password=''; }));
+    }
+  });
+  Promise.all(decTasks).then(function(){ supBuildModal(src); });
+}
+function supBuildModal(src){
   document.getElementById('supModT').textContent = src ? 'Edit Supplier' : 'Add Supplier';
   document.getElementById('delSupBtn').style.display = src ? '' : 'none';
   document.getElementById('supModB').innerHTML =
@@ -9958,7 +10231,11 @@ function openSupplierModal(id){
     '<div id="supCodeRows"></div>'+
     '<button type="button" class="btn b-gh xs" onclick="addSupCode()" style="margin:2px 0 18px">+ Add code</button>'+
     '<div style="font-size:10px;font-weight:700;color:#889;text-transform:uppercase;letter-spacing:1px;margin:0 0 4px">Portal Logins</div>'+
-    '<div style="font-size:11px;color:#a09a8c;margin:0 0 8px">Saved to your shared practice database — visible to anyone with CRM access.</div>'+
+    '<div style="font-size:11px;color:#a09a8c;margin:0 0 8px">'+
+      (SUP_CRYPTO_CFG
+        ? '🔒 Passwords are encrypted with your master password before saving.'
+        : 'Saved to your shared practice database — visible to anyone with CRM access. Use <strong>🔒 Lock passwords</strong> to encrypt them.')+
+    '</div>'+
     '<div id="supLoginRows"></div>'+
     '<button type="button" class="btn b-gh xs" onclick="addSupLogin()" style="margin:2px 0 18px">+ Add login</button>'+
     '<div style="font-size:10px;font-weight:700;color:#889;text-transform:uppercase;letter-spacing:1px;margin:0 0 8px">Phone Numbers</div>'+
@@ -10034,18 +10311,37 @@ function saveSupplier(){
   if(!EDIT_SUP) return;
   var name=g('supName');
   if(!name){ toast('Supplier name is required','err'); return; }
+  // Safety: if the vault is configured we must be unlocked to store passwords
+  // encrypted. (The editor unlock-gate makes this practically unreachable.)
+  if(SUP_CRYPTO_CFG && !SUP_CRYPTOKEY){ toast('Unlock passwords before saving','err'); openCryptoModal('unlock'); return; }
   EDIT_SUP.name  = name;
   var nt=document.getElementById('supNotes'); EDIT_SUP.notes = nt ? nt.value : '';
   // Drop rows that are entirely blank so saved data stays clean.
   EDIT_SUP.codes  = (EDIT_SUP.codes||[]).filter(function(cd){ return (cd.label||'').trim() || String(cd.value||'').trim(); });
   EDIT_SUP.phones = (EDIT_SUP.phones||[]).filter(function(p){ return (p.label||'').trim() || String(p.number||'').trim(); });
   EDIT_SUP.logins = (EDIT_SUP.logins||[]).filter(function(lg){ return (lg.label||'').trim() || (lg.username||'').trim() || (lg.password||'').trim(); });
-  if(!SUPPLIERS) SUPPLIERS=[];
-  var idx=SUPPLIERS.findIndex(function(s){ return String(s.id)===String(EDIT_SUP.id); });
-  if(idx>=0) SUPPLIERS[idx]=EDIT_SUP; else SUPPLIERS.push(EDIT_SUP);
-  closeAll();
-  render();
-  persistSuppliers(function(err){ toast(err?'Saved on this device — will sync when back online':'Supplier saved','ok'); });
+
+  function commit(){
+    if(!SUPPLIERS) SUPPLIERS=[];
+    var idx=SUPPLIERS.findIndex(function(s){ return String(s.id)===String(EDIT_SUP.id); });
+    if(idx>=0) SUPPLIERS[idx]=EDIT_SUP; else SUPPLIERS.push(EDIT_SUP);
+    closeAll();
+    render();
+    persistSuppliers(function(err){ toast(err?'Saved on this device — will sync when back online':'Supplier saved','ok'); });
+  }
+
+  // Vault on → encrypt every non-empty password that isn't already ciphertext
+  // (the fields hold plaintext during editing) before committing.
+  if(SUP_CRYPTO_CFG && SUP_CRYPTOKEY){
+    var encTasks=[];
+    EDIT_SUP.logins.forEach(function(lg){
+      var pw=lg.password||'';
+      if(pw && !supIsEnc(pw)){ encTasks.push(supEncrypt(SUP_CRYPTOKEY, pw).then(function(tok){ lg.password=tok; })); }
+    });
+    Promise.all(encTasks).then(commit).catch(function(e){ toast('Could not encrypt password: '+(e&&e.message||e),'err'); });
+  } else {
+    commit();
+  }
 }
 
 function deleteSupplier(id){
@@ -11189,8 +11485,10 @@ function bootApp(){
   // Keep every browser current: silently re-pull on a timer and on tab focus,
   // so changes by another user appear without a manual Sync or hard refresh.
   installAutoSync();
-  // Load the practice-level Suppliers & broker-codes reference in the background.
+  // Load the practice-level Suppliers & broker-codes reference in the background,
+  // plus the password-vault config (so the lock state is known on first view).
   loadSuppliers();
+  loadSupCrypto();
   // Attach persistent search listener
   var _si = document.getElementById('dashSearch');
   if(_si){
