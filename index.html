@@ -8368,6 +8368,8 @@ function pcNormalize(obj){
   return { client:client,
     children:Array.isArray(obj.children)?obj.children:[],
     needs:Array.isArray(obj.needs)?obj.needs:[],
+    assets:Array.isArray(obj.assets)?obj.assets:[],
+    liabilities:Array.isArray(obj.liabilities)?obj.liabilities:[],
     flags:Array.isArray(obj.flags)?obj.flags:[],
     notes:(typeof obj.notes==='string')?obj.notes:'' };
 }
@@ -8497,10 +8499,134 @@ function pcPreview(){
       '<pre style="margin:6px 0 0;padding:10px 12px;background:var(--smoke);border-radius:8px;font-size:12px;white-space:pre-wrap;color:#334;font-family:ui-monospace,Menlo,Consolas,monospace">'+astuteEsc(noteText)+'</pre>';
   }
 
+  var frows=pcFinposRows(payload);
+  if(frows.length){
+    html+='<div style="margin-top:12px;font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:1px">Added to the Needs / Financial Position tabs</div><ul style="margin:6px 0 0;padding-left:18px;font-size:12.5px;color:var(--navy)">';
+    frows.forEach(function(r){ html+='<li style="margin-bottom:2px">'+pcRowSummary(r)+'</li>'; });
+    html+='</ul>';
+  }
+
   wrap.innerHTML=html;
   var btn=document.getElementById('pcImportBtn');
   btn.style.display='';
   btn.textContent=existing?('💾 Update '+String(existing.Name).split(' ')[0]):('💾 Create '+((cl.IsLead==='Yes')?'Lead':'Client'));
+}
+
+// ── Structured Needs / Assets / Liabilities → the Needs & Financial Position tabs ──
+// The block can carry `needs[]`, `assets[]` and `liabilities[]`; these become real
+// finpos rows (same shape as the manual Financial Position form), not just Notes text.
+function pcScenario(s){
+  var t=String(s||'').toLowerCase();
+  if(t.indexOf('disab')>=0) return 'Disability';
+  if(t.indexOf('dread')>=0||t.indexOf('critical')>=0||t.indexOf('illness')>=0) return 'Dread Disease';
+  if(t.indexOf('retire')>=0) return 'Retirement';
+  if(t.indexOf('death')>=0||t.indexOf('die')>=0||t.indexOf('life')>=0) return 'Death';
+  return '';
+}
+function pcNeedType(n){
+  var ty=String(n.type||'').toLowerCase();
+  var blob=(ty+' '+String(n.need||n.description||'')).toLowerCase();
+  if(ty.indexOf('capital')>=0||ty==='lump'||/lump sum|once-?off|capital need/.test(blob)) return 'Once-off capital';
+  return 'Monthly income';
+}
+function pcBenTo(who){
+  var t=String(who||'').toLowerCase();
+  if(!t) return {benTo:'',benName:''};
+  if(t.indexOf('spouse')>=0||t.indexOf('wife')>=0||t.indexOf('husband')>=0||t.indexOf('partner')>=0) return {benTo:'Spouse',benName:''};
+  if(t.indexOf('estate')>=0) return {benTo:'Estate',benName:''};
+  return {benTo:'Named person',benName:String(who)};
+}
+function pcLiabType(s){
+  var opts=['Personal Loan','Credit Card','Vehicle Finance','Home Bond','Overdraft','Store Account','Tax Debt','Student Loan','Other'];
+  var t=String(s||'').toLowerCase();
+  for(var i=0;i<opts.length;i++){ if(opts[i].toLowerCase()===t) return opts[i]; }
+  if(t.indexOf('bond')>=0||t.indexOf('mortgage')>=0) return 'Home Bond';
+  if(t.indexOf('card')>=0) return 'Credit Card';
+  if(t.indexOf('vehicle')>=0||t.indexOf('car finance')>=0) return 'Vehicle Finance';
+  if(t.indexOf('overdraft')>=0) return 'Overdraft';
+  if(t.indexOf('tax')>=0) return 'Tax Debt';
+  if(t.indexOf('student')>=0) return 'Student Loan';
+  if(t.indexOf('store')>=0) return 'Store Account';
+  if(t.indexOf('personal')>=0||t.indexOf('loan')>=0) return 'Personal Loan';
+  return 'Other';
+}
+function pcAssetKind(k){
+  var t=String(k||'').toLowerCase();
+  if(t.indexOf('propert')>=0||t.indexOf('house')>=0||t.indexOf('home')>=0||t.indexOf('land')>=0||t.indexOf('flat')>=0) return 'property';
+  if(t.indexOf('vehicle')>=0||t.indexOf('car')>=0||t.indexOf('boat')>=0||t.indexOf('bakkie')>=0) return 'vehicle';
+  if(t.indexOf('business')>=0||t.indexOf('company')>=0||t==='cc') return 'business';
+  return 'other';
+}
+function pcYes(v){ return (v===true||v==='Yes'||v==='yes'||v==='1'||v===1) ? 'Yes' : 'No'; }
+
+// Assemble finpos rows from a payload (pure — used by both preview and commit).
+function pcFinposRows(payload){
+  var rows=[]; var S=function(v){ return (v==null)?'':String(v); };
+  (payload.needs||[]).forEach(function(n){
+    if(typeof n==='string'){ rows.push({Kind:'need',Data:{desc:n,scenario:'Death',needType:'Monthly income',amount:'',years:'',esc:'',benTo:'',benName:'',notes:''}}); return; }
+    var nt=pcNeedType(n); var bt=pcBenTo(n.beneficiary||n.who);
+    rows.push({Kind:'need',Data:{
+      desc:S(n.need||n.description||((n.beneficiary?n.beneficiary+' — ':'')+'need')),
+      scenario:pcScenario(n.scenario)||'Death',
+      needType:nt,
+      amount:S(n.amount||n.monthly),
+      years: nt==='Monthly income' ? S(n.years||n.term) : '',
+      esc:   nt==='Monthly income' ? S(n.escalation||n.esc) : '',
+      benTo:bt.benTo, benName:bt.benName, notes:'' }});
+  });
+  (payload.assets||[]).forEach(function(a){
+    var kind=pcAssetKind(a.kind);
+    var d={ desc:S(a.desc||a.name||kind), owner:S(a.owner||'Client'), notes:S(a.notes),
+      value:S(a.value||a.worth), valueDate:S(a.valueDate),
+      passesTo:S(a.passesTo||'Estate'), passesToName:(a.passesTo==='Named person')?S(a.passesToName):'',
+      soldDeath:pcYes(a.soldDeath), soldDisab:pcYes(a.soldDisab) };
+    if(kind==='property'){ d.baseCost=S(a.baseCost||a.purchasePrice); d.dateAcquired=S(a.dateAcquired||a.datePurchased); d.bondOut=S(a.bondOut||a.bond); d.bondPM=S(a.bondPM); d.rentalPM=S(a.rentalPM||a.rental); d.primaryRes=pcYes(a.primaryRes); }
+    else if(kind==='vehicle'){ d.financeOut=S(a.financeOut); d.financePM=S(a.financePM); }
+    else if(kind==='business'){ d.entityType=S(a.entityType); d.pctHeld=S(a.pctHeld).replace('%','').trim(); d.valBasis=S(a.valBasis); d.loanAcc=S(a.loanAcc); d.loanBal=S(a.loanBal); d.buySell=pcYes(a.buySell); }
+    else { d.type=S(a.type); d.baseCost=S(a.baseCost); d.dateAcquired=S(a.dateAcquired); }
+    rows.push({Kind:kind,Data:d});
+  });
+  (payload.liabilities||[]).forEach(function(l){
+    rows.push({Kind:'liability',Data:{
+      desc:S(l.desc||l.name||'Liability'), owner:S(l.owner||'Client'), notes:S(l.notes),
+      liabType:pcLiabType(l.liabType||l.type), balance:S(l.balance||l.amount||l.outstanding),
+      interestRate:S(l.interestRate), paymentPM:S(l.paymentPM||l.pm), payOffDisab:pcYes(l.payOffDisab) }});
+  });
+  return rows;
+}
+// One-line human summary of a proposed row (for the preview list).
+function pcRowSummary(r){
+  var d=r.Data, icon={need:'🎯',property:'🏠',vehicle:'🚗',business:'🏢',other:'💼',liability:'💳'}[r.Kind]||'•';
+  if(r.Kind==='need'){
+    var bits=[]; if(d.amount) bits.push('R'+d.amount+(d.needType==='Monthly income'?'/m':' lump'));
+    if(d.years) bits.push(d.years+' yrs'); if(d.esc) bits.push(d.esc+'% esc');
+    return icon+' Need — '+astuteEsc(d.desc)+' ['+astuteEsc(d.scenario)+']'+(bits.length?': '+astuteEsc(bits.join(', ')):'');
+  }
+  if(r.Kind==='liability') return icon+' '+astuteEsc(d.desc)+' — R'+astuteEsc(d.balance||'0')+(d.liabType?' ('+astuteEsc(d.liabType)+')':'');
+  var t=[]; if(d.value) t.push('R'+d.value); if(d.bondOut) t.push('bond R'+d.bondOut); if(d.pctHeld) t.push(d.pctHeld+'%');
+  return icon+' '+astuteEsc(d.desc)+(t.length?' — '+astuteEsc(t.join(', ')):'');
+}
+// Create the finpos rows (dedupe by kind+desc so a re-import doesn't duplicate them).
+function pcCommitFinpos(clientId, payload){
+  if(!DB.finpos) DB.finpos=[];
+  var rows=pcFinposRows(payload);
+  if(!rows.length) return 0;
+  var now=new Date().toISOString().slice(0,16).replace('T',' ');
+  var existing=DB.finpos.filter(function(r){return String(r.ClientID)===String(clientId);});
+  var seq=0, made=0;
+  rows.forEach(function(r){
+    var dup=existing.find(function(x){
+      if(String(x.Kind)!==String(r.Kind)) return false;
+      var dd; try{dd=x.Data?JSON.parse(x.Data):{};}catch(e){dd={};}
+      return String(dd.desc||'').toLowerCase().trim()===String(r.Data.desc||'').toLowerCase().trim();
+    });
+    if(dup) return;
+    var row={ ID:'fp_'+Date.now()+'_'+(seq++), ClientID:clientId, Kind:r.Kind, Data:JSON.stringify(r.Data), UpdatedAt:now };
+    DB.finpos.push(row); existing.push(row);
+    post({action:'saveFinPos', item:JSON.parse(JSON.stringify(row))});
+    made++;
+  });
+  return made;
 }
 
 function runPasteClaudeImport(){
@@ -8545,6 +8671,7 @@ function runPasteClaudeImport(){
     DB.links.push(link); post({action:'saveFamMember',member:link});
   });
 
+  pcCommitFinpos(c.ID, PC_PARSED);
   var savedId=c.ID, wasUpdate=!!existing;
   closeAll();
   c._pendingSave=true;
