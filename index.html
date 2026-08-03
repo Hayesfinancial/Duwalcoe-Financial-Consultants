@@ -805,7 +805,25 @@ function toggleRemDone(name,type){
 function recentKey(){ return 'du_recent_'+cu(); }
 function polsFor(id){ return DB.policies.filter(function(p){return String(p.ClientID)===String(id);}); }
 function roasFor(id){ return DB.roas.filter(function(r){return String(r.ClientID)===String(id);}); }
-function tasksFor(nm){ return DB.tasks.filter(function(t){return t.ClientName===nm&&!isdone(t);}); }
+function tasksFor(nm){ return DB.tasks.filter(function(t){return sameClient(t.ClientName,nm)&&!isdone(t);}); }
+// ── Tolerant client<->task name matching ──────────────────────────────────
+// Tasks are linked to a client by the client's NAME string (t.ClientName),
+// not by ID. If that string differs from the client's current Name by only
+// stray/' ' whitespace or capitalisation, an exact === match fails and the
+// task shows in the Tasks module but silently disappears from the client card.
+// normName() canonicalises a name so these near-misses still match.
+function normName(s){ return String(s==null?'':s).replace(/ /g,' ').replace(/\s+/g,' ').trim().toLowerCase(); }
+function sameClient(a,b){ var na=normName(a); return na!==''&&na===normName(b); }
+// Resolve a stored task ClientName to an actual client record. Prefers an exact
+// hit, then falls back to the tolerant match. Returns null if nothing matches
+// (e.g. the surname was changed after the task was created — use the re-link
+// selector in the task pop-up to fix those).
+function findClientByName(nm){
+  if(!clean(nm)) return null;
+  var exact=DB.clients.find(function(c){return c.Name===nm;});
+  if(exact) return exact;
+  return DB.clients.find(function(c){return sameClient(c.Name,nm);})||null;
+}
 // True iff a client is a real, current, serviceable client.
 // Excludes leads and anything inactive or cancelled. Use this for reminders,
 // dashboards, and any other surface where dead-weight clients should not
@@ -900,7 +918,7 @@ function goPage(p){
   render();
 }
 function openClient(id){
-  SEL=id; CTAB='overview'; PAGE='client'; window.CLIENT_TASK_FILTER='today';
+  SEL=id; CTAB='overview'; PAGE='client'; window.CLIENT_TASK_FILTER='open';
   window._selectedEvent = null; // Reset event detail view on client switch
   var c=DB.clients.find(function(x){return String(x.ID)===String(id);});
   if(c){
@@ -1591,7 +1609,7 @@ function clientTable(list,mini,isLeads){
     list.map(function(c){
       var rev=daysTo(c.ReviewDate);
       var np=polsFor(c.ID).filter(function(p){return p.Status!=='Replaced';}).length;
-      var nt=DB.tasks.filter(function(t){return !isdone(t)&&(t.ClientName===c.Name);}).length;
+      var nt=DB.tasks.filter(function(t){return !isdone(t)&&sameClient(t.ClientName,c.Name);}).length;
       var em=clean(c.Email);
       var isContacted = isLeads && c.Contacted==='Yes';
       var rowBg = isContacted ? ' style="background:#dcfce7"' : '';
@@ -2315,7 +2333,7 @@ function renderOverview(c,pols,roas,ctasks){
     '<div class="cb" style="padding:0"><div style="max-height:220px;overflow-y:auto;padding:14px 16px"><p style="font-size:13px;line-height:1.8;white-space:pre-wrap;color:#445;margin:0">'+((c.Notes&&c.Notes!=='undefined')?c.Notes:'No notes yet.')+'</p></div></div></div>'+
     (function(){
       var tf = window.CLIENT_TASK_FILTER || 'open';
-      var allClientTasks = DB.tasks.filter(function(t){ return t.ClientName===c.Name; });
+      var allClientTasks = DB.tasks.filter(function(t){ return sameClient(t.ClientName,c.Name); });
       var openTasks = allClientTasks.filter(function(t){ return !isdone(t); });
       var doneTasks = allClientTasks.filter(function(t){ return isdone(t); });
       var today2 = new Date(); today2.setHours(0,0,0,0);
@@ -9480,13 +9498,20 @@ function openTaskLogModal(taskId){
   TASK_LOG_ID = taskId;
   var log = [];
   try{ log = JSON.parse(t.Notes||'[]'); }catch(e){ if(t.Notes) log=[{date:t.Timestamp||'',text:t.Notes,user:t.Assignee||''}]; }
+  // Resolve the linked client (tolerant of spacing/case) so we can offer a
+  // one-click jump straight to their card, and flag a broken link if the
+  // stored name no longer matches any client.
+  var _lc = findClientByName(t.ClientName);
   document.getElementById('tMod').querySelector('h3').textContent = t.Title;
   document.getElementById('tModB').innerHTML=
     '<div style="margin-bottom:12px">'+
     '<div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap">'+
     (t.Priority==='Urgent'?'<span style="background:#fde8e8;color:var(--rose);border-radius:10px;padding:2px 9px;font-size:10px;font-weight:700">🔴 URGENT</span>':'')+
     bx(t.Assignee==='Clinton'?'bx-sk':t.Assignee==='Wife'?'bx-gd':'bx-sg', t.Assignee||'Clinton')+
-    (t.ClientName?bx('bx-gr','👤 '+t.ClientName):'')+
+    (t.ClientName ? (_lc
+        ? '<button class="btn xs" data-act="goto-client" data-name="'+String(t.ClientName).replace(/"/g,'&quot;')+'" title="Open this client\'s card" style="background:#dcfce7;color:#166534;border:1px solid #86efac;border-radius:10px;padding:2px 10px;font-size:11px;font-weight:700;cursor:pointer">👤 '+_lc.Name+' ↗</button>'
+        : '<span title="This task&#39;s client name does not match any client — use the Client re-link selector below to fix it" style="background:#fde8e8;color:var(--rose);border-radius:10px;padding:2px 9px;font-size:10px;font-weight:700">⚠ 👤 '+t.ClientName+' (not linked)</span>')
+      : '')+
     (t.DueDate?bx('bx-rd','📅 Due '+fdate(t.DueDate)):'')+
     '</div>'+
     '<div style="max-height:300px;overflow-y:auto;border:1.5px solid var(--smoke);border-radius:8px;padding:12px;background:#fafaf8">'+
@@ -9513,7 +9538,14 @@ function openTaskLogModal(taskId){
     '</div>'+
     '<div class="g2" style="margin-bottom:8px">'+
     '<div class="fld"><label>Update Due Date</label>'+fdp('tlogdue','',t.DueDate||'')+'</div>'+
-    '<div class="fld"><label>&nbsp;</label><div style="padding-top:4px;font-size:12px;color:#889">Leave unchanged if no update needed.</div></div>'+
+    '<div class="fld"><label>Client (re-link)</label><select id="tlogclient">'+
+      '<option value="">— No client —</option>'+
+      DB.clients.slice().sort(function(a,b){return String(a.Name).localeCompare(String(b.Name));}).map(function(c){
+        return '<option value="'+String(c.Name).replace(/"/g,'&quot;')+'"'+(sameClient(c.Name,t.ClientName)?' selected':'')+'>'+c.Name+'</option>';
+      }).join('')+
+      '</select>'+
+      '<div style="font-size:11px;color:#889;margin-top:3px">Fixes a task that isn\'t showing on the client card. Saved on “Save &amp; Close”.</div>'+
+    '</div>'+
     '</div>'+
     '<div class="fld"><label>Add Action / Note</label>'+
     '<textarea id="tlogentry" placeholder="What happened? What was actioned?" style="min-height:120px"></textarea></div>';
@@ -9624,11 +9656,21 @@ function saveTaskLog(){
     if(newDue !== t.DueDate) entryText += ' [Due date updated to '+fdate(newDue)+']';
     t.DueDate = newDue;
   }
+  // Re-link the task to a different client if changed via the selector.
+  var clEl = document.getElementById('tlogclient');
+  var _relinked = false;
+  if(clEl && normName(clEl.value) !== normName(t.ClientName)){
+    entryText += clEl.value ? (' [Client set to '+clEl.value+']') : ' [Client unlinked]';
+    t.ClientName = clEl.value;
+    _relinked = true;
+  }
   log.push({date:new Date().toISOString(), text:entryText, user:cu()});
   t.Notes = JSON.stringify(log);
   // Save to server
   post({action:'updateDueDate',id:TASK_LOG_ID,assignee:t.Assignee,dueDate:t.DueDate},function(){});
   post({action:'updateTaskNotes',id:TASK_LOG_ID,notes:t.Notes},function(){toast('Entry added ✓','ok');});
+  // ClientName lives on the task row itself, so persist the whole task when re-linked.
+  if(_relinked){ post({action:'saveTask', task:JSON.parse(JSON.stringify(t))}, function(){}); }
   // Stay in the modal — refresh the log view in place without closing
   openTaskLogModal(TASK_LOG_ID);
 }
@@ -9663,6 +9705,13 @@ function saveTaskLogAndClose(){
   var ccEl = document.getElementById('tccwife');
   var newCC = ccEl ? (ccEl.checked ? 'Yes' : '') : t.CCWife;
   if(newCC !== t.CCWife){ t.CCWife = newCC; changed = true; }
+  // Re-link client (fixes tasks that weren't showing on the client card)
+  var clEl = document.getElementById('tlogclient');
+  var _relinked = false;
+  if(clEl && normName(clEl.value) !== normName(t.ClientName)){
+    t.ClientName = clEl.value;
+    changed = true; _relinked = true;
+  }
   // Optional note in textarea
   var entry = document.getElementById('tlogentry');
   var noteText = entry ? entry.value.trim() : '';
@@ -9676,7 +9725,9 @@ function saveTaskLogAndClose(){
   }
   if(changed){
     post({action:'updateDueDate',id:TASK_LOG_ID,assignee:t.Assignee,dueDate:t.DueDate},function(){});
-    toast('Saved ✓','ok');
+    // ClientName is a task-row column, so persist the full task when re-linked.
+    if(_relinked){ post({action:'saveTask', task:JSON.parse(JSON.stringify(t))}, function(){}); }
+    toast(_relinked?'Task re-linked ✓':'Saved ✓','ok');
   }
   closeAll(); render();
 }
@@ -9774,6 +9825,7 @@ document.addEventListener('click', function(e){
         case 'open-task':      openTaskModal(el.getAttribute('data-client')||''); break;
         case 'toggle-task':    toggleTask(id, el.getAttribute('data-done')==='true'); break;
         case 'open-task-log':  openTaskLogModal(id); break;
+        case 'goto-client':    { var _gc=findClientByName(el.getAttribute('data-name')||''); if(_gc){ closeAll(); openClient(_gc.ID); } else { toast('No matching client found for this task','err'); } break; }
         case 'task-filter':    TASK_FILTER=el.getAttribute('data-filter'); render(); break;
         case 'task-user-filter': window.TASK_USER_FILTER=el.getAttribute('data-filter'); render(); break;
         case 'dash-task-filter': window.DASH_TASK_FILTER=el.getAttribute('data-filter'); render(); break;
