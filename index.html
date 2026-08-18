@@ -2096,6 +2096,43 @@ function searchLinkExist(q) {
 // pairs while the server check below is still running.
 var _linkBusy = false;
 
+// Mirror one partner's identity + income onto the OTHER client's Spouse* fields.
+// Those fields (SpouseName/ID/DOB/Cell/Email/Occupation/Income/Works) are what the
+// FNA data pack, the client-details card and the ID audit read — the familylinks
+// row alone is invisible to them, which is why a spouse added via "Link Existing"
+// used to not pull through. A valid SA ID re-derives the DOB (ID is authoritative).
+// Returns true only if something actually changed, so the caller can skip a
+// needless server write. Never blanks an existing SpouseWorks answer.
+function applySpouseFieldsFrom(target, source){
+  if(!target || !source) return false;
+  var dob = clean(source.DOB) ? source.DOB : '';
+  if(saIdValid(source.IDNumber)) dob = dobFromID(String(source.IDNumber).replace(/\D/g,''));
+  var next = {
+    SpouseName:       source.Name || '',
+    SpouseIDNumber:   source.IDNumber || '',
+    SpouseDOB:        dob,
+    SpouseCell:       source.Cell || '',
+    SpouseEmail:      source.Email || '',
+    SpouseOccupation: source.Occupation || '',
+    SpouseIncome:     source.Income || ''
+  };
+  // Only assert "spouse works" when there's evidence (income or occupation);
+  // otherwise leave whatever answer is already on the record.
+  if(clean(source.Income) || clean(source.Occupation)) next.SpouseWorks = 'Yes';
+  // Non-destructive: only fill/update from NON-BLANK source values, so a linked
+  // record with (say) no income captured never wipes a manually-entered figure.
+  var changed = false;
+  for(var k in next){
+    var nv = next[k]==null ? '' : String(next[k]);
+    if(nv==='') continue;
+    if(String(target[k]==null?'':target[k]) !== nv){
+      target[k] = nv;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 function confirmExistLink(linkedClientId) {
   if(_linkBusy) return;
   var rel = document.getElementById('linkExistRel').value;
@@ -2130,12 +2167,51 @@ function confirmExistLink(linkedClientId) {
              String(l.ClientID)===String(LINK_EXIST_CLIENT);
     });
 
+    // Parity with the + Spouse button: one spouse per client. Block linking a
+    // SECOND, different spouse. (A spouse link to THIS same person is the
+    // already-linked case handled just below, not a blocker.)
+    if(rel==='Spouse'){
+      var _pSp = DB.links.find(function(l){ return String(l.PrincipalID)===String(LINK_EXIST_CLIENT) && l.Type==='Spouse' && clean(l.ClientID) && String(l.ClientID)!==String(linkedClientId); });
+      var _lSp = DB.links.find(function(l){ return String(l.PrincipalID)===String(linkedClientId) && l.Type==='Spouse' && clean(l.ClientID) && String(l.ClientID)!==String(LINK_EXIST_CLIENT); });
+      var _blk = _pSp ? {who:principal.Name, sp:_pSp.Name} : (_lSp ? {who:linked.Name, sp:_lSp.Name} : null);
+      if(_blk){
+        _linkBusy = false;
+        toast((clean(_blk.who)||'This client')+' already has a spouse ('+(clean(_blk.sp)||'unnamed')+'). Reclassify or remove that one first.','err');
+        return;
+      }
+    }
+
+    // For a Spouse link, mirror each partner's details onto the other's Spouse*
+    // fields (both directions) so the spouse pulls through to the FNA, the
+    // client-details card and the ID audit — not just the family-link row.
+    function syncSpouseFields(){
+      if(rel!=='Spouse') return false;
+      var any=false;
+      if(applySpouseFieldsFrom(principal, linked)){
+        any=true; principal._pendingSave=true;
+        post({action:'saveClient', client:principal}, function(res){
+          if(!(res && res.ok)) toast('⚠️ Linked, but '+(clean(principal.Name)||'the principal')+"'s record didn't update on the server — press Sync.",'err');
+        });
+      }
+      if(applySpouseFieldsFrom(linked, principal)){
+        any=true; linked._pendingSave=true;
+        post({action:'saveClient', client:linked}, function(res){
+          if(!(res && res.ok)) toast('⚠️ Linked, but '+(clean(linked.Name)||'the linked client')+"'s record didn't update on the server — press Sync.",'err');
+        });
+      }
+      return any;
+    }
+
     if(fwdExists && revExists){
+      // Already linked both ways — still backfill Spouse* fields for couples
+      // linked before this mirroring existed (e.g. the Magalie pair).
+      var _refreshed = syncSpouseFields();
       _linkBusy = false;
       try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
       closeAll();
       render();
-      toast(linked.Name+' is already linked to '+principal.Name+' — no duplicate created','err');
+      if(_refreshed) toast('Spouse details for '+principal.Name+' & '+linked.Name+' refreshed','ok');
+      else toast(linked.Name+' is already linked to '+principal.Name+' — no duplicate created','err');
       return;
     }
 
@@ -2172,6 +2248,9 @@ function confirmExistLink(linkedClientId) {
 
     if(linkAB) DB.links.push(linkAB);
     if(linkBA) DB.links.push(linkBA);
+    // Mirror spouse details onto both client records (Spouse links only) so the
+    // new spouse pulls through to the FNA and every other screen, not just the row.
+    syncSpouseFields();
     try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
     closeAll();
     render();
