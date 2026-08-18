@@ -2255,15 +2255,26 @@ function renderOverview(c,pols,roas,ctasks){
       // (IDNumber, DOB, Cell, Email). The link object's snapshot can be stale —
       // e.g. ID number entered after the upgrade won't be on the link itself.
       var liveIdNum = m.IDNumber, liveDob = m.DOB, liveCell = m.Cell, liveEmail = m.Email;
+      var liveIncome = '', liveAnniv = '';
       if (isClient) {
         var linkedClient = DB.clients.find(function(x){ return String(x.ID)===String(m.ClientID); });
         if (linkedClient) {
-          if (clean(linkedClient.IDNumber)) liveIdNum = linkedClient.IDNumber;
-          if (clean(linkedClient.DOB))      liveDob   = linkedClient.DOB;
-          if (clean(linkedClient.Cell))     liveCell  = linkedClient.Cell;
-          if (clean(linkedClient.Email))    liveEmail = linkedClient.Email;
+          if (clean(linkedClient.IDNumber))    liveIdNum  = linkedClient.IDNumber;
+          if (clean(linkedClient.DOB))         liveDob    = linkedClient.DOB;
+          if (clean(linkedClient.Cell))        liveCell   = linkedClient.Cell;
+          if (clean(linkedClient.Email))       liveEmail  = linkedClient.Email;
+          if (clean(linkedClient.Income))      liveIncome = linkedClient.Income;
+          if (clean(linkedClient.Anniversary)) liveAnniv  = linkedClient.Anniversary;
         }
       }
+      // A valid SA ID is the authoritative source of DOB. Derive it when the
+      // stored DOB is blank (record captured before the ID→DOB rule, or a stale
+      // cached copy) so a linked person never shows a blank birthday next to a
+      // real ID number.
+      if (!clean(liveDob) && saIdValid(liveIdNum)) {
+        liveDob = dobFromID(String(liveIdNum).replace(/\D/g,''));
+      }
+      var _isPartner = (m.Type==='Spouse' || m.Type==='Life Partner');
       var ftcls = m.Type==='Spouse'?'bx-gd':'bx-sk';
       return '<div style="display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--smoke)">'+
         '<div style="width:36px;height:36px;border-radius:50%;background:var(--navy);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:var(--gold);flex-shrink:0">'+ini(m.Name)+'</div>'+
@@ -2274,6 +2285,8 @@ function renderOverview(c,pols,roas,ctasks){
         (clean(liveIdNum)?' <span>🪪 '+(String(liveIdNum).match(/e[\+\-]/i)?Number(liveIdNum).toFixed(0):liveIdNum)+'</span>':'')+
         (clean(liveDob)?' <span>🎂 '+fdate(liveDob)+(calcAge(liveDob)!==null?' · Age '+calcAge(liveDob):'')+'</span>':'')+
         (clean(liveCell)?' <span>📱 '+liveCell+'</span>':'')+
+        (clean(liveIncome)?' <span>💰 '+rnd(liveIncome)+' /pm</span>':'')+
+        ((_isPartner&&clean(liveAnniv))?' <span>💍 '+fdate(liveAnniv)+'</span>':'')+
         '</div></div>'+
         // ✎ Edit only on non-client rows: client-linked rows display LIVE values
         // from the linked client's record, so edits belong on that client profile.
@@ -4689,6 +4702,22 @@ function fdpUpdateDay(id){
     else lbl.textContent='';
   }
 }
+// Report an fdp date-picker's completeness so callers can warn instead of
+// silently saving a blank date. fdpSync() blanks the hidden value unless all
+// three of day/month/year are chosen, so a partly-filled date is otherwise
+// lost with no feedback (the Aug-2026 Magalie marriage-date loss).
+//   'na'       — not an fdp field (its Y/M/D selects aren't on the page)
+//   'empty'    — nothing selected (fine — an optional date left blank)
+//   'partial'  — 1 or 2 of the 3 selected (danger: would save blank)
+//   'complete' — all three selected
+function fdpState(id){
+  var y=document.getElementById(id+'_y');
+  var m=document.getElementById(id+'_m');
+  var d=document.getElementById(id+'_d');
+  if(!y||!m||!d) return 'na';
+  var n=(y.value?1:0)+(m.value?1:0)+(d.value?1:0);
+  return n===0?'empty':(n===3?'complete':'partial');
+}
 
 // ══ ID ↔ DOB AUDIT ═══════════════════════════════════════════
 // Scans every captured ID number (clients, spouse fields, family links),
@@ -5915,6 +5944,17 @@ function saveClient(openFNA){
   var isCompany = (ctype==='Company');
   if(!isLead && !isCompany && !getRadio('fgen')&&!g('fgen')){toast('Please select Gender','err');return;}
   if(!isLead && !isCompany && !getRadio('fsm')&&!g('fsm')){toast('Please select Smoker status','err');return;}
+  // Guard against silent date loss: a date picker only stores its value when
+  // day, month AND year are all chosen (fdpSync blanks it otherwise). Warn on a
+  // half-filled date rather than dropping it — this is what lost the Magalie
+  // marriage date twice. 'na' fields (not on the form) are skipped safely.
+  var _dateFlds=[['fann','Marriage / Anniversary date'],['fd','Date of birth'],['fspdob','Spouse date of birth'],['fwilldate','Will date']];
+  for(var _dgi=0;_dgi<_dateFlds.length;_dgi++){
+    if(fdpState(_dateFlds[_dgi][0])==='partial'){
+      toast(_dateFlds[_dgi][1]+' is incomplete — choose day, month AND year (or clear all three) before saving.','err');
+      return;
+    }
+  }
   var id=EC||('new_'+Date.now());
 
   // Duplicate check — only for new clients, not edits
