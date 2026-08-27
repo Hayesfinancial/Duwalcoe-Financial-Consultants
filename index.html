@@ -466,7 +466,7 @@ function syncNow(quiet) {
 
   // Load all core tables in parallel
   var loaded = {};
-  var needed = ['clients','policies','tasks','roas','familylinks','settings','notes','financial_position'];
+  var needed = ['clients','policies','tasks','roas','familylinks','settings','notes','financial_position','will_instructions'];
   var done = 0;
 
   function checkDone(){
@@ -539,6 +539,9 @@ function syncNow(quiet) {
         }
       });
     }catch(e){}
+
+    // Will instruction sheets — one row per client, JSON in Data column (like fnadata).
+    DB.willinstr = loaded.will_instructions||[];
 
     // Financial Position (assets & liabilities) — one row per item, JSON in Data column.
     DB.finpos = loaded.financial_position||[];
@@ -746,6 +749,12 @@ function post(data, cb){
       if(rows&&rows.length){ if(cb) cb({ok:1, data:rows[0].Data||'', saved:rows[0].LastSaved||''}); }
       else { if(cb) cb({ok:1, data:null}); }
     });
+  }
+  else if(action==='saveWill'){
+    upsert('will_instructions', data.item, cb);
+  }
+  else if(action==='patchClientFields'){
+    patch('clients', data.id, data.fields, cb);
   }
   else {
     console.warn('post(): unknown action:', action);
@@ -1673,6 +1682,7 @@ function renderProfile(){
     (function(){var bks=[];try{bks=c.BankDetails?JSON.parse(c.BankDetails):[];}catch(e){}return '<div class="tab'+(CTAB==='banking'?' on':'')+'" data-act="tab" data-tab="banking">Banking'+(bks.length?' ('+bks.length+')':'')+'</div>';})()+
     '<div class="tab'+(CTAB==='docs'?' on':'')+'" data-act="tab" data-tab="docs">Documents</div>'+
     '<div class="tab'+(CTAB==='events'?' on':'')+'" data-act="tab" data-tab="events">Work Events</div>'+
+    (function(){var wd=willData(c.ID);var has=wd&&Object.keys(wd).length;return '<div class="tab'+(CTAB==='will'?' on':'')+'" data-act="tab" data-tab="will">Will'+(has?' ✓':'')+'</div>';})()+
     '</div>'+
     (CTAB==='overview'?renderOverview(c,pols,roas,ctasks):
      CTAB==='policies'?renderPolicies(c,pols):
@@ -1681,6 +1691,7 @@ function renderProfile(){
      CTAB==='banking'?renderBanking(c):
      CTAB==='docs'?renderDocs(c):
      CTAB==='events'?renderEvents(c,pols):
+     CTAB==='will'?renderWill(c):
      renderROA(c,roas));
 }
 
@@ -5725,6 +5736,504 @@ function _brokerDocCSS(){
       +'.consent-callout{margin:8px 0!important;padding:8px!important}'
     +'}'
     +'</style>';
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// WILL INSTRUCTION SHEET — in-card capture + attorney-ready PDF
+// One row per client in will_instructions {ID:'will_'+cid, ClientID, Data(JSON), UpdatedAt}.
+// Sections mirror the print questionnaire exactly (forms.html). Sections 1–3
+// pre-fill from the client record + family links; the rest are captured here.
+// ══════════════════════════════════════════════════════════════════════════
+function willFor(cid){ if(!DB.willinstr) return null; for(var i=0;i<DB.willinstr.length;i++){ if(String(DB.willinstr[i].ClientID)===String(cid)) return DB.willinstr[i]; } return null; }
+function willData(cid){ var r=willFor(cid); if(!r||!r.Data) return {}; try{ return JSON.parse(r.Data)||{}; }catch(e){ return {}; } }
+function wfEsc(t){ return String(t==null?'':t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+// ── Field builders (each carries a data-wf* attribute the collector reads) ──
+function wfT(D,k,ph){ return '<input class="wfi" data-wf="'+k+'" value="'+wfEsc(D[k]||'')+'"'+(ph?' placeholder="'+wfEsc(ph)+'"':'')+'>'; }
+function wfA(D,k,rows){ return '<textarea class="wfi" data-wf="'+k+'" rows="'+(rows||3)+'">'+wfEsc(D[k]||'')+'</textarea>'; }
+function wfS(D,k,opts){ var v=D[k]||''; var o='<option value="">— select —</option>'; for(var i=0;i<opts.length;i++){ o+='<option'+(String(v)===String(opts[i])?' selected':'')+'>'+wfEsc(opts[i])+'</option>'; } return '<select class="wfi" data-wf="'+k+'">'+o+'</select>'; }
+function wfR(D,k,opts){ var v=D[k]||''; var h='<div class="wropts">'; for(var i=0;i<opts.length;i++){ h+='<label class="wopt"><input type="radio" name="wr_'+k+'" data-wfr="'+k+'" value="'+wfEsc(opts[i])+'"'+(v===opts[i]?' checked':'')+'> <span>'+opts[i]+'</span></label>'; } return h+'</div>'; }
+function wfC(D,k,label){ return '<label class="wopt"><input type="checkbox" data-wfc="'+k+'"'+((D[k]||'')==='Yes'?' checked':'')+'> <span>'+label+'</span></label>'; }
+function wfF(label,ctrl){ return '<div style="margin-bottom:8px"><div style="font-size:10.5px;color:#556;font-weight:600;margin-bottom:3px">'+label+'</div>'+ctrl+'</div>'; }
+function wfG2(a,b){ return '<div class="wg2">'+a+b+'</div>'; }
+function wfH(n,t){ return '<div class="wsh">'+n+'. '+t+'</div>'; }
+function wfNote(t){ return '<div class="wsub">'+t+'</div>'; }
+
+// ── Collector: read every tagged control inside #willFormRoot into a flat map ──
+function collectWill(){
+  var root=document.getElementById('willFormRoot'); var o={};
+  if(!root) return o;
+  root.querySelectorAll('[data-wf]').forEach(function(el){ o[el.getAttribute('data-wf')] = el.value; });
+  root.querySelectorAll('[data-wfc]').forEach(function(el){ o[el.getAttribute('data-wfc')] = el.checked?'Yes':'No'; });
+  root.querySelectorAll('[data-wfr]:checked').forEach(function(el){ o[el.getAttribute('data-wfr')] = el.value; });
+  return o;
+}
+
+function _willAge(dob){ if(!dob) return null; var d=new Date(dob); if(isNaN(d)) return null; var t=new Date(); var a=t.getFullYear()-d.getFullYear(); var m=t.getMonth()-d.getMonth(); if(m<0||(m===0&&t.getDate()<d.getDate())) a--; return a; }
+
+function renderWill(c){
+  var D = willData(c.ID);
+  var row = willFor(c.ID);
+  var fam = (typeof famFor==='function') ? (famFor(c.ID)||[]) : [];
+  var kids = fam.filter(function(l){ return l.Type==='Child'; });
+  var spouseName = c.SpouseName || (fam.filter(function(l){return l.Type==='Spouse'||l.Type==='Life Partner';})[0]||{}).Name || '';
+
+  var MARITAL = ['Single / never married','Married in community of property (COP)','Married out of community of property (ANC) with accrual','Married out of community of property (ANC) without accrual','Divorced','Widowed','Life partner / cohabiting'];
+
+  var h = '<style>'
+    +'.willwrap{max-width:860px}'
+    +'.wfi{width:100%;padding:6px 8px;border:1px solid #cdd6dd;border-radius:6px;font-size:13px;font-family:inherit;background:#fff}'
+    +'.wfi:focus{outline:none;border-color:var(--gold,#a8b938);box-shadow:0 0 0 2px rgba(168,185,56,.15)}'
+    +'textarea.wfi{resize:vertical;line-height:1.5}'
+    +'.wopt{display:flex;align-items:flex-start;gap:7px;font-size:12.5px;margin:3px 0;cursor:pointer;color:#334}'
+    +'.wopt input{margin-top:3px;flex-shrink:0;width:15px;height:15px;accent-color:var(--sage,#2e7d5a)}'
+    +'.wropts{display:flex;flex-direction:column;gap:1px}'
+    +'.wg2{display:grid;grid-template-columns:1fr 1fr;gap:14px}'
+    +'.wsub{font-size:11px;color:#889;margin:1px 0 8px;line-height:1.5}'
+    +'.wsh{font-size:13px;font-weight:700;color:#0e413a;background:#eef1ea;padding:7px 11px;border-left:3px solid var(--gold,#a8b938);margin:20px 0 10px;border-radius:0 5px 5px 0}'
+    +'.wprefill{background:#f0f7f4;border:1px solid #cfe6da;border-radius:8px;padding:9px 13px;font-size:12px;color:#2e5e4e;margin-bottom:6px}'
+    +'.wtbl{width:100%;border-collapse:collapse;font-size:12px;margin:4px 0 6px}'
+    +'.wtbl th{background:#0e413a;color:#fff;padding:5px 6px;text-align:left;font-weight:600;font-size:11px}'
+    +'.wtbl td{border:1px solid #dde;padding:3px}'
+    +'.wtbl .wfi{border:none;padding:5px 6px}'
+    +'@media(max-width:640px){.wg2{grid-template-columns:1fr}}'
+    +'</style>';
+
+  h += '<div class="willwrap">';
+
+  // Header + actions
+  h += '<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:6px">';
+  h += '<div><h2 style="font-family:\'DM Serif Display\',serif;color:var(--navy);font-size:19px">📜 Will Instruction Sheet</h2>';
+  h += '<div style="font-size:12px;color:#889">'+(row&&row.UpdatedAt?'Last saved '+wfEsc(row.UpdatedAt):'Not yet captured')+'</div></div>';
+  h += '<div style="display:flex;gap:8px">';
+  h += '<button class="btn b-gd sm" onclick="saveWill(\''+c.ID+'\')">💾 Save</button>';
+  h += '<button class="btn b-nv sm" onclick="printWillSheet(\''+c.ID+'\')">📄 Generate Sheet (PDF)</button>';
+  h += '</div></div>';
+
+  h += '<div style="background:#fff8e1;border:1px solid #e6c547;border-radius:7px;padding:9px 13px;font-size:12px;color:#6b5500;margin-bottom:14px">'
+    +'<strong>This is not a will.</strong> It records the client\'s wishes for a qualified attorney to draft a valid Last Will &amp; Testament (Wills Act 7 of 1953). Capture it here, then generate the sheet to send the attorney. Saving does not change the client\'s will status — that flips to “Will (mine)” only when you enter the signed date in the Office-use section at the bottom.</div>';
+
+  h += '<div id="willFormRoot">';
+
+  // ── 1. Testator ──
+  h += wfH('1','Testator (client details)');
+  h += '<div class="wprefill">Pulled from the record: <strong>'+wfEsc(c.Name||'')+'</strong>'
+    + (c.IDNumber?' · ID '+wfEsc(c.IDNumber):'')
+    + (c.DOB?' · DOB '+wfEsc(c.DOB):'')
+    + (c.Cell?' · '+wfEsc(c.Cell):'')
+    + '<br>'+wfEsc(c.Address||'(no address on file)')+'</div>';
+  h += wfG2( wfF('Place of birth', wfT(D,'t_placeofbirth')), wfF('Occupation', wfT(D,'t_occupation', c.Occupation||'')) );
+  h += wfF('Marital status / regime', wfR(D, 't_marital', MARITAL));
+  h += wfF('If divorced/widowed — date', wfT(D,'t_marital_date'));
+
+  // ── 2. Spouse / life partner ──
+  h += wfH('2','Spouse / life partner (if applicable)');
+  if(spouseName){ h += '<div class="wprefill">Spouse on record: <strong>'+wfEsc(spouseName)+'</strong>'+(c.SpouseIDNumber?' · ID '+wfEsc(c.SpouseIDNumber):'')+(c.SpouseDOB?' · DOB '+wfEsc(c.SpouseDOB):'')+'</div>'; }
+  else { h += wfNote('No spouse on record. Add one in the Family tab if applicable.'); }
+  h += wfG2( wfF('Date of marriage', wfT(D,'s_marriage_date')), wfF('Place of marriage', wfT(D,'s_marriage_place')) );
+  h += wfF('ANC / accrual notes for the attorney', wfA(D,'s_anc_note',2));
+
+  // ── 3. Children & dependants ──
+  h += wfH('3','Children and dependants');
+  if(kids.length){
+    h += '<table class="wtbl"><thead><tr><th style="width:34%">Child (from record)</th><th style="width:22%">ID / DOB</th><th style="width:10%">Minor?</th><th>Special needs / notes</th></tr></thead><tbody>';
+    kids.forEach(function(kd){
+      var age=_willAge(kd.DOB); var minor=(age!=null)?(age<18?'Yes':'No'):'';
+      h += '<tr><td style="padding:6px;font-weight:600">'+wfEsc(kd.Name||'')+'</td>'
+        +'<td style="padding:6px">'+wfEsc(kd.IDNumber||kd.DOB||'')+'</td>'
+        +'<td style="padding:6px;text-align:center">'+minor+'</td>'
+        +'<td>'+wfT(D,'cn_'+kd.ID)+'</td></tr>';
+    });
+    h += '</tbody></table>';
+  } else { h += wfNote('No children on record. Add them in the Family tab so they carry through to the will sheet.'); }
+  h += wfF('Other dependants to provide for (e.g. elderly parent, disabled sibling)', wfA(D,'dep_notes',2));
+
+  // ── 4. Existing will ──
+  h += wfH('4','Existing will');
+  h += wfF('Current position', wfR(D,'e_status',['I do not have an existing will','I have an existing will','I have a codicil / amendment to a prior will']));
+  h += wfG2( wfF('Date of existing will', wfT(D,'e_date', c.WillDate||'')), wfF('Drafted by', wfT(D,'e_drafted_by', c.WillAttorney||'')) );
+  h += wfF('Location of the existing will / codicil', wfA(D,'e_location',2));
+  h += wfC(D,'e_revoke','Revoke all prior wills and codicils when this new will is signed.');
+
+  // ── 5. Executor ──
+  h += wfH('5','Executor nomination');
+  h += wfNote('Executor fees are capped at 3.5% + VAT of gross estate. A reduced rate is often agreed, especially with a family co-executor.');
+  h += '<div style="font-weight:700;font-size:12px;margin:6px 0 3px;color:#445">Primary executor</div>';
+  h += wfG2( wfF('Full names', wfT(D,'ex_p_name')), wfF('ID / Reg number', wfT(D,'ex_p_id')) );
+  h += wfG2( wfF('Relationship', wfT(D,'ex_p_rel')), wfF('Contact number', wfT(D,'ex_p_contact')) );
+  h += wfF('Address', wfT(D,'ex_p_address'));
+  h += '<div style="font-weight:700;font-size:12px;margin:8px 0 3px;color:#445">Alternate executor</div>';
+  h += wfG2( wfF('Full names', wfT(D,'ex_a_name')), wfF('ID / Reg number', wfT(D,'ex_a_id')) );
+  h += wfG2( wfF('Relationship', wfT(D,'ex_a_rel')), wfF('Contact number', wfT(D,'ex_a_contact')) );
+  h += '<div style="font-weight:700;font-size:12px;margin:8px 0 3px;color:#445">Powers &amp; fees</div>';
+  h += wfF('Security', wfR(D,'ex_security',['Waive security (bond of security) — usual for a family executor','Require security']));
+  h += wfF('Fee basis', wfR(D,'ex_fee',['Agreed reduced rate (below)','Full statutory rate of 3.5% + VAT']));
+  h += wfG2( wfF('Agreed rate (%) + VAT, if reduced', wfT(D,'ex_fee_rate')), '' );
+  h += wfC(D,'ex_assume','Executor may assume a co-executor (e.g. a professional firm).');
+  h += wfF('Other powers / special instructions to executor', wfA(D,'ex_notes',2));
+
+  // ── 6. Guardian ──
+  h += wfH('6','Guardian for minor children');
+  h += wfC(D,'g_na','Not applicable — no minor children, or the other parent has full guardianship.');
+  h += '<div style="font-weight:700;font-size:12px;margin:8px 0 3px;color:#445">Primary guardian</div>';
+  h += wfG2( wfF('Full names', wfT(D,'g_p_name')), wfF('ID number', wfT(D,'g_p_id')) );
+  h += wfG2( wfF('Relationship', wfT(D,'g_p_rel')), wfF('Contact', wfT(D,'g_p_contact')) );
+  h += '<div style="font-weight:700;font-size:12px;margin:8px 0 3px;color:#445">Alternate guardian</div>';
+  h += wfG2( wfF('Full names', wfT(D,'g_a_name')), wfF('ID number', wfT(D,'g_a_id')) );
+  h += wfG2( wfF('Relationship', wfT(D,'g_a_rel')), wfF('Contact', wfT(D,'g_a_contact')) );
+  h += wfC(D,'g_discussed','This nomination has been discussed with the proposed guardian and they have agreed.');
+  h += wfF('Notes to guardian (values, schooling preferences, etc.)', wfA(D,'g_notes',2));
+
+  // ── 7. Testamentary trust ──
+  h += wfH('7','Testamentary trust (for minor or vulnerable beneficiaries)');
+  h += wfF('Establish a trust?', wfR(D,'tr_choice',['Yes — establish a testamentary trust','No — distribute directly','Only if beneficiaries are still minors at date of death']));
+  h += '<div style="font-weight:700;font-size:12px;margin:8px 0 3px;color:#445">Trustees (min. 2 recommended, incl. one independent)</div>';
+  h += wfG2( wfF('Trustee 1 — full names', wfT(D,'tr1_name')), wfF('ID number', wfT(D,'tr1_id')) );
+  h += wfG2( wfF('Trustee 2 — full names', wfT(D,'tr2_name')), wfF('ID number', wfT(D,'tr2_id')) );
+  h += wfG2( wfF('Trustee 3 — full names', wfT(D,'tr3_name')), wfF('ID number', wfT(D,'tr3_id')) );
+  h += wfF('Termination', wfR(D,'tr_term',['Terminates when beneficiary reaches a set age (below)','Trustees may pay capital sooner for education, medical, first home, etc.','Income distributed as needed; capital held until termination age']));
+  h += wfG2( wfF('Termination age (commonly 21 or 25)', wfT(D,'tr_term_age')), '' );
+  h += wfF('Special trust instructions', wfA(D,'tr_notes',2));
+
+  // ── 8. Specific bequests ──
+  h += wfH('8','Specific bequests (named items or amounts)');
+  h += wfNote('Distributed before the residue. Items (jewellery, vehicles, firearms), specific sums, or specific investments to named people or charities.');
+  h += '<table class="wtbl"><thead><tr><th style="width:42%">Item / amount</th><th style="width:38%">Beneficiary (names + relationship)</th><th>If beneficiary predeceases?</th></tr></thead><tbody>';
+  for(var bi=1; bi<=6; bi++){ h += '<tr><td>'+wfT(D,'bq'+bi+'_item')+'</td><td>'+wfT(D,'bq'+bi+'_ben')+'</td><td>'+wfT(D,'bq'+bi+'_pre')+'</td></tr>'; }
+  h += '</tbody></table>';
+
+  // ── 9. Residue ──
+  h += wfH('9','Residue of estate (everything not specifically bequeathed)');
+  h += wfF('Residue distribution', wfR(D,'res_choice',['Entire residue to my spouse / life partner','Entire residue to my children equally, per stirpes','Entire residue to my children equally, per capita','Split as follows (table below)']));
+  h += '<table class="wtbl"><thead><tr><th style="width:48%">Beneficiary (names + relationship)</th><th style="width:14%">% share</th><th>If predeceases, share goes to</th></tr></thead><tbody>';
+  for(var ri=1; ri<=5; ri++){ h += '<tr><td>'+wfT(D,'rs'+ri+'_ben')+'</td><td>'+wfT(D,'rs'+ri+'_pct')+'</td><td>'+wfT(D,'rs'+ri+'_pre')+'</td></tr>'; }
+  h += '</tbody></table>';
+
+  // ── 10. Special assets ──
+  h += wfH('10','Special assets requiring attention');
+  h += '<div style="font-weight:700;font-size:12px;margin:6px 0 2px;color:#445">Retirement funds (s.37C)</div>';
+  h += wfNote('Fund trustees decide the death benefit under s.37C — nominations are a guide only.');
+  h += wfR(D,'sa_rf',['I have reviewed my fund beneficiary nominations','I wish to update my fund nominations (attorney / adviser to assist)']);
+  h += '<div style="font-weight:700;font-size:12px;margin:8px 0 2px;color:#445">Life insurance policies</div>';
+  h += wfR(D,'sa_lp',['All life policies have current beneficiary nominations','Some policies pay into my estate (no nominated beneficiary)']);
+  h += wfF('Notes on policies', wfA(D,'sa_lp_notes',2));
+  h += '<div style="font-weight:700;font-size:12px;margin:8px 0 2px;color:#445">Fixed property</div>';
+  h += wfF('List all properties (address; held in own name / trust / company)', wfA(D,'sa_prop_list',2));
+  h += wfR(D,'sa_prop',['Primary residence to pass to spouse (s.4q — no estate duty)','Property to be sold and proceeds form part of residue','Specific property to a specific beneficiary (detail in section 8)']);
+  h += '<div style="font-weight:700;font-size:12px;margin:8px 0 2px;color:#445">Business interests</div>';
+  h += wfR(D,'sa_biz',['Not applicable','I am a shareholder / member (detail below)','A buy-and-sell agreement is in place','No buy-and-sell — business interest to pass to (below)']);
+  h += wfF('Business detail (entity, % held, to whom)', wfT(D,'sa_biz_detail'));
+  h += '<div style="font-weight:700;font-size:12px;margin:8px 0 2px;color:#445">Offshore assets</div>';
+  h += wfR(D,'sa_off',['None','I hold assets offshore (a separate offshore will may be recommended)']);
+  h += wfF('Country/ies and nature of offshore assets', wfA(D,'sa_off_detail',2));
+  h += '<div style="font-weight:700;font-size:12px;margin:8px 0 2px;color:#445">Firearms</div>';
+  h += wfR(D,'sa_fire',['None','I own firearms (beneficiary must hold a valid licence)']);
+  h += wfG2( wfF('Number of firearms', wfT(D,'sa_fire_num')), wfF('Licensed to', wfT(D,'sa_fire_licensed')) );
+
+  // ── 11. Living will / advance directive ──
+  h += wfH('11','Living will / advance medical directive');
+  h += wfR(D,'lw',['Yes — I wish a living will to be drafted','No — I do not want a living will','I already have a living will (date below)']);
+  h += wfG2( wfF('Date of existing living will', wfT(D,'lw_date')), '' );
+  h += '<div style="font-weight:700;font-size:12px;margin:8px 0 2px;color:#445">Organ donation</div>';
+  h += wfR(D,'organ',['I wish to donate my organs and tissues where medically suitable','I do not wish to donate organs or tissues','I am already a registered organ donor']);
+
+  // ── 12. Funeral wishes ──
+  h += wfH('12','Funeral wishes');
+  h += wfF('Preference', wfR(D,'fw',['Burial','Cremation','No preference — leave to family']));
+  h += wfF('Location (cemetery, church, scattering of ashes, etc.)', wfA(D,'fw_location',2));
+  h += wfF('Specific requests (music, readings, dress code, faith practices)', wfA(D,'fw_requests',2));
+  h += '<div style="font-weight:700;font-size:12px;margin:8px 0 2px;color:#445">Funeral cover</div>';
+  h += wfR(D,'fw_cover',['I have a funeral policy (details below)','None']);
+  h += wfG2( wfF('Provider', wfT(D,'fw_cover_provider')), wfF('Policy no.', wfT(D,'fw_cover_policy')) );
+
+  // ── 13. Digital assets ──
+  h += wfH('13','Digital assets and accounts');
+  h += wfNote('Passwords must never go in the will (it becomes public). A separate sealed letter of instruction is preferred.');
+  h += wfC(D,'da_letter','A sealed letter of instruction (accounts, access) is lodged.');
+  h += wfF('Lodged with', wfT(D,'da_letter_with'));
+  h += wfF('Social media accounts to be', wfR(D,'da_social',['Memorialised','Closed','Transferred']));
+  h += wfC(D,'da_crypto','Cryptocurrency holdings exist.');
+  h += wfF('Location of seed phrases / keys (not the keys themselves)', wfT(D,'da_crypto_loc'));
+
+  // ── 14. Pets ──
+  h += wfH('14','Pets');
+  h += wfC(D,'pet_na','Not applicable.');
+  h += wfF('Pet(s) to be cared for by (name, relationship, contact)', wfT(D,'pet_carer'));
+  h += wfF('Bequest to the carer for the pet\'s upkeep (R)', wfT(D,'pet_bequest'));
+
+  // ── 15. Letter of wishes ──
+  h += wfH('15','Letter of wishes (private, non-binding)');
+  h += wfR(D,'lo',['Yes — a separate letter of wishes will be drafted','No']);
+
+  // ── 16. Additional instructions ──
+  h += wfH('16','Additional instructions or notes to the attorney');
+  h += wfA(D,'add_notes',5);
+
+  // ── Office use ──
+  h += wfH('★','Office use — forwarding &amp; completion');
+  h += wfNote('Filling in the “signed on” date marks the will as complete and flips the client’s status to “Will (mine)”.');
+  h += wfG2( wfF('Attorney / firm', wfT(D,'ou_attorney')), wfF('Date sent', wfT(D,'ou_sent_date')) );
+  h += wfF('Method sent', wfR(D,'ou_method',['Email','Post','Hand delivery']));
+  h += wfG2( wfF('Will drafted &amp; signed on', wfT(D,'signed_date')), wfF('Original stored at', wfT(D,'ou_stored')) );
+
+  h += '</div>'; // #willFormRoot
+
+  h += '<div style="display:flex;gap:8px;margin-top:16px">';
+  h += '<button class="btn b-gd" onclick="saveWill(\''+c.ID+'\')">💾 Save will details</button>';
+  h += '<button class="btn b-nv" onclick="printWillSheet(\''+c.ID+'\')">📄 Generate Will Instruction Sheet (PDF)</button>';
+  h += '</div>';
+
+  h += '</div>'; // .willwrap
+  return h;
+}
+
+// Save the will instruction sheet — deterministic one-row-per-client (like saveNeedNotes).
+function saveWill(cid){
+  var D = collectWill();
+  var now = new Date().toISOString().slice(0,16).replace('T',' ');
+  var existing = willFor(cid);
+  var rowObj = { ID: existing ? existing.ID : ('will_'+cid), ClientID: cid, Data: JSON.stringify(D), UpdatedAt: now };
+  rowObj._pendingSave = true;
+  if(!DB.willinstr) DB.willinstr = [];
+  if(existing){ var gi=DB.willinstr.indexOf(existing); if(gi>=0) DB.willinstr[gi]=rowObj; }
+  else DB.willinstr.push(rowObj);
+  try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
+  var forServer = JSON.parse(JSON.stringify(rowObj)); delete forServer._pendingSave;
+  post({action:'saveWill', item:forServer}, function(res){
+    if(res && res.ok===1){
+      var i=DB.willinstr.findIndex(function(x){return x.ID===rowObj.ID;});
+      if(i>=0) DB.willinstr[i]=forServer;
+      try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
+      if(typeof toast==='function') toast('Will details saved ✓','ok');
+    } else {
+      console.error('Will NOT saved to server. Retained locally with _pendingSave. ID:', rowObj.ID);
+      if(typeof toast==='function') toast('Saved on this device — will sync when online','err');
+    }
+  });
+  maybeFlipWillStatus(cid, D);
+}
+
+// Flip the client's will-status summary fields ONLY when the signed date is entered
+// (capturing instructions alone does not mean the will exists yet).
+function maybeFlipWillStatus(cid, D){
+  var c = DB.clients.find(function(x){ return String(x.ID)===String(cid); });
+  if(!c) return;
+  var f = {};
+  if(D.signed_date){
+    if(c.HasWill!=='Yes') f.HasWill='Yes';
+    if(c.WillThroughMe!=='Yes') f.WillThroughMe='Yes';
+    if(c.WillDate!==D.signed_date) f.WillDate=D.signed_date;
+    if(D.ou_attorney && c.WillAttorney!==D.ou_attorney) f.WillAttorney=D.ou_attorney;
+  }
+  if(!Object.keys(f).length) return;
+  for(var k in f) c[k]=f[k];
+  try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
+  post({action:'patchClientFields', id:c.ID, fields:f}, function(){});
+}
+
+// Generate the attorney-ready, pre-filled Will Instruction Sheet (mirrors forms.html).
+function printWillSheet(cid){
+  var c = DB.clients.find(function(x){ return String(x.ID)===String(cid); });
+  if(!c){ alert('Client not found.'); return; }
+  var live = document.getElementById('willFormRoot');
+  var D = live ? collectWill() : willData(cid);
+  if(live) saveWill(cid); // persist what is on screen before printing
+  var e = wfEsc;
+  var fam = (typeof famFor==='function') ? (famFor(cid)||[]) : [];
+  var kids = fam.filter(function(l){ return l.Type==='Child'; });
+  var spouseName = c.SpouseName || (fam.filter(function(l){return l.Type==='Spouse'||l.Type==='Life Partner';})[0]||{}).Name || '';
+  var marital = D.t_marital || c.MaritalStatus || '';
+
+  // rendering helpers for the printed sheet
+  function box(on){ return '<span style="font-family:Arial;font-size:12px">'+(on?'☑':'☐')+'</span>'; }
+  function opt(sel, val){ return '<div style="margin:2px 0;font-size:10.5px">'+box(sel===val)+' '+val+'</div>'; }
+  function chk(v, label){ return '<div style="margin:2px 0;font-size:10.5px">'+box(v==='Yes')+' '+label+'</div>'; }
+  function fv(v){ return v ? '<span style="border-bottom:1px solid #333;font-weight:700;padding:0 4px">'+e(v)+'</span>' : '<span style="border-bottom:1px solid #333;display:inline-block;min-width:140px">&nbsp;</span>'; }
+  function two(l1,v1,l2,v2){ return '<div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:8px">'
+    +'<div><div style="font-size:9.5px;color:#555">'+l1+'</div><div style="border-bottom:1px solid #333;padding-bottom:2px;min-height:18px;font-weight:'+(v1?'700':'400')+'">'+(e(v1)||'&nbsp;')+'</div></div>'
+    +'<div><div style="font-size:9.5px;color:#555">'+l2+'</div><div style="border-bottom:1px solid #333;padding-bottom:2px;min-height:18px;font-weight:'+(v2?'700':'400')+'">'+(e(v2)||'&nbsp;')+'</div></div></div>'; }
+  function one(l,v){ return '<div style="margin-bottom:8px"><div style="font-size:9.5px;color:#555">'+l+'</div><div style="border-bottom:1px solid #333;padding-bottom:2px;min-height:18px;font-weight:'+(v?'700':'400')+'">'+(e(v)||'&nbsp;')+'</div></div>'; }
+  function note(l,v){ return '<div style="margin-bottom:8px"><div style="font-size:9.5px;color:#555">'+l+'</div><div style="border:1px solid #ccc;border-radius:4px;min-height:34px;padding:5px 7px;font-size:10.5px;white-space:pre-wrap">'+(e(v)||'&nbsp;')+'</div></div>'; }
+  function sh(t){ return '<div style="font-size:11.5px;font-weight:700;color:#0e413a;background:#f4f4f0;padding:6px 10px;border-left:3px solid #a8b938;margin:16px 0 9px">'+t+'</div>'; }
+
+  var h = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Will Instruction Sheet — '+e(c.Name||'')+'</title>';
+  h += _brokerDocCSS();
+  h += '<style>.wq td,.wq th{border:1px solid #bbb;padding:5px 6px;font-size:10px;vertical-align:top}.wq th{background:#0e413a;color:#fff;text-align:left}.wq{width:100%;border-collapse:collapse;margin:6px 0 10px}</style>';
+  h += '</head><body><div class="page">';
+  h += _brokerLetterhead();
+
+  h += '<div class="title">WILL INSTRUCTION SHEET</div>';
+  h += '<div style="background:#fff8e1;border:1px solid #e6c547;border-radius:5px;padding:9px 12px;margin-bottom:14px;font-size:10px;color:#6b5500"><strong>This document is not a will.</strong> It records the client\'s testamentary wishes for a qualified attorney to draft a valid Last Will &amp; Testament (Wills Act 7 of 1953), signed by the testator before two competent witnesses.</div>';
+
+  // 1. Testator
+  h += sh('1. Testator (the client)');
+  h += two('Full names', c.Name, 'ID number', c.IDNumber);
+  h += two('Date of birth', c.DOB, 'Place of birth', D.t_placeofbirth);
+  h += one('Residential address', c.Address);
+  h += two('Cell', c.Cell, 'Email', c.Email);
+  h += one('Occupation', D.t_occupation||c.Occupation);
+  h += '<div style="font-size:10px;font-weight:700;margin:6px 0 2px">Marital status / regime</div>';
+  ['Single / never married','Married in community of property (COP)','Married out of community of property (ANC) with accrual','Married out of community of property (ANC) without accrual','Divorced','Widowed','Life partner / cohabiting'].forEach(function(o){ h+=opt(marital,o); });
+  if(D.t_marital_date) h += one('Date of divorce / spouse passing', D.t_marital_date);
+
+  // 2. Spouse
+  h += sh('2. Spouse / life partner');
+  h += two('Full names', spouseName, 'ID number', c.SpouseIDNumber);
+  h += two('Date of birth', c.SpouseDOB, 'Date of marriage', D.s_marriage_date);
+  h += one('Place of marriage', D.s_marriage_place);
+  if(D.s_anc_note) h += note('ANC / accrual notes for the attorney', D.s_anc_note);
+
+  // 3. Children & dependants
+  h += sh('3. Children and dependants');
+  h += '<table class="wq"><thead><tr><th style="width:32%">Full names</th><th style="width:22%">ID / DOB</th><th style="width:10%">Minor?</th><th>Special needs / notes</th></tr></thead><tbody>';
+  if(kids.length){ kids.forEach(function(kd){ var age=_willAge(kd.DOB); var minor=(age!=null)?(age<18?'Yes':'No'):''; h+='<tr><td>'+e(kd.Name||'')+'</td><td>'+e(kd.IDNumber||kd.DOB||'')+'</td><td style="text-align:center">'+minor+'</td><td>'+e(D['cn_'+kd.ID]||'')+'</td></tr>'; }); }
+  else { h+='<tr><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td></tr><tr><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td></tr>'; }
+  h += '</tbody></table>';
+  if(D.dep_notes) h += note('Other dependants to provide for', D.dep_notes);
+
+  // 4. Existing will
+  h += sh('4. Existing will');
+  ['I do not have an existing will','I have an existing will','I have a codicil / amendment to a prior will'].forEach(function(o){ h+=opt(D.e_status,o); });
+  h += two('Date of existing will', D.e_date||c.WillDate, 'Drafted by', D.e_drafted_by||c.WillAttorney);
+  if(D.e_location) h += note('Location of the existing will / codicil', D.e_location);
+  h += chk(D.e_revoke,'Revoke all prior wills and codicils when this new will is signed.');
+
+  // 5. Executor
+  h += sh('5. Executor nomination');
+  h += '<div style="font-size:10px;font-weight:700;margin:4px 0 2px">Primary executor</div>';
+  h += two('Full names', D.ex_p_name, 'ID / Reg number', D.ex_p_id);
+  h += two('Relationship', D.ex_p_rel, 'Contact number', D.ex_p_contact);
+  h += one('Address', D.ex_p_address);
+  h += '<div style="font-size:10px;font-weight:700;margin:6px 0 2px">Alternate executor</div>';
+  h += two('Full names', D.ex_a_name, 'ID / Reg number', D.ex_a_id);
+  h += two('Relationship', D.ex_a_rel, 'Contact number', D.ex_a_contact);
+  h += '<div style="font-size:10px;font-weight:700;margin:6px 0 2px">Powers &amp; fees</div>';
+  ['Waive security (bond of security) — usual for a family executor','Require security'].forEach(function(o){ h+=opt(D.ex_security,o); });
+  ['Agreed reduced rate (below)','Full statutory rate of 3.5% + VAT'].forEach(function(o){ h+=opt(D.ex_fee,o); });
+  if(D.ex_fee_rate) h += one('Agreed rate (%) + VAT', D.ex_fee_rate);
+  h += chk(D.ex_assume,'Executor may assume a co-executor (e.g. a professional firm).');
+  if(D.ex_notes) h += note('Other powers / special instructions', D.ex_notes);
+
+  // 6. Guardian
+  h += sh('6. Guardian for minor children');
+  h += chk(D.g_na,'Not applicable — no minor children, or the other parent has full guardianship.');
+  h += '<div style="font-size:10px;font-weight:700;margin:6px 0 2px">Primary guardian</div>';
+  h += two('Full names', D.g_p_name, 'ID number', D.g_p_id);
+  h += two('Relationship', D.g_p_rel, 'Contact', D.g_p_contact);
+  h += '<div style="font-size:10px;font-weight:700;margin:6px 0 2px">Alternate guardian</div>';
+  h += two('Full names', D.g_a_name, 'ID number', D.g_a_id);
+  h += two('Relationship', D.g_a_rel, 'Contact', D.g_a_contact);
+  h += chk(D.g_discussed,'Discussed with the proposed guardian and they have agreed.');
+  if(D.g_notes) h += note('Notes to guardian', D.g_notes);
+
+  // 7. Trust
+  h += sh('7. Testamentary trust');
+  ['Yes — establish a testamentary trust','No — distribute directly','Only if beneficiaries are still minors at date of death'].forEach(function(o){ h+=opt(D.tr_choice,o); });
+  if(D.tr1_name||D.tr2_name||D.tr3_name){
+    h += '<div style="font-size:10px;font-weight:700;margin:6px 0 2px">Trustees</div>';
+    if(D.tr1_name) h += two('Trustee 1', D.tr1_name, 'ID number', D.tr1_id);
+    if(D.tr2_name) h += two('Trustee 2', D.tr2_name, 'ID number', D.tr2_id);
+    if(D.tr3_name) h += two('Trustee 3', D.tr3_name, 'ID number', D.tr3_id);
+  }
+  ['Terminates when beneficiary reaches a set age (below)','Trustees may pay capital sooner for education, medical, first home, etc.','Income distributed as needed; capital held until termination age'].forEach(function(o){ h+=opt(D.tr_term,o); });
+  if(D.tr_term_age) h += one('Termination age', D.tr_term_age);
+  if(D.tr_notes) h += note('Special trust instructions', D.tr_notes);
+
+  // 8. Bequests
+  h += sh('8. Specific bequests');
+  h += '<table class="wq"><thead><tr><th style="width:42%">Item / amount</th><th style="width:38%">Beneficiary</th><th>If predeceases?</th></tr></thead><tbody>';
+  var anyBq=false;
+  for(var bi=1; bi<=6; bi++){ var it=D['bq'+bi+'_item']; if(it||D['bq'+bi+'_ben']){ anyBq=true; h+='<tr><td>'+e(it||'')+'</td><td>'+e(D['bq'+bi+'_ben']||'')+'</td><td>'+e(D['bq'+bi+'_pre']||'')+'</td></tr>'; } }
+  if(!anyBq) h += '<tr><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td></tr>';
+  h += '</tbody></table>';
+
+  // 9. Residue
+  h += sh('9. Residue of estate');
+  ['Entire residue to my spouse / life partner','Entire residue to my children equally, per stirpes','Entire residue to my children equally, per capita','Split as follows (table below)'].forEach(function(o){ h+=opt(D.res_choice,o); });
+  var anyRs=false; var rsTbl='<table class="wq"><thead><tr><th style="width:48%">Beneficiary</th><th style="width:14%">% share</th><th>If predeceases, to</th></tr></thead><tbody>';
+  for(var ri=1; ri<=5; ri++){ var rb=D['rs'+ri+'_ben']; if(rb||D['rs'+ri+'_pct']){ anyRs=true; rsTbl+='<tr><td>'+e(rb||'')+'</td><td style="text-align:center">'+e(D['rs'+ri+'_pct']||'')+'</td><td>'+e(D['rs'+ri+'_pre']||'')+'</td></tr>'; } }
+  rsTbl+='</tbody></table>';
+  if(anyRs) h += rsTbl;
+
+  // 10. Special assets
+  h += sh('10. Special assets requiring attention');
+  h += '<div style="font-size:10px;font-weight:700;margin:4px 0 2px">Retirement funds (s.37C)</div>';
+  ['I have reviewed my fund beneficiary nominations','I wish to update my fund nominations (attorney / adviser to assist)'].forEach(function(o){ h+=opt(D.sa_rf,o); });
+  h += '<div style="font-size:10px;font-weight:700;margin:6px 0 2px">Life insurance policies</div>';
+  ['All life policies have current beneficiary nominations','Some policies pay into my estate (no nominated beneficiary)'].forEach(function(o){ h+=opt(D.sa_lp,o); });
+  if(D.sa_lp_notes) h += note('Notes on policies', D.sa_lp_notes);
+  h += '<div style="font-size:10px;font-weight:700;margin:6px 0 2px">Fixed property</div>';
+  if(D.sa_prop_list) h += note('Properties', D.sa_prop_list);
+  ['Primary residence to pass to spouse (s.4q — no estate duty)','Property to be sold and proceeds form part of residue','Specific property to a specific beneficiary (detail in section 8)'].forEach(function(o){ h+=opt(D.sa_prop,o); });
+  h += '<div style="font-size:10px;font-weight:700;margin:6px 0 2px">Business interests</div>';
+  ['Not applicable','I am a shareholder / member (detail below)','A buy-and-sell agreement is in place','No buy-and-sell — business interest to pass to (below)'].forEach(function(o){ h+=opt(D.sa_biz,o); });
+  if(D.sa_biz_detail) h += one('Business detail', D.sa_biz_detail);
+  h += '<div style="font-size:10px;font-weight:700;margin:6px 0 2px">Offshore assets</div>';
+  ['None','I hold assets offshore (a separate offshore will may be recommended)'].forEach(function(o){ h+=opt(D.sa_off,o); });
+  if(D.sa_off_detail) h += note('Country/ies and nature of offshore assets', D.sa_off_detail);
+  h += '<div style="font-size:10px;font-weight:700;margin:6px 0 2px">Firearms</div>';
+  ['None','I own firearms (beneficiary must hold a valid licence)'].forEach(function(o){ h+=opt(D.sa_fire,o); });
+  if(D.sa_fire_num||D.sa_fire_licensed) h += two('Number of firearms', D.sa_fire_num, 'Licensed to', D.sa_fire_licensed);
+
+  // 11. Living will
+  h += sh('11. Living will / advance medical directive');
+  ['Yes — I wish a living will to be drafted','No — I do not want a living will','I already have a living will (date below)'].forEach(function(o){ h+=opt(D.lw,o); });
+  if(D.lw_date) h += one('Date of existing living will', D.lw_date);
+  h += '<div style="font-size:10px;font-weight:700;margin:6px 0 2px">Organ donation</div>';
+  ['I wish to donate my organs and tissues where medically suitable','I do not wish to donate organs or tissues','I am already a registered organ donor'].forEach(function(o){ h+=opt(D.organ,o); });
+
+  // 12. Funeral
+  h += sh('12. Funeral wishes');
+  ['Burial','Cremation','No preference — leave to family'].forEach(function(o){ h+=opt(D.fw,o); });
+  if(D.fw_location) h += note('Location', D.fw_location);
+  if(D.fw_requests) h += note('Specific requests', D.fw_requests);
+  h += '<div style="font-size:10px;font-weight:700;margin:6px 0 2px">Funeral cover</div>';
+  ['I have a funeral policy (details below)','None'].forEach(function(o){ h+=opt(D.fw_cover,o); });
+  if(D.fw_cover_provider||D.fw_cover_policy) h += two('Provider', D.fw_cover_provider, 'Policy no.', D.fw_cover_policy);
+
+  // 13. Digital
+  h += sh('13. Digital assets and accounts');
+  h += chk(D.da_letter,'A sealed letter of instruction is lodged'+(D.da_letter_with?' with '+e(D.da_letter_with):'')+'.');
+  if(D.da_social) h += one('Social media accounts to be', D.da_social);
+  h += chk(D.da_crypto,'Cryptocurrency holdings exist'+(D.da_crypto_loc?' — location of keys: '+e(D.da_crypto_loc):'')+'.');
+
+  // 14. Pets
+  h += sh('14. Pets');
+  h += chk(D.pet_na,'Not applicable.');
+  if(D.pet_carer) h += one('Pet(s) to be cared for by', D.pet_carer);
+  if(D.pet_bequest) h += one('Bequest to carer for upkeep (R)', D.pet_bequest);
+
+  // 15. Letter of wishes
+  h += sh('15. Letter of wishes (private, non-binding)');
+  ['Yes — a separate letter of wishes will be drafted','No'].forEach(function(o){ h+=opt(D.lo,o); });
+
+  // 16. Additional
+  h += sh('16. Additional instructions to the attorney');
+  h += note('', D.add_notes);
+
+  // Declaration
+  h += sh('Client declaration');
+  h += '<div style="font-size:10px;color:#333;margin-bottom:12px">I, <span style="font-weight:700">'+e(c.Name||'')+'</span>, confirm that the information above represents my current testamentary wishes. I understand that this document is <strong>not a will</strong> and that a valid Last Will &amp; Testament must be drafted by a qualified attorney and signed by me before two competent witnesses (Wills Act 7 of 1953). Duwalcoe Financial Consultants CC is not providing legal advice in collecting this information.</div>';
+  h += '<div class="sig-grid"><div><div class="sig-line">Client signature</div></div><div><div class="sig-line">Date</div></div></div>';
+  h += '<div class="sig-grid" style="margin-top:16px"><div><div class="sig-line">Adviser signature (Clinton Hayes)</div></div><div><div class="sig-line">Date</div></div></div>';
+
+  h += '<div style="margin-top:20px;padding:11px 13px;background:#f4f4f0;border-radius:5px;font-size:10px;color:#333"><strong>Office use — forwarded to:</strong><br>';
+  h += 'Attorney / firm: '+fv(D.ou_attorney)+'<br>';
+  h += 'Date sent: '+fv(D.ou_sent_date)+' &nbsp;&nbsp; Method: '+(D.ou_method?e(D.ou_method):'Email / Post / Hand delivery')+'<br>';
+  h += 'Will drafted &amp; signed on: '+fv(D.signed_date)+' &nbsp;&nbsp; Original stored at: '+fv(D.ou_stored)+'</div>';
+
+  h += '<div class="footer">T: 031 763 5194 &nbsp;|&nbsp; C: 082 449 6545 &nbsp;|&nbsp; E: clinton@duwalcoe.co.za &nbsp;|&nbsp; W: www.duwalcoe.co.za<br>Members: DW Dekker, WD Dekker &nbsp;|&nbsp; CK 1992/030699/23</div>';
+
+  h += '<div class="noprint" id="willActions" style="position:fixed;bottom:16px;right:16px;display:flex;gap:8px">';
+  h += '<button onclick="window.print()" style="background:#0e413a;color:#fff;border:none;padding:10px 20px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:700">Print / Save PDF</button>';
+  h += '<button onclick="window.close()" style="background:#888;color:#fff;border:none;padding:10px 16px;border-radius:6px;cursor:pointer;font-size:13px">Close</button>';
+  h += '</div>';
+  h += '<script>(function(){var a=document.getElementById("willActions");if(!a)return;window.addEventListener("beforeprint",function(){a.style.display="none";});window.addEventListener("afterprint",function(){a.style.display="flex";});})();<' + '/script>';
+
+  h += '</div></body></html>';
+  var win = window.open('','_blank');
+  if(win){ win.document.write(h); win.document.close(); }
+  else { alert('Pop-up blocked. Please allow pop-ups for this page.'); }
 }
 
 function printBrokerAuth(clientId){
