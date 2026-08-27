@@ -1626,6 +1626,7 @@ function renderProfile(){
       :
         '<span style="background:#94a3b8;color:#fff;border-radius:20px;padding:2px 12px;font-size:13px;font-weight:700;letter-spacing:0.02em">📜 Will not asked</span>'
     ) : '')+
+    (c.Cohabiting==='Yes'?'<span style="background:#0e413a;color:#ccd660;border-radius:20px;padding:2px 12px;font-size:13px;font-weight:700;letter-spacing:0.02em" title="Cohabiting / life partner (distinct from marital status)">🤝 Life partner</span>':'')+
     '</div>'+
     (clean(c.MaidenName)?'<div style="font-size:12px;color:#aabbd4;margin-bottom:2px">Maiden name: <strong style="color:#ccd8e8">'+c.MaidenName+'</strong></div>':'')+
     (clean(c.CallingName)&&c.CallingName!==c.Name.split(' ')[0]?'<div style="font-size:12px;color:var(--gold);margin-bottom:4px">Known as: '+c.CallingName+'</div>':'<div style="font-size:12px;color:#7899bb;margin-bottom:4px">'+( c.CallingName||c.Name.split(' ')[0])+'</div>')+
@@ -5031,6 +5032,7 @@ function openClientModal(id, isLead){
     '</div>'+
     '<div class="g3" style="margin-top:10px">'+
     fs('fmar','Marital Status',['','Single','Married - ANC with accrual','Married - ANC without accrual','Married in COP','Life partner','Divorced','Widowed'],c.MaritalStatus)+
+    '<div style="display:flex;align-items:flex-end;padding-bottom:6px"><label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;color:#445" title="Tick for a client who is cohabiting with a life partner — independent of their legal marital status (e.g. Divorced AND cohabiting)."><input type="checkbox" id="fcohab"'+(c.Cohabiting==='Yes'?' checked':'')+' style="width:16px;height:16px;accent-color:var(--sage)">Cohabiting / life partner</label></div>'+
     fdp('fann','Marriage / Anniversary Date',c.Anniversary||'')+
     fld('fancc','ANC Commencement Value — Client (R)',c.ANCCommClient||'')+
     fld('fancsp','ANC Commencement Value — Spouse (R)',c.ANCCommSpouse||'')+
@@ -5771,6 +5773,41 @@ function collectWill(){
 
 function _willAge(dob){ if(!dob) return null; var d=new Date(dob); if(isNaN(d)) return null; var t=new Date(); var a=t.getFullYear()-d.getFullYear(); var m=t.getMonth()-d.getMonth(); if(m<0||(m===0&&t.getDate()<d.getDate())) a--; return a; }
 
+// Read-only reference of the client's captured assets, liabilities and needs,
+// shown at the top of the Will tab so they don't have to print or tab-hop.
+function renderWillRefPanel(c){
+  var rows = (typeof finposFor==='function') ? finposFor(c.ID) : [];
+  var assets = rows.filter(function(r){ return ['property','vehicle','other','business'].indexOf(r.Kind)>=0; });
+  var liabs  = rows.filter(function(r){ return r.Kind==='liability'; });
+  var needs  = rows.filter(function(r){ return r.Kind==='need'; });
+  var nnRow  = (typeof needNotesRowFor==='function') ? needNotesRowFor(c.ID) : null;
+  var nnTxt  = nnRow ? (fpData(nnRow).text||'') : '';
+  var assetTot=0, liabTot=0, aH='', lH='', nH='';
+  assets.forEach(function(r){ var d=fpData(r); var v=fpN(d.value); assetTot+=v; var meta=[]; if(fpN(d.bondOut))meta.push('bond '+fpR(fpN(d.bondOut))); if(fpN(d.financeOut))meta.push('finance '+fpR(fpN(d.financeOut))); if(d.passesTo)meta.push('→ '+fpPassesToLabel(d)); aH+='<tr><td>'+wfEsc(d.desc||r.Kind)+'</td><td style="text-align:right;white-space:nowrap">'+fpR(v)+'</td><td style="color:#889;font-size:11px">'+wfEsc(meta.join(' · '))+'</td></tr>'; });
+  liabs.forEach(function(r){ var d=fpData(r); var v=fpN(d.balance); liabTot+=v; lH+='<tr><td>'+wfEsc(d.desc||'Liability')+'</td><td style="text-align:right;white-space:nowrap">'+fpR(v)+'</td><td style="color:#889;font-size:11px">'+wfEsc(d.liabType||'')+'</td></tr>'; });
+  needs.forEach(function(r){ var d=fpData(r); var amt=fpN(d.amount); var inc=(d.needType==='Monthly income'); var at=inc?(fpR(amt)+' /pm'+(d.years?' × '+d.years+'yr':'')):fpR(amt); nH+='<tr><td>'+wfEsc(d.desc||d.scenario||'Need')+'</td><td>'+wfEsc(d.scenario||'')+'</td><td style="text-align:right;white-space:nowrap">'+at+'</td><td style="color:#667">'+wfEsc(fpPassesToLabel({passesTo:d.benTo,passesToName:d.benName}))+'</td></tr>'; });
+
+  if(!assets.length && !liabs.length && !needs.length && !nnTxt){
+    return '<div style="background:#f7f9fb;border:1px dashed #cdd6dd;border-radius:9px;padding:11px 14px;font-size:12.5px;color:#778;margin-bottom:14px">No assets, liabilities or needs captured yet for this client. Add them in the <strong>Financial Position</strong> and <strong>Needs</strong> tabs and they will appear here for reference while you fill in the will. Policy details live in your external Excel schedule.</div>';
+  }
+
+  function tbl(title,head,body){ if(!body) return ''; return '<div style="font-weight:700;font-size:12px;color:#445;margin:8px 0 3px">'+title+'</div><table class="wref"><thead>'+head+'</thead><tbody>'+body+'</tbody></table>'; }
+  var h = '<style>.wref{width:100%;border-collapse:collapse;font-size:12px;margin-bottom:4px}.wref th{text-align:left;color:#889;font-weight:600;font-size:11px;border-bottom:1px solid #e2e8ee;padding:3px 6px}.wref td{padding:3px 6px;border-bottom:1px solid #f0f3f6;vertical-align:top}</style>';
+  h += '<details open style="margin-bottom:14px"><summary style="cursor:pointer;font-weight:700;color:var(--navy);font-size:14px;padding:5px 0">📎 This client\'s file — assets, liabilities &amp; needs (for reference while you fill in the will)</summary>';
+  h += '<div style="border:1px solid #e2e8ee;border-radius:10px;padding:12px 14px;margin-top:8px;background:#fbfcfd">';
+  h += '<div style="display:flex;gap:18px;flex-wrap:wrap;font-size:12px;margin-bottom:4px">'
+    +'<span>Assets: <strong>'+fpR(assetTot)+'</strong></span>'
+    +'<span>Liabilities: <strong>'+fpR(liabTot)+'</strong></span>'
+    +'<span>Estimated net: <strong>'+fpR(assetTot-liabTot)+'</strong></span></div>';
+  h += tbl('Assets','<tr><th>Item</th><th style="text-align:right">Value</th><th>Notes</th></tr>', aH);
+  h += tbl('Liabilities','<tr><th>Item</th><th style="text-align:right">Balance</th><th>Type</th></tr>', lH);
+  h += tbl('Needs','<tr><th>Need</th><th>Scenario</th><th style="text-align:right">Amount</th><th>For whom</th></tr>', nH);
+  if(nnTxt) h += '<div style="font-weight:700;font-size:12px;color:#445;margin:8px 0 3px">Needs discussion notes</div><div style="font-size:12px;color:#556;white-space:pre-wrap;background:#fff;border:1px solid #eef;border-radius:6px;padding:7px 9px">'+wfEsc(nnTxt)+'</div>';
+  h += '<div style="font-size:11.5px;color:#889;margin-top:10px;border-top:1px dashed #dde;padding-top:8px">📄 <strong>Policies &amp; beneficiary nominations</strong> are kept in your external Excel schedule — open that alongside for section 10 (retirement funds, life policies).</div>';
+  h += '</div></details>';
+  return h;
+}
+
 function renderWill(c){
   var D = willData(c.ID);
   var row = willFor(c.ID);
@@ -5812,6 +5849,8 @@ function renderWill(c){
 
   h += '<div style="background:#fff8e1;border:1px solid #e6c547;border-radius:7px;padding:9px 13px;font-size:12px;color:#6b5500;margin-bottom:14px">'
     +'<strong>This is not a will.</strong> It records the client\'s wishes for a qualified attorney to draft a valid Last Will &amp; Testament (Wills Act 7 of 1953). Capture it here, then generate the sheet to send the attorney. Saving does not change the client\'s will status — that flips to “Will (mine)” only when you enter the signed date in the Office-use section at the bottom.</div>';
+
+  h += renderWillRefPanel(c);
 
   h += '<div id="willFormRoot">';
 
@@ -6512,7 +6551,7 @@ function saveClient(openFNA){
 
   var c={ID:id,Name:name,MaidenName:g('fmdn')||'',CallingName:g('fcn')||name.split(' ')[0]||name,Title:g('fttl'),IDNumber:g('fi'),DOB:g('fd'),Cell:g('fc'),Email:g('fe'),
     Occupation:g('fo'),Employer:g('fem'),Income:g('finc')||'',TaxNo:g('ftx'),
-    Anniversary:g('fann'),MaritalStatus:g('fmar'),Status:g('fst'),ReviewDate:g('fr'),
+    Anniversary:g('fann'),MaritalStatus:g('fmar'),Cohabiting:(document.getElementById('fcohab')&&document.getElementById('fcohab').checked)?'Yes':'No',Status:g('fst'),ReviewDate:g('fr'),
     ANCCommClient:g('fancc')||'',ANCCommSpouse:g('fancsp')||'',
     HasWill:getRadio('fhaswill')||'',WillDate:g('fwilldate')||'',WillAttorney:g('fwillatt')||'',WillThroughMe:getRadio('fwillthrough')||'',WillNotes:g('fwillnotes')||'',
     Gender:getRadio('fgen')||g('fgen'),Smoker:getRadio('fsm')||g('fsm'),
