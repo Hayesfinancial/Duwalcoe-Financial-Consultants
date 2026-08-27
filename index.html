@@ -5773,8 +5773,34 @@ function collectWill(){
 
 function _willAge(dob){ if(!dob) return null; var d=new Date(dob); if(isNaN(d)) return null; var t=new Date(); var a=t.getFullYear()-d.getFullYear(); var m=t.getMonth()-d.getMonth(); if(m<0||(m===0&&t.getDate()<d.getDate())) a--; return a; }
 
+// Add/edit an asset or liability from inside the Will tab. Auto-saves the will
+// first (so nothing typed is lost when the finpos save triggers a re-render),
+// then opens the normal Financial Position modal — one source of truth.
+function willAddFinpos(cid, kind){ try{ if(document.getElementById('willFormRoot')) saveWill(cid); }catch(e){} if(typeof openFinPosModal==='function') openFinPosModal(cid, kind); else alert('Asset capture unavailable.'); }
+function willEditFinpos(cid, kind, fpid){ try{ if(document.getElementById('willFormRoot')) saveWill(cid); }catch(e){} if(typeof openFinPosModal==='function') openFinPosModal(cid, kind, fpid); else alert('Asset capture unavailable.'); }
+
+// Re-do a will: clear the captured will data for a fresh start. Keeps only the
+// latest capture (no version history) — the signed will on file is the record.
+// Does NOT touch the client's will-status flags or family/assets.
+function clearWill(cid){
+  if(!confirm('Start a new will for this client? This clears the captured will details so you can begin fresh.\n\nIt does NOT affect the client\'s assets, family, will status, or any signed will already on file. The previous capture is not kept.')) return;
+  var existing = willFor(cid);
+  var now = new Date().toISOString().slice(0,16).replace('T',' ');
+  var rowObj = { ID: existing ? existing.ID : ('will_'+cid), ClientID: cid, Data: JSON.stringify({}), UpdatedAt: now };
+  rowObj._pendingSave = true;
+  if(!DB.willinstr) DB.willinstr = [];
+  if(existing){ var gi=DB.willinstr.indexOf(existing); if(gi>=0) DB.willinstr[gi]=rowObj; }
+  else DB.willinstr.push(rowObj);
+  try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
+  var forServer = JSON.parse(JSON.stringify(rowObj)); delete forServer._pendingSave;
+  post({action:'saveWill', item:forServer}, function(res){ if(res && res.ok===1){ var i=DB.willinstr.findIndex(function(x){return x.ID===rowObj.ID;}); if(i>=0) DB.willinstr[i]=forServer; try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){} } });
+  if(typeof toast==='function') toast('Cleared — ready for a fresh will','ok');
+  render();
+}
+
 // Read-only reference of the client's captured assets, liabilities and needs,
 // shown at the top of the Will tab so they don't have to print or tab-hop.
+// Add/edit buttons write to Financial Position (the single source of truth).
 function renderWillRefPanel(c){
   var rows = (typeof finposFor==='function') ? finposFor(c.ID) : [];
   var assets = rows.filter(function(r){ return ['property','vehicle','other','business'].indexOf(r.Kind)>=0; });
@@ -5783,12 +5809,22 @@ function renderWillRefPanel(c){
   var nnRow  = (typeof needNotesRowFor==='function') ? needNotesRowFor(c.ID) : null;
   var nnTxt  = nnRow ? (fpData(nnRow).text||'') : '';
   var assetTot=0, liabTot=0, aH='', lH='', nH='';
-  assets.forEach(function(r){ var d=fpData(r); var v=fpN(d.value); assetTot+=v; var meta=[]; if(fpN(d.bondOut))meta.push('bond '+fpR(fpN(d.bondOut))); if(fpN(d.financeOut))meta.push('finance '+fpR(fpN(d.financeOut))); if(d.passesTo)meta.push('→ '+fpPassesToLabel(d)); aH+='<tr><td>'+wfEsc(d.desc||r.Kind)+'</td><td style="text-align:right;white-space:nowrap">'+fpR(v)+'</td><td style="color:#889;font-size:11px">'+wfEsc(meta.join(' · '))+'</td></tr>'; });
-  liabs.forEach(function(r){ var d=fpData(r); var v=fpN(d.balance); liabTot+=v; lH+='<tr><td>'+wfEsc(d.desc||'Liability')+'</td><td style="text-align:right;white-space:nowrap">'+fpR(v)+'</td><td style="color:#889;font-size:11px">'+wfEsc(d.liabType||'')+'</td></tr>'; });
+  assets.forEach(function(r){ var d=fpData(r); var v=fpN(d.value); assetTot+=v; var meta=[]; if(fpN(d.bondOut))meta.push('bond '+fpR(fpN(d.bondOut))); if(fpN(d.financeOut))meta.push('finance '+fpR(fpN(d.financeOut))); if(d.passesTo)meta.push('→ '+fpPassesToLabel(d)); aH+='<tr><td>'+wfEsc(d.desc||r.Kind)+'</td><td style="text-align:right;white-space:nowrap">'+fpR(v)+'</td><td style="color:#889;font-size:11px">'+wfEsc(meta.join(' · '))+'</td><td style="text-align:right;white-space:nowrap"><button class="btn b-gh xs" onclick="willEditFinpos(\''+c.ID+'\',\''+r.Kind+'\',\''+r.ID+'\')">edit</button></td></tr>'; });
+  liabs.forEach(function(r){ var d=fpData(r); var v=fpN(d.balance); liabTot+=v; lH+='<tr><td>'+wfEsc(d.desc||'Liability')+'</td><td style="text-align:right;white-space:nowrap">'+fpR(v)+'</td><td style="color:#889;font-size:11px">'+wfEsc(d.liabType||'')+'</td><td style="text-align:right;white-space:nowrap"><button class="btn b-gh xs" onclick="willEditFinpos(\''+c.ID+'\',\'liability\',\''+r.ID+'\')">edit</button></td></tr>'; });
   needs.forEach(function(r){ var d=fpData(r); var amt=fpN(d.amount); var inc=(d.needType==='Monthly income'); var at=inc?(fpR(amt)+' /pm'+(d.years?' × '+d.years+'yr':'')):fpR(amt); nH+='<tr><td>'+wfEsc(d.desc||d.scenario||'Need')+'</td><td>'+wfEsc(d.scenario||'')+'</td><td style="text-align:right;white-space:nowrap">'+at+'</td><td style="color:#667">'+wfEsc(fpPassesToLabel({passesTo:d.benTo,passesToName:d.benName}))+'</td></tr>'; });
 
+  var addBar = '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:10px">'
+    +'<span style="font-size:11.5px;color:#778;font-weight:600">Add:</span>'
+    +'<button class="btn b-gh xs" onclick="willAddFinpos(\''+c.ID+'\',\'property\')">＋ Property</button>'
+    +'<button class="btn b-gh xs" onclick="willAddFinpos(\''+c.ID+'\',\'vehicle\')">＋ Vehicle</button>'
+    +'<button class="btn b-gh xs" onclick="willAddFinpos(\''+c.ID+'\',\'other\')">＋ Other asset</button>'
+    +'<button class="btn b-gh xs" onclick="willAddFinpos(\''+c.ID+'\',\'business\')">＋ Business</button>'
+    +'<button class="btn b-gh xs" onclick="willAddFinpos(\''+c.ID+'\',\'liability\')">＋ Liability</button>'
+    +'</div>'
+    +'<div style="font-size:11px;color:#9aa;margin-top:4px">Adding or editing here writes to the client\'s Financial Position (one source of truth) and auto-saves the will first, so nothing you\'ve typed is lost.</div>';
+
   if(!assets.length && !liabs.length && !needs.length && !nnTxt){
-    return '<div style="background:#f7f9fb;border:1px dashed #cdd6dd;border-radius:9px;padding:11px 14px;font-size:12.5px;color:#778;margin-bottom:14px">No assets, liabilities or needs captured yet for this client. Add them in the <strong>Financial Position</strong> and <strong>Needs</strong> tabs and they will appear here for reference while you fill in the will. Policy details live in your external Excel schedule.</div>';
+    return '<div style="background:#f7f9fb;border:1px dashed #cdd6dd;border-radius:9px;padding:11px 14px;margin-bottom:14px"><div style="font-size:12.5px;color:#778">No assets, liabilities or needs captured for this client yet. Add them here (or in the <strong>Financial Position</strong> / <strong>Needs</strong> tabs) and they\'ll show for reference while you fill in the will. Policy details live in your external Excel schedule.</div>'+addBar+'</div>';
   }
 
   function tbl(title,head,body){ if(!body) return ''; return '<div style="font-weight:700;font-size:12px;color:#445;margin:8px 0 3px">'+title+'</div><table class="wref"><thead>'+head+'</thead><tbody>'+body+'</tbody></table>'; }
@@ -5799,9 +5835,10 @@ function renderWillRefPanel(c){
     +'<span>Assets: <strong>'+fpR(assetTot)+'</strong></span>'
     +'<span>Liabilities: <strong>'+fpR(liabTot)+'</strong></span>'
     +'<span>Estimated net: <strong>'+fpR(assetTot-liabTot)+'</strong></span></div>';
-  h += tbl('Assets','<tr><th>Item</th><th style="text-align:right">Value</th><th>Notes</th></tr>', aH);
-  h += tbl('Liabilities','<tr><th>Item</th><th style="text-align:right">Balance</th><th>Type</th></tr>', lH);
+  h += tbl('Assets','<tr><th>Item</th><th style="text-align:right">Value</th><th>Notes</th><th></th></tr>', aH);
+  h += tbl('Liabilities','<tr><th>Item</th><th style="text-align:right">Balance</th><th>Type</th><th></th></tr>', lH);
   h += tbl('Needs','<tr><th>Need</th><th>Scenario</th><th style="text-align:right">Amount</th><th>For whom</th></tr>', nH);
+  h += addBar;
   if(nnTxt) h += '<div style="font-weight:700;font-size:12px;color:#445;margin:8px 0 3px">Needs discussion notes</div><div style="font-size:12px;color:#556;white-space:pre-wrap;background:#fff;border:1px solid #eef;border-radius:6px;padding:7px 9px">'+wfEsc(nnTxt)+'</div>';
   h += '<div style="font-size:11.5px;color:#889;margin-top:10px;border-top:1px dashed #dde;padding-top:8px">📄 <strong>Policies &amp; beneficiary nominations</strong> are kept in your external Excel schedule — open that alongside for section 10 (retirement funds, life policies).</div>';
   h += '</div></details>';
@@ -5845,6 +5882,7 @@ function renderWill(c){
   h += '<div style="display:flex;gap:8px">';
   h += '<button class="btn b-gd sm" onclick="saveWill(\''+c.ID+'\')">💾 Save</button>';
   h += '<button class="btn b-nv sm" onclick="printWillSheet(\''+c.ID+'\')">📄 Generate Sheet (PDF)</button>';
+  h += '<button class="btn b-gh sm" onclick="clearWill(\''+c.ID+'\')" title="Re-doing the will? Clear the captured data for a fresh start. Does not affect status, assets, family, or any signed will on file.">🔄 Start new will</button>';
   h += '</div></div>';
 
   h += '<div style="background:#fff8e1;border:1px solid #e6c547;border-radius:7px;padding:9px 13px;font-size:12px;color:#6b5500;margin-bottom:14px">'
