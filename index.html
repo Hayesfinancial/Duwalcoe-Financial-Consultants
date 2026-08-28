@@ -363,6 +363,8 @@ var PAGE = 'dash';
 var SEL = null;
 var CTAB = 'overview';
 var SRCH = '';
+var AGE_MIN = '';  // clients-page age filter, lower bound (inclusive); '' = unset
+var AGE_MAX = '';  // clients-page age filter, upper bound (inclusive); '' = unset
 var EC = null; // edit client id
 var EPC = null; // edit policy client id
 var EPI = null; // edit policy index
@@ -876,6 +878,68 @@ function saIdValid(id){
     sum+=n;
   }
   return sum%10===0;
+}
+// Current age of a client. Prefers the captured DOB; if that's blank, derives
+// it from the SA ID number (a valid 13-digit ID is authoritative, otherwise a
+// best-effort read of the first 6 digits). Returns null when no usable date.
+function ageOf(c){
+  if(!c) return null;
+  var dob=clean(c.DOB);
+  if(!dob){
+    var rawId=String(c.IDNumber||'');
+    if(rawId){
+      var d = saIdValid(rawId) ? dobFromID(rawId.replace(/\D/g,'')) : dobFromID(rawId.replace(/\D/g,''));
+      if(d) dob=d;
+    }
+  }
+  return calcAge(dob);
+}
+// Does this client fall inside the active age filter (AGE_MIN..AGE_MAX,
+// inclusive)? Bounds are forgiving: either may be blank, and a reversed
+// pair (e.g. From 62 / To 60) is swapped rather than matching nothing.
+// A client with no usable DOB/ID is excluded whenever any bound is set.
+function clientMatchesAge(c){
+  var lo = AGE_MIN==='' ? null : parseInt(AGE_MIN,10);
+  var hi = AGE_MAX==='' ? null : parseInt(AGE_MAX,10);
+  if(lo!==null && isNaN(lo)) lo=null;
+  if(hi!==null && isNaN(hi)) hi=null;
+  if(lo===null && hi===null) return true;      // filter inactive
+  if(lo!==null && hi!==null && lo>hi){ var t=lo; lo=hi; hi=t; }
+  var a=ageOf(c);
+  if(a===null) return false;
+  if(lo!==null && a<lo) return false;
+  if(hi!==null && a>hi) return false;
+  return true;
+}
+// Sorted + tab-filtered client list (before search/age). The single source of
+// truth for which tab (Clients / Leads / Inactive / No Will / Unasked) is shown,
+// used by both renderClients() and the live refreshClientList().
+function clientPageFiltered(){
+  var base=DB.clients.slice().sort(function(a,b){
+    if(a.LastAccessed&&!b.LastAccessed) return -1;
+    if(!a.LastAccessed&&b.LastAccessed) return 1;
+    if(a.LastAccessed&&b.LastAccessed) return b.LastAccessed-a.LastAccessed;
+    return (a.Name||'').localeCompare(b.Name||'');
+  });
+  var f=window.CLIENT_LIST_FILTER||'clients';
+  return base.filter(function(c){
+    if(f==='leads')       return c.IsLead==='Yes';
+    if(f==='inactive')    return c.IsLead!=='Yes' && (c.Status==='Inactive'||c.Status==='Cancelled');
+    if(f==='nowill')      return c.IsLead!=='Yes' && c.Status!=='Inactive' && c.Status!=='Cancelled' && c.HasWill==='No';
+    if(f==='willunasked') return c.IsLead!=='Yes' && c.Status!=='Inactive' && c.Status!=='Cancelled' && c.HasWill!=='Yes' && c.HasWill!=='No';
+    return c.IsLead!=='Yes' && c.Status!=='Inactive' && c.Status!=='Cancelled';
+  });
+}
+// Apply the text search (SRCH) and the age filter to a tab-filtered array.
+function applyClientSearchAge(arr){
+  var q=SRCH?SRCH.toLowerCase():'';
+  return arr.filter(function(c){
+    if(q && !((c.Name||'').toLowerCase().indexOf(q)>=0 ||
+              String(c.IDNumber||'').indexOf(q)>=0 ||
+              (c.Email||'').toLowerCase().indexOf(q)>=0 ||
+              String(c.Cell||'').indexOf(q)>=0)) return false;
+    return clientMatchesAge(c);
+  });
 }
 // Set an fdp date picker (hidden input + Y/M/D dropdowns) — or a plain date
 // input — to a YYYY-MM-DD value, keeping the visible dropdowns in step.
@@ -1557,23 +1621,11 @@ function renderClients(){
   var isInactive     = window.CLIENT_LIST_FILTER === 'inactive';
   var isNoWill       = window.CLIENT_LIST_FILTER === 'nowill';
   var isWillUnasked  = window.CLIENT_LIST_FILTER === 'willunasked';
-  var filtered = base.filter(function(c){
-    if(isLeads)        return c.IsLead==='Yes';
-    if(isInactive)     return c.IsLead!=='Yes' && (c.Status==='Inactive'||c.Status==='Cancelled');
-    // No Will = explicit "No" only (sales-target list). Unasked is a separate filter below.
-    if(isNoWill)       return c.IsLead!=='Yes' && c.Status!=='Inactive' && c.Status!=='Cancelled' && c.HasWill==='No';
-    // Unasked = anything other than explicit Yes/No. Mirrors the dashboard bucket logic
-    // so the filter list count matches the ⚪ pill count on the dashboard tile.
-    if(isWillUnasked)  return c.IsLead!=='Yes' && c.Status!=='Inactive' && c.Status!=='Cancelled' && c.HasWill!=='Yes' && c.HasWill!=='No';
-    return c.IsLead!=='Yes' && c.Status!=='Inactive' && c.Status!=='Cancelled';
-  });
-  var list=SRCH?filtered.filter(function(c){
-    var q=SRCH.toLowerCase();
-    return (c.Name||'').toLowerCase().indexOf(q)>=0||
-           String(c.IDNumber||'').indexOf(q)>=0||
-           (c.Email||'').toLowerCase().indexOf(q)>=0||
-           String(c.Cell||'').indexOf(q)>=0;
-  }):filtered;
+  // Tab filter + text search + age filter now share one code path
+  // (clientPageFiltered / applyClientSearchAge) so the full render and the live
+  // refreshClientList() can never drift apart.
+  var filtered = clientPageFiltered();
+  var list = applyClientSearchAge(filtered);
   var clientCount     = base.filter(function(c){ return c.IsLead!=='Yes' && c.Status!=='Inactive' && c.Status!=='Cancelled'; }).length;
   var leadCount       = base.filter(function(c){ return c.IsLead==='Yes'; }).length;
   var inactiveCount   = base.filter(function(c){ return c.IsLead!=='Yes' && (c.Status==='Inactive'||c.Status==='Cancelled'); }).length;
@@ -1583,7 +1635,7 @@ function renderClients(){
   var willUnaskedCount= base.filter(function(c){ return c.IsLead!=='Yes' && c.Status!=='Inactive' && c.Status!=='Cancelled' && c.HasWill!=='Yes' && c.HasWill!=='No'; }).length;
   var pageLabel = isLeads ? 'Leads' : isInactive ? 'Inactive' : isNoWill ? 'Clients — No Will (sales targets)' : isWillUnasked ? 'Clients — Will Not Yet Asked' : 'Clients';
   return '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">'+
-    '<h1 style="font-family:\'DM Serif Display\',serif;font-size:22px;color:var(--navy)">'+pageLabel+' ('+list.length+')</h1>'+
+    '<h1 style="font-family:\'DM Serif Display\',serif;font-size:22px;color:var(--navy)">'+pageLabel+' (<span id="clientPageCount">'+list.length+'</span>)</h1>'+
     '<div style="display:flex;gap:6px;align-items:center">'+
     '<div style="display:flex;gap:0;border:1.5px solid var(--mist);border-radius:8px;overflow:hidden">'+
     '<button class="btn xs" data-act="client-list-filter" data-filter="clients" style="border-radius:0;border:none;'+(!isLeads&&!isInactive&&!isNoWill&&!isWillUnasked?'background:var(--navy);color:#fff':'background:#f5f7fa;color:#889')+';padding:5px 14px;font-weight:700">👥 Clients ('+clientCount+')</button>'+
@@ -1598,11 +1650,59 @@ function renderClients(){
     '<div class="sb"><span style="color:#aaa">🔍</span>'+
     '<input type="text" id="srchBox" value="'+SRCH+'" placeholder="Search name, ID number, email, cell…">'+
     '</div>'+
+    // ── Age-range filter ────────────────────────────────────────────────
+    // Filters the list below to clients whose current age falls in From..To
+    // (inclusive). Either box may be left blank for an open-ended range.
+    // Live — updates the table as you type, without losing input focus.
+    '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 12px;padding:8px 12px;background:#faf9f4;border:1.5px solid var(--mist);border-radius:8px">'+
+    '<span style="font-size:13px;font-weight:700;color:var(--navy)">🎂 Filter by age</span>'+
+    '<input type="number" id="ageMin" value="'+AGE_MIN+'" min="0" max="120" inputmode="numeric" placeholder="From" oninput="AGE_MIN=this.value.trim();refreshClientList();" style="width:74px;border:1.5px solid var(--mist);border-radius:7px;padding:6px 8px;font-size:13px;font-family:inherit">'+
+    '<span style="font-size:12px;color:#889">to</span>'+
+    '<input type="number" id="ageMax" value="'+AGE_MAX+'" min="0" max="120" inputmode="numeric" placeholder="To" oninput="AGE_MAX=this.value.trim();refreshClientList();" style="width:74px;border:1.5px solid var(--mist);border-radius:7px;padding:6px 8px;font-size:13px;font-family:inherit">'+
+    '<button class="btn b-gh xs" onclick="clearAgeFilter()">Clear</button>'+
+    '<span id="ageFilterInfo" style="font-size:11px;color:#889;font-style:italic">'+ageFilterInfoText(list.length)+'</span>'+
+    '</div>'+
     '<div class="card" style="overflow:hidden" id="clientTableWrap">'+
     (isLeads?'<div style="max-height:calc(100vh - 260px);overflow-y:auto">':'')+
     clientTable(list,false,isLeads)+
     (isLeads?'</div>':'')+
     '</div>';
+}
+
+// The little grey note next to the age boxes: describes the active range and
+// how many matched, or a hint when the filter is off.
+function ageFilterInfoText(n){
+  var lo=AGE_MIN==='' ? null : parseInt(AGE_MIN,10);
+  var hi=AGE_MAX==='' ? null : parseInt(AGE_MAX,10);
+  if(lo!==null && isNaN(lo)) lo=null;
+  if(hi!==null && isNaN(hi)) hi=null;
+  if(lo===null && hi===null) return 'e.g. 60 to 62 — leave one side blank for “and older / and younger”';
+  if(lo!==null && hi!==null && lo>hi){ var t=lo; lo=hi; hi=t; }
+  var range = (lo!==null && hi!==null) ? ('ages '+lo+'–'+hi)
+            : (lo!==null) ? ('age '+lo+' and older')
+            : ('age '+hi+' and younger');
+  return 'Showing '+range+' · '+n+' match'+(n===1?'':'es');
+}
+
+// Live-refresh just the client table (and the header count + age note) when the
+// age boxes change. Rebuilds only #clientTableWrap so the number inputs keep
+// focus while you type. Uses the same shared filter path as the full render.
+function clearAgeFilter(){
+  AGE_MIN=''; AGE_MAX='';
+  var a=document.getElementById('ageMin'); if(a) a.value='';
+  var b=document.getElementById('ageMax'); if(b) b.value='';
+  refreshClientList();
+}
+function refreshClientList(){
+  var wrap=document.getElementById('clientTableWrap');
+  if(!wrap) return;  // not on the clients page
+  var isLeads=(window.CLIENT_LIST_FILTER||'clients')==='leads';
+  var list=applyClientSearchAge(clientPageFiltered());
+  wrap.innerHTML=(isLeads?'<div style="max-height:calc(100vh - 260px);overflow-y:auto">':'')+
+    clientTable(list,false,isLeads)+
+    (isLeads?'</div>':'');
+  var cnt=document.getElementById('clientPageCount'); if(cnt) cnt.textContent=list.length;
+  var info=document.getElementById('ageFilterInfo'); if(info) info.textContent=ageFilterInfoText(list.length);
 }
 
 function clientTable(list,mini,isLeads){
@@ -1619,12 +1719,14 @@ function clientTable(list,mini,isLeads){
       var np=polsFor(c.ID).filter(function(p){return p.Status!=='Replaced';}).length;
       var nt=DB.tasks.filter(function(t){return !isdone(t)&&sameClient(t.ClientName,c.Name);}).length;
       var em=clean(c.Email);
+      var ag=ageOf(c);
+      var ageChip = ag!==null ? '<span style="font-size:10px;font-weight:700;color:#8a6d1a;background:#f5f0d8;border-radius:10px;padding:1px 7px;white-space:nowrap" title="Current age">'+ag+'y</span>' : '';
       var isContacted = isLeads && c.Contacted==='Yes';
       var rowBg = isContacted ? ' style="background:#dcfce7"' : '';
       return '<tr class="row" data-act="open-client" data-id="'+c.ID+'"'+rowBg+'>'+
         '<td><div style="display:flex;align-items:center;gap:10px">'+
         '<div style="width:32px;height:32px;border-radius:50%;background:'+(isLeads?(isContacted?'#16a34a':'#d97706'):'var(--navy)')+';display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:#fff;flex-shrink:0">'+ini(c.Name)+'</div>'+
-        '<div><div style="font-weight:600">'+(c.Name||'—')+'</div>'+(em&&!mini?'<div style="font-size:11px;color:#889">'+em+'</div>':'')+'</div>'+
+        '<div><div style="font-weight:600;display:flex;align-items:center;gap:6px;flex-wrap:wrap">'+(c.Name||'—')+ageChip+'</div>'+(em&&!mini?'<div style="font-size:11px;color:#889">'+em+'</div>':'')+'</div>'+
         '</div></td>'+
         (isLeads&&!mini?'<td style="text-align:center"><input type="checkbox" data-act="toggle-contacted" data-id="'+c.ID+'" '+(isContacted?'checked':'')+' style="width:18px;height:18px;cursor:pointer;accent-color:#16a34a" title="'+(isContacted&&c.ContactedAt?'Contacted '+c.ContactedAt:'Mark as contacted')+'"></td>':'')+
         '<td style="font-size:12px">'+(clean(c.Cell)?c.Cell:'—')+'</td>'+
@@ -12293,18 +12395,11 @@ document.addEventListener('change', function(e){
 
 document.addEventListener('input', function(e){
   if(e.target.id==='srchBox'){
+    // Route through the shared filter path so text search respects the active
+    // tab AND the age filter, and updates the same count — identical to a full
+    // render, but rebuilding only the table so the search box keeps focus.
     SRCH=e.target.value;
-    var q=SRCH.toLowerCase();
-    var list=SRCH?DB.clients.filter(function(c){
-      return (c.Name||'').toLowerCase().indexOf(q)>=0||
-             (c.IDNumber||'').toString().indexOf(q)>=0||
-             (c.Email||'').toLowerCase().indexOf(q)>=0||
-             (c.Cell||'').toString().indexOf(q)>=0;
-    }):DB.clients;
-    var wrap=document.getElementById('clientTableWrap');
-    if(wrap) wrap.innerHTML=clientTable(list,false);
-    var hdr=document.getElementById('clientHdr');
-    if(hdr) hdr.textContent='Clients ('+list.length+')';
+    refreshClientList();
   }
   if(e.target.id==='linkExistSrch'){ searchLinkExist(e.target.value); }
   if(e.target.getAttribute('data-autdob')){
