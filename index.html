@@ -24,7 +24,7 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--cream);c
 .ni:hover{color:#ccd6ee;background:rgba(255,255,255,.05)}.ni.on{color:var(--gold);background:rgba(200,168,75,.08);border-left-color:var(--gold)}
 .nsec{font-size:10px;font-weight:700;color:#445577;text-transform:uppercase;letter-spacing:1.2px;padding:8px 20px 4px}
 .ndiv{height:1px;background:#1e3560;margin:8px 16px}
-#main{overflow-y:auto;padding:24px;display:flex;flex-direction:column;gap:20px}
+#main{overflow-y:auto;min-height:0;padding:24px;display:flex;flex-direction:column;gap:20px}
 .card{background:#fff;border-radius:10px;border:1px solid var(--smoke);box-shadow:0 4px 24px rgba(15,31,61,.08)}
 .ch{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid var(--smoke)}
 .ch h2{font-family:'DM Serif Display',serif;font-size:17px;color:var(--navy)}
@@ -1634,7 +1634,7 @@ function renderClients(){
   var noWillCount     = base.filter(function(c){ return c.IsLead!=='Yes' && c.Status!=='Inactive' && c.Status!=='Cancelled' && c.HasWill==='No'; }).length;
   var willUnaskedCount= base.filter(function(c){ return c.IsLead!=='Yes' && c.Status!=='Inactive' && c.Status!=='Cancelled' && c.HasWill!=='Yes' && c.HasWill!=='No'; }).length;
   var pageLabel = isLeads ? 'Leads' : isInactive ? 'Inactive' : isNoWill ? 'Clients — No Will (sales targets)' : isWillUnasked ? 'Clients — Will Not Yet Asked' : 'Clients';
-  return '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">'+
+  return '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;flex-shrink:0">'+
     '<h1 style="font-family:\'DM Serif Display\',serif;font-size:22px;color:var(--navy)">'+pageLabel+' (<span id="clientPageCount">'+list.length+'</span>)</h1>'+
     '<div style="display:flex;gap:6px;align-items:center">'+
     '<div style="display:flex;gap:0;border:1.5px solid var(--mist);border-radius:8px;overflow:hidden">'+
@@ -1647,14 +1647,14 @@ function renderClients(){
     (isLeads ? btn('btn b-gd','open-new-lead','+ New Lead') : (!isInactive&&!isNoWill&&!isWillUnasked ? btn('btn b-gh','id-dob-audit','🪪 ID Audit')+' '+btn('btn b-gd','open-new-client','+ New Client') : ''))+
     '</div>'+
     '</div>'+
-    '<div class="sb"><span style="color:#aaa">🔍</span>'+
+    '<div class="sb" style="flex-shrink:0"><span style="color:#aaa">🔍</span>'+
     '<input type="text" id="srchBox" value="'+SRCH+'" placeholder="Search name, ID number, email, cell…">'+
     '</div>'+
     // ── Age-range filter ────────────────────────────────────────────────
     // Filters the list below to clients whose current age falls in From..To
     // (inclusive). Either box may be left blank for an open-ended range.
     // Live — updates the table as you type, without losing input focus.
-    '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 12px;padding:8px 12px;background:#faf9f4;border:1.5px solid var(--mist);border-radius:8px">'+
+    '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 12px;padding:8px 12px;background:#faf9f4;border:1.5px solid var(--mist);border-radius:8px;flex-shrink:0">'+
     '<span style="font-size:13px;font-weight:700;color:var(--navy)">🎂 Filter by age</span>'+
     '<input type="number" id="ageMin" value="'+AGE_MIN+'" min="0" max="120" inputmode="numeric" placeholder="From" oninput="AGE_MIN=this.value.trim();refreshClientList();" style="width:74px;border:1.5px solid var(--mist);border-radius:7px;padding:6px 8px;font-size:13px;font-family:inherit">'+
     '<span style="font-size:12px;color:#889">to</span>'+
@@ -1662,10 +1662,12 @@ function renderClients(){
     '<button class="btn b-gh xs" onclick="clearAgeFilter()">Clear</button>'+
     '<span id="ageFilterInfo" style="font-size:11px;color:#889;font-style:italic">'+ageFilterInfoText(list.length)+'</span>'+
     '</div>'+
-    '<div class="card" style="overflow:hidden" id="clientTableWrap">'+
-    (isLeads?'<div style="max-height:calc(100vh - 260px);overflow-y:auto">':'')+
+    // The card scrolls internally (overflow:auto + min-height:0) so a long client
+    // list is fully reachable inside #main's fixed-height grid track, instead of
+    // being clipped. flex:0 1 auto = size to content for short lists, shrink +
+    // scroll for long ones. Table header is sticky (see clientTable).
+    '<div class="card" id="clientTableWrap" style="overflow:auto;min-height:0;flex:0 1 auto">'+
     clientTable(list,false,isLeads)+
-    (isLeads?'</div>':'')+
     '</div>';
 }
 
@@ -1698,17 +1700,18 @@ function refreshClientList(){
   if(!wrap) return;  // not on the clients page
   var isLeads=(window.CLIENT_LIST_FILTER||'clients')==='leads';
   var list=applyClientSearchAge(clientPageFiltered());
-  wrap.innerHTML=(isLeads?'<div style="max-height:calc(100vh - 260px);overflow-y:auto">':'')+
-    clientTable(list,false,isLeads)+
-    (isLeads?'</div>':'');
+  // #clientTableWrap is the scroll container itself now — just swap the table in.
+  wrap.innerHTML=clientTable(list,false,isLeads);
   var cnt=document.getElementById('clientPageCount'); if(cnt) cnt.textContent=list.length;
   var info=document.getElementById('ageFilterInfo'); if(info) info.textContent=ageFilterInfoText(list.length);
 }
 
 function clientTable(list,mini,isLeads){
   if(!list.length)return '<div class="empty">'+(isLeads?'No leads yet — add your first lead':'No clients found')+'</div>';
-  // For leads view, add Contacted column and sticky header for scrollable table
-  var theadStyle = isLeads ? ' style="position:sticky;top:0;background:#fff;z-index:2;box-shadow:0 1px 0 var(--mist)"' : '';
+  // Sticky header on all full-size tables (the card is the scroll container),
+  // so column titles stay visible while scrolling a long list. Skipped for the
+  // compact `mini` table embedded in the client card.
+  var theadStyle = !mini ? ' style="position:sticky;top:0;background:#fff;z-index:2;box-shadow:0 1px 0 var(--mist)"' : '';
   return '<table class="tbl"><thead'+theadStyle+'><tr>'+
     '<th>'+(isLeads?'Lead':'Client')+'</th>'+
     (isLeads&&!mini?'<th style="width:90px;text-align:center">Contacted</th>':'')+
