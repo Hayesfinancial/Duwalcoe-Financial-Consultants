@@ -85,6 +85,9 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--cream);c
 .toast{position:fixed;bottom:24px;right:24px;background:var(--navy);color:#fff;padding:12px 20px;border-radius:8px;font-size:13px;font-weight:600;z-index:9999;box-shadow:0 4px 24px rgba(0,0,0,.2);transform:translateY(80px);opacity:0;transition:all .3s}
 .toast.show{transform:translateY(0);opacity:1}
 .toast.ok{border-left:4px solid var(--sage)}.toast.err{border-left:4px solid var(--rose)}
+.undo-toast{display:none;align-items:center;gap:14px}.undo-toast.show{display:flex}
+.undo-btn{background:var(--gold);color:var(--navy);border:none;border-radius:6px;padding:5px 12px;font-size:12px;font-weight:800;cursor:pointer;font-family:inherit;white-space:nowrap}
+.undo-btn:hover{filter:brightness(.95)}
 .dr{display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--smoke);font-size:13px}
 .dr:last-child{border-bottom:none}
 .dl{color:#889;font-weight:500;flex-shrink:0}.dv{font-weight:600;text-align:right;max-width:65%;word-break:break-word}
@@ -323,6 +326,7 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--cream);c
 </div>
 
 <div class="toast" id="toast"></div>
+<div class="toast undo-toast" id="undoToast"></div>
 
 <!-- ══ FLOATING NOTEPAD ══════════════════════════════════════ -->
 <div id="notepad" style="display:none;position:fixed;bottom:24px;right:24px;width:300px;background:#fff;border-radius:12px;box-shadow:0 8px 40px rgba(15,31,61,.22);border:1.5px solid var(--mist);z-index:8000;flex-direction:column;overflow:hidden">
@@ -895,6 +899,54 @@ function toast(msg,type){
   t.textContent=(type==='ok'?'✓ ':'⚠ ')+msg;
   t.className='toast show '+(type||'ok');
   setTimeout(function(){t.className='toast';},3000);
+}
+// Undo toast — a dismissible toast carrying an action button (Gmail-style).
+// Used to make an accidental task completion recoverable for a few seconds.
+// It lives in its own #undoToast element so it never clobbers plain toast().
+var _undoTimer=null;
+function undoToast(msg, actionLabel, fn){
+  var el=document.getElementById('undoToast');
+  if(!el){ return; }
+  clearTimeout(_undoTimer);
+  el.innerHTML='';
+  var span=document.createElement('span'); span.textContent=msg; el.appendChild(span);
+  var b=document.createElement('button');
+  b.type='button'; b.className='undo-btn'; b.textContent=actionLabel||'Undo';
+  b.onclick=function(){
+    clearTimeout(_undoTimer);
+    el.className='toast undo-toast'; el.innerHTML='';
+    try{ fn(); }catch(e){}
+  };
+  el.appendChild(b);
+  el.className='toast undo-toast ok show';
+  _undoTimer=setTimeout(function(){ el.className='toast undo-toast'; el.innerHTML=''; }, 8000);
+}
+// Restore a task to an exact prior (Notes, Done) snapshot. Used by the undo
+// toast so an accidental "Mark Complete" is reverted cleanly — including the
+// "[Marked complete]" log line that completion appended.
+function restoreTaskState(id, notes, done){
+  var t=DB.tasks.find(function(x){ return String(x.ID)===String(id); });
+  if(!t){ return; }
+  t.Notes=notes;
+  t.Done=(done===true||done==='true'||done===1||done==='TRUE');
+  render();
+  post({action:'updateTaskNotes',id:id,notes:t.Notes},function(){});
+  post({action:'toggleTask',id:id,done:isdone(t)},function(){ toast('Completion undone — task is open again','ok'); });
+}
+// Deliberately reopen a completed task to continue working it (e.g. the client
+// finally got back to you). Unlike undo, this keeps the completion history and
+// writes an audit line into the task log so the trail stays intact.
+function reopenTask(id){
+  var t=DB.tasks.find(function(x){ return String(x.ID)===String(id); });
+  if(!t){ return; }
+  var log=[];
+  try{ log=JSON.parse(t.Notes||'[]'); }catch(e){ if(t.Notes) log=[{date:t.Timestamp||'',text:t.Notes,user:t.Assignee||''}]; }
+  log.push({date:new Date().toISOString(), text:'Task reopened to continue.', user:cu()});
+  t.Notes=JSON.stringify(log);
+  t.Done=false;
+  closeAll(); render();
+  post({action:'updateTaskNotes',id:id,notes:t.Notes},function(){});
+  post({action:'toggleTask',id:id,done:false},function(){ toast('Task reopened ↩','ok'); });
 }
 function updateBadge(){
   var n=DB.tasks.filter(function(t){return !isdone(t);}).length;
@@ -4586,7 +4638,7 @@ function taskRowColored(t, color){
     (entryCount?'<span style="color:var(--sky)">📝 '+entryCount+'</span>':'')+
     '</div></div>'+
     (!done?'<button class="btn b-rd xs" data-act="del-task" data-id="'+t.ID+'">Del</button>':
-    '<span style="font-size:10px;color:#aaa;padding:4px 8px">✅ Done</span>')+
+    '<span style="font-size:10px;color:#aaa;padding:4px 4px" title="Completed">✅</span><button class="btn b-gh xs" data-act="reopen-task" data-id="'+t.ID+'" title="Reopen this task to continue working it">↩ Reopen</button>')+
     '</div>';
 }
 
@@ -4616,7 +4668,7 @@ function taskRow(t){
     (entryCount?'<span style="color:var(--sky)">📝 '+entryCount+' '+(entryCount===1?'entry':'entries')+'</span>':'')+
     '</div></div>'+
     (!done?'<button class="btn b-rd xs" data-act="del-task" data-id="'+t.ID+'">Del</button>':
-    '<span style="font-size:10px;color:#aaa;padding:4px 8px">✅ Done</span>')+
+    '<span style="font-size:10px;color:#aaa;padding:4px 4px" title="Completed">✅</span><button class="btn b-gh xs" data-act="reopen-task" data-id="'+t.ID+'" title="Reopen this task to continue working it">↩ Reopen</button>')+
     '</div>';
 }
 
@@ -10217,8 +10269,10 @@ function openTaskLogModal(taskId){
     '<button type="button" id="tpriBtn" onclick="toggleTaskPri()" style="background:'+(t.Priority==='Urgent'?'#fde8e8':'#f5f5f5')+';border:1.5px solid '+(t.Priority==='Urgent'?'var(--rose)':'var(--mist)')+';border-radius:7px;padding:5px 12px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;color:'+(t.Priority==='Urgent'?'var(--rose)':'inherit')+'">'+(t.Priority==='Urgent'?'🔴 Urgent':'Normal')+'</button>'+
     '<input type="hidden" id="tpri" value="'+(t.Priority||'Normal')+'">'+
     '<button class="btn b-gd sm" data-save="task-log">📝 Add Entry</button>'+
+    '<span style="width:1px;align-self:stretch;background:var(--mist);margin:0 4px"></span>'+
     '<button class="btn b-sg sm" onclick="completeTaskFromLog()">✅ Mark Complete</button>'+
-    '</div>':'');
+    '</div>':
+    '<button class="btn b-sg sm" data-act="reopen-task" data-id="'+t.ID+'" title="Reopen this task to continue working it">↩ Reopen Task</button>');
   document.getElementById('tMod').classList.add('open');
   // Load attachments lazily when the modal opens. The list will populate
   // via renderTaskDocsSection once the fetch returns.
@@ -10264,6 +10318,11 @@ function saveTask(){
 function completeTaskFromLog(){
   var t = DB.tasks.find(function(x){ return String(x.ID)===String(TASK_LOG_ID); });
   if(!t) return;
+  // Snapshot BEFORE mutating, so the undo toast can restore the task exactly
+  // (removing the completion log line too), not just flip the tick back.
+  var tid = t.ID;
+  var snapNotes = t.Notes;
+  var snapDone = t.Done;
   var entry = document.getElementById('tlogentry');
   var log = [];
   try{ log = JSON.parse(t.Notes||'[]'); }catch(e){ if(t.Notes) log=[{date:t.Timestamp||'',text:t.Notes,user:t.Assignee||''}]; }
@@ -10274,7 +10333,8 @@ function completeTaskFromLog(){
   closeAll(); render();
   post({action:'updateDueDate',id:TASK_LOG_ID,assignee:t.Assignee,dueDate:t.DueDate},function(){});
   post({action:'updateTaskNotes',id:TASK_LOG_ID,notes:t.Notes},function(){});
-  post({action:'toggleTask',id:TASK_LOG_ID,done:true},function(){toast('Task completed ✅','ok');});
+  post({action:'toggleTask',id:TASK_LOG_ID,done:true},function(){});
+  undoToast('Task marked complete', '↩ Undo', function(){ restoreTaskState(tid, snapNotes, snapDone); });
 }
 
 function saveTaskLog(){
@@ -10391,6 +10451,16 @@ function toggleTask(id,wasDone){
   if(t){t.Done=!wasDone;}
   render();
   post({action:'toggleTask',id:id,done:!wasDone});
+  // If the checkbox just completed a task, offer a few-second undo so an
+  // accidental tick can be reversed. (Reopening via checkbox needs no undo.)
+  if(!wasDone){
+    undoToast('Task marked complete', '↩ Undo', function(){
+      var tt=DB.tasks.find(function(x){return x.ID===id;});
+      if(tt){ tt.Done=false; }
+      render();
+      post({action:'toggleTask',id:id,done:false},function(){ toast('Completion undone — task is open again','ok'); });
+    });
+  }
 }
 
 function delTask(id){
@@ -10478,6 +10548,7 @@ document.addEventListener('click', function(e){
         case 'open-roa':       openROAModal(cid); break;
         case 'open-task':      openTaskModal(el.getAttribute('data-client')||''); break;
         case 'toggle-task':    toggleTask(id, el.getAttribute('data-done')==='true'); break;
+        case 'reopen-task':    reopenTask(id); break;
         case 'open-task-log':  openTaskLogModal(id); break;
         case 'goto-client':    { var _gc=findClientByName(el.getAttribute('data-name')||''); if(_gc){ closeAll(); openClient(_gc.ID); } else { toast('No matching client found for this task','err'); } break; }
         case 'task-filter':    TASK_FILTER=el.getAttribute('data-filter'); render(); break;
