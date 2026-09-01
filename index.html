@@ -366,11 +366,12 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--cream);c
   </div>
   <div id="notepad-body" style="display:flex;flex-direction:column">
     <textarea id="notepad-text" placeholder="Type notes here… switching tabs auto-inserts a section label." style="width:100%;height:220px;border:none;outline:none;padding:12px 14px;font-size:13px;font-family:'DM Sans',sans-serif;color:var(--ink);resize:vertical;min-height:100px;line-height:1.7;background:#fffef8"></textarea>
-    <div style="padding:8px 10px;border-top:1px solid var(--smoke);display:flex;gap:6px;background:#fafaf6">
+    <div id="notepad-btnrow" style="padding:8px 10px;border-top:1px solid var(--smoke);display:flex;gap:6px;background:#fafaf6">
       <button id="notepad-task-btn" class="btn b-nv xs" style="flex:1">+ Create Task</button>
       <button id="notepad-save-btn" class="btn b-sg xs" style="flex:1" title="Append to client's permanent notes with timestamp">💾 Save to Notes</button>
       <button id="notepad-clear-btn" class="btn b-gh xs">Clear</button>
     </div>
+    <div id="notepad-capture-hint" style="display:none;padding:8px 12px;border-top:1px solid var(--smoke);background:#fffbeb;font-size:11px;color:#92610a;line-height:1.5">📎 These notes attach to the new client automatically when you tap <b>Save to CRM</b>.</div>
   </div>
 </div>
 <!-- Reopen pill -->
@@ -5331,6 +5332,7 @@ function openClientModal(id, isLead){
   renderEditDocs();
 
   document.getElementById('cMod').classList.add('open');
+  window._captureActive = isNew; if(window.notepadSync) window.notepadSync();
 
   // Apply the record-type view (Individual default / Company) to the freshly-built modal.
   setClientType(c.ClientType||'Individual');
@@ -6821,6 +6823,12 @@ function saveClient(openFNA){
     c.Notes = _notesEl.value;
   } else {
     c.Notes = _existing ? (_existing.Notes || '') : '';
+  }
+  // For a NEW client/lead, fold any floating-Notepad scratch into the Notes too.
+  if(!EC){
+    var _scratchC = (window.captureNoteText ? window.captureNoteText() : '');
+    if(_scratchC && _scratchC.trim()){ c.Notes = (c.Notes ? String(c.Notes).replace(/\s+$/,'')+'\n\n' : '') + _scratchC.trim(); }
+    if(window.captureNoteClear) window.captureNoteClear();
   }
   if(_existing){
     c.LastAccessed=_existing.LastAccessed||'';
@@ -9840,6 +9848,7 @@ function openFactFind(){
   // Seed one blank row in each repeatable section so the form isn't empty.
   ffAddChild(); ffAddAsset(); ffAddLiab(); ffAddIncome(); ffAddExpense(); ffAddNeed();
   document.getElementById('ffMod').classList.add('open');
+  window._captureActive = true; if(window.notepadSync) window.notepadSync();
   setTimeout(function(){ var n=document.getElementById('ffname'); if(n) n.focus(); },60);
 }
 
@@ -9902,6 +9911,9 @@ function ffCollectPayload(){
 function saveFactFind(){
   var p=ffCollectPayload();
   if(!p.client.Name){ toast('Client name is required','err'); return; }
+  // Fold any floating-Notepad scratch (jotted during the meeting) into the client's Notes.
+  var _scratch = (window.captureNoteText ? window.captureNoteText() : '');
+  if(_scratch && _scratch.trim()){ p.notes = (p.notes ? p.notes.replace(/\s+$/,'')+'\n\n' : '') + _scratch.trim(); }
   var existing=pcFindExisting(p.client);
   if(existing){
     if(!confirm('A record for "'+existing.Name+'" already exists (matched by ID number or name).\n\nUpdate it with this fact-find? Only non-blank fields change — nothing is deleted.')) return;
@@ -9916,6 +9928,7 @@ function saveFactFind(){
   // Hand off to the shared, tested commit path.
   PC_PARSED=p; PC_TARGET=existing||null; PC_MODE=existing?'update':'create';
   runPasteClaudeImport();
+  if(window.captureNoteClear) window.captureNoteClear();
   if(summary.length) toast('Captured: '+summary.join(', '),'ok');
 }
 
@@ -13151,6 +13164,8 @@ if(checkAuth()) bootApp();
   var _currentSEL = null;
 
   function updateNotepadVisibility(){
+    if(captureModalOpen()){ enterCaptureMode(); return; }
+    if(PAD_CAPTURE){ exitCaptureMode(); }
     if(PAGE === 'client' && SEL){
       if(minimised){
         pad.style.display = 'none';
@@ -13177,19 +13192,21 @@ if(checkAuth()) bootApp();
   // Tab tracking removed
 
   textarea.addEventListener('input', function(){
+    if(PAD_CAPTURE){ setScratch(textarea.value); return; }
     if(SEL) saveNote(SEL, textarea.value);
   });
 
   document.getElementById('notepad-min').addEventListener('click', function(){
     minimised = true;
     pad.style.display = 'none';
-    if(PAGE === 'client') pill.style.display = 'block';
+    if(PAGE === 'client' || PAD_CAPTURE) pill.style.display = 'flex';
   });
 
   document.getElementById('notepad-close').addEventListener('click', function(){
     minimised = true;
     pad.style.display = 'none';
-    pill.style.display = 'none';
+    // In capture mode keep the pill so the notes stay reachable over the form.
+    pill.style.display = PAD_CAPTURE ? 'flex' : 'none';
   });
 
   pill.addEventListener('click', function(){
@@ -13297,6 +13314,60 @@ if(checkAuth()) bootApp();
       if(tt && prefill) tt.value = prefill.slice(0,120);
     }, 80);
   }
+
+  // ── Capture-mode scratch ──────────────────────────────────────────────
+  // While a NEW lead/client is being captured (Fact Find or the New-Client/Lead
+  // intake) there is no client record yet, so the notepad becomes a scratch pad
+  // whose text is folded into that client's Notes on Save (see saveFactFind /
+  // saveClient). It is docked bottom-LEFT so it never covers the modal's Save
+  // button, has no per-client buttons, and persists to localStorage so nothing
+  // is lost on an accidental close or refresh. Gated on window._captureActive so
+  // EDITING an existing client keeps the normal per-client notepad.
+  var PAD_CAPTURE = false;
+  function getScratch(){ try{ return localStorage.getItem('du_note_capture')||''; }catch(e){ return ''; } }
+  function setScratch(v){ try{ localStorage.setItem('du_note_capture', v||''); }catch(e){} }
+  function captureModalOpen(){
+    if(!window._captureActive) return false;
+    var f=document.getElementById('ffMod'), m=document.getElementById('cMod');
+    return !!((f&&f.classList.contains('open'))||(m&&m.classList.contains('open')));
+  }
+  function enterCaptureMode(){
+    if(!PAD_CAPTURE){
+      PAD_CAPTURE = true;
+      minimised = false;              // show the pad straight away so it's obvious it's there
+      _currentSEL = null;             // force a reload when we later return to a client
+      textarea.value = getScratch();
+      document.getElementById('notepad-title').textContent = 'Meeting notes';
+      // dock bottom-left, clear of the modal's Save button (bottom-right)
+      pad.style.right='auto'; pad.style.left='24px'; pad.style.top='auto'; pad.style.bottom='24px';
+      pill.style.right='auto'; pill.style.left='24px';
+      var br=document.getElementById('notepad-btnrow'); if(br) br.style.display='none';
+      var hint=document.getElementById('notepad-capture-hint'); if(hint) hint.style.display='block';
+    }
+    if(minimised){ pad.style.display='none'; pill.style.display='flex'; }
+    else { pad.style.display='flex'; pill.style.display='none'; }
+  }
+  function exitCaptureMode(){
+    PAD_CAPTURE = false;
+    minimised = true; _currentSEL = null;
+    // restore the default bottom-right docking + per-client UI
+    pad.style.left='auto'; pad.style.right='24px'; pad.style.top='auto'; pad.style.bottom='24px';
+    pill.style.left='auto'; pill.style.right='24px';
+    var br=document.getElementById('notepad-btnrow'); if(br) br.style.display='flex';
+    var hint=document.getElementById('notepad-capture-hint'); if(hint) hint.style.display='none';
+    document.getElementById('notepad-title').textContent = 'Notes';
+    pad.style.display='none'; pill.style.display='none';
+  }
+
+  // Exposed for the capture modals + their save paths (they live outside this IIFE).
+  window.notepadSync = updateNotepadVisibility;
+  window.captureNoteText = function(){ return getScratch(); };
+  window.captureNoteClear = function(){ setScratch(''); if(PAD_CAPTURE){ textarea.value=''; } };
+
+  // Re-evaluate notepad state whenever any overlay closes (a capture modal may
+  // have just been dismissed). Mirrors the existing render/goPage wrappers.
+  var _origCloseAll = closeAll;
+  closeAll = function(){ _origCloseAll.apply(this, arguments); window._captureActive = false; updateNotepadVisibility(); };
 })();
 </script>
 </body>
