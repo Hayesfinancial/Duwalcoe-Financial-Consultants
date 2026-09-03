@@ -10115,20 +10115,35 @@ function astuteProposeType(productType, holdingName, funds){
   return 'Other';
 }
 
+// Status mapper — recognises ENGLISH and AFRIKAANS status text. Afrikaans is
+// common on Momentum / Old Mutual / Sanlam feeds (added 3 Sep 2026 after a
+// Momentum Investo came through 'BYDRAE BETALEND' = contribution-paying and was
+// mis-flagged Paid Up — reported by Clinton). Afrikaans tokens used, and only
+// ones that are unambiguous:
+//   BETALEND = paying (Bydrae/Premie Betalend) → Active  [guarded against 'NIE' = not]
+//   AKTIEF   = active                          → Active
+//   OPGEHOU  = ceased/stopped                  → Lapsed
+//   AFGEKOOP = surrendered / GEKANSELL(EER) = cancelled → Cancelled
+//   Premievry / Bydraevry (premium-free = paid up) fall through to the default
+//   correctly (they contain no 'BETALEND'), as do Matured/Converted/ERV.
 function astuteMapStatus(astStatus){
   var s = String(astStatus||'').toUpperCase();
-  if(s.indexOf('INACTIVE')<0 && (s.indexOf('ACTIVE')>=0 || s.indexOf('INFORCE')>=0 || s.indexOf('IN FORCE')>=0)) return 'Active';
-  if(s.indexOf('LAPS')>=0) return 'Lapsed';
-  if(s.indexOf('SURRENDER')>=0 || s.indexOf('CANCEL')>=0) return 'Cancelled';
-  return 'Paid Up'; // Matured, Early Retirement, Inactive, paid-up etc.
+  var afPaying = s.indexOf('AKTIEF')>=0 || (s.indexOf('BETALEND')>=0 && s.indexOf('NIE')<0); // 'nie betalend' = not paying
+  if(s.indexOf('INACTIVE')<0 && (s.indexOf('ACTIVE')>=0 || s.indexOf('INFORCE')>=0 || s.indexOf('IN FORCE')>=0 || afPaying)) return 'Active';
+  if(s.indexOf('LAPS')>=0 || s.indexOf('OPGEHOU')>=0) return 'Lapsed';
+  if(s.indexOf('SURRENDER')>=0 || s.indexOf('CANCEL')>=0 || s.indexOf('AFGEKOOP')>=0 || s.indexOf('GEKANSELL')>=0) return 'Cancelled';
+  return 'Paid Up'; // Matured, Early Retirement, Inactive, Converted, ERV, Premievry/Bydraevry, etc.
 }
 
 // True only for genuinely in-force statuses. NOTE: 'Inactive' contains the
 // substring 'active' — must be excluded explicitly (caught in live-data test).
+// Mirrors the Afrikaans active-tokens above so a benefit option carrying an
+// Afrikaans status isn't wrongly dropped as ceased.
 function astuteIsActive(s){
   var u = String(s||'').toUpperCase();
   if(u.indexOf('INACTIVE')>=0) return false;
-  return u.indexOf('ACTIVE')>=0 || u.indexOf('INFORCE')>=0 || u.indexOf('IN FORCE')>=0;
+  return u.indexOf('ACTIVE')>=0 || u.indexOf('INFORCE')>=0 || u.indexOf('IN FORCE')>=0 ||
+         u.indexOf('AKTIEF')>=0 || (u.indexOf('BETALEND')>=0 && u.indexOf('NIE')<0);
 }
 
 // Token-subset name match: every word of the shorter name appears in the
