@@ -10836,6 +10836,10 @@ function parseAstutePasteJSON(txt){
       jointLife: clean(o.jointLife),
       bizType: clean(o.bizType),           // Business Assurance: Buy & Sell / Contingent Liability / Keyman
       keyPosition: clean(o.keyPosition),   // Business Assurance: key person's role
+      irr: clean(o.irr),                   // stated IRR from statement → IllustrativeRate (shows as IRR badge)
+      growthRate: clean(o.growthRate),     // forward growth assumption → GrowthRate/PremGrowthRate (drives projection)
+      eac: clean(o.eac),                   // effective annual cost → BenEscalation on Living Annuities, else a note
+      extraNotes: clean(o.notes),          // free-text catch-all for anything without a field (boosts, TER, etc.)
       funds: funds,
       covers: covers,
       bens: bens
@@ -10871,6 +10875,20 @@ function astuteFindExisting(r){
 // block is refreshed from the fresh record when it carries funds, else the
 // existing funds are kept — so a plain XML re-pull never wipes funds captured
 // from a statement, but a statement refresh updates them.
+// Union note lines from two blocks, de-duplicated (case-insensitive), order
+// preserved — so a refresh keeps existing manual notes AND folds in new note
+// lines (EAC, free-text) without piling up duplicates on repeat imports.
+function mergeNoteLines(a, b){
+  var seen={}, out=[];
+  [a,b].forEach(function(block){
+    String(block||'').split('\n').forEach(function(l){
+      var t=l.trim(); if(!t) return;
+      var key=t.toLowerCase(); if(seen[key]) return;
+      seen[key]=1; out.push(l);
+    });
+  });
+  return out.join('\n');
+}
 function astuteMergePolicy(existing, fresh){
   var out = JSON.parse(JSON.stringify(existing));
   var preserve = {ID:1,ClientID:1,CapturedDate:1,ReviewHistory:1,ReplacedBy:1,ReplacedDate:1,ReplacedPolicyNo:1,Payer:1,Notes:1};
@@ -10879,10 +10897,10 @@ function astuteMergePolicy(existing, fresh){
     var v = fresh[k];
     if(!(v===''||v===null||v===undefined||v==='[]')) out[k]=v;   // meaningful new value wins
   });
-  var existingBase = crmStripFundBlock(existing.Notes||'');
+  var base = mergeNoteLines(crmStripFundBlock(existing.Notes||''), crmStripFundBlock(fresh.Notes||''));
   var freshFunds = crmParseFunds(fresh.Notes||'');
   var fundBlock = freshFunds.length ? crmFundsToNotesBlock(freshFunds) : crmFundsToNotesBlock(crmParseFunds(existing.Notes||''));
-  out.Notes = [existingBase, fundBlock].filter(Boolean).join('\n');
+  out.Notes = [base, fundBlock].filter(Boolean).join('\n');
   out.LastUpdated = fresh.LastUpdated || out.LastUpdated;
   return out;
 }
@@ -10957,7 +10975,7 @@ function runAstuteImport(){
       BizType:(r.bizType||''), LifeAssuredType:'', LifeAssured:'', LoanAmount:'', KeyPosition:(r.keyPosition||''),
       Premium:r.premium, Frequency:r.frequency,
       PolicyFee:(policyFee>0?String(Math.round(policyFee*100)/100):''),
-      PremEscalation:r.premEsc, BenEscalation:'',
+      PremEscalation:r.premEsc, BenEscalation:(r.type==='Living Annuity' ? (r.eac||'') : ''),
       BenDeath:lumpSum('Life Cover'), BenDisability:lumpSum('Capital Disability'), BenDreadDisease:lumpSum('Dread Disease / Severe Illness'),
       DreadDiseaseType:'Lump Sum',
       DreadDiseaseNotes:(function(){ var ls=lumps.filter(function(x){return x.type==='Dread Disease / Severe Illness'&&x.label;}).map(function(x){return x.label;}); var all=ls.concat((cls&&cls.ddNotes)||[]); return all.join(' · '); })(),
@@ -10966,7 +10984,7 @@ function runAstuteImport(){
       MaturityDate:r.maturityDate, MaturityAge:'', maturityAge:'', RetirementAge:r.retireAge||'',
       VestedValue:r.vestedPot||'', NonVestedValue:'',
       RetirementComponent:r.retirementPot||'', SavingsComponent:r.savingsPot||'',
-      IllustrativeRate:'', PremGrowthRate:'', GrowthRate:'',
+      IllustrativeRate:(r.irr||''), PremGrowthRate:(r.growthRate||''), GrowthRate:(r.growthRate||''),
       TotalInvested:r.totalInvested, TotalWithdrawn:'',
       WithdrawSavingsPot:'', IncludeInRetirement:'', ContinuePastMaturity:'',
       PaysIncome:'',
@@ -10978,7 +10996,12 @@ function runAstuteImport(){
       PayerType:'', PayerName:'',
       PensionableSalary:'', MemberContribPct:'', EmployerContribPct:'', AnnualAdminFees:'',
       HasGroupRisk:'', GroupRiskApproved:'', GroupRiskBenefits:'[]',
-      Notes:astuteFundsToNotes(r),
+      Notes:(function(){
+        var base=astuteFundsToNotes(r); var extra=[];
+        if(r.eac && r.type!=='Living Annuity') extra.push('EAC: '+r.eac+'%');   // no EAC field on non-LA policies → note
+        if(r.extraNotes) extra.push(r.extraNotes);
+        return [base, extra.join('\n')].filter(Boolean).join('\n');
+      })(),
       Beneficiaries:bensJson,
       EstateRouting:'',
       IncomeBenefits:JSON.stringify(incomes),
@@ -12300,7 +12323,12 @@ function openPolicySchedule(cid){
     if(p.Type==='Living Annuity' || p.Type==='Life Annuity') return {value:0, targetDate:''};
     var fv = N(p.BenFundValue);
     if(fv <= 0) return {value:0, targetDate:''};
-    var rate = N(p.GrowthRate||p.PremGrowthRate||p.IllustrativeRate);
+    // Project ONLY from an explicit growth assumption — NOT from a stated IRR
+    // (Clinton, 3 Sep 2026: a stated IRR shows as a badge but must not silently
+    // drive a client-facing projection, e.g. a Discovery lump-sum's 16.5%).
+    // Imported policies carry IllustrativeRate for the badge with GrowthRate
+    // blank, so they don't project until a growth rate is entered on the card.
+    var rate = N(p.GrowthRate||p.PremGrowthRate);
     if(rate <= 0) return {value:0, targetDate:''};
     // Determine target date
     var tgt = null;
