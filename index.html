@@ -7043,18 +7043,16 @@ function crmStripFXLine(notes){
 function crmCleanScheduleNote(s){
   s=String(s||'').replace(/\s+/g,' ').trim(); if(!s) return '';
   var drop=/captured from provider statement|imported from astute|astute product type|^product type:|verify against|confirm crm|zar conversion|add from (the )?policy schedule|not on astute|omitted (at adviser|from irr|—)|all values in usd|risk benefits (captured|imported)|nb currency effect|risk stats|volatility [\d.]|sharpe|max drawdown|indicative conversion|rate on \d|actual rand cost|reporting currency|model portfolio|fund code \d|per holdings statement|performance summary shows/i;
-  var seen={}, out=[];
+  var seen={}, out=[], len=0, CAP=260;
   s.split(/\.\s+/).forEach(function(t){
     t=t.trim().replace(/\.+$/,''); if(!t) return;
     if(drop.test(t)) return;
     var key=t.toLowerCase().replace(/[^a-z0-9]/g,'');
     if(!key||seen[key]) return; seen[key]=1;
-    out.push(t);
+    if(out.length && len+t.length>CAP) return;   // stop once over the cap — but keep WHOLE sentences (never cut mid-sentence)
+    out.push(t); len+=t.length+2;
   });
-  var res=out.join('. '); if(res) res+='.';
-  var CAP=240;
-  if(res.length>CAP) res=res.slice(0,CAP).replace(/\s+\S*$/,'').replace(/[,;:.\s]+$/,'')+'…';
-  return res;
+  return out.length ? out.join('. ')+'.' : '';
 }
 
 // ── Underlying-fund editor UI (policy modal) ──────────────────────────────
@@ -12830,10 +12828,11 @@ function openPolicySchedule(cid){
     var isInv   = grp===groups.invest;
     var isBiz   = grp===groups.business;
     var col     = grp.color;
-    // Wrap the section in a <tbody class="sect"> so the section header,
-    // policy rows, and section-total row stay together on the same printed
-    // page (CSS rule .sect{page-break-inside:avoid;break-inside:avoid}).
-    var s='<tbody class="sect">';
+    // Build the section header + column header into `hdr`, then inject them INTO the
+    // first policy's <tbody class="polblock"> (break-inside:avoid). That glues the
+    // header to its first policy so a section header can never be orphaned at the
+    // foot of a page (Chromium ignores break-after:avoid on a bare header tbody).
+    var s='';
 
     // Section header
     s+='<tr><td colspan="8" style="background:'+col+';color:#fff;padding:9px 14px;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.5px">'+grp.label+'</td></tr>';
@@ -12857,8 +12856,11 @@ function openPolicySchedule(cid){
     s+='<td style="padding:6px 10px;border-bottom:1px solid #e0e0d8;text-align:right">Premium</td>';
     s+='<td style="padding:6px 10px;border-bottom:1px solid #e0e0d8;text-align:right">Esc %</td>';
     s+='</tr>';
+    var hdr=s; s='';   // capture header rows; injected into the first policy's tbody below
 
     grp.pols.forEach(function(p,idx){
+      s+='<tbody class="polblock">';   // one tbody per policy — never split across a page
+      if(idx===0) s+=hdr;              // glue the section header to the first policy so it can't orphan
       var bens=[];
       try{bens=p.Beneficiaries?JSON.parse(p.Beneficiaries):[];}catch(e){}
       var incBens=[];
@@ -13118,6 +13120,7 @@ function openPolicySchedule(cid){
         s+=details.join(' &nbsp;&nbsp;|&nbsp;&nbsp; ');
         s+='</td></tr>';
       }
+      s+='</tbody>';   // close this policy's polblock
     });
 
     // Section total row — per-column totals so each column sums its values.
@@ -13147,6 +13150,7 @@ function openPolicySchedule(cid){
       return '<td style="padding:9px 10px;border-bottom:2px solid #ddd;text-align:right;color:'+color+'">'+content+'</td>';
     }
 
+    s+='<tbody class="secttot">';   // section total kept together
     s+='<tr class="sect-total" style="background:#f0efe9;font-weight:700;font-size:13px">';
     s+='<td colspan="3" style="padding:9px 10px;border-bottom:2px solid #ddd;color:'+col+'">Section Total</td>';
     if(isRisk||isBiz){
@@ -13176,8 +13180,22 @@ function openPolicySchedule(cid){
 
   // ── BUILD DOC ──
   var doc='<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Policy Schedule — '+c.Name+'</title>';
-  doc+='<style>*{box-sizing:border-box;-webkit-print-color-adjust:exact;print-color-adjust:exact;color-adjust:exact}body{font-family:Arial,sans-serif;color:#0e413a;font-size:13px;max-width:1000px;margin:0 auto;padding:24px}table{border-collapse:collapse;width:100%}tr{page-break-inside:avoid;break-inside:avoid}tbody.sect > tr:first-child,tbody.sect > tr:nth-child(2){page-break-after:avoid;break-after:avoid}tr.pol-detail{page-break-before:avoid;break-before:avoid}@media print{.noprint{display:none!important}body{padding:10px;max-width:100%}tr{page-break-inside:avoid;break-inside:avoid}tbody.sect > tr:first-child,tbody.sect > tr:nth-child(2){page-break-after:avoid;break-after:avoid}tr.pol-detail{page-break-before:avoid;break-before:avoid}tr.sect-total{page-break-before:avoid;break-before:avoid}}</style>';
+  doc+='<style>'
+    +'*{box-sizing:border-box;-webkit-print-color-adjust:exact;print-color-adjust:exact;color-adjust:exact}'
+    +'@page{size:A4 landscape;margin:11mm 12mm}'
+    +'body{font-family:Arial,sans-serif;color:#0e413a;font-size:13px;max-width:1180px;margin:0 auto;padding:20px}'
+    +'table{border-collapse:collapse;width:100%}'
+    +'tr{page-break-inside:avoid;break-inside:avoid}'
+    // Keep each section header with the policies that follow it, and never split a
+    // single policy (its main row + funds + detail) across a page — the orphaned
+    // "Sanlam header alone at the bottom of a page" bug (Clinton, 3 Sep 2026).
+    +'tbody.secthead{page-break-after:avoid;break-after:avoid}'
+    +'tbody.polblock{page-break-inside:avoid;break-inside:avoid}'
+    +'tbody.secttot{page-break-inside:avoid;break-inside:avoid}'
+    +'@media print{.noprint{display:none!important}body{padding:0;max-width:100%}}'
+    +'</style>';
   doc+='</head><body>';
+  doc+='<div id="schedBody">';   // wraps all printable content; the Word export reads this
 
   // Header
   doc+='<div style="display:flex;justify-content:space-between;align-items:flex-start;border-bottom:3px solid #a8b938;padding-bottom:14px;margin-bottom:20px">';
@@ -13390,7 +13408,21 @@ function openPolicySchedule(cid){
   doc+='</div>';
 
   doc+='<div style="margin-top:24px;font-size:10px;color:#999;border-top:1px solid #eee;padding-top:12px">Policy schedule prepared by Clinton Hayes, Duwalcoe Financial Consultants CC (FSP No: 9978) on '+today+'. Based on information captured in the practice management system. Please verify all details with the respective product providers.</div>';
-  doc+='<div class="noprint" style="position:fixed;bottom:20px;right:20px"><button onclick="window.print()" style="background:#0e413a;color:#fff;border:none;padding:10px 24px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:700;box-shadow:0 4px 12px rgba(0,0,0,.2)">🖨 Print / Save PDF</button></div>';
+  doc+='</div>';   // end #schedBody
+  // Action buttons + Word export. dlWord() wraps the #schedBody content in a
+  // Word-openable, LANDSCAPE .doc so Clinton can edit it and move sections onto
+  // their own pages himself (Ctrl+Enter for a page break in Word).
+  doc+='<div class="noprint" style="position:fixed;bottom:20px;right:20px;display:flex;gap:10px">';
+  doc+='<button onclick="dlWord()" style="background:#2563ab;color:#fff;border:none;padding:10px 22px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:700;box-shadow:0 4px 12px rgba(0,0,0,.2)">📄 Download for Word</button>';
+  doc+='<button onclick="window.print()" style="background:#0e413a;color:#fff;border:none;padding:10px 24px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:700;box-shadow:0 4px 12px rgba(0,0,0,.2)">🖨 Print / Save PDF</button>';
+  doc+='</div>';
+  doc+='<scr'+'ipt>function dlWord(){'
+    +'var body=document.getElementById("schedBody").innerHTML;'
+    +'var head=\'<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40"><head><meta charset="utf-8"><style>@page WordSection1{size:29.7cm 21.0cm;mso-page-orientation:landscape;margin:1.2cm}div.WordSection1{page:WordSection1}body{font-family:Arial,sans-serif;color:#0e413a;font-size:11pt}table{border-collapse:collapse;width:100%}</style></head><body><div class="WordSection1">\';'
+    +'var html=head+body+"</div></body></html>";'
+    +'var blob=new Blob(["\\ufeff"+html],{type:"application/msword"});'
+    +'var a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download='+JSON.stringify('Policy Schedule - '+c.Name+'.doc')+';document.body.appendChild(a);a.click();document.body.removeChild(a);'
+    +'}</scr'+'ipt>';
   doc+='</body></html>';
 
   var win=window.open('','_blank','width=960,height=900');
