@@ -10068,6 +10068,12 @@ function openAstuteImport(cid){
     'Check each proposed <strong>policy type</strong> and tag each <strong>beneficiary</strong> — the beneficiary tag drives estate-duty (s.4(q)) treatment in FNA work.</div>'+
     '<input type="file" id="astuteFile" accept=".xml,text/xml" onchange="handleAstuteFile(this)" '+
     'style="display:block;width:100%;border:1.5px dashed var(--mist);border-radius:8px;padding:18px;font-family:inherit;font-size:13px;background:var(--smoke);cursor:pointer">'+
+    '<div style="margin:16px 0 4px;font-size:12.5px;color:#667;border-top:1px dashed var(--mist);padding-top:14px">'+
+      '<strong>Provider not on Astute?</strong> Upload the statement (PDF/Excel) to Claude, paste the block it returns below, then Load. '+
+      'Pasted policies join any Astute pull above in the same review — nothing imports until you confirm.</div>'+
+    '<textarea id="astutePasteBox" placeholder=\'[{"insurer":"Allan Gray","product":"Allan Gray Retirement Annuity","type":"Retirement Annuity","status":"Active","fundValue":"845000","funds":[{"name":"Allan Gray Balanced Fund","value":"845000","alloc":"100"}],"bens":[{"name":"Cornelia Van Der Walt","pct":"100","benType":"Spouse"}]}]\' '+
+    'style="width:100%;min-height:96px;border:1.5px solid var(--mist);border-radius:8px;padding:10px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;resize:vertical"></textarea>'+
+    '<button class="btn b-gh sm" style="margin-top:8px" onclick="handleAstutePaste()">➕ Load pasted policies</button>'+
     '<div id="astutePreviewWrap"></div>';
   document.getElementById('astuteMod').classList.add('open');
 }
@@ -10534,7 +10540,7 @@ function renderAstutePreview(){
       '<input type="checkbox" '+(r.include?'checked':'')+' onchange="ASTUTE_ROWS['+i+'].include=this.checked;renderAstutePreview()" style="width:17px;height:17px;margin-top:2px;cursor:pointer;accent-color:var(--sage);flex-shrink:0">'+
       '<div style="flex:1;min-width:0">'+
       '<div style="font-weight:700;font-size:13.5px;color:var(--navy)">'+astuteEsc(r.insurer)+' — '+astuteEsc(r.product)+(r.polNo?' <span style="font-weight:400;color:#667">('+astuteEsc(r.polNo)+')</span>':'')+'</div>'+
-      '<div style="font-size:11.5px;color:#667;margin-top:3px">Astute: '+astuteEsc(r.astType)+' · <span style="color:'+stCol+';font-weight:600">'+astuteEsc(r.astStatus)+'</span>'+
+      '<div style="font-size:11.5px;color:#667;margin-top:3px">'+(r.manual?'Manual: ':'Astute: ')+astuteEsc(r.astType)+' · <span style="color:'+stCol+';font-weight:600">'+astuteEsc(r.astStatus)+'</span>'+
       (r.fundValue?' · Value R'+Number(r.fundValue).toLocaleString():'')+(r.premium?' · R'+r.premium+' '+astuteEsc(r.frequency||''):'')+
       (r.startDate?' · from '+r.startDate:'')+(r.maturityDate?' to '+r.maturityDate:'')+'</div>'+
       (r.isPackage?'<div style="font-size:11.5px;color:#667;margin-top:4px">ℹ Package wrapper — the actual products are listed separately below it.</div>':'');
@@ -10594,8 +10600,16 @@ function renderAstutePreview(){
 
 function astuteFundsToNotes(r){
   var lines = [];
-  lines.push('Imported from Astute CCP on '+new Date().toISOString().slice(0,10)+'.');
-  if(r.astType && r.astType!==r.type) lines.push('Astute product type: '+r.astType+'.');
+  // Source-aware first line: Astute pull vs a non-Astute paste (Part A). The
+  // "Funds at import:" block format below is IDENTICAL for both so the schedule
+  // fund table (policyFunds) renders either source the same way.
+  if(r.manual){
+    lines.push('Captured from provider statement on '+new Date().toISOString().slice(0,10)+' (not on Astute).');
+    if(r.astType && r.astType!==r.type) lines.push('Product type: '+r.astType+'.');
+  } else {
+    lines.push('Imported from Astute CCP on '+new Date().toISOString().slice(0,10)+'.');
+    if(r.astType && r.astType!==r.type) lines.push('Astute product type: '+r.astType+'.');
+  }
   if(r.jointLife) lines.push('Joint life: '+r.jointLife+'.');
   if(r.funds.length){
     lines.push('Funds at import:');
@@ -10608,8 +10622,119 @@ function astuteFundsToNotes(r){
       lines.push(l);
     });
   }
-  if(r.covers.length && (r.type==='Life / Income Protector'||r.type==='Business Assurance')) lines.push('Risk benefits imported from Astute — verify against policy schedule.');
+  if(r.covers.length && (r.type==='Life / Income Protector'||r.type==='Business Assurance')) lines.push('Risk benefits '+(r.manual?'captured — verify against the statement':'imported from Astute — verify against policy schedule')+'.');
   return lines.join('\n');
+}
+
+// ── Non-Astute paste import (added 3 Sep 2026 — Part A) ────────────────────
+// Consolidation decision: the CRM is the single system of record. For providers
+// not on Astute, Clinton uploads the statement to Claude, Claude returns a JSON
+// block in the shape below, and he pastes it here. Each object becomes an
+// ASTUTE_ROW and flows through the SAME preview + runAstuteImport + savePolicy
+// path as an Astute pull — no new save contract, no schema change, no data risk.
+// Funds land in the Notes "Funds at import:" block exactly like Astute, so the
+// Part B fund table renders them identically. Paste APPENDS to whatever is
+// already loaded, so an Astute XML pull and non-Astute policies can be reviewed
+// and imported together in one pass.
+//
+// Expected shape — an array, or {policies:[...]}. Only insurer OR product is
+// required; everything else defaults sensibly:
+//   { insurer, product, polNo, type, status, startDate, maturityDate,
+//     premium, frequency, premEsc, polFee, fundValue, surrValue, totalInvested,
+//     savingsPot, retirementPot, vestedPot, retireAge, owner, insured, jointLife,
+//     funds:[{name,value,alloc,units,price,asOf}],
+//     covers:[{plan,code,amt,prem,mode,monthlyAmt,period,elim,benEsc}],
+//     bens:[{name,pct,benType,linkType,dob}] }
+function astutePasteKnownNames(){
+  var c = DB.clients.find(function(x){return String(x.ID)===String(ASTUTE_CID);});
+  var known = [];
+  if(c && clean(c.SpouseName)) known.push(c.SpouseName.trim());
+  DB.links.filter(function(l){ return String(l.PrincipalID)===String(ASTUTE_CID) || String(l.ClientID)===String(ASTUTE_CID); })
+    .forEach(function(l){ if(l.Name && l.Name.trim()) known.push(l.Name.trim()); });
+  return known;
+}
+function parseAstutePasteJSON(txt){
+  var raw = String(txt||'').trim();
+  if(!raw){ toast('Paste the policy block first','err'); return; }
+  raw = raw.replace(/^```[a-z]*\s*/i,'').replace(/```\s*$/,'').trim();  // tolerate ```json fences
+  var data = null;
+  try{ data = JSON.parse(raw); }
+  catch(e){
+    var m = raw.match(/[\[{][\s\S]*[\]}]/);                              // pull JSON out of surrounding prose
+    if(m){ try{ data = JSON.parse(m[0]); }catch(e2){} }
+  }
+  if(!data){ toast('That doesn’t look like valid JSON — paste the block Claude gave you','err'); return; }
+  var list = Array.isArray(data) ? data : (Array.isArray(data.policies) ? data.policies : null);
+  if(!list){ toast('Expected a list of policies (an array, or {"policies":[...]})','err'); return; }
+  if(!list.length){ toast('No policies in the pasted block','err'); return; }
+
+  var c = DB.clients.find(function(x){return String(x.ID)===String(ASTUTE_CID);});
+  var clientName = c ? c.Name : '';
+  var known = astutePasteKnownNames();
+  var added = 0, skipped = 0;
+  list.forEach(function(o){
+    if(!o || (typeof o!=='object') || (!clean(o.insurer) && !clean(o.product))){ skipped++; return; }
+    var funds = Array.isArray(o.funds) ? o.funds.map(function(f){
+      f = f||{};
+      return {name:clean(f.name), units:clean(f.units), price:clean(f.price),
+              value:clean(f.value), alloc:clean(f.alloc), asOf:clean(f.asOf)};
+    }).filter(function(f){return f.name;}) : [];
+    var covers = Array.isArray(o.covers) ? o.covers.map(function(cv){
+      cv = cv||{};
+      return {plan:clean(cv.plan)||clean(cv.type), code:clean(cv.code), amt:clean(cv.amt)||clean(cv.cover),
+              prem:clean(cv.prem), mode:clean(cv.mode), monthlyAmt:clean(cv.monthlyAmt),
+              period:clean(cv.period), elim:clean(cv.elim)||clean(cv.waiting), benEsc:clean(cv.benEsc)};
+    }) : [];
+    var type = clean(o.type) || astuteProposeType(clean(o.productType)||clean(o.astType), clean(o.product), funds);
+    var status = clean(o.status) || 'Active';
+    var ownerName = clean(o.owner);
+    var ownerIsClient = !ownerName || astuteNameMatch(ownerName, clientName);
+    var insuredName = (clean(o.insured) && !astuteNameMatch(o.insured, clientName)) ? clean(o.insured).trim() : '';
+    var bens = (Array.isArray(o.bens)?o.bens:[]).filter(function(b){return b && clean(b.name);}).map(function(b){
+      var matched = known.some(function(k){ return astuteNameMatch(k, b.name); });
+      return {name:String(b.name).trim(), dob:clean(b.dob), pct:(b.pct!=null?String(b.pct):''),
+              benType:clean(b.benType)||'Other', matched:matched, createLink:!matched, linkType:clean(b.linkType)||'Other'};
+    });
+    var fundSum = funds.reduce(function(s,f){return s+N(f.value);},0);
+    ASTUTE_ROWS.push({
+      include: astuteIsActive(status),
+      manual: true,
+      insurer: clean(o.insurer) || type,
+      product: clean(o.product) || type,
+      polNo: clean(o.polNo),
+      astType: clean(o.astType) || clean(o.productType) || type,
+      astStatus: status,
+      isPackage: false,
+      type: type,
+      status: status,
+      startDate: clean(o.startDate),
+      maturityDate: clean(o.maturityDate),
+      premium: (o.premium!=null && String(o.premium)!=='') ? String(o.premium) : '',
+      frequency: clean(o.frequency) || (N(o.premium)?'Monthly':''),
+      premEsc: (o.premEsc!=null?String(o.premEsc):''),
+      polFee: (o.polFee!=null?String(o.polFee):''),
+      fundValue: (o.fundValue!=null && String(o.fundValue)!=='') ? String(o.fundValue) : (fundSum?String(fundSum):''),
+      surrValue: clean(o.surrValue),
+      totalInvested: clean(o.totalInvested),
+      savingsPot: clean(o.savingsPot), retirementPot: clean(o.retirementPot), vestedPot: clean(o.vestedPot),
+      retireAge: clean(o.retireAge),
+      ownerIsClient: ownerIsClient,
+      ownerName: ownerName,
+      insuredName: insuredName,
+      jointLife: clean(o.jointLife),
+      funds: funds,
+      covers: covers,
+      bens: bens
+    });
+    added++;
+  });
+  if(!added){ toast('No usable policies found — each needs at least an insurer or product','err'); return; }
+  renderAstutePreview();
+  toast(added+' pasted polic'+(added===1?'y':'ies')+' loaded'+(skipped?' · '+skipped+' skipped (no insurer/product)':'')+' — review below','ok');
+}
+function handleAstutePaste(){
+  var el = document.getElementById('astutePasteBox');
+  if(el) parseAstutePasteJSON(el.value);
 }
 
 function runAstuteImport(){
@@ -12394,6 +12519,41 @@ function openPolicySchedule(cid){
     }).join(' &nbsp;·&nbsp; ');
   }
 
+  // ── Underlying-fund helpers (added 3 Sep 2026 — Part B: itemise funds) ──
+  // Funds already persist in the existing Notes column: the Astute importer
+  // writes a "Funds at import:" block there (astuteFundsToNotes), and the
+  // non-Astute paste importer writes the same format. Rather than add a new
+  // Supabase column (which would break the policy upsert until the table is
+  // migrated) we parse that block and render it as a table. Also reads a
+  // structured p.Funds JSON first, so if a Funds column is ever added this
+  // upgrades cleanly with no further change. Legacy already-imported policies
+  // light up immediately because their funds are already in Notes.
+  function policyFunds(p){
+    try{ var j = p.Funds ? JSON.parse(p.Funds) : null; if(Array.isArray(j) && j.length) return j; }catch(e){}
+    var out=[], notes=String(p.Notes||''); var hi=notes.indexOf('Funds at import:');
+    if(hi<0) return out;
+    notes.slice(hi).split('\n').forEach(function(line){
+      var t=line.trim(); if(t.charAt(0)!=='•') return;                 // '•' bullet lines only
+      var body=t.replace(/^•\s*/,'');
+      var nameM=body.match(/^(.*?)(?:\s+—\s+|\s+=\s+|$)/);             // name up to ' — ' or ' = '
+      var name=nameM?nameM[1].trim():body;
+      var vM=body.match(/=\s*R\s*([\d.,]+)/);  var val  =vM?vM[1].replace(/,/g,''):'';
+      var aM=body.match(/\(([\d.]+)\s*%\)/);   var alloc=aM?aM[1]:'';
+      var uM=body.match(/([\d.,]+)\s*units/);  var units=uM?uM[1].replace(/,/g,''):'';
+      var pM=body.match(/@\s*([\d.,]+)/);      var price=pM?pM[1].replace(/,/g,''):'';
+      var oM=body.match(/as at\s*([0-9()\/\-]+)/); var asOf=oM?oM[1].replace(/[()]/g,''):'';
+      if(name) out.push({name:name, value:val, alloc:alloc, units:units, price:price, asOf:asOf});
+    });
+    return out;
+  }
+  // Notes with the fund block removed, so funds aren't shown twice (table + footnote).
+  function notesWithoutFunds(notes){
+    return String(notes||'').split('\n').filter(function(l){
+      var t=l.trim();
+      return t.indexOf('Funds at import:')!==0 && t.charAt(0)!=='•';
+    }).join('\n').replace(/\n{2,}/g,'\n').trim();
+  }
+
   function buildTableSection(grp){
     if(!grp.pols.length) return '';
     // Order within section: insurer alphabetical, then inception date oldest
@@ -12457,6 +12617,7 @@ function openPolicySchedule(cid){
       try{bens=p.Beneficiaries?JSON.parse(p.Beneficiaries):[];}catch(e){}
       var incBens=[];
       try{incBens=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):[];}catch(e){}
+      var _funds = policyFunds(p);
       var rowBg = idx%2===0?'#ffffff':'#fafaf8';
       // Premium frequency suffix. Monthly stays as compact '/pm' (most common,
       // default). Everything else gets a full-word label so '/Once Off' doesn't
@@ -12562,6 +12723,27 @@ function openPolicySchedule(cid){
       s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-size:12px">'+_escCell+'</td>';
       s+='</tr>';
 
+      // Underlying-funds sub-row — itemised fund breakdown under the contract.
+      // Value column mirrors the schedule's R-format; the % is the Astute
+      // allocation, falling back to a computed share of the fund total when the
+      // feed didn't carry an allocation figure.
+      if(_funds.length){
+        var _ftot=0; _funds.forEach(function(f){ _ftot+=N(f.value); });
+        s+='<tr class="pol-funds" style="background:'+rowBg+'">';
+        s+='<td colspan="8" style="padding:4px 10px 9px 26px;border-bottom:1px solid #eeede8">';
+        s+='<div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:#9a9a90;margin-bottom:3px">Underlying funds</div>';
+        s+='<table style="width:100%;border-collapse:collapse;font-size:11.5px">';
+        _funds.forEach(function(f){
+          var pctTxt = f.alloc ? (f.alloc+'%') : ((_ftot>0 && N(f.value)) ? (Math.round(N(f.value)/_ftot*1000)/10+'%') : '');
+          s+='<tr>'+
+            '<td style="padding:2px 8px 2px 0;color:#555;border-bottom:1px solid #f4f3ec">'+escHtml(f.name||'')+'</td>'+
+            '<td style="padding:2px 8px;text-align:right;color:#444;white-space:nowrap;border-bottom:1px solid #f4f3ec">'+(N(f.value)?R(f.value):'—')+'</td>'+
+            '<td style="padding:2px 0;text-align:right;color:#889;white-space:nowrap;width:56px;border-bottom:1px solid #f4f3ec">'+pctTxt+'</td>'+
+          '</tr>';
+        });
+        s+='</table></div></td></tr>';
+      }
+
       // Detail row — beneficiaries, income benefits, notes, owner
       var details=[];
       if(bens.length) details.push('<span style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.3px">Beneficiary: </span>'+benDisplay(bens));
@@ -12659,7 +12841,12 @@ function openPolicySchedule(cid){
         details.push('<span style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.3px">Income Benefit: </span><span style="font-size:12px">'+ipStr+'</span>');
       }
 
-      if(p.Notes) details.push('<span style="font-size:11px;color:#888;font-style:italic">'+p.Notes+'</span>');
+      if(p.Notes){
+        // When the funds are shown as a table above, strip the "Funds at import:"
+        // block from the notes footnote so they aren't listed twice.
+        var _notesDisp = _funds.length ? notesWithoutFunds(p.Notes) : p.Notes;
+        if(_notesDisp) details.push('<span style="font-size:11px;color:#888;font-style:italic">'+escHtml(_notesDisp)+'</span>');
+      }
 
       if(details.length){
         s+='<tr class="pol-detail" style="background:'+rowBg+'">';
