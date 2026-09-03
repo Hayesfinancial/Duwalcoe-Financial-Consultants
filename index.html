@@ -6944,6 +6944,97 @@ var POL_INCOME_ROWS=[];
 var POL_LUMP_ROWS=[];
 var POL_BENS=[];
 var POL_GROUP_RISK_ROWS=[];
+var POL_FUNDS=[];   // underlying-fund working rows for the policy edit modal
+
+// ── Underlying-fund store helpers (added 3 Sep 2026) ──────────────────────
+// Funds persist in the existing Notes column as a "Funds at import:" bullet
+// block (written by the Astute importer and the non-Astute paste import). These
+// three helpers are the single source of truth for reading/writing that block,
+// shared by the policy edit modal AND the schedule (openPolicySchedule delegates
+// to crmParseFunds/crmStripFundBlock) so the two can never drift. No new DB
+// column — safe with the Supabase (fixed-column) policy table.
+function crmParseFunds(p){
+  var notes;
+  if(p && typeof p==='object'){
+    try{ var j=p.Funds?JSON.parse(p.Funds):null; if(Array.isArray(j)&&j.length) return j; }catch(e){}
+    notes=String(p.Notes||'');
+  } else { notes=String(p||''); }
+  var out=[], hi=notes.indexOf('Funds at import:');
+  if(hi<0) return out;
+  notes.slice(hi).split('\n').forEach(function(line){
+    var t=line.trim(); if(t.charAt(0)!=='•') return;                    // fund bullets only
+    var body=t.replace(/^•\s*/,'');
+    var nameM=body.match(/^(.*?)(?:\s+—\s+|\s+=\s+|$)/); var name=nameM?nameM[1].trim():body;
+    var vM=body.match(/=\s*R\s*([\d.,]+)/);  var val  =vM?vM[1].replace(/,/g,''):'';
+    var aM=body.match(/\(([\d.]+)\s*%\)/);   var alloc=aM?aM[1]:'';
+    var uM=body.match(/([\d.,]+)\s*units/);  var units=uM?uM[1].replace(/,/g,''):'';
+    var pM=body.match(/@\s*([\d.,]+)/);      var price=pM?pM[1].replace(/,/g,''):'';
+    var oM=body.match(/as at\s*([0-9()\/\-]+)/); var asOf=oM?oM[1].replace(/[()]/g,''):'';
+    if(name) out.push({name:name, value:val, alloc:alloc, units:units, price:price, asOf:asOf});
+  });
+  return out;
+}
+// Notes with ONLY the fund block removed (header + its contiguous bullet lines);
+// any other bullet lines the user typed elsewhere are preserved.
+function crmStripFundBlock(notes){
+  var lines=String(notes||'').split('\n'), out=[], inBlock=false;
+  lines.forEach(function(l){
+    var t=l.trim();
+    if(t.indexOf('Funds at import:')===0){ inBlock=true; return; }       // drop header, enter block
+    if(inBlock){ if(t.charAt(0)==='•') return; inBlock=false; }          // drop fund bullets; first non-bullet ends block
+    out.push(l);
+  });
+  return out.join('\n').replace(/\n{2,}/g,'\n').trim();
+}
+function crmFundsToNotesBlock(funds){
+  if(!funds || !funds.length) return '';
+  var lines=['Funds at import:'];
+  funds.forEach(function(f){
+    var name=String(f.name||'').trim(); if(!name) return;
+    var l='• '+name;
+    if(N(f.units)&&N(f.price)) l+=' — '+Number(f.units).toLocaleString()+' units @ '+f.price;
+    if(N(f.value)) l+=' = R'+Number(f.value).toLocaleString();
+    if(f.alloc!==''&&f.alloc!=null&&String(f.alloc).trim()!=='') l+=' ('+String(f.alloc).trim()+'%)';
+    if(f.asOf) l+=' (as at '+f.asOf+')';
+    lines.push(l);
+  });
+  return lines.length>1?lines.join('\n'):'';
+}
+
+// ── Underlying-fund editor UI (policy modal) ──────────────────────────────
+function renderPolFunds(){
+  var wrap=document.getElementById('polFundsWrap'); if(!wrap) return;
+  if(!POL_FUNDS.length){ wrap.innerHTML='<div style="font-size:12px;color:#999;font-style:italic">No underlying funds captured.</div>'; return; }
+  var h='<table style="width:100%;border-collapse:collapse;font-size:12px"><tr style="color:#889;font-size:10px;text-transform:uppercase;letter-spacing:.3px"><td style="padding:2px 6px 4px 0">Fund name</td><td style="padding:2px 6px;width:120px">Value (R)</td><td style="padding:2px 6px;width:72px">Alloc %</td><td style="width:28px"></td></tr>';
+  POL_FUNDS.forEach(function(f,i){
+    h+='<tr>'+
+      '<td style="padding:2px 6px 2px 0"><input value="'+astuteEsc(f.name||'')+'" oninput="POL_FUNDS['+i+'].name=this.value" style="width:100%;border:1px solid var(--mist);border-radius:6px;padding:5px 7px;font-size:12px"></td>'+
+      '<td style="padding:2px 6px"><input value="'+astuteEsc(f.value||'')+'" oninput="POL_FUNDS['+i+'].value=this.value" inputmode="decimal" style="width:100%;border:1px solid var(--mist);border-radius:6px;padding:5px 7px;font-size:12px"></td>'+
+      '<td style="padding:2px 6px"><input value="'+astuteEsc(f.alloc||'')+'" oninput="POL_FUNDS['+i+'].alloc=this.value" inputmode="decimal" style="width:100%;border:1px solid var(--mist);border-radius:6px;padding:5px 7px;font-size:12px"></td>'+
+      '<td style="text-align:center"><button type="button" onclick="polFundDel('+i+')" title="Remove fund" style="border:none;background:none;color:#c62828;cursor:pointer;font-size:15px;line-height:1">✕</button></td>'+
+    '</tr>';
+  });
+  h+='</table>';
+  var tot=POL_FUNDS.reduce(function(s,f){return s+N(f.value);},0);
+  if(tot>0) h+='<div style="text-align:right;font-size:11px;color:#667;margin-top:4px">Total: R '+Math.round(tot).toLocaleString('en-ZA')+'</div>';
+  wrap.innerHTML=h;
+}
+function polFundAdd(){ POL_FUNDS.push({name:'',value:'',alloc:'',units:'',price:'',asOf:''}); renderPolFunds(); }
+function polFundDel(i){ POL_FUNDS.splice(i,1); renderPolFunds(); }
+function polFundLoadPaste(){
+  var el=document.getElementById('polFundPaste'); if(!el) return;
+  var raw=String(el.value||'').trim().replace(/^```[a-z]*\s*/i,'').replace(/```\s*$/,'').trim();
+  if(!raw){ toast('Paste a fund block first','err'); return; }
+  var data=null; try{ data=JSON.parse(raw); }catch(e){ var m=raw.match(/[\[{][\s\S]*[\]}]/); if(m){ try{data=JSON.parse(m[0]);}catch(e2){} } }
+  if(!data){ toast('That doesn’t look like valid JSON','err'); return; }
+  // Accept: an array of funds, {funds:[...]}, or a whole policy object carrying .funds
+  var arr = Array.isArray(data)?data:(Array.isArray(data.funds)?data.funds:null);
+  if(!arr){ toast('Expected a list of funds, or an object with a "funds" array','err'); return; }
+  var add=arr.map(function(f){ f=f||{}; return {name:clean(f.name),value:clean(f.value),alloc:clean(f.alloc),units:clean(f.units),price:clean(f.price),asOf:clean(f.asOf)}; }).filter(function(f){return f.name;});
+  if(!add.length){ toast('No named funds found in the paste','err'); return; }
+  POL_FUNDS=POL_FUNDS.concat(add); el.value=''; renderPolFunds();
+  toast(add.length+' fund'+(add.length>1?'s':'')+' loaded','ok');
+}
 
 function sec(title){
   return '<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--gold);padding:14px 0 6px;border-top:1px solid var(--smoke);margin-top:8px">'+title+'</div>';
@@ -6956,6 +7047,7 @@ function buildPolicyForm(p){
   try{ POL_LUMP_ROWS=p.LumpBenefits?JSON.parse(p.LumpBenefits):[]; if(!Array.isArray(POL_LUMP_ROWS))POL_LUMP_ROWS=[]; }catch(e){ POL_LUMP_ROWS=[]; }
   try{ POL_BENS=p.Beneficiaries?JSON.parse(p.Beneficiaries):[]; if(!Array.isArray(POL_BENS))POL_BENS=[]; }catch(e){ POL_BENS=[]; }
   try{ POL_GROUP_RISK_ROWS=p.GroupRiskBenefits?JSON.parse(p.GroupRiskBenefits):[]; if(!Array.isArray(POL_GROUP_RISK_ROWS))POL_GROUP_RISK_ROWS=[]; }catch(e){ POL_GROUP_RISK_ROWS=[]; }
+  POL_FUNDS = crmParseFunds(p);   // underlying funds parsed from the Notes fund block
 
   var isRisk=(type==='Life / Income Protector'||type==='');
   var isRA=['Retirement Annuity','Pension Fund','Provident Fund','Pension Preservation','Provident Preservation'].indexOf(type)>=0;
@@ -7545,12 +7637,28 @@ function buildPolicyForm(p){
     }
   }
 
-  // NOTES
+  // UNDERLYING FUNDS — fund-bearing contract types only. Funds render on the
+  // policy schedule under this contract; captured here for policies whose Astute
+  // feed omitted the fund split (e.g. Discovery Invest) or for hand-entered ones.
+  if(isRA||isInv||isLA||isGuarEndow||isPension){
+    html+=sec('Underlying Funds');
+    html+='<div style="font-size:11px;color:#667;margin-bottom:8px">These appear on the policy schedule under this contract. Add rows by hand, or paste a fund block from Claude.</div>';
+    html+='<div id="polFundsWrap"></div>';
+    html+='<button type="button" class="btn b-gh sm" onclick="polFundAdd()" style="margin-top:8px">+ Add fund</button>';
+    html+='<div style="margin-top:12px">';
+    html+='<textarea id="polFundPaste" placeholder=\'Paste from Claude, e.g. [{"name":"Allan Gray Balanced Fund","value":"634000","alloc":"75"}]\' style="width:100%;min-height:60px;border:1.5px solid var(--mist);border-radius:8px;padding:8px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;resize:vertical"></textarea>';
+    html+='<button type="button" class="btn b-gh sm" onclick="polFundLoadPaste()" style="margin-top:6px">➕ Load pasted funds</button>';
+    html+='</div>';
+  }
+
+  // NOTES — funds live in their own section above; show the notes without the
+  // fund block so the two aren't edited in the same box.
   html+=sec('Notes');
-  html+=fld('pnt','',p.Notes,'textarea');
+  html+=fld('pnt','',crmStripFundBlock(p.Notes),'textarea');
   html+='</div>';
 
   document.getElementById('pModB').innerHTML=html;
+  renderPolFunds();
   // Calculate weighted average premium increase on load
   setTimeout(calcWeightedAvgPremEsc, 0);
 
@@ -8521,7 +8629,10 @@ function collectPolicyForm(){
     HasGroupRisk:getR('phasgr'),
     GroupRiskApproved:getR('pgrapproved'),
     GroupRiskBenefits:JSON.stringify(POL_GROUP_RISK_ROWS),
-    Notes:g('pnt'),
+    // Notes = the user's free-text notes (fund block stripped defensively) plus
+    // the fund block rebuilt from the POL_FUNDS editor rows, so the schedule's
+    // fund table stays in sync with what's edited here.
+    Notes:(function(){ var base=crmStripFundBlock(g('pnt')); var fb=crmFundsToNotesBlock(POL_FUNDS); return [base, fb].filter(Boolean).join('\n'); })(),
     Beneficiaries:JSON.stringify(POL_BENS),
     EstateRouting:g('pestrouting'),
     IncomeBenefits:JSON.stringify(POL_INCOME_ROWS)
@@ -12528,31 +12639,10 @@ function openPolicySchedule(cid){
   // structured p.Funds JSON first, so if a Funds column is ever added this
   // upgrades cleanly with no further change. Legacy already-imported policies
   // light up immediately because their funds are already in Notes.
-  function policyFunds(p){
-    try{ var j = p.Funds ? JSON.parse(p.Funds) : null; if(Array.isArray(j) && j.length) return j; }catch(e){}
-    var out=[], notes=String(p.Notes||''); var hi=notes.indexOf('Funds at import:');
-    if(hi<0) return out;
-    notes.slice(hi).split('\n').forEach(function(line){
-      var t=line.trim(); if(t.charAt(0)!=='•') return;                 // '•' bullet lines only
-      var body=t.replace(/^•\s*/,'');
-      var nameM=body.match(/^(.*?)(?:\s+—\s+|\s+=\s+|$)/);             // name up to ' — ' or ' = '
-      var name=nameM?nameM[1].trim():body;
-      var vM=body.match(/=\s*R\s*([\d.,]+)/);  var val  =vM?vM[1].replace(/,/g,''):'';
-      var aM=body.match(/\(([\d.]+)\s*%\)/);   var alloc=aM?aM[1]:'';
-      var uM=body.match(/([\d.,]+)\s*units/);  var units=uM?uM[1].replace(/,/g,''):'';
-      var pM=body.match(/@\s*([\d.,]+)/);      var price=pM?pM[1].replace(/,/g,''):'';
-      var oM=body.match(/as at\s*([0-9()\/\-]+)/); var asOf=oM?oM[1].replace(/[()]/g,''):'';
-      if(name) out.push({name:name, value:val, alloc:alloc, units:units, price:price, asOf:asOf});
-    });
-    return out;
-  }
-  // Notes with the fund block removed, so funds aren't shown twice (table + footnote).
-  function notesWithoutFunds(notes){
-    return String(notes||'').split('\n').filter(function(l){
-      var t=l.trim();
-      return t.indexOf('Funds at import:')!==0 && t.charAt(0)!=='•';
-    }).join('\n').replace(/\n{2,}/g,'\n').trim();
-  }
+  // Delegate to the shared global helpers (defined near the policy modal) so the
+  // schedule and the fund editor read/write the exact same format.
+  function policyFunds(p){ return crmParseFunds(p); }
+  function notesWithoutFunds(notes){ return crmStripFundBlock(notes); }
 
   function buildTableSection(grp){
     if(!grp.pols.length) return '';
