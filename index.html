@@ -10240,9 +10240,34 @@ function astuteClassifyCovers(covers){
   return {lumps:lumps, incomes:incomes, fee:fee, ddNotes:ddNotes};
 }
 
+// ── Defensive XML sanitiser (added 3 Sep 2026) ────────────────────────────
+// Real-world Astute / insurer feeds frequently contain UNESCAPED ampersands in
+// free-text fields — e.g. Occupation "Manager - Administration & Supervision"
+// (the exact failure Clinton hit 3 Sep 2026 on an ABSA record in a Van der Walt
+// consolidated pull), plus "Smith & Associates", "Mr & Mrs", etc. A bare '&' is
+// not well-formed XML, so the browser's DOMParser rejects the WHOLE file and the
+// import died with "File is not valid XML". This repairs the one malformation
+// that is safe to auto-repair: it escapes ONLY ampersands that are not already
+// part of a valid entity, so genuinely well-formed input passes through
+// byte-for-byte unchanged. It also strips a leading UTF-8 BOM. It deliberately
+// does NOT try to patch bare '<' or other structural errors — those stay hard
+// errors so a truly broken/ wrong file is still caught.
+function astuteSanitizeXML(txt){
+  txt = String(txt==null?'':txt);
+  if(txt.charCodeAt(0) === 0xFEFF) txt = txt.slice(1);           // strip UTF-8 BOM
+  return txt.replace(/&(?!(?:amp|lt|gt|quot|apos|#[0-9]+|#x[0-9a-fA-F]+);)/g, '&amp;');
+}
+
 function parseAstuteXML(txt){
+  txt = astuteSanitizeXML(txt);
   var dom = new DOMParser().parseFromString(txt, 'text/xml');
-  if(dom.getElementsByTagName('parsererror').length){ toast('File is not valid XML','err'); return; }
+  var perr = dom.getElementsByTagName('parsererror');
+  if(perr.length){
+    var pmsg = (perr[0].textContent||'').replace(/\s+/g,' ').trim().slice(0,140);
+    console.error('Astute XML parse error:', pmsg);
+    toast('File is not valid XML'+(pmsg?' — '+pmsg:''),'err');
+    return;
+  }
   var contents = dom.getElementsByTagName('Content');
   if(!contents.length){ toast('No provider data found in this file','err'); return; }
 
