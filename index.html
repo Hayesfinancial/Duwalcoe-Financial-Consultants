@@ -10652,6 +10652,7 @@ function renderAstutePreview(){
       '<div style="flex:1;min-width:0">'+
       '<div style="font-weight:700;font-size:13.5px;color:var(--navy)">'+astuteEsc(r.insurer)+' — '+astuteEsc(r.product)+(r.polNo?' <span style="font-weight:400;color:#667">('+astuteEsc(r.polNo)+')</span>':'')+'</div>'+
       '<div style="font-size:11.5px;color:#667;margin-top:3px">'+(r.manual?'Manual: ':'Astute: ')+astuteEsc(r.astType)+' · <span style="color:'+stCol+';font-weight:600">'+astuteEsc(r.astStatus)+'</span>'+
+      (astuteFindExisting(r)?' · <span style="color:#1e40af;font-weight:700">↻ updates existing</span>':' · <span style="color:#2e7d32;font-weight:700">+ new</span>')+
       (r.fundValue?' · Value R'+Number(r.fundValue).toLocaleString():'')+(r.premium?' · R'+r.premium+' '+astuteEsc(r.frequency||''):'')+
       (r.startDate?' · from '+r.startDate:'')+(r.maturityDate?' to '+r.maturityDate:'')+'</div>'+
       (r.isPackage?'<div style="font-size:11.5px;color:#667;margin-top:4px">ℹ Package wrapper — the actual products are listed separately below it.</div>':'');
@@ -10850,6 +10851,42 @@ function handleAstutePaste(){
   if(el) parseAstutePasteJSON(el.value);
 }
 
+// ── Update-on-import (added 3 Sep 2026) ───────────────────────────────────
+// So a re-pull, or a merged (XML + statements) block, REFRESHES an existing
+// policy instead of duplicating it. Match is per-client by normalised policy
+// number (leading zeros / spaces / dashes ignored), skipping Replaced/Cancelled.
+function astuteNormPolNo(x){ return String(x==null?'':x).replace(/[\s-]/g,'').replace(/^0+/,'').toUpperCase(); }
+function astuteFindExisting(r){
+  var target = astuteNormPolNo(r && r.polNo);
+  if(!target) return null;                       // no usable number → can't match, always create new
+  return DB.policies.find(function(p){
+    return String(p.ClientID)===String(ASTUTE_CID)
+      && p.Status!=='Replaced' && p.Status!=='Cancelled'
+      && astuteNormPolNo(p.PolicyNo)===target;
+  }) || null;
+}
+// Refresh merge: newer non-empty values win; anything the fresh record doesn't
+// carry (blank, or an empty '[]' JSON) is kept from the existing policy. Identity
+// and history fields are preserved. Notes keep the existing free text; the fund
+// block is refreshed from the fresh record when it carries funds, else the
+// existing funds are kept — so a plain XML re-pull never wipes funds captured
+// from a statement, but a statement refresh updates them.
+function astuteMergePolicy(existing, fresh){
+  var out = JSON.parse(JSON.stringify(existing));
+  var preserve = {ID:1,ClientID:1,CapturedDate:1,ReviewHistory:1,ReplacedBy:1,ReplacedDate:1,ReplacedPolicyNo:1,Payer:1,Notes:1};
+  Object.keys(fresh).forEach(function(k){
+    if(preserve[k]) return;
+    var v = fresh[k];
+    if(!(v===''||v===null||v===undefined||v==='[]')) out[k]=v;   // meaningful new value wins
+  });
+  var existingBase = crmStripFundBlock(existing.Notes||'');
+  var freshFunds = crmParseFunds(fresh.Notes||'');
+  var fundBlock = freshFunds.length ? crmFundsToNotesBlock(freshFunds) : crmFundsToNotesBlock(crmParseFunds(existing.Notes||''));
+  out.Notes = [existingBase, fundBlock].filter(Boolean).join('\n');
+  out.LastUpdated = fresh.LastUpdated || out.LastUpdated;
+  return out;
+}
+
 function runAstuteImport(){
   var rows = ASTUTE_ROWS.filter(function(r){return r.include;});
   if(!rows.length){ toast('Nothing selected to import','err'); return; }
@@ -10881,13 +10918,15 @@ function runAstuteImport(){
   });
 
   // ── 2. Policies: full collectPolicyForm key shape + savePolicy meta ──
-  var saved = 0, failed = 0, done = 0, total = rows.length;
+  var saved = 0, updated = 0, failed = 0, done = 0, total = rows.length;
   function finish(){
     try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
     render();
-    var msg = saved+' of '+total+' policies imported'+(linksCreated?' · '+linksCreated+' family link'+(linksCreated>1?'s':'')+' created':'');
-    if(failed) toast('⚠️ '+msg+' — '+failed+' failed to reach server (kept locally, will retry on sync)','err');
-    else toast(msg+' ✓','ok');
+    var parts=[]; if(saved) parts.push(saved+' new'); if(updated) parts.push(updated+' updated');
+    var head = 'Policies: '+(parts.length?parts.join(' · '):'0 of '+total);
+    if(linksCreated) head += ' · '+linksCreated+' family link'+(linksCreated>1?'s':'')+' created';
+    if(failed) toast('⚠️ '+head+' — '+failed+' failed to reach server (kept locally, will retry on sync)','err');
+    else toast(head+' ✓','ok');
   }
   closeAll();
   rows.forEach(function(r,ri){
@@ -10947,18 +10986,24 @@ function runAstuteImport(){
       ID:'p_'+Date.now()+'_'+ri, ClientID:ASTUTE_CID, LastUpdated:now, CapturedDate:now,
       ReplacedBy:'', ReplacedDate:'', ReplacedPolicyNo:'', Payer:'', ReviewHistory:''
     };
-    pol._pendingSave = true;
-    DB.policies.push(pol);
+    // Match an existing policy (same client + number) → refresh it; else create new.
+    var existingPol = astuteFindExisting(r);
+    var isUpdate = !!existingPol;
+    var finalPol = isUpdate ? astuteMergePolicy(existingPol, pol) : pol;
+    if(isUpdate) finalPol.ID = existingPol.ID;
+    finalPol._pendingSave = true;
+    if(isUpdate){ var ei = DB.policies.indexOf(existingPol); if(ei>=0) DB.policies[ei]=finalPol; else DB.policies.push(finalPol); }
+    else DB.policies.push(finalPol);
     try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
-    var clean_ = JSON.parse(JSON.stringify(pol)); delete clean_._pendingSave;
+    var clean_ = JSON.parse(JSON.stringify(finalPol)); delete clean_._pendingSave;
     post({action:'savePolicy', policy:clean_}, function(res){
       if(res && res.ok===1){
-        var gi = DB.policies.findIndex(function(x){return x.ID===pol.ID;});
+        var gi = DB.policies.findIndex(function(x){return x.ID===finalPol.ID;});
         if(gi>=0) DB.policies[gi]=clean_;
-        saved++;
+        if(isUpdate) updated++; else saved++;
       } else {
         failed++;
-        console.error('Astute import: policy NOT saved to server, kept locally with _pendingSave. ID:', pol.ID, '—', pol.Insurer, pol.PolicyNo);
+        console.error('Astute import: policy NOT saved to server, kept locally with _pendingSave. ID:', finalPol.ID, '—', finalPol.Insurer, finalPol.PolicyNo);
       }
       done++;
       if(done===total) finish();
