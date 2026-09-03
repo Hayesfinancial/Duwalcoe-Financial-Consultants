@@ -287,7 +287,7 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--cream);c
 </div>
 <div class="ov" id="ffMod">
   <div class="modal" style="max-width:1000px">
-    <div class="mh"><h3 id="ffModT">📋 New Fact Find</h3><button class="xb" data-close="1">✕</button></div>
+    <div class="mh"><h3>📋 New Fact Find</h3><button class="xb" data-close="1">✕</button></div>
     <div class="mb" id="ffModB"></div>
     <div class="mf" style="flex-wrap:wrap;gap:8px">
       <button class="btn b-gh sm" data-close="1">Cancel</button>
@@ -1834,7 +1834,6 @@ function renderProfile(){
       '<button class="btn b-sg sm" data-act="convert-lead" data-id="'+c.ID+'">✅ Convert to Client</button>'
       :'')+
     '<button class="btn b-gh sm" style="color:#fff;border-color:#334466" data-act="edit-client" data-id="'+c.ID+'">✏️ Edit</button>'+
-    '<button class="btn b-sk sm" style="background:#0e413a;color:#e0b64a;border-color:#2a3a5e" onclick="openFactFind(\''+c.ID+'\')" title="Run the full fact-find on this existing client — pre-filled; new assets/needs are added to the record">📋 Fact Find</button>'+
     "<a href='"+buildComplianceUrl(c)+"' target='_blank' style='text-decoration:none'><button class='btn b-sk sm' style='background:#0e413a;color:#d4af5a;border-color:#2a3a5e'>📋 Compliance Docs</button></a>"+
     "<a href='"+buildFormsUrl(c)+"' target='_blank' style='text-decoration:none'><button class='btn b-sk sm' style='background:#0e413a;color:#ccd660;border-color:#2a3a5e'>📝 Forms</button></a>"+
     '<button class="btn b-sk sm" style="background:#0e413a;color:#7aa8dc;border-color:#2a3a5e" onclick="launchContribCalc(\''+c.ID+'\')">🧮 Contrib Calc</button>'+
@@ -7002,6 +7001,41 @@ function crmFundsToNotesBlock(funds){
   return lines.length>1?lines.join('\n'):'';
 }
 
+// ── Multi-currency (offshore) helpers (added 3 Sep 2026) ──────────────────
+// Offshore policies (e.g. a USD Glacier Global endowment) are held in their
+// native currency. We keep the ZAR EQUIVALENT in BenFundValue/Premium so every
+// rand aggregation (net worth, AUM, schedule totals) stays valid, and record the
+// native amounts + the explicit DATED exchange rates in a one-line "FX:" marker
+// in Notes. The app NEVER fetches a live rate — the rate is looked up once for
+// the value date (and separately the inception date) and stored. The schedule
+// reads the marker to show the policy native-currency-first with the rand
+// equivalent beside it. Format: "FX: USD | current 60652.41 @ 16.01 (2026-09-03) | initial 57122.95 @ 17.609 (2025-09-01)"
+function crmFmtCur(value, ccy){
+  var s=Math.round(N(value)).toLocaleString('en-ZA');
+  ccy=String(ccy||'').toUpperCase();
+  return (!ccy||ccy==='ZAR') ? ('R '+s) : (ccy+' '+s);
+}
+function crmFXLine(o){
+  if(!o || !o.ccy || String(o.ccy).toUpperCase()==='ZAR') return '';
+  var parts=['FX: '+String(o.ccy).toUpperCase()];
+  if(N(o.curNat)&&N(o.curRate)) parts.push('current '+o.curNat+' @ '+o.curRate+(o.curDate?' ('+o.curDate+')':''));
+  if(N(o.initNat)&&N(o.initRate)) parts.push('initial '+o.initNat+' @ '+o.initRate+(o.initDate?' ('+o.initDate+')':''));
+  return parts.length>1 ? parts.join(' | ') : '';
+}
+function crmParseFX(p){
+  var notes=(p&&typeof p==='object')?String(p.Notes||''):String(p||'');
+  var line=null; notes.split('\n').forEach(function(l){ if(l.trim().indexOf('FX:')===0) line=l.trim(); });
+  if(!line) return null;
+  var ccyM=line.match(/FX:\s*([A-Za-z]{3})/); if(!ccyM) return null;
+  var out={ccy:ccyM[1].toUpperCase()};
+  var cur=line.match(/current\s*([\d.]+)\s*@\s*([\d.]+)(?:\s*\(([\d\/-]+)\))?/); if(cur){ out.curNat=cur[1]; out.curRate=cur[2]; out.curDate=cur[3]||''; }
+  var ini=line.match(/initial\s*([\d.]+)\s*@\s*([\d.]+)(?:\s*\(([\d\/-]+)\))?/); if(ini){ out.initNat=ini[1]; out.initRate=ini[2]; out.initDate=ini[3]||''; }
+  return out;
+}
+function crmStripFXLine(notes){
+  return String(notes||'').split('\n').filter(function(l){ return l.trim().indexOf('FX:')!==0; }).join('\n').replace(/\n{2,}/g,'\n').trim();
+}
+
 // ── Underlying-fund editor UI (policy modal) ──────────────────────────────
 function renderPolFunds(){
   var wrap=document.getElementById('polFundsWrap'); if(!wrap) return;
@@ -9714,9 +9748,6 @@ function runPasteClaudeImport(){
 // saveFamMember via the existing pc* machinery. A matching printable paper version
 // (printFactFind) mirrors the on-screen fields for across-the-desk meetings.
 var FF_SEQ = 0;
-// When a fact-find is opened FROM an existing client card, this holds that client's
-// ID so Save updates that exact record instead of creating a new one. null = new capture.
-var FF_BIND_ID = null;
 
 // Small builders (kept ES5 to match the rest of the file).
 function ffField(label, ctrl){ return '<div class="fff"><div class="fflbl">'+label+'</div>'+ctrl+'</div>'; }
@@ -9861,27 +9892,13 @@ function ffTryDob(idField, dobField){
 }
 
 // ── Build & open the form ──
-function openFactFind(existingId){
+function openFactFind(){
   FF_SEQ=0;
-  FF_BIND_ID = existingId ? String(existingId) : null;
-  var existC = FF_BIND_ID ? DB.clients.find(function(x){ return String(x.ID)===FF_BIND_ID; }) : null;
-  if(FF_BIND_ID && !existC){ toast('Cannot find that client to fact-find','err'); FF_BIND_ID=null; return; }
   var titleOpts=['','Mr.','Mrs.','Ms.','Miss','Dr.','Prof.','Rev.','Adv.'];
   var maritalOpts=['','Single','Married - ANC with accrual','Married - ANC without accrual','Married in COP','Life partner','Divorced','Widowed'];
   var eduOpts=['','School - no matric','Matric','Diploma / Certificate','Degree','Post Graduate','Other'];
 
   var body='';
-  // When updating an existing client, explain what the form does to their record.
-  if(existC){
-    var _fpn = (typeof finposFor==='function') ? finposFor(existC.ID) : [];
-    var _nNeed = _fpn.filter(function(r){ return r.Kind==='need'; }).length;
-    var _nFin  = _fpn.length - _nNeed;
-    body+='<div style="margin-bottom:16px;padding:11px 14px;background:#eff6ff;border:1.5px solid #3b82f6;border-radius:10px;font-size:12.5px;color:#1e40af;line-height:1.55">'
-      +'<b>Updating '+escHtml(existC.Name)+'</b> — details are pre-filled; anything you change is updated on the record and nothing is deleted. '
-      +'New assets, liabilities, income, expenses and needs you add below are <b>added</b> to the client'
-      +((_nFin||_nNeed)?' (they already have '+_nFin+' financial item'+(_nFin===1?'':'s')+' and '+_nNeed+' need'+(_nNeed===1?'':'s')+' — edit those on the Financial Position / Needs tabs).':'.')
-      +'</div>';
-  }
   // Lead / client toggle
   body+='<div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;padding:10px 14px;background:#f5f7fa;border-radius:10px;border:1.5px solid var(--mist)">'
     +'<span id="ffTypeBadge" style="font-size:13px;font-weight:700;color:#d97706">🎯 Capturing a LEAD</span>'
@@ -9973,52 +9990,12 @@ function openFactFind(existingId){
   body+=fld('ffnotes','Notes (the client\'s own words)','','textarea');
 
   document.getElementById('ffModB').innerHTML=body;
-  var _t=document.getElementById('ffModT'); if(_t) _t.textContent = existC ? ('📋 Fact Find — '+existC.Name) : '📋 New Fact Find';
-  ffSetLead(existC ? (existC.IsLead==='Yes'?'Yes':'No') : 'Yes');
+  ffSetLead('Yes');
   // Seed one blank row in each repeatable section so the form isn't empty.
   ffAddChild(); ffAddAsset(); ffAddLiab(); ffAddIncome(); ffAddExpense(); ffAddNeed();
-  if(existC) ffPrefillFrom(existC);
   document.getElementById('ffMod').classList.add('open');
   window._captureActive = true; if(window.notepadSync) window.notepadSync();
   setTimeout(function(){ var n=document.getElementById('ffname'); if(n) n.focus(); },60);
-}
-
-// Pre-fill the fact-find form from an existing client record (personal, spouse,
-// will, children). Financial sections stay blank on purpose — new items are ADDED
-// here; existing assets/needs are edited on the Financial Position / Needs tabs.
-function ffPrefillFrom(c){
-  function sv(id,val){ var e=document.getElementById(id); if(e && val!=null && val!=='' && val!=='None') e.value=val; }
-  function rd(name,val){ if(!val) return; var el=document.querySelector('input[name="'+name+'"][value="'+val+'"]'); if(el) el.checked=true; }
-  sv('ffname',c.Name); sv('ffcalling',c.CallingName); sv('fftitle',c.Title);
-  sv('ffid',c.IDNumber); sv('ffdob',c.DOB); sv('ffcell',c.Cell); sv('ffemail',c.Email);
-  sv('ffocc',c.Occupation); sv('ffemp',c.Employer); sv('ffincome',c.Income); sv('fftax',c.TaxNo);
-  sv('ffedu',c.Education); sv('ffmarital',c.MaritalStatus); sv('ffanniv',c.Anniversary);
-  sv('fftelh',c.TelHome); sv('fftelw',c.TelWork); sv('ffreview',c.ReviewDate);
-  sv('ffaddr',c.Address); sv('ffpobox',c.POBox); sv('ffrisk',c.RiskCategory);
-  var coh=document.getElementById('ffcohab'); if(coh) coh.checked=(c.Cohabiting==='Yes');
-  rd('ffgen',c.Gender); rd('ffsm',c.Smoker);
-  sv('ffspname',c.SpouseName); sv('ffspid',c.SpouseIDNumber); sv('ffspdob',c.SpouseDOB);
-  sv('ffspcell',c.SpouseCell); sv('ffspemail',c.SpouseEmail);
-  sv('ffspocc',c.SpouseOccupation); sv('ffspincome',c.SpouseIncome); rd('ffspworks',c.SpouseWorks);
-  rd('ffhaswill',c.HasWill); rd('ffwillthrough',c.WillThroughMe);
-  sv('ffwilldate',c.WillDate); sv('ffwillatt',c.WillAttorney); sv('ffwillnotes',c.WillNotes);
-  // Children from family links → pre-filled rows + a trailing blank for adding more.
-  var kids=(DB.links||[]).filter(function(l){ return String(l.PrincipalID)===String(c.ID) && l.Type==='Child'; });
-  if(kids.length){
-    var box=document.getElementById('ffChildren');
-    if(box){
-      box.innerHTML='';
-      kids.forEach(function(k){
-        ffAddChild();
-        var rows=box.querySelectorAll('.ffrow'); var row=rows[rows.length-1];
-        if(row){
-          var setf=function(f,val){ var el=row.querySelector('[data-ff="'+f+'"]'); if(el && val!=null) el.value=val; };
-          setf('Name',k.Name); setf('DOB',k.DOB); setf('IDNumber',k.IDNumber);
-        }
-      });
-      ffAddChild();
-    }
-  }
 }
 
 // Section header — matches the client-intake modal styling.
@@ -10083,15 +10060,9 @@ function saveFactFind(){
   // Fold any floating-Notepad scratch (jotted during the meeting) into the client's Notes.
   var _scratch = (window.captureNoteText ? window.captureNoteText() : '');
   if(_scratch && _scratch.trim()){ p.notes = (p.notes ? p.notes.replace(/\s+$/,'')+'\n\n' : '') + _scratch.trim(); }
-  var existing;
-  if(FF_BIND_ID){
-    // Opened from an existing client card — bind to that exact record, no re-match/confirm.
-    existing = DB.clients.find(function(x){ return String(x.ID)===String(FF_BIND_ID); }) || null;
-  } else {
-    existing = pcFindExisting(p.client);
-    if(existing){
-      if(!confirm('A record for "'+existing.Name+'" already exists (matched by ID number or name).\n\nUpdate it with this fact-find? Only non-blank fields change — nothing is deleted.')) return;
-    }
+  var existing=pcFindExisting(p.client);
+  if(existing){
+    if(!confirm('A record for "'+existing.Name+'" already exists (matched by ID number or name).\n\nUpdate it with this fact-find? Only non-blank fields change — nothing is deleted.')) return;
   }
   var summary=[];
   if(p.assets.length) summary.push(p.assets.length+' asset(s)');
@@ -10104,7 +10075,6 @@ function saveFactFind(){
   PC_PARSED=p; PC_TARGET=existing||null; PC_MODE=existing?'update':'create';
   runPasteClaudeImport();
   if(window.captureNoteClear) window.captureNoteClear();
-  FF_BIND_ID = null;
   if(summary.length) toast('Captured: '+summary.join(', '),'ok');
 }
 
@@ -10905,6 +10875,11 @@ function parseAstutePasteJSON(txt){
       growthRate: clean(o.growthRate),     // forward growth assumption → GrowthRate/PremGrowthRate (drives projection)
       eac: clean(o.eac),                   // effective annual cost → BenEscalation on Living Annuities, else a note
       extraNotes: clean(o.notes),          // free-text catch-all for anything without a field (boosts, TER, etc.)
+      ccy: (clean(o.currency)||'').toUpperCase(),  // offshore: native currency (USD/GBP/EUR); blank/ZAR = rand
+      fxRate: clean(o.fxRate),             // rand per 1 unit of ccy, as at the value date
+      fxDate: clean(o.fxDate),             // date of fxRate
+      initFxRate: clean(o.premiumFxRate),  // rand per 1 unit at inception (for the initial premium's rand cost)
+      initFxDate: clean(o.premiumFxDate),  // inception date of the rate
       funds: funds,
       covers: covers,
       bens: bens
@@ -10962,10 +10937,13 @@ function astuteMergePolicy(existing, fresh){
     var v = fresh[k];
     if(!(v===''||v===null||v===undefined||v==='[]')) out[k]=v;   // meaningful new value wins
   });
-  var base = mergeNoteLines(crmStripFundBlock(existing.Notes||''), crmStripFundBlock(fresh.Notes||''));
+  var base = mergeNoteLines(crmStripFXLine(crmStripFundBlock(existing.Notes||'')), crmStripFXLine(crmStripFundBlock(fresh.Notes||'')));
+  // FX marker: fresh rate wins (else keep existing) — replaced, never duplicated.
+  var freshFX = crmFXLine(crmParseFX(fresh.Notes||'')||{});
+  var fxLine = freshFX || crmFXLine(crmParseFX(existing.Notes||'')||{});
   var freshFunds = crmParseFunds(fresh.Notes||'');
   var fundBlock = freshFunds.length ? crmFundsToNotesBlock(freshFunds) : crmFundsToNotesBlock(crmParseFunds(existing.Notes||''));
-  out.Notes = [base, fundBlock].filter(Boolean).join('\n');
+  out.Notes = [base, fxLine, fundBlock].filter(Boolean).join('\n');
   out.LastUpdated = fresh.LastUpdated || out.LastUpdated;
   return out;
 }
@@ -11031,6 +11009,20 @@ function runAstuteImport(){
     function lumpSum(t){ var s=0; lumps.forEach(function(x){if(x.type===t)s+=N(x.cover);}); return s?String(s):''; }
     var bensJson = JSON.stringify(r.bens.map(function(b){ return {type:b.benType, name:b.name, pct:b.pct}; }));
 
+    // Offshore (foreign-currency) handling: keep the ZAR EQUIVALENT in the money
+    // fields (so all rand totals stay valid) and record the native amounts + the
+    // explicit dated rates in an "FX:" Notes marker for native-first display.
+    var isFX = r.ccy && r.ccy!=='ZAR' && N(r.fxRate);
+    var benFundValue = r.fundValue;                 // ZAR policies: value is already in rand
+    var premiumVal   = r.premium;
+    var fxMarker = '';
+    if(isFX){
+      benFundValue = N(r.fundValue) ? String(Math.round(N(r.fundValue)*N(r.fxRate))) : '';
+      var initRate = N(r.initFxRate) ? N(r.initFxRate) : N(r.fxRate);   // fall back to current rate if no inception rate given
+      premiumVal   = N(r.premium)   ? String(Math.round(N(r.premium)*initRate)) : '';
+      fxMarker = crmFXLine({ccy:r.ccy, curNat:r.fundValue, curRate:r.fxRate, curDate:r.fxDate, initNat:r.premium, initRate:(N(r.initFxRate)?r.initFxRate:''), initDate:r.initFxDate});
+    }
+
     var pol = {
       Insurer:r.insurer, Product:r.product, PolicyNo:r.polNo, Type:r.type,
       StartDate:r.startDate, ClientIsOwner:(r.ownerIsClient?'Yes':'No'), Owner:(r.ownerIsClient?'':r.ownerName), Status:r.status,
@@ -11038,14 +11030,14 @@ function runAstuteImport(){
       EstateDutiable:(r.type==='Business Assurance' ? (r.bizType==='Contingent Liability'?'Yes':'No') : ''),
       AdvisorOfRecord:'Yes', CountsForAUM:'Yes',
       BizType:(r.bizType||''), LifeAssuredType:'', LifeAssured:'', LoanAmount:'', KeyPosition:(r.keyPosition||''),
-      Premium:r.premium, Frequency:r.frequency,
+      Premium:premiumVal, Frequency:r.frequency,
       PolicyFee:(policyFee>0?String(Math.round(policyFee*100)/100):''),
       PremEscalation:r.premEsc, BenEscalation:(r.type==='Living Annuity' ? (r.eac||'') : ''),
       BenDeath:lumpSum('Life Cover'), BenDisability:lumpSum('Capital Disability'), BenDreadDisease:lumpSum('Dread Disease / Severe Illness'),
       DreadDiseaseType:'Lump Sum',
       DreadDiseaseNotes:(function(){ var ls=lumps.filter(function(x){return x.type==='Dread Disease / Severe Illness'&&x.label;}).map(function(x){return x.label;}); var all=ls.concat((cls&&cls.ddNotes)||[]); return all.join(' · '); })(),
       LumpBenefits:JSON.stringify(lumps),
-      BenSurrenderValue:r.surrValue, BenFundValue:r.fundValue, BenMaturityValue:'',
+      BenSurrenderValue:r.surrValue, BenFundValue:benFundValue, BenMaturityValue:'',
       MaturityDate:r.maturityDate, MaturityAge:'', maturityAge:'', RetirementAge:r.retireAge||'',
       VestedValue:r.vestedPot||'', NonVestedValue:'',
       RetirementComponent:r.retirementPot||'', SavingsComponent:r.savingsPot||'',
@@ -11063,6 +11055,7 @@ function runAstuteImport(){
       HasGroupRisk:'', GroupRiskApproved:'', GroupRiskBenefits:'[]',
       Notes:(function(){
         var base=astuteFundsToNotes(r); var extra=[];
+        if(fxMarker) extra.push(fxMarker);                                       // offshore currency marker (native + dated rates)
         if(r.eac && r.type!=='Living Annuity') extra.push('EAC: '+r.eac+'%');   // no EAC field on non-LA policies → note
         if(r.extraNotes) extra.push(r.extraNotes);
         return [base, extra.join('\n')].filter(Boolean).join('\n');
@@ -12850,6 +12843,7 @@ function openPolicySchedule(cid){
       var incBens=[];
       try{incBens=p.IncomeBenefits?JSON.parse(p.IncomeBenefits):[];}catch(e){}
       var _funds = policyFunds(p);
+      var _fx = crmParseFX(p);   // offshore currency marker (native amounts + dated rates), or null
       var rowBg = idx%2===0?'#ffffff':'#fafaf8';
       // Premium frequency suffix. Monthly stays as compact '/pm' (most common,
       // default). Everything else gets a full-word label so '/Once Off' doesn't
@@ -12911,7 +12905,11 @@ function openPolicySchedule(cid){
           s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">—</td>';
         } else {
           var _proj = projectPolicy(p);
-          s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+R(p.BenFundValue)+'</td>';
+          // Offshore: native currency first, rand equivalent (at the stored dated rate) beneath.
+          var _fvCell = (_fx && _fx.curNat)
+            ? crmFmtCur(_fx.curNat,_fx.ccy)+'<div style="font-size:10px;color:#888;font-weight:400">≈ '+R(p.BenFundValue)+' @ '+_fx.curRate+'</div>'
+            : R(p.BenFundValue);
+          s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+_fvCell+'</td>';
           s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600">'+(_proj.value>0?R(_proj.value):'—')+'</td>';
           s+='<td style="padding:9px 10px;border-bottom:1px solid #eeede8;text-align:right;font-weight:600;font-size:12px">'+(_proj.targetDate||'—')+'</td>';
         }
@@ -12963,13 +12961,13 @@ function openPolicySchedule(cid){
         var _ftot=0; _funds.forEach(function(f){ _ftot+=N(f.value); });
         s+='<tr class="pol-funds" style="background:'+rowBg+'">';
         s+='<td colspan="8" style="padding:4px 10px 9px 26px;border-bottom:1px solid #eeede8">';
-        s+='<div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:#9a9a90;margin-bottom:3px">Underlying funds</div>';
+        s+='<div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:#9a9a90;margin-bottom:3px">Underlying funds'+(_fx?' ('+escHtml(_fx.ccy)+')':'')+'</div>';
         s+='<table style="width:100%;border-collapse:collapse;font-size:11.5px">';
         _funds.forEach(function(f){
           var pctTxt = f.alloc ? (f.alloc+'%') : ((_ftot>0 && N(f.value)) ? (Math.round(N(f.value)/_ftot*1000)/10+'%') : '');
           s+='<tr>'+
             '<td style="padding:2px 8px 2px 0;color:#555;border-bottom:1px solid #f4f3ec">'+escHtml(f.name||'')+'</td>'+
-            '<td style="padding:2px 8px;text-align:right;color:#444;white-space:nowrap;border-bottom:1px solid #f4f3ec">'+(N(f.value)?R(f.value):'—')+'</td>'+
+            '<td style="padding:2px 8px;text-align:right;color:#444;white-space:nowrap;border-bottom:1px solid #f4f3ec">'+(N(f.value)?(_fx?crmFmtCur(f.value,_fx.ccy):R(f.value)):'—')+'</td>'+
             '<td style="padding:2px 0;text-align:right;color:#889;white-space:nowrap;width:56px;border-bottom:1px solid #f4f3ec">'+pctTxt+'</td>'+
           '</tr>';
         });
@@ -13008,9 +13006,14 @@ function openPolicySchedule(cid){
         if(p.Type!=='Life Annuity' && p.BenEscalation && N(p.BenEscalation)>0){
           details.push('<span style="font-size:11px;color:#888">EAC: </span><span style="font-size:12px;font-weight:600;color:#92400e">'+p.BenEscalation+'%</span>');
         }
-        // Total contributions (initial investment)
+        // Total contributions (initial investment). Offshore: native premium first,
+        // rand cost at the INCEPTION-date rate beside it (that's why it can differ
+        // from today's rate).
         if(p.Premium && N(p.Premium)>0 && (p.Frequency==='Once Off'||p.Frequency==='Paid Up'||p.Frequency==='Lump Sum')){
-          details.push('<span style="font-size:11px;color:#888">Initial Investment: </span><span style="font-size:12px;font-weight:600">'+R(p.Premium)+'</span>');
+          var _iiVal = (_fx && _fx.initNat)
+            ? crmFmtCur(_fx.initNat,_fx.ccy)+' <span style="font-size:11px;color:#888;font-weight:400">· '+R(p.Premium)+' @ '+_fx.initRate+(_fx.initDate?' ('+_fx.initDate+')':'')+'</span>'
+            : R(p.Premium);
+          details.push('<span style="font-size:11px;color:#888">Initial Investment: </span><span style="font-size:12px;font-weight:600">'+_iiVal+'</span>');
         }
         // LA income
         if(p.Type==='Living Annuity'){
@@ -13075,8 +13078,9 @@ function openPolicySchedule(cid){
 
       if(p.Notes){
         // When the funds are shown as a table above, strip the "Funds at import:"
-        // block from the notes footnote so they aren't listed twice.
-        var _notesDisp = _funds.length ? notesWithoutFunds(p.Notes) : p.Notes;
+        // block from the notes footnote so they aren't listed twice. Also strip the
+        // "FX:" marker — its contents are already shown in the value/initial cells.
+        var _notesDisp = crmStripFXLine(_funds.length ? notesWithoutFunds(p.Notes) : p.Notes);
         if(_notesDisp) details.push('<span style="font-size:11px;color:#888;font-style:italic">'+escHtml(_notesDisp)+'</span>');
       }
 
