@@ -287,7 +287,7 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--cream);c
 </div>
 <div class="ov" id="ffMod">
   <div class="modal" style="max-width:1000px">
-    <div class="mh"><h3>📋 New Fact Find</h3><button class="xb" data-close="1">✕</button></div>
+    <div class="mh"><h3 id="ffModT">📋 New Fact Find</h3><button class="xb" data-close="1">✕</button></div>
     <div class="mb" id="ffModB"></div>
     <div class="mf" style="flex-wrap:wrap;gap:8px">
       <button class="btn b-gh sm" data-close="1">Cancel</button>
@@ -1834,6 +1834,7 @@ function renderProfile(){
       '<button class="btn b-sg sm" data-act="convert-lead" data-id="'+c.ID+'">✅ Convert to Client</button>'
       :'')+
     '<button class="btn b-gh sm" style="color:#fff;border-color:#334466" data-act="edit-client" data-id="'+c.ID+'">✏️ Edit</button>'+
+    '<button class="btn b-sk sm" style="background:#0e413a;color:#e0b64a;border-color:#2a3a5e" onclick="openFactFind(\''+c.ID+'\')" title="Run the full fact-find on this existing client — pre-filled; new assets/needs are added to the record">📋 Fact Find</button>'+
     "<a href='"+buildComplianceUrl(c)+"' target='_blank' style='text-decoration:none'><button class='btn b-sk sm' style='background:#0e413a;color:#d4af5a;border-color:#2a3a5e'>📋 Compliance Docs</button></a>"+
     "<a href='"+buildFormsUrl(c)+"' target='_blank' style='text-decoration:none'><button class='btn b-sk sm' style='background:#0e413a;color:#ccd660;border-color:#2a3a5e'>📝 Forms</button></a>"+
     '<button class="btn b-sk sm" style="background:#0e413a;color:#7aa8dc;border-color:#2a3a5e" onclick="launchContribCalc(\''+c.ID+'\')">🧮 Contrib Calc</button>'+
@@ -9713,6 +9714,9 @@ function runPasteClaudeImport(){
 // saveFamMember via the existing pc* machinery. A matching printable paper version
 // (printFactFind) mirrors the on-screen fields for across-the-desk meetings.
 var FF_SEQ = 0;
+// When a fact-find is opened FROM an existing client card, this holds that client's
+// ID so Save updates that exact record instead of creating a new one. null = new capture.
+var FF_BIND_ID = null;
 
 // Small builders (kept ES5 to match the rest of the file).
 function ffField(label, ctrl){ return '<div class="fff"><div class="fflbl">'+label+'</div>'+ctrl+'</div>'; }
@@ -9857,13 +9861,27 @@ function ffTryDob(idField, dobField){
 }
 
 // ── Build & open the form ──
-function openFactFind(){
+function openFactFind(existingId){
   FF_SEQ=0;
+  FF_BIND_ID = existingId ? String(existingId) : null;
+  var existC = FF_BIND_ID ? DB.clients.find(function(x){ return String(x.ID)===FF_BIND_ID; }) : null;
+  if(FF_BIND_ID && !existC){ toast('Cannot find that client to fact-find','err'); FF_BIND_ID=null; return; }
   var titleOpts=['','Mr.','Mrs.','Ms.','Miss','Dr.','Prof.','Rev.','Adv.'];
   var maritalOpts=['','Single','Married - ANC with accrual','Married - ANC without accrual','Married in COP','Life partner','Divorced','Widowed'];
   var eduOpts=['','School - no matric','Matric','Diploma / Certificate','Degree','Post Graduate','Other'];
 
   var body='';
+  // When updating an existing client, explain what the form does to their record.
+  if(existC){
+    var _fpn = (typeof finposFor==='function') ? finposFor(existC.ID) : [];
+    var _nNeed = _fpn.filter(function(r){ return r.Kind==='need'; }).length;
+    var _nFin  = _fpn.length - _nNeed;
+    body+='<div style="margin-bottom:16px;padding:11px 14px;background:#eff6ff;border:1.5px solid #3b82f6;border-radius:10px;font-size:12.5px;color:#1e40af;line-height:1.55">'
+      +'<b>Updating '+escHtml(existC.Name)+'</b> — details are pre-filled; anything you change is updated on the record and nothing is deleted. '
+      +'New assets, liabilities, income, expenses and needs you add below are <b>added</b> to the client'
+      +((_nFin||_nNeed)?' (they already have '+_nFin+' financial item'+(_nFin===1?'':'s')+' and '+_nNeed+' need'+(_nNeed===1?'':'s')+' — edit those on the Financial Position / Needs tabs).':'.')
+      +'</div>';
+  }
   // Lead / client toggle
   body+='<div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;padding:10px 14px;background:#f5f7fa;border-radius:10px;border:1.5px solid var(--mist)">'
     +'<span id="ffTypeBadge" style="font-size:13px;font-weight:700;color:#d97706">🎯 Capturing a LEAD</span>'
@@ -9955,12 +9973,52 @@ function openFactFind(){
   body+=fld('ffnotes','Notes (the client\'s own words)','','textarea');
 
   document.getElementById('ffModB').innerHTML=body;
-  ffSetLead('Yes');
+  var _t=document.getElementById('ffModT'); if(_t) _t.textContent = existC ? ('📋 Fact Find — '+existC.Name) : '📋 New Fact Find';
+  ffSetLead(existC ? (existC.IsLead==='Yes'?'Yes':'No') : 'Yes');
   // Seed one blank row in each repeatable section so the form isn't empty.
   ffAddChild(); ffAddAsset(); ffAddLiab(); ffAddIncome(); ffAddExpense(); ffAddNeed();
+  if(existC) ffPrefillFrom(existC);
   document.getElementById('ffMod').classList.add('open');
   window._captureActive = true; if(window.notepadSync) window.notepadSync();
   setTimeout(function(){ var n=document.getElementById('ffname'); if(n) n.focus(); },60);
+}
+
+// Pre-fill the fact-find form from an existing client record (personal, spouse,
+// will, children). Financial sections stay blank on purpose — new items are ADDED
+// here; existing assets/needs are edited on the Financial Position / Needs tabs.
+function ffPrefillFrom(c){
+  function sv(id,val){ var e=document.getElementById(id); if(e && val!=null && val!=='' && val!=='None') e.value=val; }
+  function rd(name,val){ if(!val) return; var el=document.querySelector('input[name="'+name+'"][value="'+val+'"]'); if(el) el.checked=true; }
+  sv('ffname',c.Name); sv('ffcalling',c.CallingName); sv('fftitle',c.Title);
+  sv('ffid',c.IDNumber); sv('ffdob',c.DOB); sv('ffcell',c.Cell); sv('ffemail',c.Email);
+  sv('ffocc',c.Occupation); sv('ffemp',c.Employer); sv('ffincome',c.Income); sv('fftax',c.TaxNo);
+  sv('ffedu',c.Education); sv('ffmarital',c.MaritalStatus); sv('ffanniv',c.Anniversary);
+  sv('fftelh',c.TelHome); sv('fftelw',c.TelWork); sv('ffreview',c.ReviewDate);
+  sv('ffaddr',c.Address); sv('ffpobox',c.POBox); sv('ffrisk',c.RiskCategory);
+  var coh=document.getElementById('ffcohab'); if(coh) coh.checked=(c.Cohabiting==='Yes');
+  rd('ffgen',c.Gender); rd('ffsm',c.Smoker);
+  sv('ffspname',c.SpouseName); sv('ffspid',c.SpouseIDNumber); sv('ffspdob',c.SpouseDOB);
+  sv('ffspcell',c.SpouseCell); sv('ffspemail',c.SpouseEmail);
+  sv('ffspocc',c.SpouseOccupation); sv('ffspincome',c.SpouseIncome); rd('ffspworks',c.SpouseWorks);
+  rd('ffhaswill',c.HasWill); rd('ffwillthrough',c.WillThroughMe);
+  sv('ffwilldate',c.WillDate); sv('ffwillatt',c.WillAttorney); sv('ffwillnotes',c.WillNotes);
+  // Children from family links → pre-filled rows + a trailing blank for adding more.
+  var kids=(DB.links||[]).filter(function(l){ return String(l.PrincipalID)===String(c.ID) && l.Type==='Child'; });
+  if(kids.length){
+    var box=document.getElementById('ffChildren');
+    if(box){
+      box.innerHTML='';
+      kids.forEach(function(k){
+        ffAddChild();
+        var rows=box.querySelectorAll('.ffrow'); var row=rows[rows.length-1];
+        if(row){
+          var setf=function(f,val){ var el=row.querySelector('[data-ff="'+f+'"]'); if(el && val!=null) el.value=val; };
+          setf('Name',k.Name); setf('DOB',k.DOB); setf('IDNumber',k.IDNumber);
+        }
+      });
+      ffAddChild();
+    }
+  }
 }
 
 // Section header — matches the client-intake modal styling.
@@ -10025,9 +10083,15 @@ function saveFactFind(){
   // Fold any floating-Notepad scratch (jotted during the meeting) into the client's Notes.
   var _scratch = (window.captureNoteText ? window.captureNoteText() : '');
   if(_scratch && _scratch.trim()){ p.notes = (p.notes ? p.notes.replace(/\s+$/,'')+'\n\n' : '') + _scratch.trim(); }
-  var existing=pcFindExisting(p.client);
-  if(existing){
-    if(!confirm('A record for "'+existing.Name+'" already exists (matched by ID number or name).\n\nUpdate it with this fact-find? Only non-blank fields change — nothing is deleted.')) return;
+  var existing;
+  if(FF_BIND_ID){
+    // Opened from an existing client card — bind to that exact record, no re-match/confirm.
+    existing = DB.clients.find(function(x){ return String(x.ID)===String(FF_BIND_ID); }) || null;
+  } else {
+    existing = pcFindExisting(p.client);
+    if(existing){
+      if(!confirm('A record for "'+existing.Name+'" already exists (matched by ID number or name).\n\nUpdate it with this fact-find? Only non-blank fields change — nothing is deleted.')) return;
+    }
   }
   var summary=[];
   if(p.assets.length) summary.push(p.assets.length+' asset(s)');
@@ -10040,6 +10104,7 @@ function saveFactFind(){
   PC_PARSED=p; PC_TARGET=existing||null; PC_MODE=existing?'update':'create';
   runPasteClaudeImport();
   if(window.captureNoteClear) window.captureNoteClear();
+  FF_BIND_ID = null;
   if(summary.length) toast('Captured: '+summary.join(', '),'ok');
 }
 
