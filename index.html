@@ -12636,10 +12636,17 @@ function openPolicySchedule(cid){
 
       var polDeath = isRiskP ? lumpSum(p,'Life Cover','BenDeath') : 0;
       var polFV    = (isInvP||isRaP) ? N(p.BenFundValue) : 0;
+      // Per-policy split: use the captured percentages when ANY are valid; when
+      // a policy's beneficiary percentages are ALL blank/garbage, split EQUALLY
+      // among the named beneficiaries — never 100% each, which double-counted the
+      // money and inflated the by-beneficiary investment/retirement totals.
+      var _anyValidPct = validBens.some(function(b){var x=N(b.pct); return x>0 && x<=100;});
+      var _eqShare = validBens.length ? (1/validBens.length) : 0;
       validBens.forEach(function(b){
         if(!b.name || !String(b.name).trim()) return;
-        var pct = N(b.pct) / 100;
-        if(pct<=0 || pct>1) pct = 1; // empty/garbage % treated as 100%
+        var pct;
+        if(_anyValidPct){ pct = N(b.pct)/100; if(pct<0||pct>1) pct = 0; }
+        else { pct = _eqShare; }
         var key = normName(b.name);
         if(!benMap[key]){
           benMap[key] = {displayName:String(b.name).trim(), types:[], death:0, inv:0, ret:0, policyIds:{}};
@@ -12900,6 +12907,7 @@ function openPolicySchedule(cid){
 
   // Underlying-fund pills.
   function fundPills(funds,ccy){
+    funds=(funds||[]).filter(function(f){ return N(f.value)>0 || (f.alloc && N(f.alloc)>0); });
     if(!funds.length) return '';
     var ftot=0; funds.forEach(function(f){ ftot+=N(f.value); });
     var s='<div style="padding:2px 18px 15px"><div style="font-size:9px;text-transform:uppercase;letter-spacing:.6px;color:'+MUT+';margin-bottom:7px">Underlying funds'+(ccy?' ('+escHtml(ccy)+')':'')+'</div><div style="display:flex;flex-wrap:wrap;gap:6px">';
@@ -12925,8 +12933,10 @@ function openPolicySchedule(cid){
     if(p.PolicyNo) right.push('Policy '+escHtml(p.PolicyNo));
     if(p.StartDate) right.push('Inception '+FD(p.StartDate));
     if((isRAP||isInvP)&&p.MaturityDate) right.push('Matures '+FD(p.MaturityDate));
+    var _pr=String(p.Product||''), _ins=String(p.Insurer||'');
+    var _title=_pr?(_pr.toLowerCase().indexOf(_ins.toLowerCase())===0?_pr:((_ins?_ins+' ':'')+_pr)):(_ins||'Policy');
     var card='<div class="pcard">';
-    card+='<div class="pcard-h"><div><span style="font-weight:700;color:'+INK+'">'+V(p.Insurer)+(p.Product?' '+escHtml(p.Product):'')+'</span>'+
+    card+='<div class="pcard-h"><div><span style="font-weight:700;color:'+INK+'">'+escHtml(_title)+'</span>'+
           '<span style="color:'+MUT+'"> &middot; '+escHtml(friendlyType(p))+'</span></div>'+
           '<div style="font-size:10.5px;color:'+MUT+';text-align:right">'+right.join(' &middot; ')+'</div></div>';
 
@@ -13019,14 +13029,14 @@ function openPolicySchedule(cid){
   var doc='<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Portfolio Schedule &mdash; '+escHtml(c.Name)+'</title>';
   doc+='<style>'
     +'*{box-sizing:border-box;-webkit-print-color-adjust:exact;print-color-adjust:exact;color-adjust:exact}'
-    +'@page{size:A4 portrait;margin:15mm 15mm}'
-    +'body{font-family:Arial,Helvetica,sans-serif;color:'+TXT+';font-size:12.5px;line-height:1.5;max-width:820px;margin:0 auto;padding:30px;background:#fff}'
+    +'@page{size:A4 landscape;margin:11mm 12mm}'
+    +'body{font-family:Arial,Helvetica,sans-serif;color:'+TXT+';font-size:12px;line-height:1.5;max-width:1180px;margin:0 auto;padding:22px 26px;background:#fff}'
     +'.serif{font-family:Georgia,"Times New Roman",serif}'
     +'table{border-collapse:collapse;width:100%}'
-    +'.sect{font-family:Georgia,"Times New Roman",serif;font-size:16px;font-weight:700;color:'+INK+';margin:26px 0 11px}'
+    +'.sect{font-family:Georgia,"Times New Roman",serif;font-size:16px;font-weight:700;color:'+INK+';margin:22px 0 10px;page-break-after:avoid;break-after:avoid}'
     +'.pcard{border:1px solid '+LINE+';border-radius:9px;overflow:hidden;margin-bottom:12px;page-break-inside:avoid;break-inside:avoid}'
     +'.pcard-h{display:flex;justify-content:space-between;align-items:baseline;gap:14px;background:'+PALE+';padding:9px 18px;border-bottom:1px solid '+LINE+';font-size:12.5px}'
-    +'.tile{flex:1;min-width:150px;border:1px solid '+LINE+';border-top:3px solid '+INK+';border-radius:7px;padding:13px 15px}'
+    +'.tile{flex:1 1 0;min-width:150px;display:flex;flex-direction:column;border:1px solid '+LINE+';border-top:3px solid '+INK+';border-radius:7px;padding:13px 15px}'
     +'.gtbl th{background:'+INK+';color:#fff;font-size:9.5px;text-transform:uppercase;letter-spacing:.5px;font-weight:700;padding:9px 11px;text-align:right}'
     +'.gtbl th:first-child,.gtbl th:nth-child(2){text-align:left}'
     +'.gtbl td{padding:9px 11px;border-bottom:1px solid '+LINE+';font-size:12.5px;text-align:right}'
@@ -13092,7 +13102,7 @@ function openPolicySchedule(cid){
       tiles.push(tile('Product providers',provNames.length+'','<span style="font-size:10px">'+top+(provNames.length>3?' &middot; &hellip;':'')+'</span>'));
     }
   }
-  if(tiles.length) doc+='<div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:8px">'+tiles.join('')+'</div>';
+  if(tiles.length) doc+='<div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:8px;align-items:stretch">'+tiles.join('')+'</div>';
 
   // ── AT A GLANCE — COST & RETURN ──
   var glancePols=[];
@@ -13145,8 +13155,11 @@ function openPolicySchedule(cid){
   // ── PER-POLICY CARD SECTIONS ──
   function cardSection(g){
     if(!g.pols.length) return;
-    doc+='<div class="sect">'+escHtml(g.label)+'</div>';
-    sortPols(g.pols).forEach(function(p){ doc+=policyCard(p); });
+    var _ps=sortPols(g.pols);
+    // Glue the section heading to its FIRST card so a heading can never sit alone
+    // at the foot of a page (the orphaned "Personal Life & Risk Cover" bug).
+    doc+='<div style="page-break-inside:avoid;break-inside:avoid"><div class="sect">'+escHtml(g.label)+'</div>'+policyCard(_ps[0])+'</div>';
+    for(var _i=1;_i<_ps.length;_i++) doc+=policyCard(_ps[_i]);
   }
   cardSection(groups.personal);
   cardSection(groups.ra);
@@ -13199,7 +13212,7 @@ function openPolicySchedule(cid){
   doc+='</div>';
   doc+='<scr'+'ipt>function dlWord(){'
     +'var body=document.getElementById("schedBody").innerHTML;'
-    +'var head=\'<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40"><head><meta charset="utf-8"><style>@page WordSection1{size:21.0cm 29.7cm;mso-page-orientation:portrait;margin:1.5cm}div.WordSection1{page:WordSection1}body{font-family:Arial,sans-serif;color:#33332e;font-size:11pt}table{border-collapse:collapse;width:100%}</style></head><body><div class="WordSection1">\';'
+    +'var head=\'<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40"><head><meta charset="utf-8"><style>@page WordSection1{size:29.7cm 21.0cm;mso-page-orientation:landscape;margin:1.2cm}div.WordSection1{page:WordSection1}body{font-family:Arial,sans-serif;color:#33332e;font-size:11pt}table{border-collapse:collapse;width:100%}</style></head><body><div class="WordSection1">\';'
     +'var html=head+body+"</div></body></html>";'
     +'var blob=new Blob(["\\ufeff"+html],{type:"application/msword"});'
     +'var a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download='+JSON.stringify('Portfolio Schedule - '+c.Name+'.doc')+';document.body.appendChild(a);a.click();document.body.removeChild(a);'
