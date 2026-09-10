@@ -11258,6 +11258,9 @@ function openTaskLogModal(taskId){
   var _lc = findClientByName(t.ClientName);
   document.getElementById('tMod').querySelector('h3').textContent = t.Title;
   document.getElementById('tModB').innerHTML=
+    '<div class="fld" style="margin-bottom:12px"><label>Task Title</label>'+
+    '<input id="tlogtitle" type="text" value="'+escHtml(t.Title||'')+'" placeholder="Task title" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:7px 10px;font-family:inherit;font-size:14px;font-weight:600;color:var(--navy)">'+
+    '<div style="font-size:11px;color:#889;margin-top:3px">Rename the task here. Saved on “Save &amp; Close” or “Add Entry”.</div></div>'+
     '<div style="margin-bottom:12px">'+
     '<div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap">'+
     (t.Priority==='Urgent'?'<span style="background:#fde8e8;color:var(--rose);border-radius:10px;padding:2px 9px;font-size:10px;font-weight:700">🔴 URGENT</span>':'')+
@@ -11397,6 +11400,16 @@ function saveTaskLog(){
   var priEl = document.getElementById('tpri');
   var newPri = priEl ? priEl.value : '';
   var entryText = entry.value.trim();
+  var titleEl = document.getElementById('tlogtitle');
+  var _titleChanged = false;
+  if(titleEl){
+    var newTitle = titleEl.value.trim();
+    if(newTitle && newTitle !== t.Title){
+      entryText += ' [Renamed to "'+newTitle+'"]';
+      t.Title = newTitle;
+      _titleChanged = true;
+    }
+  }
   if(newAssignee && newAssignee !== t.Assignee){
     entryText += ' [Reassigned to '+newAssignee+']';
     t.Assignee = newAssignee;
@@ -11431,8 +11444,9 @@ function saveTaskLog(){
   // Save to server
   post({action:'updateDueDate',id:TASK_LOG_ID,assignee:t.Assignee,dueDate:t.DueDate},function(){});
   post({action:'updateTaskNotes',id:TASK_LOG_ID,notes:t.Notes},function(){toast('Entry added ✓','ok');});
-  // ClientName lives on the task row itself, so persist the whole task when re-linked.
-  if(_relinked){ post({action:'saveTask', task:JSON.parse(JSON.stringify(t))}, function(){}); }
+  // ClientName and Title live on the task row itself, so persist the whole task
+  // when the client link or the title changed.
+  if(_relinked || _titleChanged){ post({action:'saveTask', task:JSON.parse(JSON.stringify(t))}, function(){}); }
   // Stay in the modal — refresh the log view in place without closing
   openTaskLogModal(TASK_LOG_ID);
 }
@@ -11442,6 +11456,16 @@ function saveTaskLogAndClose(){
   var t = DB.tasks.find(function(x){ return String(x.ID)===String(TASK_LOG_ID); });
   if(!t){ closeAll(); render(); return; }
   var changed = false;
+  // Title (rename). Blank titles are ignored so a task can never lose its name.
+  var titleEl = document.getElementById('tlogtitle');
+  var _titleChanged = false;
+  if(titleEl){
+    var newTitle = titleEl.value.trim();
+    if(newTitle && newTitle !== t.Title){
+      t.Title = newTitle;
+      changed = true; _titleChanged = true;
+    }
+  }
   // Due date
   fdpSync('tlogdue');
   var newDue = g('tlogdue');
@@ -11487,9 +11511,10 @@ function saveTaskLogAndClose(){
   }
   if(changed){
     post({action:'updateDueDate',id:TASK_LOG_ID,assignee:t.Assignee,dueDate:t.DueDate},function(){});
-    // ClientName is a task-row column, so persist the full task when re-linked.
-    if(_relinked){ post({action:'saveTask', task:JSON.parse(JSON.stringify(t))}, function(){}); }
-    toast(_relinked?'Task re-linked ✓':'Saved ✓','ok');
+    // ClientName and Title are task-row columns, so persist the full task when
+    // either the client link or the title changed.
+    if(_relinked || _titleChanged){ post({action:'saveTask', task:JSON.parse(JSON.stringify(t))}, function(){}); }
+    toast(_relinked?'Task re-linked ✓':_titleChanged?'Task renamed ✓':'Saved ✓','ok');
   }
   closeAll(); render();
 }
