@@ -1868,8 +1868,8 @@ function renderProfile(){
     (function(){var fp=finposFor(c.ID).filter(function(r){return r.Kind!=='need'&&r.Kind!=='need_notes';});return '<div class="tab'+(CTAB==='finpos'?' on':'')+'" data-act="tab" data-tab="finpos">Financial Position'+(fp.length?' ('+fp.length+')':'')+'</div>';})()+
     (function(){var nd=finposFor(c.ID).filter(function(r){return r.Kind==='need';});return '<div class="tab'+(CTAB==='needs'?' on':'')+'" data-act="tab" data-tab="needs">Needs'+(nd.length?' ('+nd.length+')':'')+'</div>';})()+
     (function(){var bks=[];try{bks=c.BankDetails?JSON.parse(c.BankDetails):[];}catch(e){}return '<div class="tab'+(CTAB==='banking'?' on':'')+'" data-act="tab" data-tab="banking">Banking'+(bks.length?' ('+bks.length+')':'')+'</div>';})()+
-    '<div class="tab'+(CTAB==='docs'?' on':'')+'" data-act="tab" data-tab="docs">Documents</div>'+
-    '<div class="tab'+(CTAB==='events'?' on':'')+'" data-act="tab" data-tab="events">Work Events</div>'+
+    (function(){if(!window._clientDocs[c.ID])loadClientDocs(c.ID);var dc=(window._clientDocs[c.ID]||[]).length;return '<div class="tab'+(CTAB==='docs'?' on':'')+'" data-act="tab" data-tab="docs">Documents'+(dc?' ('+dc+')':'')+'</div>';})()+
+    (function(){if(!window._events[c.ID])loadEvents(c.ID);var ec=(window._events[c.ID]||[]).length;return '<div class="tab'+(CTAB==='events'?' on':'')+'" data-act="tab" data-tab="events">Work Events'+(ec?' ('+ec+')':'')+'</div>';})()+
     (function(){var wd=willData(c.ID);var has=wd&&Object.keys(wd).length;return '<div class="tab'+(CTAB==='will'?' on':'')+'" data-act="tab" data-tab="will">Will'+(has?' ✓':'')+'</div>';})()+
     '</div>'+
     (CTAB==='overview'?renderOverview(c,pols,roas,ctasks):
@@ -3316,15 +3316,23 @@ function renderDocs(c){
 
 // Load all documents for a client from Supabase and re-render when ready
 function loadClientDocs(clientId){
+  // In-flight guard: the Documents tab counter and the broker-auth banner can
+  // both request a load in the same render pass — don't fire two identical GETs.
+  window._clientDocsLoading = window._clientDocsLoading || {};
+  if(window._clientDocsLoading[clientId]) return;
+  window._clientDocsLoading[clientId] = true;
   sbFetch('GET', '/rest/v1/client_documents?ClientID=eq.'+encodeURIComponent(clientId)+'&select=*&order=UploadedAt.desc', null, function(rows, err){
+    window._clientDocsLoading[clientId] = false;
     if(err){
       console.error('loadClientDocs error:', err);
       window._clientDocs[clientId] = [];
     } else {
       window._clientDocs[clientId] = rows || [];
     }
-    // Re-render if we're currently viewing this client's Docs tab
-    if(SEL && String(SEL)===String(clientId) && CTAB==='docs'){
+    // Re-render if we're currently viewing this client — so the Documents
+    // tab counter and the broker-auth banner update once docs load, whatever
+    // tab is active (not only when the Docs tab itself is open).
+    if(SEL && String(SEL)===String(clientId)){
       render();
     }
   });
@@ -3730,7 +3738,13 @@ function loadEventNA(eventId, cb){
 
 // Load events for a client (and their policy links) from Supabase
 function loadEvents(clientId){
+  // In-flight guard — the Work Events tab counter triggers this on card open,
+  // and renderEvents triggers it when the tab is viewed; avoid duplicate GETs.
+  window._eventsLoading = window._eventsLoading || {};
+  if(window._eventsLoading[clientId]) return;
+  window._eventsLoading[clientId] = true;
   sbFetch('GET','/rest/v1/work_events?ClientID=eq.'+encodeURIComponent(clientId)+'&select=*&order=EventDate.desc', null, function(rows, err){
+    window._eventsLoading[clientId] = false;
     if(err){ console.error('loadEvents error:',err); window._events[clientId] = []; }
     else window._events[clientId] = rows || [];
     // Also load policy links for these events in one go
@@ -3743,10 +3757,10 @@ function loadEvents(clientId){
           if(!window._eventPolicies[l.WorkEventID]) window._eventPolicies[l.WorkEventID] = [];
           window._eventPolicies[l.WorkEventID].push(l);
         });
-        if(SEL && String(SEL)===String(clientId) && CTAB==='events') render();
+        if(SEL && String(SEL)===String(clientId)) render();
       });
     } else {
-      if(SEL && String(SEL)===String(clientId) && CTAB==='events') render();
+      if(SEL && String(SEL)===String(clientId)) render();
     }
   });
 }
