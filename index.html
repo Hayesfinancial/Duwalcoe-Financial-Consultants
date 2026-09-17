@@ -7035,6 +7035,24 @@ function crmParseFX(p){
 function crmStripFXLine(notes){
   return String(notes||'').split('\n').filter(function(l){ return l.trim().indexOf('FX:')!==0; }).join('\n').replace(/\n{2,}/g,'\n').trim();
 }
+// EAC now has its own field on the RA/Investment card. It is stored as a single
+// structured "EAC:" line in Notes (no schema change) so the schedule can read it
+// and the notes textarea can hide it. crmStripEACLine removes that line; the
+// EAC field is the one place EAC is edited.
+function crmStripEACLine(notes){
+  return String(notes||'').split('\n').filter(function(l){ return l.trim().slice(0,4).toLowerCase()!=='eac:'; }).join('\n').replace(/\n{2,}/g,'\n').trim();
+}
+// Current EAC text for pre-filling the EAC field: prefer a structured "EAC:" line,
+// else fall back to a legacy prose EAC clause so existing policies pre-fill too.
+function crmCurrentEAC(p){
+  var notes=String((p&&p.Notes!==undefined)?p.Notes:(p||''));
+  var out='';
+  notes.split('\n').forEach(function(l){ var t=l.trim(); if(t.slice(0,4).toLowerCase()==='eac:') out=t.slice(4).trim(); });
+  if(out) return out;
+  var low=notes.toLowerCase(), i=low.indexOf('eac');
+  if(i<0) return '';
+  return notes.slice(i).split(/[\n.]/)[0].replace(/\bIRR\b.*$/i,'').replace(/^eac\s*[:=]?\s*/i,'').trim();
+}
 // Tidy a policy's Notes for the CLIENT-FACING schedule footnote (added 3 Sep 2026,
 // after a test schedule showed rambling, repetitive, meta-commentary notes). Drops
 // import-provenance and notes-to-self boilerplate, de-duplicates repeated sentences,
@@ -7092,6 +7110,35 @@ function polFundLoadPaste(){
 
 function sec(title){
   return '<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--gold);padding:14px 0 6px;border-top:1px solid var(--smoke);margin-top:8px">'+title+'</div>';
+}
+
+// Return / cost fields for RA & Investment cards — three clearly separated inputs
+// so it is obvious where each figure goes:
+//   pb_netirr   → Net IRR since inception (from the statement) → IllustrativeRate.
+//                 Shown as "Return (IRR)" on the schedule; NOT used to project.
+//   pb_eacinv   → EAC p.a. (free text, so a range like "4,9% reducing to 1,7%" is kept)
+//                 → stored as an "EAC:" line in Notes; shown as "Cost (EAC)".
+//   pb_growrate → Assumed growth % p.a. (forward, net of fees) → GrowthRate/PremGrowthRate.
+//                 THIS drives the projected value. Kept separate from the IRR on
+//                 purpose — a past return is not a forward projection assumption.
+function raInvReturnFields(p, isInv){
+  var netirr=(p.IllustrativeRate||'');
+  var grow=(p.GrowthRate||p.PremGrowthRate||'');
+  var eac=crmCurrentEAC(p);
+  var inpBase='width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px';
+  var inpPct='width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 28px 8px 10px;font-family:inherit;font-size:13px';
+  var pctSpan='<span style="position:absolute;right:10px;top:50%;transform:translateY(-50%);color:#889;font-size:11px;pointer-events:none">%</span>';
+  var h='<div class="g2">';
+  h+='<div class="fld"><label>Net IRR since inception % <span style="font-size:10px;color:#889;font-weight:400">(from the statement &mdash; shown as the return, not used to project)</span></label>';
+  h+='<div style="position:relative"><input id="pb_netirr" type="text" value="'+astuteEsc(netirr)+'" placeholder="e.g. 9.72" style="'+inpPct+'">'+pctSpan+'</div></div>';
+  h+='<div class="fld"><label>EAC p.a. <span style="font-size:10px;color:#889;font-weight:400">(effective annual cost &mdash; type it as the statement quotes it)</span></label>';
+  h+='<input id="pb_eacinv" type="text" value="'+astuteEsc(eac)+'" placeholder="e.g. 2% or 4,9% reducing to 1,7%" style="'+inpBase+'"></div>';
+  h+='</div>';
+  h+='<div class="g2">';
+  h+='<div class="fld"><label>Assumed growth % p.a. <span style="font-size:10px;color:#889;font-weight:400">(forward assumption, net of fees &mdash; drives the projection)</span></label>';
+  h+='<div style="position:relative"><input id="pb_growrate" type="text" value="'+astuteEsc(grow)+'" placeholder="e.g. 8"'+(isInv?' oninput="invCalcMaturity()"':'')+' style="'+inpPct+'">'+pctSpan+'</div></div>';
+  h+='<div></div></div>';
+  return h;
 }
 
 function buildPolicyForm(p){
@@ -7324,12 +7371,7 @@ function buildPolicyForm(p){
       // Single Growth Rate field — replaces the old Illustrative Rate + Premium Growth Rate pair (which were redundant and confusing).
       // Prefers IllustrativeRate (insurer-quoted return) on load, falls back to PremGrowthRate then GrowthRate.
       // Premium escalation is handled separately at the top of the card (pprem_pct) — this field is the FUND growth rate only.
-      html+='<div class="g2">';
-      html+='<div class="fld"><label>Growth Rate % <span style="font-size:10px;color:#889;font-weight:400">(fund return — used for projection)</span></label>';
-      html+='<div style="position:relative"><input id="pb_growrate" type="text" value="'+(p.IllustrativeRate||p.PremGrowthRate||p.GrowthRate||'')+'" placeholder="e.g. 9" ';
-      html+='style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 28px 8px 10px;font-family:inherit;font-size:13px">';
-      html+='<span style="position:absolute;right:10px;top:50%;transform:translateY(-50%);color:#889;font-size:11px;pointer-events:none">%</span></div></div>';
-      html+='<div></div></div>';
+      html+=raInvReturnFields(p,isInv);
       html+='<div class="fld"><label>Will client withdraw Savings Pot (Pot 3) before retirement?</label><div style="display:flex;gap:12px;margin-top:8px">';
       html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="p3pot" value="Yes"'+(p.WithdrawSavingsPot==='Yes'?' checked':'')+'>Yes</label>';
       html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="p3pot" value="No"'+(p.WithdrawSavingsPot==='No'?' checked':'')+'>No</label>';
@@ -7408,13 +7450,7 @@ function buildPolicyForm(p){
       } else {
         html+='<input type="hidden" id="pb_matage" value="">';
       }
-      html+='<div class="g2">';
-      html+='<div class="fld"><label>Growth Rate % <span style="font-size:10px;color:#889;font-weight:400">(used for projection)</span></label>';
-      html+='<div style="position:relative"><input id="pb_growrate" type="text" value="'+(p.GrowthRate||p.PremGrowthRate||p.IllustrativeRate||'')+'" placeholder="e.g. 8.5" oninput="invCalcMaturity()" ';
-      html+='style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 28px 8px 10px;font-family:inherit;font-size:13px">';
-      html+='<span style="position:absolute;right:10px;top:50%;transform:translateY(-50%);color:#889;font-size:11px;pointer-events:none">%</span></div></div>';
-      html+=(_isOnceOff?'<div></div>':'<div></div>');
-      html+='</div>';
+      html+=raInvReturnFields(p,isInv);
       // Total invested / withdrawn / gain
       html+='<div class="g2">';
       html+=fld('pb_totalinv','Total Invested to Date',p.TotalInvested,'text','oninput="invCalcGain()"');
@@ -7708,7 +7744,7 @@ function buildPolicyForm(p){
   // NOTES — funds live in their own section above; show the notes without the
   // fund block so the two aren't edited in the same box.
   html+=sec('Notes');
-  html+=fld('pnt','',crmStripFundBlock(p.Notes),'textarea');
+  html+=fld('pnt','',crmStripEACLine(crmStripFundBlock(p.Notes)),'textarea');
   html+='</div>';
 
   document.getElementById('pModB').innerHTML=html;
@@ -8653,7 +8689,7 @@ function collectPolicyForm(){
     MaturityDate:g('pb_matdate'),MaturityAge:g('pb_matage'),maturityAge:g('pb_matage'),RetirementAge:g('pb_retage'),
     VestedValue:g('pb_vested'),NonVestedValue:g('pb_nonvested'),
     RetirementComponent:g('pb_retcomp'),SavingsComponent:g('pb_savcomp'),
-    IllustrativeRate:g('pb_growrate')||g('pb_illrate'),PremGrowthRate:g('pb_growrate'),GrowthRate:g('pb_growrate'),
+    IllustrativeRate:g('pb_netirr')||g('pb_illrate'),PremGrowthRate:g('pb_growrate'),GrowthRate:g('pb_growrate'),
     TotalInvested:g('pb_totalinv'),TotalWithdrawn:g('pb_totalwith'),
     WithdrawSavingsPot:getR('p3pot'),IncludeInRetirement:getR('pinret'),ContinuePastMaturity:getR('pcontmat'),
     PaysIncome:getR('ppaysincome'),
@@ -8686,7 +8722,7 @@ function collectPolicyForm(){
     // Notes = the user's free-text notes (fund block stripped defensively) plus
     // the fund block rebuilt from the POL_FUNDS editor rows, so the schedule's
     // fund table stays in sync with what's edited here.
-    Notes:(function(){ var base=crmStripFundBlock(g('pnt')); var fb=crmFundsToNotesBlock(POL_FUNDS); return [base, fb].filter(Boolean).join('\n'); })(),
+    Notes:(function(){ var base=crmStripEACLine(crmStripFundBlock(g('pnt'))); var eacEl=document.getElementById('pb_eacinv'); var eacLine=(eacEl&&eacEl.value.trim())?('EAC: '+eacEl.value.trim()):''; var fb=crmFundsToNotesBlock(POL_FUNDS); return [base, eacLine, fb].filter(Boolean).join('\n'); })(),
     Beneficiaries:JSON.stringify(POL_BENS),
     EstateRouting:g('pestrouting'),
     IncomeBenefits:JSON.stringify(POL_INCOME_ROWS)
@@ -12829,17 +12865,27 @@ function openPolicySchedule(cid){
       return e>0 ? {display:String(p.BenEscalation).replace(',','.').replace(/%*$/,'')+'%', note:''} : null;
     }
     var notes=String(p.Notes||'');
-    var low=notes.toLowerCase();
-    var idx=low.indexOf('eac');
-    if(idx<0) return null;
-    // Take from "EAC" to the next sentence break, and drop any trailing IRR clause
-    // so a combined "IRR = 8,46% EAC = 3,1% down to 2,2%" note reads only the EAC part.
-    var tail=notes.slice(idx).split(/[\n.]/)[0].replace(/\bIRR\b.*$/i,'').trim();
-    var nums=tail.match(/\d+(?:[.,]\d+)?/g);
-    if(!nums||!nums.length) return null;
-    var pcts=nums.map(function(x){return x.replace(',','.');});
-    var disp = pcts.length>1 ? (pcts[0]+'&ndash;'+pcts[pcts.length-1]+'%') : (pcts[0]+'%');
-    return {display:disp, note:tail.replace(/^eac\s*[:=]?\s*/i,'').trim()};
+    // Prefer the structured "EAC:" line written by the policy card; fall back to a
+    // legacy prose EAC clause so older notes still resolve.
+    var src=null;
+    notes.split('\n').forEach(function(l){ var t=l.trim(); if(t.slice(0,4).toLowerCase()==='eac:') src=t.slice(4).trim(); });
+    if(src===null){
+      var low=notes.toLowerCase(), idx=low.indexOf('eac');
+      if(idx<0) return null;
+      src=notes.slice(idx).split(/[\n.]/)[0].replace(/\bIRR\b.*$/i,'').replace(/^eac\s*[:=]?\s*/i,'').trim();
+    }
+    if(!src) return null;
+    var nums=src.match(/\d+(?:[.,]\d+)?/g);
+    var disp;
+    if(nums&&nums.length){
+      var pcts=nums.map(function(x){return x.replace(',','.');});
+      disp = pcts.length>1 ? (pcts[0]+'&ndash;'+pcts[pcts.length-1]+'%') : (pcts[0]+'%');
+    } else {
+      disp=escHtml(src);
+    }
+    // Footnote only when the EAC text carries real words (e.g. "reducing to option
+    // date"); a bare "2%" or "4,9%-1,7%" needs none.
+    return {display:disp, note:(/[a-z]{3,}/i.test(src)?src:'')};
   }
 
   // Wealth Bonus at death — Sanlam risk policies. Parsed from the captured note
@@ -13231,8 +13277,12 @@ function openPolicySchedule(cid){
     +'var btn=document.getElementById("pdfBtn");'
     +'if(typeof html2pdf==="undefined"){alert("The PDF tool is still loading. Give it a second and click again.");return;}'
     +'var old=btn?btn.textContent:"";if(btn){btn.disabled=true;btn.style.opacity=".6";btn.textContent="Generating\\u2026";}'
-    +'var opt={margin:[8,9,8,9],filename:'+JSON.stringify('Portfolio Schedule - '+c.Name+'.pdf')+',image:{type:"jpeg",quality:0.98},html2canvas:{scale:2,useCORS:true,backgroundColor:"#ffffff",windowWidth:1180},jsPDF:{unit:"mm",format:"a4",orientation:"landscape"},pagebreak:{mode:["css","legacy"],avoid:[".pcard"]}};'
-    +'html2pdf().set(opt).from(el).save().then(function(){if(btn){btn.disabled=false;btn.style.opacity="1";btn.textContent=old;}}).catch(function(e){if(btn){btn.disabled=false;btn.style.opacity="1";btn.textContent=old;}alert("PDF export failed: "+e);});'
+    +'var W=1123;'
+    +'var pbw=document.body.style.width,pew=el.style.width,pmw=el.style.maxWidth;'
+    +'document.body.style.width=W+"px";el.style.width=W+"px";el.style.maxWidth=W+"px";'
+    +'function done(){document.body.style.width=pbw;el.style.width=pew;el.style.maxWidth=pmw;if(btn){btn.disabled=false;btn.style.opacity="1";btn.textContent=old;}}'
+    +'var opt={margin:[8,8,8,8],filename:'+JSON.stringify('Portfolio Schedule - '+c.Name+'.pdf')+',image:{type:"jpeg",quality:0.98},html2canvas:{scale:2,useCORS:true,backgroundColor:"#ffffff",width:W,windowWidth:W,scrollX:0,scrollY:0},jsPDF:{unit:"mm",format:"a4",orientation:"landscape"},pagebreak:{mode:["css","legacy"],avoid:[".pcard"]}};'
+    +'html2pdf().set(opt).from(el).save().then(done).catch(function(e){done();alert("PDF export failed: "+e);});'
     +'}</scr'+'ipt>';
   doc+='</body></html>';
 
