@@ -2953,6 +2953,10 @@ function renderFinPos(c){
                 cell('Value of Client\'s Share', money(d.value)+asAt)+
                 cell('Valuation Basis', d.valBasis||'—')+
                 cell('Loan Account', loanTxt)+
+                cell('Base Cost', money(d.baseCost))+
+                cell('Date Acquired', d.dateAcquired?fdate(d.dateAcquired):'—')+
+                cell('Main Use', d.mainUse||'—')+
+                cell('Actively Involved', d.activeInv||'—')+
                 cell('Passes to at Death', fpPassesToLabel(d));
       } else if(r.Kind==='income'){
         cells = cell('Amount /pm', money(d.amountPM))+
@@ -5765,8 +5769,14 @@ function buildFnaDataPack(cid, includeSpouse){
         if(polSkip[k]) return;
         var v = p[k];
         if(v===undefined || v===null || String(v).trim()==='' || String(v)==='None') return;
+        // Offshore base cost is captured in the investment's own currency (para 43, Eighth Schedule)
+        if(k==='BaseCost' && p.Type==='Offshore Flexible Investment'){ line('  '+k+': '+v+' (in the investment\'s own currency, see FX line in Notes)'); return; }
         line('  '+k+': '+v);
       });
+      // CGT-bearing discretionary investments: a blank base cost prints explicitly (Sep 2026)
+      if(POL_CGT_TYPES.indexOf(p.Type)>=0 && String(p.BaseCost===undefined||p.BaseCost===null?'':p.BaseCost).trim()===''){
+        line('  BaseCost: NOT CAPTURED');
+      }
     });
     line('');
   }
@@ -5794,6 +5804,9 @@ function buildFnaDataPack(cid, includeSpouse){
           if(v===undefined || v===null || String(v).trim()==='') return;
           line('      '+key+': '+v);
         });
+        // CGT-on-death inputs left blank print explicitly, so the FNA flags them
+        // instead of reading a blank as "not applicable" (Sep 2026).
+        fpCgtMissing(r.Kind, d).forEach(function(m){ line('      '+m.key+': NOT CAPTURED'); });
         if(r.Kind==='liability'){ totL += fpN(d.balance); }
         else if(r.Kind==='income'){ totIncPM += fpN(d.amountPM); }
         else if(r.Kind==='expense'){ totExpPM += fpN(d.amountPM); }
@@ -6169,6 +6182,26 @@ function fnaCapStamp(stamp, meta){
     ? '<span class="fc-stamp fresh">✓ confirmed '+fnaEsc(stamp)+'</span>'
     : '<span class="fc-stamp stale">⚠ last updated '+fnaEsc(stamp)+'</span>';
 }
+// CGT-on-death inputs that are blank on a financial-position row (Sep 2026).
+// Returns [{key, label}] — used by the FNA Capture card chip and the Data Pack
+// "NOT CAPTURED" lines, so a missing figure is never mistaken for "not applicable".
+// Scope: property (all, incl. primary residence — gain above the exclusion is taxed),
+// business interests (plus the small business relief inputs), and Other assets of a
+// CGT-bearing type. Vehicles and personal-use assets are excluded.
+var FP_CGT_OTHER_TYPES = ['Shares / Unit Trusts','Business Interest','Crypto'];
+// Policy types that carry a BaseCost field (CGT on death). Endowments (proceeds excluded,
+// tax paid inside the policy), TFSA (exempt) and retirement funds (exempt) are deliberately
+// left out. Offshore Endowment left out pending confirmation of issuer (Sep 2026).
+var POL_CGT_TYPES = ['Unit Trust','Flexible Investment','Offshore Flexible Investment'];
+function fpCgtMissing(kind, d){
+  d = d || {};
+  function blank(k){ return String(d[k]===undefined||d[k]===null?'':d[k]).trim()===''; }
+  var want = [];
+  if(kind==='property') want = [['baseCost','base cost']];
+  else if(kind==='other' && FP_CGT_OTHER_TYPES.indexOf(d.type)>=0) want = [['baseCost','base cost']];
+  else if(kind==='business') want = [['baseCost','base cost'],['dateAcquired','date acquired'],['mainUse','main use'],['activeInv','active involvement']];
+  return want.filter(function(w){ return blank(w[0]); }).map(function(w){ return {key:w[0], label:w[1]}; });
+}
 // One financial-position / need row as a compact confirm card.
 function fnaCapItem(r, meta){
   var d = fpData(r);
@@ -6178,7 +6211,7 @@ function fnaCapItem(r, meta){
   if(r.Kind==='property'){ bits.push('Value '+money(d.value)); if(fpN(d.bondOut)) bits.push('Bond '+money(d.bondOut)); if(d.primaryRes==='Yes') bits.push('Primary residence'); bits.push('→ '+fpPassesToLabel(d)); }
   else if(r.Kind==='vehicle'){ bits.push('Value '+money(d.value)); if(fpN(d.financeOut)) bits.push('Finance '+money(d.financeOut)); bits.push('→ '+fpPassesToLabel(d)); }
   else if(r.Kind==='other'){ if(d.type) bits.push(d.type); bits.push('Value '+money(d.value)); bits.push('→ '+fpPassesToLabel(d)); }
-  else if(r.Kind==='business'){ if(d.pctHeld) bits.push(d.pctHeld+'% held'); bits.push('Share '+money(d.value)); if(d.loanAcc==='Credit'||d.loanAcc==='Debit') bits.push('Loan a/c '+d.loanAcc+' '+money(d.loanBal)); bits.push(d.buySell==='Yes'?'Buy & Sell in place':'No Buy & Sell'); }
+  else if(r.Kind==='business'){ if(d.pctHeld) bits.push(d.pctHeld+'% held'); bits.push('Share '+money(d.value)); if(d.loanAcc==='Credit'||d.loanAcc==='Debit') bits.push('Loan a/c '+d.loanAcc+' '+money(d.loanBal)); bits.push(d.buySell==='Yes'?'Buy & Sell in place':'No Buy & Sell'); if(d.mainUse) bits.push(d.mainUse); if(d.dateAcquired) bits.push('Acquired '+fdate(d.dateAcquired)); if(d.activeInv) bits.push('Actively involved: '+d.activeInv); }
   else if(r.Kind==='liability'){ if(d.liabType) bits.push(d.liabType); bits.push('Balance '+money(d.balance)); if(fpN(d.paymentPM)) bits.push(money(d.paymentPM)+' /pm'); if(d.payOffDisab==='Yes') bits.push('Pay off if disabled'); }
   else if(r.Kind==='income'){ if(d.incomeType) bits.push(d.incomeType); bits.push(money(d.amountPM)+' /pm'); if(fpN(d.bonus)) bits.push('Bonus '+money(d.bonus)+' /pa'); if(d.taxable==='No') bits.push('Non-taxable'); }
   else if(r.Kind==='expense'){ if(d.expCategory) bits.push(d.expCategory); bits.push(money(d.amountPM)+' /pm'); }
@@ -6190,9 +6223,11 @@ function fnaCapItem(r, meta){
   }
   if(d.owner && r.Kind!=='need') bits.unshift(d.owner);
   var pending = r._pendingSave ? '<span class="fc-stamp stale">⚠ not saved to server yet</span>' : '';
+  var cgtMiss = fpCgtMissing(r.Kind, d);
+  var cgtChip = cgtMiss.length ? '<span class="fc-stamp stale">⚠ missing: '+fnaEsc(cgtMiss.map(function(m){ return m.label; }).join(', '))+'</span>' : '';
   return '<div class="fc-item '+(fresh?'fresh':'stale')+'">'+
     '<div style="flex:1;min-width:0">'+
-    '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span class="fc-t">'+fnaEsc(d.desc||'(no description)')+'</span>'+fnaCapStamp(r.UpdatedAt, meta)+pending+'</div>'+
+    '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span class="fc-t">'+fnaEsc(d.desc||'(no description)')+'</span>'+fnaCapStamp(r.UpdatedAt, meta)+pending+cgtChip+'</div>'+
     '<div class="fc-d">'+bits.map(function(b){ return '<span>'+fnaEsc(b)+'</span>'; }).join('')+'</div>'+
     (d.notes?'<div style="font-size:12px;color:#667;font-style:italic;margin-top:4px">'+fnaEsc(d.notes)+'</div>':'')+
     '</div>'+
@@ -6298,7 +6333,7 @@ function fnaCapRender(){
   }
 
   else if(step.key==='balance'){
-    body += '<div class="fc-ask">Ask: Current value and outstanding bond / finance on every asset; who it passes to at death and whether it would be sold. Base cost and date acquired for CGT on death. Business interests: % held, loan account, buy-and-sell. Then every debt.</div>';
+    body += '<div class="fc-ask">Ask: Current value and outstanding bond / finance on every asset; who it passes to at death and whether it would be sold. Base cost and date acquired for CGT on death. Business interests: % held, loan account, buy-and-sell, base cost, date acquired, main use (trading or letting) and whether the client is actively involved. Then every debt.</div>';
     body += fnaCapKindSection(cid, meta, 'property',  'Properties',         '🏠', '+ Add property');
     body += fnaCapKindSection(cid, meta, 'vehicle',   'Vehicles',           '🚗', '+ Add vehicle');
     body += fnaCapKindSection(cid, meta, 'other',     'Other assets',       '💼', '+ Add asset');
@@ -8107,6 +8142,12 @@ function buildPolicyForm(p){
       var _gainBg=_gain>=0?'#f0fdf4':'#fef2f2';
       html+='<div style="padding:8px 11px;background:'+_gainBg+';border:1.5px solid var(--mist);border-radius:7px;font-size:13px;font-weight:700;color:'+_gainCol+'" id="inv_gain_display">'+(_net>0&&_fv>0?'R '+Math.round(_gain).toLocaleString('en-ZA')+' ('+_gainPct+'%)':'—')+'</div></div>';
       html+='</div>';
+      // Base cost for CGT on death — discretionary unit-trust-type investments only (Sep 2026)
+      if(POL_CGT_TYPES.indexOf(type)>=0){
+        var _isOffBC = type==='Offshore Flexible Investment';
+        html+='<div class="g2">'+fld('pb_basecost', _isOffBC?'Base Cost for CGT (in the investment\'s own currency, e.g. USD)':'Base Cost for CGT (R)', p.BaseCost||'')+'<div></div></div>';
+        html+='<div style="font-size:11px;color:#889;margin:-4px 0 8px 0">From the provider\'s base cost / CGT statement. Not the same as Total Invested once there have been withdrawals or fund switches.</div>';
+      }
       if(['Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment','Unit Trust'].indexOf(type)>=0 && !isCompanyClient){
         // ── Retirement Planning Treatment ──
         // Two policy-level decisions for discretionary investments:
@@ -9327,6 +9368,7 @@ function collectPolicyForm(){
     RetirementComponent:g('pb_retcomp'),SavingsComponent:g('pb_savcomp'),
     IllustrativeRate:g('pb_netirr')||g('pb_illrate'),PremGrowthRate:g('pb_growrate'),GrowthRate:g('pb_growrate'),
     TotalInvested:g('pb_totalinv'),TotalWithdrawn:g('pb_totalwith'),
+    BaseCost:g('pb_basecost'),
     WithdrawSavingsPot:getR('p3pot'),IncludeInRetirement:getR('pinret'),ContinuePastMaturity:getR('pcontmat'),
     PaysIncome:getR('ppaysincome'),
     MedPlan:g('pmedplan'),MedLives:g('pmedlives'),
@@ -9573,7 +9615,18 @@ function openFinPosModal(cid, kind, fpid){
         fld('fpfinancePM','Finance Payment per Month (R)',d.financePM||'')+
         '</div>';
     } else if(FP_KIND==='business'){
+      // CGT on death + small business relief inputs (Sep 2026): base cost, date acquired
+      // (five-year test), main use (active trading vs letting/investment), active involvement.
+      // Selects start blank so "not captured" is distinguishable from "No".
       mid =
+        '<div class="g2">'+
+        fld('fpbaseCost','Base Cost of Client\'s Share (R) — for CGT',d.baseCost||'')+
+        fld('fpdateAcquired','Date Acquired',d.dateAcquired||'','date')+
+        '</div>'+
+        '<div class="g2">'+
+        fs('fpmainUse','Main Use of the Business',['','Active trading business','Mainly property to let','Mainly investments (shares, cash, loans)','Mixed (trading plus letting or investments)'],d.mainUse||'')+
+        fs('fpactiveInv','Client Actively Involved in Running It',['','Yes','No'],d.activeInv||'')+
+        '</div>'+
         '<div class="g2">'+
         fs('fploanAcc','Loan Account (Credit = co. owes client)',['','None','Credit','Debit'],d.loanAcc||'')+
         fld('fploanBal','Loan Account Balance (R)',d.loanBal||'')+
@@ -9690,6 +9743,8 @@ function collectFinPosForm(){
     d.loanAcc = g('fploanAcc');
     d.loanBal = (d.loanAcc==='Credit'||d.loanAcc==='Debit') ? g('fploanBal') : '';
     d.buySell = fpChkVal('fpbuySell');
+    d.baseCost = g('fpbaseCost'); d.dateAcquired = g('fpdateAcquired');
+    d.mainUse = g('fpmainUse'); d.activeInv = g('fpactiveInv');
   } else {
     d.type = g('fptype');
     d.baseCost = g('fpbaseCost'); d.dateAcquired = g('fpdateAcquired');
