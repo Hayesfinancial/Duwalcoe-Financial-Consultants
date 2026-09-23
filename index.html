@@ -5817,6 +5817,89 @@ function buildFnaDataPack(cid, includeSpouse){
   }
   packFinpos(cid, '');
 
+  // ── Will instructions (reusable for the linked spouse appendix) ──
+  // Carries what the will capture decides about the estate: regime, who inherits what,
+  // trust, executor fee basis, property instruction, funeral cover and cost. These drive
+  // the s.4(q) deduction, estate duty and the cost-of-dying figures (FNA rules §F).
+  function packWill(forCid, prefix){
+    var wc = DB.clients.find(function(x){ return String(x.ID)===String(forCid); }) || {};
+    var wr = willFor(forCid);
+    var W = willData(forCid);
+    var hasAny = Object.keys(W).some(function(k){ var v=W[k]; return v!==undefined && v!==null && String(v).trim()!=='' && v!=='No'; });
+    line('── '+prefix+'WILL INSTRUCTIONS'+(wr&&wr.UpdatedAt&&hasAny?' (captured, last saved '+wr.UpdatedAt+')':'')+' ──');
+    if(!hasAny){
+      line('  No will instructions captured in the CRM. Use the will status above; treat who-inherits-what as unknown and apply the worst-case will basis.');
+      line('');
+      return;
+    }
+    function wk(lbl, v){ if(v!==undefined && v!==null && String(v).trim()!=='') line('  '+lbl+': '+String(v).replace(/\n/g, '\n    ')); }
+    // Marital regime — flag if the will capture disagrees with the client record
+    var WMAP = {'Single / never married':'Single','Married in community of property (COP)':'Married in COP','Married out of community of property (ANC) with accrual':'Married - ANC with accrual','Married out of community of property (ANC) without accrual':'Married - ANC without accrual','Divorced':'Divorced','Widowed':'Widowed','Life partner / cohabiting':'Life partner'};
+    wk('Marital status / regime (per will capture)', W.t_marital);
+    if(W.t_marital && clean(wc.MaritalStatus) && WMAP[W.t_marital] && WMAP[W.t_marital]!==wc.MaritalStatus){
+      line('  ⚠ Regime differs from the client record ('+maritalReadable(wc.MaritalStatus)+'). Confirm which is correct before any estate calculation.');
+    }
+    wk('Date of divorce / spouse passing', W.t_marital_date);
+    wk('Date of marriage', W.s_marriage_date);
+    wk('ANC / accrual notes', W.s_anc_note);
+    // Children notes and other dependants
+    var wkids = ((typeof famFor==='function') ? (famFor(forCid)||[]) : []).filter(function(l){ return l.Type==='Child'; });
+    wkids.forEach(function(kd){ if(clean(W['cn_'+kd.ID])) line('  Child note — '+(kd.Name||'')+': '+W['cn_'+kd.ID]); });
+    wk('Other dependants', W.dep_notes);
+    // Existing will
+    wk('Existing will position', W.e_status);
+    wk('Existing will dated', W.e_date);
+    if(W.e_revoke==='Yes') line('  Revoke all prior wills and codicils: Yes');
+    // Trust
+    wk('Testamentary trust', W.tr_choice);
+    var trs = [W.tr1_name, W.tr2_name, W.tr3_name].filter(function(x){ return clean(x); });
+    if(trs.length) line('  Trustees: '+trs.join('; '));
+    wk('Trust termination', W.tr_term);
+    wk('Trust termination age', W.tr_term_age);
+    wk('Trust instructions', W.tr_notes);
+    // Specific bequests
+    var bq = [];
+    for(var bi=1; bi<=6; bi++){ var it=W['bq'+bi+'_item'], bb=W['bq'+bi+'_ben']; if(clean(it)||clean(bb)) bq.push('    • '+(it||'(item not stated)')+' → '+(bb||'(beneficiary not stated)')+(clean(W['bq'+bi+'_pre'])?'  [if predeceased: '+W['bq'+bi+'_pre']+']':'')); }
+    if(bq.length){ line('  Specific bequests (before residue):'); bq.forEach(function(s){ line(s); }); }
+    else line('  Specific bequests: none captured');
+    // Residue
+    wk('Residue', W.res_choice);
+    var rs = [];
+    for(var ri=1; ri<=5; ri++){ var rb=W['rs'+ri+'_ben'], rp=W['rs'+ri+'_pct']; if(clean(rb)||clean(rp)) rs.push('    • '+(rb||'(beneficiary not stated)')+(clean(rp)?' — '+String(rp).replace('%','')+'%':'')+(clean(W['rs'+ri+'_pre'])?'  [if predeceased: '+W['rs'+ri+'_pre']+']':'')); }
+    if(rs.length){ line('  Residue split:'); rs.forEach(function(s){ line(s); }); }
+    // Special assets
+    wk('Retirement fund nominations', W.sa_rf);
+    wk('Life policy nominations', W.sa_lp);
+    wk('Notes on policies', W.sa_lp_notes);
+    wk('Property instruction', W.sa_prop);
+    wk('Property address / holding structure', W.sa_prop_list);
+    wk('Business interests', W.sa_biz);
+    wk('Business notes', W.sa_biz_detail);
+    wk('Offshore assets', W.sa_off);
+    wk('Offshore detail', W.sa_off_detail);
+    // Funeral
+    wk('Funeral preference', W.fw);
+    wk('Funeral cover', W.fw_cover);
+    if(clean(W.fw_cover_provider)||clean(W.fw_cover_policy)) line('  Funeral policy: '+(W.fw_cover_provider||'')+(clean(W.fw_cover_policy)?' #'+W.fw_cover_policy:''));
+    line('  Estimated funeral cost: '+(clean(W.fw_cost)?'R '+W.fw_cost:'not captured — use the standard R50,000 allowance (FNA rules §F)'));
+    // Executor
+    if(clean(W.ex_p_name)) line('  Primary executor: '+W.ex_p_name+(clean(W.ex_p_rel)?' ('+W.ex_p_rel+')':''));
+    if(clean(W.ex_a_name)) line('  Alternate executor: '+W.ex_a_name+(clean(W.ex_a_rel)?' ('+W.ex_a_rel+')':''));
+    var feeTxt;
+    if(W.ex_fee==='Agreed reduced rate (below)') feeTxt = clean(W.ex_fee_rate) ? ('agreed reduced rate '+String(W.ex_fee_rate).replace('%','')+'% + VAT') : 'reduced rate agreed but rate not captured — use 3.5% + VAT (4.025%) and flag';
+    else if(W.ex_fee) feeTxt = 'full statutory rate 3.5% + VAT (4.025%)';
+    else feeTxt = 'not specified — use 3.5% + VAT (4.025%)';
+    line('  Executor fee basis: '+feeTxt);
+    wk('Executor security', W.ex_security);
+    wk('Executor notes', W.ex_notes);
+    wk('Additional instructions to attorney', W.add_notes);
+    // Status
+    if(clean(W.signed_date)) line('  Will signed: '+W.signed_date+(clean(W.ou_attorney)?' (attorney: '+W.ou_attorney+')':''));
+    else line('  Status: instructions only — will not yet signed (these are the client\'s instructed wishes, not an in-force will)');
+    line('');
+  }
+  packWill(cid, '');
+
   // ── Needs ──
   var needRows = finposFor(cid).filter(function(r){ return r.Kind==='need'; });
   var nn = needNotesRowFor(cid);
@@ -5868,6 +5951,7 @@ function buildFnaDataPack(cid, includeSpouse){
       line('');
       packPolicies(spId, 'SPOUSE ');
       packFinpos(spId, 'SPOUSE ');
+      packWill(spId, 'SPOUSE ');
     }
   }
 
@@ -5889,7 +5973,7 @@ function copyFnaDataPack(cid){
     if(spId){
       var sp = DB.clients.find(function(x){ return String(x.ID)===String(spId); });
       var lblEl = document.getElementById('fnaPackSpouseLbl');
-      if(lblEl) lblEl.textContent = 'Include '+((sp&&sp.Name)||'linked spouse')+'\u2019s assets & policies (context for accrual/estate only — their needs are excluded)';
+      if(lblEl) lblEl.textContent = 'Include '+((sp&&sp.Name)||'linked spouse')+'\u2019s assets, policies & will instructions (context for accrual/estate only — their needs are excluded)';
     }
   }
   var txt = buildFnaDataPack(cid, false);
@@ -6373,11 +6457,31 @@ function _brokerDocCSS(){
 // pre-fill from the client record + family links; the rest are captured here.
 // ══════════════════════════════════════════════════════════════════════════
 function willFor(cid){ if(!DB.willinstr) return null; for(var i=0;i<DB.willinstr.length;i++){ if(String(DB.willinstr[i].ClientID)===String(cid)) return DB.willinstr[i]; } return null; }
-function willData(cid){ var r=willFor(cid); if(!r||!r.Data) return {}; try{ return JSON.parse(r.Data)||{}; }catch(e){ return {}; } }
+function willData(cid){ var r=willFor(cid); if(!r||!r.Data) return {}; var D; try{ D=JSON.parse(r.Data)||{}; }catch(e){ return {}; } return willMigrate(D); }
+// Section 9 property option was reworded (Sep 2026): s.4(q) covers anything left to the
+// surviving spouse, not only the primary residence. Map the old stored text to the new
+// so wills captured before the change keep their selection (render, print and data pack).
+var WILL_SA_PROP_OLD = 'Primary residence to pass to spouse (s.4q — no estate duty)';
+var WILL_SA_PROP_NEW = 'Property to pass to surviving spouse (s.4(q) deduction)';
+function willMigrate(D){ if(D && D.sa_prop===WILL_SA_PROP_OLD) D.sa_prop = WILL_SA_PROP_NEW; return D; }
+// Policy types that pay no death benefit to a beneficiary — left off the Will tab.
+var WILL_POL_SKIP_TYPES = ['Medical Aid'];
+function willIsDeadPolicy(p){ return p.Status==='Replaced' || p.Status==='Cancelled' || p.Status==='Lapsed'; }
+// Family names for the beneficiary boxes in sections 7 and 8, as "Name (Relationship)".
+function willNameOptions(c){
+  var out=[], seen={};
+  function add(n, rel){ n=String(n||'').trim(); if(!n) return; var k=n.toLowerCase(); if(seen[k]) return; seen[k]=1; out.push(rel?n+' ('+rel+')':n); }
+  if(c && clean(c.SpouseName)) add(c.SpouseName, (c.MaritalStatus==='Life partner')?'Life Partner':'Spouse');
+  var fam = (typeof famFor==='function') ? (famFor(c.ID)||[]) : [];
+  fam.forEach(function(m){ add(m.Name, m.Type||''); });
+  return out;
+}
 function wfEsc(t){ return String(t==null?'':t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
 // ── Field builders (each carries a data-wf* attribute the collector reads) ──
 function wfT(D,k,ph){ return '<input class="wfi" data-wf="'+k+'" value="'+wfEsc(D[k]||'')+'"'+(ph?' placeholder="'+wfEsc(ph)+'"':'')+'>'; }
+// Text input with a datalist of suggestions (free typing still allowed)
+function wfTL(D,k,listId){ return '<input class="wfi" data-wf="'+k+'" list="'+listId+'" autocomplete="off" value="'+wfEsc(D[k]||'')+'">'; }
 function wfA(D,k,rows){ return '<textarea class="wfi" data-wf="'+k+'" rows="'+(rows||3)+'">'+wfEsc(D[k]||'')+'</textarea>'; }
 function wfS(D,k,opts){ var v=D[k]||''; var o='<option value="">— select —</option>'; for(var i=0;i<opts.length;i++){ o+='<option'+(String(v)===String(opts[i])?' selected':'')+'>'+wfEsc(opts[i])+'</option>'; } return '<select class="wfi" data-wf="'+k+'">'+o+'</select>'; }
 function wfR(D,k,opts){ var v=D[k]||''; var h='<div class="wropts">'; for(var i=0;i<opts.length;i++){ h+='<label class="wopt"><input type="radio" name="wr_'+k+'" data-wfr="'+k+'" value="'+wfEsc(opts[i])+'"'+(v===opts[i]?' checked':'')+'> <span>'+opts[i]+'</span></label>'; } return h+'</div>'; }
@@ -6404,6 +6508,54 @@ function _willAge(dob){ if(!dob) return null; var d=new Date(dob); if(isNaN(d)) 
 // then opens the normal Financial Position modal — one source of truth.
 function willAddFinpos(cid, kind){ try{ if(document.getElementById('willFormRoot')) saveWill(cid); }catch(e){} if(typeof openFinPosModal==='function') openFinPosModal(cid, kind); else alert('Asset capture unavailable.'); }
 function willEditFinpos(cid, kind, fpid){ try{ if(document.getElementById('willFormRoot')) saveWill(cid); }catch(e){} if(typeof openFinPosModal==='function') openFinPosModal(cid, kind, fpid); else alert('Asset capture unavailable.'); }
+// Edit a policy from the Will tab: auto-save the will first, then open the normal policy card.
+// idx is the policy's index in polsFor(cid), the same index the Policies tab uses.
+function willEditPolicy(cid, idx){ try{ if(document.getElementById('willFormRoot')) saveWill(cid); }catch(e){} if(typeof openPolicyModal==='function') openPolicyModal(cid, idx); else alert('Policy card unavailable.'); }
+
+// Active policies for the Will tab reference panel. Dead policies (Replaced / Cancelled /
+// Lapsed) are left out, as in the Data Pack. Where no beneficiary is captured, show where
+// the money goes by default: investments and living annuities → Estate; retirement funds →
+// fund trustees under s.37C; risk policies → flagged, because Clinton nominates on every one.
+function renderWillPolicyRows(c){
+  var WP_RISK = ['Life / Income Protector','Business Assurance',''];
+  var WP_RET  = ['Retirement Annuity','Pension Fund','Provident Fund','Pension Preservation','Provident Preservation'];
+  var WP_EST  = ['Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment','Unit Trust','Tax Free Savings','Guaranteed Endowment','Living Annuity'];
+  var all = (typeof polsFor==='function') ? polsFor(c.ID) : [];
+  var body = '', count = 0, totDeath = 0, totFund = 0;
+  all.forEach(function(p, idx){
+    if(willIsDeadPolicy(p)) return;
+    var t = p.Type||'';
+    if(WILL_POL_SKIP_TYPES.indexOf(t)>=0) return;
+    count++;
+    var isRisk = WP_RISK.indexOf(t)>=0, isRet = WP_RET.indexOf(t)>=0, isEst = WP_EST.indexOf(t)>=0;
+    var val = '', valLbl = '';
+    if(isRisk){ var dc = lumpSum(p,'Life Cover','BenDeath'); totDeath += dc; val = dc ? fpR(dc) : '—'; valLbl = 'death cover'; }
+    else if(t==='Life Annuity'){ val = '—'; valLbl = 'annuity'; }
+    else { var fv = fpN(p.BenFundValue); totFund += fv; val = fv ? fpR(fv) : '—'; valLbl = 'fund value'; }
+    var bens = []; try{ bens = p.Beneficiaries ? JSON.parse(p.Beneficiaries) : []; if(!Array.isArray(bens)) bens = []; }catch(e){ bens = []; }
+    bens = bens.filter(function(b){ return b && b.name && String(b.name).trim(); });
+    var benTxt;
+    if(bens.length){
+      benTxt = bens.map(function(b){ return wfEsc(String(b.name).trim())+(b.type?' <span style="color:#889">['+wfEsc(b.type)+']</span>':'')+(b.pct?' '+wfEsc(String(b.pct).replace('%',''))+'%':''); }).join('; ');
+      var pctSum = 0, anyPct = false;
+      bens.forEach(function(b){ var x = fpN(b.pct); if(x>0){ anyPct = true; pctSum += x; } });
+      if(anyPct && Math.abs(pctSum-100)>0.01) benTxt += ' <span style="color:#b54708;font-weight:600">⚠ shares total '+(Math.round(pctSum*100)/100)+'%</span>';
+      if(isRet) benTxt += ' <span style="color:#889">· trustees decide (s.37C)</span>';
+    } else if(isRet){
+      benTxt = '<span style="color:#667">Fund trustees decide (s.37C), no nomination</span>';
+    } else if(isEst){
+      benTxt = '<span style="color:#667">Estate (no nomination)</span>';
+    } else if(isRisk){
+      benTxt = '<span style="color:#b42318;font-weight:600">⚠ No beneficiary captured</span>';
+    } else {
+      benTxt = '<span style="color:#889">None captured</span>';
+    }
+    var pName = wfEsc(p.Insurer||'?')+' · '+wfEsc(t||'Policy')+(p.PolicyNo?' <span style="color:#889">#'+wfEsc(p.PolicyNo)+'</span>':'')+(p.Status==='Paid Up'?' <span style="color:#889">(paid up)</span>':'');
+    body += '<tr><td>'+pName+'</td><td style="text-align:right;white-space:nowrap">'+val+'<div style="color:#99a;font-size:10px">'+valLbl+'</div></td><td>'+benTxt+'</td>'
+      + '<td style="text-align:right;white-space:nowrap"><button class="btn b-gh xs" onclick="willEditPolicy(\''+c.ID+'\','+idx+')">edit</button></td></tr>';
+  });
+  return { body: body, count: count, totDeath: totDeath, totFund: totFund };
+}
 
 // Re-do a will: clear the captured will data for a fresh start. Keeps only the
 // latest capture (no version history) — the signed will on file is the record.
@@ -6449,13 +6601,15 @@ function renderWillRefPanel(c){
     +'</div>'
     +'<div style="font-size:11px;color:#9aa;margin-top:4px">Adding or editing here writes to the client\'s Financial Position (one source of truth) and auto-saves the will first, so nothing you\'ve typed is lost.</div>';
 
-  if(!assets.length && !liabs.length && !needs.length && !nnTxt){
-    return '<div style="background:#f7f9fb;border:1px dashed #cdd6dd;border-radius:9px;padding:11px 14px;margin-bottom:14px"><div style="font-size:12.5px;color:#778">No assets, liabilities or needs captured for this client yet. Add them here (or in the <strong>Financial Position</strong> / <strong>Needs</strong> tabs) and they\'ll show for reference while you fill in the will. Policy details live in your external Excel schedule.</div>'+addBar+'</div>';
+  var wp = renderWillPolicyRows(c);
+
+  if(!assets.length && !liabs.length && !needs.length && !nnTxt && !wp.count){
+    return '<div style="background:#f7f9fb;border:1px dashed #cdd6dd;border-radius:9px;padding:11px 14px;margin-bottom:14px"><div style="font-size:12.5px;color:#778">No assets, liabilities, policies or needs captured for this client yet. Add assets and liabilities here (or in the <strong>Financial Position</strong> / <strong>Needs</strong> tabs) and policies in the <strong>Policies</strong> tab, and they\'ll show for reference while you fill in the will.</div>'+addBar+'</div>';
   }
 
   function tbl(title,head,body){ if(!body) return ''; return '<div style="font-weight:700;font-size:12px;color:#445;margin:8px 0 3px">'+title+'</div><table class="wref"><thead>'+head+'</thead><tbody>'+body+'</tbody></table>'; }
   var h = '<style>.wref{width:100%;border-collapse:collapse;font-size:12px;margin-bottom:4px}.wref th{text-align:left;color:#889;font-weight:600;font-size:11px;border-bottom:1px solid #e2e8ee;padding:3px 6px}.wref td{padding:3px 6px;border-bottom:1px solid #f0f3f6;vertical-align:top}</style>';
-  h += '<details open style="margin-bottom:14px"><summary style="cursor:pointer;font-weight:700;color:var(--navy);font-size:14px;padding:5px 0">📎 This client\'s file — assets, liabilities &amp; needs (for reference while you fill in the will)</summary>';
+  h += '<details open style="margin-bottom:14px"><summary style="cursor:pointer;font-weight:700;color:var(--navy);font-size:14px;padding:5px 0">📎 This client\'s file — assets, liabilities, policies &amp; needs (for reference while you fill in the will)</summary>';
   h += '<div style="border:1px solid #e2e8ee;border-radius:10px;padding:12px 14px;margin-top:8px;background:#fbfcfd">';
   h += '<div style="display:flex;gap:18px;flex-wrap:wrap;font-size:12px;margin-bottom:4px">'
     +'<span>Assets: <strong>'+fpR(assetTot)+'</strong></span>'
@@ -6463,11 +6617,49 @@ function renderWillRefPanel(c){
     +'<span>Estimated net: <strong>'+fpR(assetTot-liabTot)+'</strong></span></div>';
   h += tbl('Assets','<tr><th>Item</th><th style="text-align:right">Value</th><th>Notes</th><th></th></tr>', aH);
   h += tbl('Liabilities','<tr><th>Item</th><th style="text-align:right">Balance</th><th>Type</th><th></th></tr>', lH);
-  h += tbl('Needs','<tr><th>Need</th><th>Scenario</th><th style="text-align:right">Amount</th><th>For whom</th></tr>', nH);
   h += addBar;
+  if(wp.count){
+    h += '<div style="display:flex;gap:18px;flex-wrap:wrap;font-size:12px;margin:12px 0 0">'
+      +'<span>Policies: <strong>'+wp.count+'</strong> active</span>'
+      +(wp.totDeath?'<span>Death cover: <strong>'+fpR(wp.totDeath)+'</strong></span>':'')
+      +(wp.totFund?'<span>Investment &amp; retirement values: <strong>'+fpR(wp.totFund)+'</strong></span>':'')+'</div>';
+    h += tbl('Policies &amp; beneficiary nominations (for section 9)','<tr><th>Policy</th><th style="text-align:right">Value</th><th>On death, pays to</th><th></th></tr>', wp.body);
+  } else {
+    h += '<div style="font-size:11.5px;color:#889;margin-top:10px">No active policies captured. Add them in the <strong>Policies</strong> tab.</div>';
+  }
+  h += tbl('Needs','<tr><th>Need</th><th>Scenario</th><th style="text-align:right">Amount</th><th>For whom</th></tr>', nH);
   if(nnTxt) h += '<div style="font-weight:700;font-size:12px;color:#445;margin:8px 0 3px">Needs discussion notes</div><div style="font-size:12px;color:#556;white-space:pre-wrap;background:#fff;border:1px solid #eef;border-radius:6px;padding:7px 9px">'+wfEsc(nnTxt)+'</div>';
-  h += '<div style="font-size:11.5px;color:#889;margin-top:10px;border-top:1px dashed #dde;padding-top:8px">📄 <strong>Policies &amp; beneficiary nominations</strong> are kept in your external Excel schedule — open that alongside for section 10 (retirement funds, life policies).</div>';
   h += '</div></details>';
+  return h;
+}
+
+// Section 9: show the client's property or business rows from Financial Position (the
+// single source of truth), so they are not retyped. Add/edit goes to Financial Position.
+function willFinposList(c, kind){
+  var rows = ((typeof finposFor==='function') ? finposFor(c.ID) : []).filter(function(r){ return r.Kind===kind; });
+  var addBtn = '<button class="btn b-gh xs" onclick="willAddFinpos(\''+c.ID+'\',\''+kind+'\')">＋ '+(kind==='property'?'Property':'Business')+'</button>';
+  if(!rows.length){
+    return '<div class="wsub">No '+(kind==='property'?'property':'business interest')+' in Financial Position. '+addBtn+'</div>';
+  }
+  var h = '<div style="background:#f7f9fb;border:1px solid #e2e8ee;border-radius:7px;padding:6px 10px;margin:2px 0 8px;font-size:12px">';
+  rows.forEach(function(r){
+    var d = fpData(r), bits = [];
+    if(d.owner) bits.push(wfEsc(d.owner==='Client'?'own name':d.owner==='Joint'?'joint':d.owner));
+    if(kind==='property'){
+      if(d.primaryRes==='Yes') bits.push('primary residence');
+      if(fpN(d.bondOut)) bits.push('bond '+fpR(fpN(d.bondOut)));
+    } else {
+      if(d.entityType) bits.push(wfEsc(d.entityType));
+      if(d.pctHeld) bits.push(wfEsc(String(d.pctHeld).replace('%',''))+'% held');
+      bits.push(d.buySell==='Yes'?'buy &amp; sell in place':'no buy &amp; sell recorded');
+    }
+    bits.push('passes to '+wfEsc(fpPassesToLabel(d)));
+    if(d.soldDeath==='Yes') bits.push('sold at death');
+    h += '<div style="display:flex;justify-content:space-between;gap:10px;padding:3px 0;border-bottom:1px solid #eef1f4">'
+      + '<div><strong>'+wfEsc(d.desc||(kind==='property'?'Property':'Business'))+'</strong> · '+fpR(fpN(d.value))+'<div style="color:#778;font-size:11px">'+bits.join(' · ')+'</div></div>'
+      + '<div style="white-space:nowrap"><button class="btn b-gh xs" onclick="willEditFinpos(\''+c.ID+'\',\''+kind+'\',\''+r.ID+'\')">edit</button></div></div>';
+  });
+  h += '<div style="margin-top:5px">'+addBtn+'</div></div>';
   return h;
 }
 
@@ -6584,8 +6776,10 @@ function renderWill(c){
   // ── 7. Specific bequests ──
   h += wfH('7','Specific bequests (named items or amounts)');
   h += wfNote('Distributed before the residue. Items (jewellery, vehicles, firearms), specific sums, or specific investments to named people or charities.');
+  // Family names offered as suggestions in the beneficiary boxes (sections 7 and 8)
+  h += '<datalist id="willNameList">'+willNameOptions(c).map(function(n){ return '<option value="'+wfEsc(n)+'">'; }).join('')+'</datalist>';
   h += '<table class="wtbl"><thead><tr><th style="width:42%">Item / amount</th><th style="width:38%">Beneficiary (names + relationship)</th><th>If beneficiary predeceases?</th></tr></thead><tbody>';
-  for(var bi=1; bi<=6; bi++){ h += '<tr><td>'+wfT(D,'bq'+bi+'_item')+'</td><td>'+wfT(D,'bq'+bi+'_ben')+'</td><td>'+wfT(D,'bq'+bi+'_pre')+'</td></tr>'; }
+  for(var bi=1; bi<=6; bi++){ h += '<tr><td>'+wfT(D,'bq'+bi+'_item')+'</td><td>'+wfTL(D,'bq'+bi+'_ben','willNameList')+'</td><td>'+wfTL(D,'bq'+bi+'_pre','willNameList')+'</td></tr>'; }
   h += '</tbody></table>';
 
   // ── 8. Residue ──
@@ -6593,7 +6787,7 @@ function renderWill(c){
   h += wfNote('Per stirpes — if a beneficiary dies before you, their share passes down to their own descendants (their children). Per capita — a deceased beneficiary\'s share is instead re-divided equally among the surviving beneficiaries.');
   h += wfF('Residue distribution', wfR(D,'res_choice',['Entire residue to my spouse / life partner','Entire residue to my children equally, per stirpes','Entire residue to my children equally, per capita','Split as follows (table below)']));
   h += '<table class="wtbl"><thead><tr><th style="width:48%">Beneficiary (names + relationship)</th><th style="width:14%">% share</th><th>If predeceases, share goes to</th></tr></thead><tbody>';
-  for(var ri=1; ri<=5; ri++){ h += '<tr><td>'+wfT(D,'rs'+ri+'_ben')+'</td><td>'+wfT(D,'rs'+ri+'_pct')+'</td><td>'+wfT(D,'rs'+ri+'_pre')+'</td></tr>'; }
+  for(var ri=1; ri<=5; ri++){ h += '<tr><td>'+wfTL(D,'rs'+ri+'_ben','willNameList')+'</td><td>'+wfT(D,'rs'+ri+'_pct')+'</td><td>'+wfTL(D,'rs'+ri+'_pre','willNameList')+'</td></tr>'; }
   h += '</tbody></table>';
 
   // ── 9. Special assets ──
@@ -6605,11 +6799,13 @@ function renderWill(c){
   h += wfR(D,'sa_lp',['All life policies have current beneficiary nominations','Some policies pay into my estate (no nominated beneficiary)']);
   h += wfF('Notes on policies', wfA(D,'sa_lp_notes',2));
   h += '<div style="font-weight:700;font-size:12px;margin:8px 0 2px;color:#445">Fixed property</div>';
-  h += wfF('List all properties (address; held in own name / trust / company)', wfA(D,'sa_prop_list',2));
-  h += wfR(D,'sa_prop',['Primary residence to pass to spouse (s.4q — no estate duty)','Property to be sold and proceeds form part of residue','Specific property to a specific beneficiary (detail in section 7)']);
+  h += willFinposList(c, 'property');
+  h += wfF('Address and holding structure (own name, trust or company) — for the attorney', wfA(D,'sa_prop_list',2));
+  h += wfR(D,'sa_prop',[WILL_SA_PROP_NEW,'Property to be sold and proceeds form part of residue','Specific property to a specific beneficiary (detail in section 7)']);
   h += '<div style="font-weight:700;font-size:12px;margin:8px 0 2px;color:#445">Business interests</div>';
+  h += willFinposList(c, 'business');
   h += wfR(D,'sa_biz',['Not applicable','I am a shareholder / member (detail below)','A buy-and-sell agreement is in place','No buy-and-sell — business interest to pass to (below)']);
-  h += wfF('Business detail (entity, % held, to whom)', wfT(D,'sa_biz_detail'));
+  h += wfF('Business notes for the attorney (entity, % held, to whom)', wfT(D,'sa_biz_detail'));
   h += '<div style="font-weight:700;font-size:12px;margin:8px 0 2px;color:#445">Offshore assets</div>';
   h += wfR(D,'sa_off',['None','I hold assets offshore (a separate offshore will may be recommended)']);
   h += wfF('Country/ies and nature of offshore assets', wfA(D,'sa_off_detail',2));
@@ -6632,6 +6828,7 @@ function renderWill(c){
   h += '<div style="font-weight:700;font-size:12px;margin:8px 0 2px;color:#445">Funeral cover</div>';
   h += wfR(D,'fw_cover',['I have a funeral policy (details below)','None']);
   h += wfG2( wfF('Provider', wfT(D,'fw_cover_provider')), wfF('Policy no.', wfT(D,'fw_cover_policy')) );
+  h += wfG2( wfF('Estimated funeral cost (R) — for the cost-of-dying calculation', wfT(D,'fw_cost','Blank = standard R50,000 allowance')), '' );
 
   // ── 12. Digital assets ──
   h += wfH('12','Digital assets and accounts');
@@ -6852,8 +7049,8 @@ function printWillSheet(cid){
   ['All life policies have current beneficiary nominations','Some policies pay into my estate (no nominated beneficiary)'].forEach(function(o){ h+=opt(D.sa_lp,o); });
   if(D.sa_lp_notes) h += note('Notes on policies', D.sa_lp_notes);
   h += '<div style="font-size:10px;font-weight:700;margin:6px 0 2px">Fixed property</div>';
-  if(D.sa_prop_list) h += note('Properties', D.sa_prop_list);
-  ['Primary residence to pass to spouse (s.4q — no estate duty)','Property to be sold and proceeds form part of residue','Specific property to a specific beneficiary (detail in section 7)'].forEach(function(o){ h+=opt(D.sa_prop,o); });
+  if(D.sa_prop_list) h += note('Properties: address and holding structure', D.sa_prop_list);
+  [WILL_SA_PROP_NEW,'Property to be sold and proceeds form part of residue','Specific property to a specific beneficiary (detail in section 7)'].forEach(function(o){ h+=opt(D.sa_prop,o); });
   h += '<div style="font-size:10px;font-weight:700;margin:6px 0 2px">Business interests</div>';
   ['Not applicable','I am a shareholder / member (detail below)','A buy-and-sell agreement is in place','No buy-and-sell — business interest to pass to (below)'].forEach(function(o){ h+=opt(D.sa_biz,o); });
   if(D.sa_biz_detail) h += one('Business detail', D.sa_biz_detail);
