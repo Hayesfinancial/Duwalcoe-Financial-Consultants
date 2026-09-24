@@ -176,6 +176,7 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--cream);c
     <div class="ni" data-nav="tasks">✅ Tasks <span id="tbadge" style="margin-left:auto;background:var(--rose);color:#fff;border-radius:10px;padding:1px 7px;font-size:10px;display:none"></span></div>
     <div class="ni" data-nav="cases">📂 Open Cases <span id="cbadge" style="margin-left:auto;background:var(--gold);color:#fff;border-radius:10px;padding:1px 7px;font-size:10px;display:none"></span></div>
     <div class="ni" data-nav="reviews">🔄 Annual Reviews</div>
+    <div class="ni" data-nav="register">📊 Register</div>
     <div class="ni" data-nav="suppliers">🏢 Suppliers</div>
     <div class="ndiv"></div>
     <div class="nsec">Tools</div>
@@ -905,6 +906,8 @@ function reviewDaysTo(ds){
   return best;
 }
 function reviewIsMonth(ds){ return daysTo(ds) === null && reviewMonths(ds).length > 0; }
+// Policy types offered on the policy form (and by the Register's "add policy").
+var POLICY_TYPE_OPTIONS=['Life / Income Protector','Business Assurance','Retirement Annuity','Pension Fund','Provident Fund','Pension Preservation','Provident Preservation','Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment','Unit Trust','Tax Free Savings','Guaranteed Endowment','Living Annuity','Life Annuity','Medical Aid','Other'];
 function cu(){ return document.getElementById('userSel').value||'Clinton'; }
 // ── Staff display names (Build 2, 24 Sep 2026) ──────────────────────────────
 // Records store the codes 'Wife' and 'Daughter' (tasks, work events, uploads,
@@ -1356,6 +1359,7 @@ function render(){
   else if(PAGE==='suppliers') m.innerHTML=renderSuppliers();
   else if(PAGE==='cases') m.innerHTML=renderCasesPage();
   else if(PAGE==='reviews') m.innerHTML=renderReviewsPage();
+  else if(PAGE==='register') m.innerHTML=renderRegisterPage();
   else if(PAGE==='tasks'){  if(!window.TASK_USER_FILTER) window.TASK_USER_FILTER=cu(); m.innerHTML=renderTasks();}
   // Restore dashboard search value
   if(_dashQ){
@@ -4522,6 +4526,616 @@ function renderReviewsPage(){
     '</div>';
 }
 
+// ══ CASE REGISTER · BUILD A (24 Sep 2026) ═══════════════════════════════════
+// Replaces Tracy's "Apps submitted" and "Activations - Comm due" spreadsheets
+// from 1 October 2026. Each New Business / Servicing Work Event carries its
+// own case details (13 columns on work_events, see Register_BuildA.sql):
+// provider, policy no, premium, commission, submitted / accepted / schedule /
+// invoiced dates, lead source. The Register page lists them; activations are
+// grouped by the month of ACCEPTANCE (Tracy's rule; she invoices on
+// acceptance). Jan to Sep 2026 is brought forward from the spreadsheet.
+// When a case is first accepted: offer "invoiced today", then offer a BASIC
+// policy on the Policies tab (Clinton completes it) plus a task to Clinton.
+var REG_FROM = '2026-10-01';
+var REG_NET_PCT = 85;                        // "COMM due HFS - less 15%"
+var REG_BF_KEY = 'register_bf_2026';
+var REG_COMMON_PROVIDERS = ['Allan Gray','Bidvest Life','BrightRock','Coronation','Discovery','Glacier','Hollard','Liberty','Momentum','Momentum Investo','Ninety One','Old Mutual','Old Mutual Wealth','PPS','SA Asset Management','Sanlam','Stanlib','Sygnia','10X'];
+var REG_MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+window._reg = window._reg || {loadedAt:0, loading:false, events:[], links:[], bf:null, err:false, tab:'apps',
+  f:{q:'', kind:'', status:'', resp:'', provider:'', year:String(new Date().getFullYear())}};
+
+function regNum(v){
+  if(v === null || v === undefined || v === '') return null;
+  var n = typeof v === 'number' ? v : parseFloat(String(v).replace(/[\s,]/g, ''));
+  return isFinite(n) ? n : null;
+}
+function regMoney(v, cur){
+  var n = regNum(v); if(n === null) return '';
+  var s = n.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  return (cur && cur !== 'ZAR' ? ({USD:'$', GBP:'£', EUR:'€'}[cur] || cur+' ') : 'R') + s;
+}
+function regRound(n){ return Math.round((n || 0) * 100) / 100; }
+function regDate(d){ if(!d) return ''; var p = String(d).slice(0,10).split('-'); return p.length === 3 ? p[2]+' '+REG_MONTHS[+p[1]-1].slice(0,3)+' '+p[0] : String(d); }
+function regPremium(ev){
+  var a = regMoney(ev.PremiumAmount, ev.PremiumCurrency);
+  var f = ev.PremiumFreq ? (ev.PremiumFreq === 'Monthly' ? ' pm' : ev.PremiumFreq === 'Annual' ? ' pa' : ' '+ev.PremiumFreq.toLowerCase()) : '';
+  return (a ? a+f : '') + (ev.PremiumNote ? (a ? ' · ' : '')+ev.PremiumNote : '');
+}
+function regStatus(ev){
+  if(ev.Status === 'ntu') return {k:'ntu', t:'NTU', clr:'#6b6b6b', bg:'#ececec'};
+  if(ev.AcceptedDate) return {k:'accepted', t:'Accepted', clr:'#2d7a3e', bg:'#eaf5ec'};
+  if(ev.SubmittedDate) return {k:'submitted', t:'Submitted', clr:'#2563ab', bg:'#e8f0fb'};
+  return {k:'notsub', t:'Not yet submitted', clr:'#b95900', bg:'#fdf2e6'};
+}
+function regClient(ev){ return DB.clients.find(function(c){ return String(c.ID) === String(ev.ClientID); }) || null; }
+function regStartDate(ev){
+  var links = (window._reg.links || []).filter(function(l){ return String(l.WorkEventID) === String(ev.ID); });
+  if(!links.length) links = (window._eventPolicies[ev.ID] || []);
+  for(var i = 0; i < links.length; i++){
+    var p = DB.policies.find(function(x){ return String(x.ID) === String(links[i].PolicyID); });
+    if(p && clean(p.StartDate)) return String(p.StartDate).slice(0,10);
+  }
+  return '';
+}
+
+// ── Case details box (inside the case) ────────────────────────────────────
+function renderCaseDetails(ev){
+  if(!eventGetsCaseTask(ev.EventType)) return '';
+  var any = ['Provider','PolicyNo','PremiumAmount','PremiumNote','CommissionDue','SubmittedDate','AcceptedDate','ScheduleDate','InvoicedDate','LeadSource'].some(function(k){ return ev[k] !== null && ev[k] !== undefined && ev[k] !== ''; });
+  var st = regStatus(ev);
+  // Accepted but no policy on the Policies tab yet (nothing linked as "created").
+  var needsPolicy = !!ev.AcceptedDate && ev.Status !== 'ntu' &&
+    !(window._eventPolicies[ev.ID] || []).some(function(l){ return l.Action === 'created'; });
+  var html = '<div style="margin-bottom:18px;border:1px solid var(--mist);border-radius:8px;overflow:hidden">'+
+    '<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:#f6f8f7;border-bottom:1px solid var(--mist)">'+
+      '<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:.8px">💼 Case details <span style="text-transform:none;letter-spacing:0;font-weight:400;color:#889">· for the Register</span> '+
+        '<span style="background:'+st.bg+';color:'+st.clr+';border-radius:4px;padding:1px 7px;font-size:10px;font-weight:700;margin-left:4px">'+st.t+'</span></div>'+
+      '<div style="display:flex;gap:6px;flex-wrap:wrap">'+
+        (needsPolicy ? '<button class="btn b-nv sm" data-act="case-add-policy" data-eid="'+ev.ID+'" style="font-size:11px;padding:3px 10px" title="Add a basic record of this policy to the Policies tab">➕ Add to Policies</button>' : '')+
+        '<button class="btn b-gh sm" data-act="edit-case-details" data-eid="'+ev.ID+'" style="font-size:11px;padding:3px 10px">✏️ '+(any ? 'Edit' : 'Fill in')+'</button>'+
+      '</div>'+
+    '</div>';
+  if(!any){
+    return html + '<div style="padding:10px 12px;font-size:12px;color:#889;font-style:italic">No case details yet. Click Fill in to add the provider, policy number, premium, commission and dates.</div></div>';
+  }
+  function cell(lbl, val, extra){
+    return '<div style="min-width:0"><div style="font-size:10px;color:#889;text-transform:uppercase;letter-spacing:.5px">'+lbl+'</div>'+
+      '<div style="font-size:13px;font-weight:600;color:'+(val ? 'var(--ink)' : '#bbc')+';word-break:break-word'+(extra||'')+'">'+(val ? escHtml(val) : '—')+'</div></div>';
+  }
+  var notInvoiced = ev.AcceptedDate && !ev.InvoicedDate;
+  html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px 16px;padding:10px 12px">'+
+    cell('Provider', ev.Provider)+cell('Policy no', ev.PolicyNo)+cell('Premium', regPremium(ev))+
+    cell('Commission (excl VAT)', regMoney(ev.CommissionDue))+cell('After 15%', regMoney(ev.CommissionNet))+
+    cell('Lead source', ev.LeadSource)+
+    cell('Submitted', regDate(ev.SubmittedDate))+cell('Accepted', regDate(ev.AcceptedDate))+cell('Schedule received', regDate(ev.ScheduleDate))+
+    (notInvoiced
+      ? '<div><div style="font-size:10px;color:#889;text-transform:uppercase;letter-spacing:.5px">Invoiced</div><div style="font-size:12px;font-weight:700;color:#b95900">⚠ Not invoiced yet</div></div>'
+      : cell('Invoiced', regDate(ev.InvoicedDate)))+
+  '</div></div>';
+  return html;
+}
+
+function openCaseDetailsModal(eventId){
+  var clientId = SEL;
+  var ev = (window._events[clientId] || []).find(function(e){ return String(e.ID) === String(eventId); });
+  if(!ev){ toast('Work Event not found. Refresh and try again.','err'); return; }
+  // Suggestions: providers from policies + earlier cases + common list; lead sources from earlier cases.
+  var prov = {}, lead = {};
+  REG_COMMON_PROVIDERS.forEach(function(p){ prov[p] = 1; });
+  DB.policies.forEach(function(p){ if(clean(p.Insurer)) prov[String(p.Insurer).trim()] = 1; });
+  (window._reg.events || []).concat(window._events[clientId] || []).forEach(function(e){
+    if(e.Provider) prov[e.Provider] = 1;
+    if(e.LeadSource) lead[e.LeadSource] = 1;
+  });
+  function opts(o){ return Object.keys(o).sort(function(a,b){ return a.toLowerCase() < b.toLowerCase() ? -1 : 1; }).map(function(v){ return '<option value="'+escHtml(v)+'"></option>'; }).join(''); }
+  function v(k){ return ev[k] === null || ev[k] === undefined ? '' : escHtml(String(ev[k]).slice(0, k.indexOf('Date') >= 0 ? 10 : 500)); }
+  var lbl = 'font-size:11px;font-weight:600;color:#445;display:block;margin-bottom:3px';
+  var inp = 'width:100%;padding:7px 9px;border:1.5px solid #ccc;border-radius:6px;font-size:13px;font-family:inherit;box-sizing:border-box';
+  function sel(id, list, cur){ return '<select id="'+id+'" style="'+inp+'">'+list.map(function(o){ return '<option value="'+o[0]+'"'+(o[0] === (cur||'') ? ' selected' : '')+'>'+o[1]+'</option>'; }).join('')+'</select>'; }
+  var ov = document.createElement('div');
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(10,20,40,.55);z-index:10000;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(2px)';
+  var box = document.createElement('div');
+  box.style.cssText = 'background:#fff;border-radius:12px;padding:20px 24px;max-width:640px;width:94%;max-height:90vh;overflow:auto;box-shadow:0 12px 48px rgba(0,0,0,.25);font-family:inherit';
+  box.innerHTML =
+    '<div style="font-family:Georgia,serif;font-size:18px;color:#0e413a;margin-bottom:2px">Case details</div>'+
+    '<div style="font-size:12px;color:#889;margin-bottom:14px">'+escHtml(eventTypeLabel(ev))+(ev.Outcome ? ' · '+escHtml(ev.Outcome) : '')+'</div>'+
+    '<datalist id="cd_prov_list">'+opts(prov)+'</datalist><datalist id="cd_lead_list">'+opts(lead)+'</datalist>'+
+    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px 14px">'+
+      '<div><label style="'+lbl+'">Provider</label><input id="cd_provider" list="cd_prov_list" value="'+v('Provider')+'" style="'+inp+'" autocomplete="off"></div>'+
+      '<div><label style="'+lbl+'">Policy number</label><input id="cd_polno" value="'+v('PolicyNo')+'" style="'+inp+'" autocomplete="off"></div>'+
+      '<div style="grid-column:1/-1;display:grid;grid-template-columns:2fr 1fr 1.3fr;gap:10px">'+
+        '<div><label style="'+lbl+'">Premium / amount</label><input id="cd_prem" type="number" step="0.01" min="0" value="'+v('PremiumAmount')+'" style="'+inp+'"></div>'+
+        '<div><label style="'+lbl+'">Currency</label>'+sel('cd_cur', [['ZAR','R (Rand)'],['USD','$ (USD)'],['GBP','£ (GBP)'],['EUR','€ (EUR)']], ev.PremiumCurrency || 'ZAR')+'</div>'+
+        '<div><label style="'+lbl+'">Frequency</label>'+sel('cd_freq', [['',''],['Monthly','Monthly'],['Annual','Annual'],['Lump sum','Lump sum']], ev.PremiumFreq)+'</div>'+
+      '</div>'+
+      '<div style="grid-column:1/-1"><label style="'+lbl+'">Premium note <span style="font-weight:400;color:#889">(optional, e.g. "R800 pm plus R296,765 transfer")</span></label><input id="cd_premnote" value="'+v('PremiumNote')+'" style="'+inp+'"></div>'+
+      '<div><label style="'+lbl+'">Commission due (excl VAT)</label><input id="cd_comm" type="number" step="0.01" min="0" value="'+v('CommissionDue')+'" style="'+inp+'"></div>'+
+      '<div><label style="'+lbl+'">After 15% <span style="font-weight:400;color:#889">(fills in at '+REG_NET_PCT+'%)</span></label><input id="cd_net" type="number" step="0.01" min="0" value="'+v('CommissionNet')+'" style="'+inp+'"></div>'+
+      '<div><label style="'+lbl+'">Submitted</label><input id="cd_sub" type="date" value="'+v('SubmittedDate')+'" style="'+inp+'"></div>'+
+      '<div><label style="'+lbl+'">Accepted / activated</label><input id="cd_acc" type="date" value="'+v('AcceptedDate')+'" style="'+inp+'"></div>'+
+      '<div><label style="'+lbl+'">Schedule received</label><input id="cd_sched" type="date" value="'+v('ScheduleDate')+'" style="'+inp+'"></div>'+
+      '<div><label style="'+lbl+'">Invoiced</label><input id="cd_inv" type="date" value="'+v('InvoicedDate')+'" style="'+inp+'"></div>'+
+      '<div style="grid-column:1/-1"><label style="'+lbl+'">Lead source</label><input id="cd_lead" list="cd_lead_list" value="'+v('LeadSource')+'" style="'+inp+'" autocomplete="off"></div>'+
+    '</div>'+
+    '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px">'+
+      '<button data-role="cancel" style="padding:8px 18px;border-radius:7px;border:1.5px solid #ddd;background:#fff;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;color:#555">Cancel</button>'+
+      '<button data-role="ok" style="padding:8px 22px;border-radius:7px;border:none;background:#0e413a;color:#fff;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">Save</button>'+
+    '</div>';
+  ov.appendChild(box);
+  document.body.appendChild(ov);
+  function $(id){ return box.querySelector('#'+id); }
+  function close(){ if(ov.parentNode) document.body.removeChild(ov); }
+  // After 15% follows the commission until someone types in it themselves.
+  var netTouched = regNum(ev.CommissionNet) !== null && regNum(ev.CommissionDue) !== null &&
+                   Math.abs(regNum(ev.CommissionNet) - Math.round(regNum(ev.CommissionDue) * REG_NET_PCT) / 100) > 0.011;
+  $('cd_net').addEventListener('input', function(){ netTouched = true; });
+  $('cd_comm').addEventListener('input', function(){
+    if(netTouched) return;
+    var n = regNum(this.value);
+    $('cd_net').value = n === null ? '' : (Math.round(n * REG_NET_PCT) / 100).toFixed(2);
+  });
+  box.querySelector('[data-role=cancel]').addEventListener('click', close);
+  ov.addEventListener('click', function(e){ if(e.target === ov) close(); });
+  box.querySelector('[data-role=ok]').addEventListener('click', function(){
+    function txt(id){ var s = String($(id).value || '').replace(/\s+/g, ' ').trim(); return s || null; }
+    function num(id){ var s = String($(id).value || '').trim(); if(!s) return null; var n = regNum(s); return n; }
+    function dte(id){ var s = String($(id).value || '').trim(); return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null; }
+    var bad = ['cd_prem','cd_comm','cd_net'].filter(function(id){ var s = String($(id).value||'').trim(); return s && (regNum(s) === null || regNum(s) < 0); });
+    if(bad.length){ alert('Please enter amounts as numbers only (no R or spaces), e.g. 35068.95'); return; }
+    var patch = {
+      Provider: txt('cd_provider'), PolicyNo: txt('cd_polno'),
+      PremiumAmount: num('cd_prem'), PremiumCurrency: $('cd_cur').value || 'ZAR', PremiumFreq: $('cd_freq').value || null, PremiumNote: txt('cd_premnote'),
+      CommissionDue: num('cd_comm'), CommissionNet: num('cd_net'),
+      SubmittedDate: dte('cd_sub'), AcceptedDate: dte('cd_acc'), ScheduleDate: dte('cd_sched'), InvoicedDate: dte('cd_inv'),
+      LeadSource: txt('cd_lead')
+    };
+    if(patch.CommissionDue !== null && patch.CommissionNet === null) patch.CommissionNet = Math.round(patch.CommissionDue * REG_NET_PCT) / 100;
+    var newlyAccepted = !ev.AcceptedDate && !!patch.AcceptedDate;
+    sbFetch('PATCH','/rest/v1/work_events?ID=eq.'+encodeURIComponent(eventId), patch, function(res, err){
+      if(err){
+        alert(/column|PGRST204/.test(String(err))
+          ? 'Could not save: the database has not been updated for the Case Register yet. Run Register_BuildA.sql in Supabase first.'
+          : 'Could not save the case details: '+err);
+        return;
+      }
+      close();
+      Object.keys(patch).forEach(function(k){ ev[k] = patch[k]; });   // update the open case straight away
+      if(window._reg) window._reg.loadedAt = 0;
+      toast('✓ Case details saved','ok');
+      render();
+      // Reload the case list only after the "invoiced today?" step has saved, so it cannot overwrite it.
+      if(newlyAccepted && ev.Status !== 'ntu') caseAcceptedSteps(ev, function(){ loadEvents(clientId); });
+      else loadEvents(clientId);
+    });
+  });
+  setTimeout(function(){ $('cd_provider').focus(); }, 50);
+}
+
+// First time a case gets an accepted date: invoiced today? then basic policy + task.
+function caseAcceptedSteps(ev, after){
+  function policyStep(){
+    if(after) after();
+    var links = window._eventPolicies[ev.ID] || [];
+    if(links.some(function(l){ return l.Action === 'created'; })) return;   // already has its policy
+    openAddPolicyFromCase(ev);
+  }
+  if(!ev.InvoicedDate && confirm('Case accepted.\n\nMark it as invoiced today ('+regDate(localDateStr())+')?')){
+    var today = localDateStr();
+    sbFetch('PATCH','/rest/v1/work_events?ID=eq.'+encodeURIComponent(ev.ID), {InvoicedDate: today}, function(res, err){
+      if(err){ toast('Could not mark invoiced: '+err,'err'); }
+      else { ev.InvoicedDate = today; toast('✓ Marked invoiced','ok'); if(window._reg) window._reg.loadedAt = 0; render(); }
+      policyStep();
+    });
+  } else {
+    policyStep();
+  }
+}
+
+function regGuessPolicyType(ev){
+  var s = ((ev.Outcome || '')+' '+(ev.PremiumNote || '')).toLowerCase();
+  if(ev.EventType === 'NB_RISK' || ev.EventType === 'SVC_RISK') return /key ?man|buy.?and.?sell|business|contingent/.test(s) ? 'Business Assurance' : 'Life / Income Protector';
+  if(/living annuity|\bla\b/.test(s)) return 'Living Annuity';
+  if(/life annuity|guaranteed annuity/.test(s)) return 'Life Annuity';
+  if(/preserv/.test(s)) return /provident/.test(s) ? 'Provident Preservation' : 'Pension Preservation';
+  if(/\bra\b|retirement annuity|recurring ra|re-?occ/.test(s)) return 'Retirement Annuity';
+  if(/tax free|tfsa/.test(s)) return 'Tax Free Savings';
+  if(/offshore|global/.test(s)) return /endow/.test(s) ? 'Offshore Endowment' : 'Offshore Flexible Investment';
+  if(/endow/.test(s)) return 'Endowment';
+  if(/unit trust/.test(s)) return 'Unit Trust';
+  if(/flexi|investment/.test(s)) return 'Flexible Investment';
+  return '';
+}
+
+function regNormNo(v){ return String(v || '').toUpperCase().replace(/[^A-Z0-9]/g, ''); }
+// A policy already on this client's Policies tab with the same policy number (so we never make a duplicate).
+function regFindExistingPolicy(ev){
+  var n = regNormNo(ev.PolicyNo);
+  if(!n) return null;
+  return DB.policies.find(function(p){ return String(p.ClientID) === String(ev.ClientID) && regNormNo(p.PolicyNo) === n; }) || null;
+}
+
+function openAddPolicyFromCase(ev){
+  var c = regClient(ev);
+  var existing = regFindExistingPolicy(ev);
+  var ov = document.createElement('div');
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(10,20,40,.55);z-index:10000;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(2px)';
+  var box = document.createElement('div');
+  box.style.cssText = 'background:#fff;border-radius:12px;padding:20px 24px;max-width:480px;width:92%;box-shadow:0 12px 48px rgba(0,0,0,.25);font-family:inherit';
+  var guess = regGuessPolicyType(ev);
+  var missingProvider = !ev.Provider;
+  var btnGh = 'padding:8px 18px;border-radius:7px;border:1.5px solid #ddd;background:#fff;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;color:#555';
+  var btnOk = 'padding:8px 22px;border-radius:7px;border:none;background:#0e413a;color:#fff;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit';
+  var body;
+  if(existing){
+    body = '<div style="font-family:Georgia,serif;font-size:17px;color:#0e413a;margin-bottom:6px">This policy is already on the Policies tab</div>'+
+      '<div style="font-size:12px;color:#556;margin-bottom:12px"><b>'+escHtml(c ? c.Name : 'This client')+'</b> already has <b>'+escHtml(existing.Insurer || '')+' '+escHtml(existing.PolicyNo || '')+'</b>'+
+        (existing.Type ? ' ('+escHtml(existing.Type)+')' : '')+'. Link it to this case instead of adding it again?</div>'+
+      '<div style="display:flex;justify-content:flex-end;gap:8px">'+
+        '<button data-role="cancel" style="'+btnGh+'">Not now</button>'+
+        '<button data-role="link" style="'+btnOk+'">Link it to this case</button>'+
+      '</div>';
+  } else {
+    body = '<div style="font-family:Georgia,serif;font-size:17px;color:#0e413a;margin-bottom:6px">Add this policy to the Policies tab?</div>'+
+      '<div style="font-size:12px;color:#556;margin-bottom:12px">A basic record for <b>'+escHtml(c ? c.Name : 'this client')+'</b>. Clinton gets a task to add the start date and benefits'+
+        (ev.EventSubType === 'Replacement' ? ' and to mark the <b>replaced</b> policies' : ', and to mark any policy it replaces or cancels')+'.</div>'+
+      '<div style="background:#fafaf5;border-radius:6px;padding:8px 12px;font-size:13px;margin-bottom:12px;line-height:1.7">'+
+        '<b>'+escHtml(ev.Provider || 'Provider missing')+'</b>'+(ev.PolicyNo ? ' · '+escHtml(ev.PolicyNo) : ' · <span style="color:#b95900">no policy number yet</span>')+
+        (regPremium(ev) ? '<br>'+escHtml(regPremium(ev)) : '')+'</div>'+
+      (missingProvider
+        ? '<div style="color:#b23;font-size:12px;margin-bottom:12px">Add the provider in Case details first, then use the ➕ Add to Policies button in the case.</div>'
+        : '<label style="font-size:12px;font-weight:600;color:#445;display:block;margin-bottom:4px">Policy type</label>'+
+          '<select data-role="type" style="width:100%;padding:8px 10px;border:1.5px solid #ccc;border-radius:6px;font-size:13px;font-family:inherit;margin-bottom:14px">'+
+            '<option value="">Choose the policy type…</option>'+POLICY_TYPE_OPTIONS.map(function(t){ return '<option'+(t === guess ? ' selected' : '')+'>'+escHtml(t)+'</option>'; }).join('')+
+          '</select>')+
+      '<div style="display:flex;justify-content:flex-end;gap:8px">'+
+        '<button data-role="cancel" style="'+btnGh+'">Not now</button>'+
+        (missingProvider ? '' : '<button data-role="ok" style="'+btnOk+'">Add policy</button>')+
+      '</div>';
+  }
+  box.innerHTML = body;
+  ov.appendChild(box);
+  document.body.appendChild(ov);
+  function close(){ if(ov.parentNode) document.body.removeChild(ov); }
+  box.querySelector('[data-role=cancel]').addEventListener('click', close);
+  ov.addEventListener('click', function(e){ if(e.target === ov) close(); });
+  var ok = box.querySelector('[data-role=ok]');
+  if(ok) ok.addEventListener('click', function(){
+    var type = box.querySelector('[data-role=type]').value;
+    if(!type){ alert('Please choose the policy type.'); return; }
+    close();
+    addPolicyFromCase(ev, type);
+  });
+  var lk = box.querySelector('[data-role=link]');
+  if(lk) lk.addEventListener('click', function(){
+    close();
+    sbFetch('POST','/rest/v1/work_event_policies', [{WorkEventID:ev.ID, PolicyID:existing.ID, Action:'created'}], function(r2, e2){
+      if(e2){ alert('Could not link the policy: '+e2); return; }
+      (window._eventPolicies[ev.ID] = window._eventPolicies[ev.ID] || []).push({WorkEventID:ev.ID, PolicyID:existing.ID, Action:'created'});
+      toast('✓ Policy linked to this case','ok');
+      if(window._reg) window._reg.loadedAt = 0;
+      loadEvents(ev.ClientID);
+      render();
+    });
+  });
+}
+
+function addPolicyFromCase(ev, type){
+  var c = regClient(ev);
+  var today = localDateStr(), who = curUserCode();
+  var freqMap = {'Monthly':'Monthly', 'Annual':'Annually', 'Lump sum':'Once Off'};
+  var foreign = ev.PremiumCurrency && ev.PremiumCurrency !== 'ZAR';
+  var notes = 'Added from case "'+(ev.Outcome || eventTypeLabel(ev))+'" on '+regDate(today)+' by '+userLabel(who)+'. Details to complete: start date and benefits.';
+  // Policy premiums in the CRM are in rand. A foreign premium is NOT copied as a number
+  // (it would be read as rand); it goes in the notes for Clinton to convert.
+  if(foreign && regNum(ev.PremiumAmount) !== null) notes += ' Premium is '+regMoney(ev.PremiumAmount, ev.PremiumCurrency)+' ('+ev.PremiumCurrency+'): enter the rand amount.';
+  if(ev.PremiumNote) notes += ' Premium note: '+ev.PremiumNote+'.';
+  var pol = {ID:'p_'+Date.now(), ClientID:ev.ClientID, Insurer:ev.Provider, PolicyNo:ev.PolicyNo || '', Type:type,
+    Premium: (foreign || regNum(ev.PremiumAmount) === null) ? '' : String(regNum(ev.PremiumAmount)), Frequency: freqMap[ev.PremiumFreq] || '',
+    Status:'Active', StartDate:'', ClientIsOwner:'Yes', AdvisorOfRecord:'Yes', CountsForAUM:'Yes',
+    Notes:notes, CapturedDate:today, LastUpdated:today};
+  pol._pendingSave = true;                    // same protection as savePolicy()
+  DB.policies.push(pol);
+  try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
+  var server = JSON.parse(JSON.stringify(pol)); delete server._pendingSave;
+  post({action:'savePolicy', policy:server}, function(res){
+    if(!(res && res.ok === 1)){ toast('⚠️ Policy kept on this computer; it will retry on next sync. Link it to the case afterwards.','err'); return; }
+    var i = DB.policies.findIndex(function(x){ return x.ID === pol.ID; });
+    if(i >= 0) DB.policies[i] = server;
+    try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
+    sbFetch('POST','/rest/v1/work_event_policies', [{WorkEventID:ev.ID, PolicyID:pol.ID, Action:'created'}], function(r2, e2){
+      if(!e2){ (window._eventPolicies[ev.ID] = window._eventPolicies[ev.ID] || []).push({WorkEventID:ev.ID, PolicyID:pol.ID, Action:'created'}); }
+      else toast('⚠️ Policy added, but it could not be linked to the case. Use + Link Policy.','err');
+      createPolicyCompletionTask(ev, pol, c, who);
+      if(!e2) toast('✓ Policy added to the Policies tab · task sent to Clinton','ok');
+      if(window._reg) window._reg.loadedAt = 0;
+      render();
+    });
+  });
+}
+
+function createPolicyCompletionTask(ev, pol, c, who){
+  var isRepl = ev.EventSubType === 'Replacement';
+  var now = new Date().toISOString();
+  var text = 'Policy added from case "'+(ev.Outcome || eventTypeLabel(ev))+'" when it was accepted. Please add the start date and benefits on the Policies tab.'+
+    (isRepl ? '\nREPLACEMENT CASE: mark the policy or policies it replaces as Replaced (see the case name and RAR).'
+            : '\nIf this policy replaces or cancels another policy, mark that one Replaced or Cancelled.');
+  var task = {ID:'t_'+(Date.now()+1), Title:('Complete policy: '+pol.Insurer+(pol.PolicyNo ? ' '+pol.PolicyNo : '')+' · '+(c ? c.Name : '')+(isRepl ? ' (REPLACEMENT)' : '')).replace(/[<>]/g, ''),
+    Assignee:'Clinton', DueDate:localDateStr(), Priority: isRepl ? 'Urgent' : 'Normal', CCWife:'', ClientName: c ? c.Name : '',
+    Notes: JSON.stringify([{date:now, text:text, user:who}]), Done:false, Timestamp:now, OpenedBy:who, OpenedDate:now};
+  task._pendingSave = true;
+  DB.tasks.push(task);
+  try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
+  post({action:'saveTask', task:task}, function(res){
+    if(!(res && res.ok)) toast('⚠️ Policy added, but the task for Clinton could not be saved. Please add it by hand.','err');
+  });
+}
+
+// ── Register page ──────────────────────────────────────────────────────────
+function loadRegister(){
+  var R = window._reg;
+  if(R.loading) return;
+  R.loading = true;
+  var pending = 3, evs = null, links = null, bf = null, failed = false;
+  function done(){
+    if(--pending > 0) return;
+    R.loading = false; R.loadedAt = Date.now();
+    if(failed){ R.err = true; }
+    else { R.err = false; R.events = evs || []; R.links = links || []; R.bf = bf; }
+    if(PAGE === 'register') render();
+  }
+  sbFetch('GET','/rest/v1/work_events?EventType=in.('+CASE_EVENT_TYPES.join(',')+')&select=*&order=EventDate.desc,CreatedAt.desc', null, function(r, e){ if(e) failed = true; else evs = r; done(); });
+  sbFetch('GET','/rest/v1/work_event_policies?select=WorkEventID,PolicyID,Action', null, function(r, e){ if(e) failed = true; else links = r; done(); });
+  sbFetch('GET','/rest/v1/settings?Key=eq.'+REG_BF_KEY+'&select=*', null, function(r, e){
+    if(!e && r && r[0]){ try{ bf = JSON.parse(r[0].Value); }catch(x){ bf = null; } }
+    done();
+  });
+}
+function regSet(k, v){
+  window._reg.f[k] = v;
+  render();
+  if(k === 'q'){ var q = document.getElementById('regQ'); if(q){ q.focus(); q.setSelectionRange(q.value.length, q.value.length); } }
+}
+function regAppsRows(){
+  var R = window._reg, f = R.f, q = (f.q || '').toLowerCase();
+  return (R.events || []).filter(function(ev){
+    var inRange = (ev.SubmittedDate && String(ev.SubmittedDate) >= REG_FROM) || ev.Status === 'in_progress';
+    if(!inRange) return false;
+    var st = regStatus(ev).k;
+    if(f.kind === 'nb' && String(ev.EventType).indexOf('NB_') !== 0) return false;
+    if(f.kind === 'svc' && String(ev.EventType).indexOf('SVC_') !== 0) return false;
+    if(f.status && st !== f.status) return false;
+    if(f.resp && ev.ResponsibleUser !== f.resp) return false;
+    if(f.provider && (ev.Provider || '') !== f.provider) return false;
+    if(q){ var c = regClient(ev); var hay = ((c ? c.Name : '')+' '+(ev.Outcome || '')+' '+(ev.PolicyNo || '')+' '+(ev.Provider || '')).toLowerCase(); if(hay.indexOf(q) < 0) return false; }
+    return true;
+  }).sort(function(a, b){
+    var ka = String(a.SubmittedDate || a.EventDate || ''), kb = String(b.SubmittedDate || b.EventDate || '');
+    return ka < kb ? 1 : ka > kb ? -1 : 0;
+  });
+}
+// Accepted from REG_FROM, not NTU, in the chosen year; grouped by month of acceptance.
+function regActsGroups(){
+  var R = window._reg, y = String(R.f.year);
+  var rows = (R.events || []).filter(function(ev){
+    return ev.AcceptedDate && String(ev.AcceptedDate) >= REG_FROM && ev.Status !== 'ntu' && String(ev.AcceptedDate).slice(0,4) === y;
+  }).sort(function(a, b){ return String(a.AcceptedDate) < String(b.AcceptedDate) ? -1 : String(a.AcceptedDate) > String(b.AcceptedDate) ? 1 : 0; });
+  var groups = [], byKey = {};
+  rows.forEach(function(ev){
+    var k = String(ev.AcceptedDate).slice(0,7);
+    if(!byKey[k]){ byKey[k] = {key:k, rows:[], full:0, net:0}; groups.push(byKey[k]); }
+    byKey[k].rows.push(ev);
+    byKey[k].full += regNum(ev.CommissionDue) || 0;
+    byKey[k].net += regNum(ev.CommissionNet) || 0;
+  });
+  return groups;
+}
+function regMonthTitle(key){
+  var p = key.split('-'), y = +p[0], m = +p[1];
+  var last = new Date(y, m, 0).getDate();
+  return '1 TO '+last+' '+REG_MONTHS[m-1].toUpperCase()+' '+y;
+}
+function regBf(){ var R = window._reg; return (R.bf && String(R.bf.year) === String(R.f.year)) ? R.bf : null; }
+
+function renderRegisterPage(){
+  var R = window._reg;
+  if(!R.loading && Date.now() - R.loadedAt > BOARD_REFRESH_MS) loadRegister();
+  var tab = R.tab;
+  var head = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;gap:10px;flex-wrap:wrap">'+
+    '<h1 style="font-family:\'DM Serif Display\',serif;font-size:22px;color:var(--navy)">Register</h1>'+
+    '<div style="display:flex;gap:6px;align-items:center">'+
+      '<button class="btn '+(tab === 'apps' ? 'b-nv' : 'b-gh')+' sm" data-act="reg-tab" data-tab="apps">📝 Applications</button>'+
+      '<button class="btn '+(tab === 'acts' ? 'b-nv' : 'b-gh')+' sm" data-act="reg-tab" data-tab="acts">💰 Activations &amp; Commission</button>'+
+      '<button class="btn b-gh sm" data-act="reg-xlsx" title="Download what is shown as an Excel file">⬇ Excel</button>'+
+      '<button class="btn b-gh sm" data-act="reg-refresh" title="Refresh">↻</button>'+
+    '</div></div>';
+  if(!R.loadedAt) return head + '<div class="card"><div class="empty" style="padding:20px">Loading the register…</div></div>';
+  if(R.err) return head + '<div class="card"><div class="empty" style="padding:20px;color:#b23">Could not load the register. Tap ↻ to try again.</div></div>';
+  return head + (tab === 'acts' ? regActsHtml() : regAppsHtml());
+}
+
+function regAppsHtml(){
+  var R = window._reg, f = R.f, rows = regAppsRows();
+  var provs = {}; (R.events || []).forEach(function(e){ if(e.Provider) provs[e.Provider] = 1; });
+  var pipeline = rows.filter(function(e){ var k = regStatus(e).k; return k === 'submitted'; }).reduce(function(t, e){ return t + (regNum(e.CommissionDue) || 0); }, 0);
+  var sel = 'border:1.5px solid var(--mist);border-radius:7px;padding:5px 8px;font-size:12px;font-family:inherit';
+  var html = '<div class="card" style="padding:0">'+
+    '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:10px 14px;border-bottom:1px solid var(--smoke)">'+
+      '<input id="regQ" type="search" placeholder="Search client, case, policy no, provider" value="'+escHtml(f.q)+'" oninput="regSet(\'q\',this.value)" style="'+sel+';flex:1;min-width:200px">'+
+      '<select onchange="regSet(\'kind\',this.value)" style="'+sel+'">'+[['','New Business & Servicing'],['nb','New Business only'],['svc','Servicing only']].map(function(o){ return '<option value="'+o[0]+'"'+(f.kind === o[0] ? ' selected' : '')+'>'+o[1]+'</option>'; }).join('')+'</select>'+
+      '<select onchange="regSet(\'status\',this.value)" style="'+sel+'">'+[['','All statuses'],['notsub','Not yet submitted'],['submitted','Submitted'],['accepted','Accepted'],['ntu','NTU']].map(function(o){ return '<option value="'+o[0]+'"'+(f.status === o[0] ? ' selected' : '')+'>'+o[1]+'</option>'; }).join('')+'</select>'+
+      '<select onchange="regSet(\'resp\',this.value)" style="'+sel+'"><option value="">Everyone</option>'+USER_CODES.map(function(u){ return '<option value="'+u+'"'+(f.resp === u ? ' selected' : '')+'>'+userLabel(u)+'</option>'; }).join('')+'</select>'+
+      '<select onchange="regSet(\'provider\',this.value)" style="'+sel+'"><option value="">All providers</option>'+Object.keys(provs).sort().map(function(p){ return '<option'+(f.provider === p ? ' selected' : '')+'>'+escHtml(p)+'</option>'; }).join('')+'</select>'+
+    '</div>'+
+    '<div style="padding:8px 14px;font-size:12px;color:#667;border-bottom:1px solid var(--smoke)">'+rows.length+' case'+(rows.length === 1 ? '' : 's')+
+      ' · submitted from '+regDate(REG_FROM)+' plus everything still open'+
+      (pipeline ? ' · <b style="color:#2563ab">In the pipeline (submitted, not yet accepted): '+regMoney(pipeline)+'</b>' : '')+'</div>';
+  if(!rows.length) return html + '<div class="empty" style="padding:18px">No cases match.</div></div>';
+  var th = 'style="font-size:10px;text-transform:uppercase;letter-spacing:.6px;color:#889;text-align:left;padding:7px 8px;border-bottom:1px solid var(--smoke);white-space:nowrap"';
+  html += '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr>'+
+    ['Submitted','Client','ID No.','Provider','Case','Policy no','Premium','Comm (excl VAT)','Status','Accepted','Schedule'].map(function(h){ return '<th '+th+'>'+h+'</th>'; }).join('')+'</tr></thead><tbody>';
+  rows.forEach(function(ev){
+    var c = regClient(ev), st = regStatus(ev);
+    function td(x){ return 'style="padding:7px 8px;border-bottom:1px solid var(--smoke);vertical-align:top;'+(x||'')+'"'; }
+    html += '<tr class="ri" style="cursor:pointer;display:table-row" data-act="open-board-case" data-cid="'+escHtml(ev.ClientID)+'" data-eid="'+ev.ID+'">'+
+      '<td '+td('white-space:nowrap')+'>'+(ev.SubmittedDate ? regDate(ev.SubmittedDate) : '<span style="color:#bbc">—</span>')+'</td>'+
+      '<td '+td()+'><b>'+escHtml(c ? c.Name : '(client)')+'</b></td>'+
+      '<td '+td('white-space:nowrap')+'>'+escHtml(c ? clean(c.IDNumber) : '')+'</td>'+
+      '<td '+td()+'>'+escHtml(ev.Provider || '')+'</td>'+
+      '<td '+td()+'>'+escHtml(eventTypeLabel(ev))+(ev.Outcome ? '<div style="color:#0e413a;font-weight:600">'+escHtml(ev.Outcome)+'</div>' : '')+'</td>'+
+      '<td '+td()+'>'+escHtml(ev.PolicyNo || '')+'</td>'+
+      '<td '+td()+'>'+escHtml(regPremium(ev))+'</td>'+
+      '<td '+td('text-align:right;white-space:nowrap')+'>'+regMoney(ev.CommissionDue)+'</td>'+
+      '<td '+td()+'><span style="background:'+st.bg+';color:'+st.clr+';border-radius:4px;padding:1px 6px;font-size:10px;font-weight:700;white-space:nowrap">'+st.t+'</span></td>'+
+      '<td '+td('white-space:nowrap')+'>'+regDate(ev.AcceptedDate)+'</td>'+
+      '<td '+td('white-space:nowrap')+'>'+regDate(ev.ScheduleDate)+'</td></tr>';
+  });
+  return html + '</tbody></table></div></div>';
+}
+
+function regActsHtml(){
+  var R = window._reg, groups = regActsGroups(), bf = regBf();
+  var years = {}; years[String(new Date().getFullYear())] = 1;
+  (R.events || []).forEach(function(e){ if(e.AcceptedDate && String(e.AcceptedDate) >= REG_FROM) years[String(e.AcceptedDate).slice(0,4)] = 1; });
+  var sel = 'border:1.5px solid var(--mist);border-radius:7px;padding:5px 8px;font-size:12px;font-family:inherit';
+  var all = [].concat.apply([], groups.map(function(g){ return g.rows; }));
+  var notInv = all.filter(function(e){ return !e.InvoicedDate; });
+  var totFull = groups.reduce(function(t, g){ return t + g.full; }, 0) + (bf ? (regNum(bf.full) || 0) : 0);
+  var totNet  = groups.reduce(function(t, g){ return t + g.net; }, 0)  + (bf ? (regNum(bf.net) || 0) : 0);
+  var html = '<div class="card" style="padding:0">'+
+    '<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;padding:10px 14px;border-bottom:1px solid var(--smoke)">'+
+      '<select onchange="regSet(\'year\',this.value)" style="'+sel+'">'+Object.keys(years).sort().map(function(y){ return '<option'+(String(R.f.year) === y ? ' selected' : '')+'>'+y+'</option>'; }).join('')+'</select>'+
+      '<span style="font-size:12px;color:#667">Grouped by the month the policy was accepted · from '+regDate(REG_FROM)+'</span>'+
+      (notInv.length ? '<span style="margin-left:auto;background:#fdf2e6;color:#b95900;border-radius:5px;padding:3px 9px;font-size:11px;font-weight:700">⚠ '+notInv.length+' accepted but not invoiced</span>' : '')+
+    '</div>';
+  var th = 'style="font-size:10px;text-transform:uppercase;letter-spacing:.6px;color:#889;text-align:left;padding:6px 8px;border-bottom:1px solid var(--smoke);white-space:nowrap"';
+  var cols = ['#','Client','ID No.','Provider','Case','Policy no','Premium','Full comm','After 15%','Accepted','Start date','Invoiced','Lead source'];
+  function td(x){ return 'style="padding:6px 8px;border-bottom:1px solid var(--smoke);vertical-align:top;'+(x||'')+'"'; }
+  var money = 'text-align:right;white-space:nowrap';
+  // One table for the whole year so the columns line up month to month.
+  html += '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr>'+cols.map(function(h, i){ return '<th '+th.replace('text-align:left', (i === 7 || i === 8) ? 'text-align:right' : 'text-align:left')+'>'+h+'</th>'; }).join('')+'</tr></thead><tbody>';
+  if(!groups.length){
+    html += '<tr><td colspan="13" class="empty" style="padding:18px">No policies accepted from '+regDate(REG_FROM)+' in '+escHtml(R.f.year)+' yet.</td></tr>';
+  }
+  groups.forEach(function(g){
+    html += '<tr><td colspan="13" style="padding:14px 8px 4px;font-family:\'DM Serif Display\',serif;font-size:15px;color:var(--navy)">'+regMonthTitle(g.key)+'</td></tr>';
+    g.rows.forEach(function(ev, i){
+      var c = regClient(ev), sd = regStartDate(ev);
+      html += '<tr class="ri" style="cursor:pointer;display:table-row" data-act="open-board-case" data-cid="'+escHtml(ev.ClientID)+'" data-eid="'+ev.ID+'">'+
+        '<td '+td()+'>'+(i+1)+'</td><td '+td()+'><b>'+escHtml(c ? c.Name : '(client)')+'</b></td>'+
+        '<td '+td('white-space:nowrap')+'>'+escHtml(c ? clean(c.IDNumber) : '')+'</td><td '+td()+'>'+escHtml(ev.Provider || '')+'</td>'+
+        '<td '+td()+'>'+escHtml(eventTypeLabel(ev))+(ev.Outcome ? '<div style="color:#0e413a;font-weight:600">'+escHtml(ev.Outcome)+'</div>' : '')+'</td>'+
+        '<td '+td()+'>'+escHtml(ev.PolicyNo || '')+'</td><td '+td()+'>'+escHtml(regPremium(ev))+'</td>'+
+        '<td '+td(money)+'>'+regMoney(ev.CommissionDue)+'</td>'+
+        '<td '+td(money)+'>'+regMoney(ev.CommissionNet)+'</td>'+
+        '<td '+td('white-space:nowrap')+'>'+regDate(ev.AcceptedDate)+'</td>'+
+        '<td '+td('white-space:nowrap')+'>'+(sd ? regDate(sd) : '<span style="color:#bbc" title="Comes from the linked policy on the Policies tab">—</span>')+'</td>'+
+        '<td '+td('white-space:nowrap')+'>'+(ev.InvoicedDate ? regDate(ev.InvoicedDate) : '<b style="color:#b95900">Not invoiced</b>')+'</td>'+
+        '<td '+td()+'>'+escHtml(ev.LeadSource || '')+'</td></tr>';
+    });
+    html += '<tr style="background:#f6f8f7;font-weight:700"><td colspan="7" style="padding:6px 8px">TOTAL '+REG_MONTHS[+g.key.slice(5)-1].toUpperCase()+'</td>'+
+      '<td style="padding:6px 8px;'+money+'">'+regMoney(g.full)+'</td><td style="padding:6px 8px;'+money+'">'+regMoney(g.net)+'</td><td colspan="4"></td></tr>';
+  });
+  html += '<tr><td colspan="13" style="padding:6px 0 0"></td></tr>';
+  if(bf){
+    html += '<tr style="border-top:2px solid var(--navy)"><td colspan="7" style="padding:8px 8px 4px;font-size:13px">'+escHtml(bf.label || 'Brought forward')+
+        ' <button class="btn b-gh xs" data-act="reg-bf-edit" style="font-size:10px;padding:1px 8px;margin-left:6px">Edit</button></td>'+
+      '<td style="padding:8px 8px 4px;font-size:13px;'+money+'">'+regMoney(bf.full)+'</td><td style="padding:8px 8px 4px;font-size:13px;'+money+'">'+regMoney(bf.net)+'</td><td colspan="4"></td></tr>';
+  }
+  html += '<tr style="font-weight:700;color:var(--navy)'+(bf ? '' : ';border-top:2px solid var(--navy)')+'"><td colspan="7" style="padding:6px 8px 14px;font-size:13px">TOTAL INCOME '+escHtml(R.f.year)+'</td>'+
+      '<td style="padding:6px 8px 14px;font-size:13px;'+money+'">'+regMoney(totFull)+'</td><td style="padding:6px 8px 14px;font-size:13px;'+money+'">'+regMoney(totNet)+'</td><td colspan="4"></td></tr>'+
+    '</tbody></table></div></div>';
+  return html;
+}
+
+function regEditBf(){
+  var R = window._reg, bf = R.bf || {year:2026, label:'Brought forward Jan to Sep 2026 (spreadsheet)', full:0, net:0};
+  var full = prompt('Brought forward, FULL commission (excl VAT), Jan to Sep '+bf.year+':', String(bf.full));
+  if(full === null) return;
+  var net = prompt('Brought forward, AFTER 15%, Jan to Sep '+bf.year+':', String(bf.net));
+  if(net === null) return;
+  var nf = regNum(full), nn = regNum(net);
+  if(nf === null || nn === null){ alert('Please enter numbers only, e.g. 867956.02'); return; }
+  var val = {year:bf.year, label:bf.label, full:nf, net:nn};
+  sbFetch('POST','/rest/v1/settings', [{Key:REG_BF_KEY, Value:JSON.stringify(val)}], function(res, err){
+    if(err){ alert('Could not save: '+err); return; }
+    R.bf = val; toast('✓ Brought forward updated','ok'); render();
+  });
+}
+
+// ── Excel download (SheetJS, loaded only when needed) ─────────────────────
+function regWithXLSX(cb){
+  if(window.XLSX){ cb(); return; }
+  var s = document.createElement('script');
+  s.src = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+  s.onload = function(){ cb(); };
+  s.onerror = function(){ alert('Could not load the Excel tool. Check your internet connection and try again.'); };
+  document.head.appendChild(s);
+}
+function regExcel(){
+  if(!window._reg.loadedAt || window._reg.err){ toast('The register has not loaded yet. Tap ↻ and try again.','err'); return; }
+  regWithXLSX(function(){
+    var R = window._reg, X = window.XLSX, aoa = [], formulas = [], today = localDateStr();
+    var numFmt = '#,##0.00';
+    function num(v){ var n = regNum(v); return n === null ? null : {t:'n', v:n, z:numFmt}; }
+    var wb = X.utils.book_new(), ws, name;
+    if(R.tab === 'acts'){
+      var groups = regActsGroups(), bf = regBf(), totalRefs = {H:[], I:[]}, sumH = 0, sumI = 0;
+      aoa.push(['NEW BUSINESS ACCEPTANCE COMMISSION · '+R.f.year+' · Duwalcoe Financial Consultants · as of '+regDate(today)]);
+      aoa.push([]);
+      var hdr = ['#','CLIENT','ID No.','FSP','NB TYPE','POLICY NO','Premium AMT','FULL COMM DUE less VAT','COMM due HFS - less 15%','Accepted','Start Date','INVOICED','LEAD SOURCE'];
+      groups.forEach(function(g){
+        aoa.push([regMonthTitle(g.key)]);
+        aoa.push(hdr);
+        var first = aoa.length + 1;
+        g.rows.forEach(function(ev, i){
+          var c = regClient(ev);
+          aoa.push([i+1, c ? c.Name : '', c ? clean(c.IDNumber) : '', ev.Provider || '', eventTypeLabel(ev)+(ev.Outcome ? ' · '+ev.Outcome : ''), ev.PolicyNo || '', regPremium(ev),
+            num(ev.CommissionDue), num(ev.CommissionNet), regDate(ev.AcceptedDate), regDate(regStartDate(ev)), ev.InvoicedDate ? regDate(ev.InvoicedDate) : 'NOT INVOICED', ev.LeadSource || '']);
+        });
+        var last = aoa.length, tr = aoa.length + 1;
+        // Formulas keep the sheet live; v is the worked-out value so previews (phone, WhatsApp) show the total too.
+        aoa.push(['', 'TOTAL '+REG_MONTHS[+g.key.slice(5)-1].toUpperCase(), '', '', '', '', '', {t:'n', f:'SUM(H'+first+':H'+last+')', v:regRound(g.full), z:numFmt}, {t:'n', f:'SUM(I'+first+':I'+last+')', v:regRound(g.net), z:numFmt}]);
+        sumH += g.full; sumI += g.net;
+        totalRefs.H.push('H'+tr); totalRefs.I.push('I'+tr);
+        aoa.push([]);
+      });
+      if(bf){
+        var br = aoa.length + 1;
+        aoa.push(['', bf.label || 'Brought forward', '', '', '', '', '', num(bf.full), num(bf.net)]);
+        totalRefs.H.push('H'+br); totalRefs.I.push('I'+br);
+        sumH += regNum(bf.full) || 0; sumI += regNum(bf.net) || 0;
+      }
+      aoa.push(['', 'TOTAL INCOME '+R.f.year, '', '', '', '', '',
+        totalRefs.H.length ? {t:'n', f:'SUM('+totalRefs.H.join(',')+')', v:regRound(sumH), z:numFmt} : 0,
+        totalRefs.I.length ? {t:'n', f:'SUM('+totalRefs.I.join(',')+')', v:regRound(sumI), z:numFmt} : 0]);
+      ws = X.utils.aoa_to_sheet(aoa);
+      ws['!cols'] = [4,26,15,16,40,16,22,16,16,12,12,13,18].map(function(w){ return {wch:w}; });
+      name = 'Register - Activations '+R.f.year+' (as of '+today+').xlsx';
+      X.utils.book_append_sheet(wb, ws, 'Activations '+R.f.year);
+    } else {
+      var rows = regAppsRows();
+      aoa.push(['NEW BUSINESS APPLICATIONS · LIFE & INVEST · Duwalcoe Financial Consultants · as of '+regDate(today)]);
+      aoa.push([]);
+      aoa.push(['SUBMITTED','CLIENT','ID No.','FSP','NB TYPE','POLICY NO','Premium AMT','FULL COMM DUE less VAT','COMM due HFS - less 15%','STATUS','ACCEPTED','SCHEDULE REC','RESPONSIBLE','LEAD SOURCE','NOTES']);
+      var f0 = aoa.length + 1;
+      rows.forEach(function(ev){
+        var c = regClient(ev);
+        aoa.push([regDate(ev.SubmittedDate), c ? c.Name : '', c ? clean(c.IDNumber) : '', ev.Provider || '', eventTypeLabel(ev)+(ev.Outcome ? ' · '+ev.Outcome : ''), ev.PolicyNo || '', regPremium(ev),
+          num(ev.CommissionDue), num(ev.CommissionNet), regStatus(ev).t, regDate(ev.AcceptedDate), regDate(ev.ScheduleDate), userLabel(ev.ResponsibleUser || ''), ev.LeadSource || '', String(ev.Notes || '').replace(/\s+/g, ' ').trim()]);
+      });
+      var l0 = aoa.length;
+      var aH = rows.reduce(function(t, e){ return t + (regNum(e.CommissionDue) || 0); }, 0);
+      var aI = rows.reduce(function(t, e){ return t + (regNum(e.CommissionNet) || 0); }, 0);
+      if(rows.length) aoa.push(['', 'TOTAL', '', '', '', '', '', {t:'n', f:'SUM(H'+f0+':H'+l0+')', v:regRound(aH), z:numFmt}, {t:'n', f:'SUM(I'+f0+':I'+l0+')', v:regRound(aI), z:numFmt}]);
+      ws = X.utils.aoa_to_sheet(aoa);
+      ws['!cols'] = [12,26,15,16,40,16,22,16,16,16,12,12,12,18,40].map(function(w){ return {wch:w}; });
+      name = 'Register - Applications (as of '+today+').xlsx';
+      X.utils.book_append_sheet(wb, ws, 'Applications');
+    }
+    X.writeFile(wb, name);
+  });
+}
+
 function openBoardCase(clientId, eventId){
   openClient(clientId);
   CTAB = 'events';
@@ -4543,6 +5157,7 @@ function loadEventNA(eventId, cb){
 // Load events for a client (and their policy links) from Supabase
 function loadEvents(clientId){
   if(window._board) window._board.loadedAt = 0;
+  if(window._reg) window._reg.loadedAt = 0;
   sbFetch('GET','/rest/v1/work_events?ClientID=eq.'+encodeURIComponent(clientId)+'&select=*&order=EventDate.desc', null, function(rows, err){
     if(err){ console.error('loadEvents error:',err); window._events[clientId] = []; }
     else window._events[clientId] = rows || [];
@@ -4742,6 +5357,9 @@ function renderEventDetail(ev, c, pols){
       '<b>NTU</b>'+(ev.ClosedReason ? ': '+escHtml(ev.ClosedReason) : '')+(ev.CompletedAt ? ' <span style="color:#889">· '+fdate(ev.CompletedAt)+'</span>' : '')+'</div>';
   }
   html += '</div>';
+
+  // Case details for the Register (NB + Servicing)
+  html += renderCaseDetails(ev);
 
   // Pre-acceptance requirements (NB + Servicing)
   html += renderEventReqs(ev);
@@ -9061,7 +9679,7 @@ function buildPolicyForm(p){
   var _freq=p.Frequency||'Monthly';
   var _isOnceOff=_freq==='Once Off'||_freq==='Paid Up';
 
-  var typeOpts=['Life / Income Protector','Business Assurance','Retirement Annuity','Pension Fund','Provident Fund','Pension Preservation','Provident Preservation','Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment','Unit Trust','Tax Free Savings','Guaranteed Endowment','Living Annuity','Life Annuity','Medical Aid','Other'];
+  var typeOpts=POLICY_TYPE_OPTIONS.slice();   // shared list (Build A): also used when a case adds a policy
 
   var html='<div style="display:flex;flex-direction:column;gap:0">';
 
@@ -13670,6 +14288,30 @@ document.addEventListener('click', function(e){
           break;
         case 'open-board-case':
           openBoardCase(el.getAttribute('data-cid'), el.getAttribute('data-eid'));
+          break;
+        case 'edit-case-details':
+          openCaseDetailsModal(el.getAttribute('data-eid'));
+          break;
+        case 'case-add-policy':
+          (function(){
+            var _ev = (window._events[SEL] || []).find(function(e){ return String(e.ID) === String(el.getAttribute('data-eid')); });
+            if(_ev) openAddPolicyFromCase(_ev); else toast('Work Event not found. Refresh and try again.','err');
+          })();
+          break;
+        case 'reg-tab':
+          window._reg.tab = el.getAttribute('data-tab') === 'acts' ? 'acts' : 'apps';
+          render();
+          break;
+        case 'reg-refresh':
+          window._reg.loadedAt = 0;
+          loadRegister();
+          render();
+          break;
+        case 'reg-xlsx':
+          regExcel();
+          break;
+        case 'reg-bf-edit':
+          regEditBf();
           break;
         case 'task-doc-upload':
           openTaskDocUpload(el.getAttribute('data-tid'));
