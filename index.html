@@ -4539,6 +4539,7 @@ function renderReviewsPage(){
 var REG_FROM = '2026-10-01';
 var REG_NET_PCT = 85;                        // "COMM due HFS - less 15%"
 var REG_BF_KEY = 'register_bf_2026';
+var REG_HIST_KEY = 'register_history';          // monthly after-15% totals before the Register (from Tracy's spreadsheet)
 var REG_COMMON_PROVIDERS = ['Allan Gray','Bidvest Life','BrightRock','Coronation','Discovery','Glacier','Hollard','Liberty','Momentum','Momentum Investo','Ninety One','Old Mutual','Old Mutual Wealth','PPS','SA Asset Management','Sanlam','Stanlib','Sygnia','10X'];
 var REG_MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 window._reg = window._reg || {loadedAt:0, loading:false, events:[], links:[], bf:null, err:false, tab:'apps',
@@ -4978,18 +4979,22 @@ function loadRegister(){
   var R = window._reg;
   if(R.loading) return;
   R.loading = true;
-  var pending = 3, evs = null, links = null, bf = null, failed = false;
+  var pending = 4, evs = null, links = null, bf = null, hist = null, failed = false;
   function done(){
     if(--pending > 0) return;
     R.loading = false; R.loadedAt = Date.now();
     if(failed){ R.err = true; }
-    else { R.err = false; R.events = evs || []; R.links = links || []; R.bf = bf; }
+    else { R.err = false; R.events = evs || []; R.links = links || []; R.bf = bf; R.hist = hist; }
     if(PAGE === 'register') render();
   }
   sbFetch('GET','/rest/v1/work_events?EventType=in.('+CASE_EVENT_TYPES.join(',')+')&select=*&order=EventDate.desc,CreatedAt.desc', null, function(r, e){ if(e) failed = true; else evs = r; done(); });
   sbFetch('GET','/rest/v1/work_event_policies?select=WorkEventID,PolicyID,Action', null, function(r, e){ if(e) failed = true; else links = r; done(); });
   sbFetch('GET','/rest/v1/settings?Key=eq.'+REG_BF_KEY+'&select=*', null, function(r, e){
     if(!e && r && r[0]){ try{ bf = JSON.parse(r[0].Value); }catch(x){ bf = null; } }
+    done();
+  });
+  sbFetch('GET','/rest/v1/settings?Key=eq.'+REG_HIST_KEY+'&select=*', null, function(r, e){
+    if(!e && r && r[0]){ try{ hist = JSON.parse(r[0].Value); }catch(x){ hist = null; } }
     done();
   });
 }
@@ -5048,12 +5053,13 @@ function renderRegisterPage(){
       '<button class="btn '+(tab === 'apps' ? 'b-nv' : 'b-gh')+' sm" data-act="reg-tab" data-tab="apps">📝 Applications</button>'+
       '<button class="btn '+(tab === 'acts' ? 'b-nv' : 'b-gh')+' sm" data-act="reg-tab" data-tab="acts">💰 Activations &amp; Commission</button>'+
       '<button class="btn '+(tab === 'trail' ? 'b-nv' : 'b-gh')+' sm" data-act="reg-tab" data-tab="trail">🔁 Trail</button>'+
+      '<button class="btn '+(tab === 'sales' ? 'b-nv' : 'b-gh')+' sm" data-act="reg-tab" data-tab="sales">📈 Sales</button>'+
       '<button class="btn b-gh sm" data-act="reg-xlsx" title="Download what is shown as an Excel file">⬇ Excel</button>'+
       '<button class="btn b-gh sm" data-act="reg-refresh" title="Refresh">↻</button>'+
     '</div></div>';
   if(!R.loadedAt) return head + '<div class="card"><div class="empty" style="padding:20px">Loading the register…</div></div>';
   if(R.err) return head + '<div class="card"><div class="empty" style="padding:20px;color:#b23">Could not load the register. Tap ↻ to try again.</div></div>';
-  return head + (tab === 'acts' ? regActsHtml() : tab === 'trail' ? regTrailHtml() : regAppsHtml());
+  return head + (tab === 'acts' ? regActsHtml() : tab === 'trail' ? regTrailHtml() : tab === 'sales' ? regSalesHtml() : regAppsHtml());
 }
 
 function regAppsHtml(){
@@ -5256,6 +5262,260 @@ function regTrailHtml(){
   return html;
 }
 
+// ── Sales views (Register > 📈 Sales) ─────────────────────────────────────
+// All money here is AFTER 15% (HFS's share, excl VAT). Months before 1 Oct 2026 come from
+// the loaded history (Tracy's activations spreadsheet, client rows added up); from 1 Oct the
+// Register itself. Chart colours: validated pair (colour-blind separation + contrast).
+var REG_SALES_THIS = '#2a78d6', REG_SALES_LAST = '#eb6834';
+function regFromKey(){ return REG_FROM.slice(0,7); }
+function regMonthNet(key){
+  if(key >= regFromKey()){
+    var t = 0;
+    (window._reg.events || []).forEach(function(ev){
+      if(ev.Status === 'ntu' || !ev.AcceptedDate || String(ev.AcceptedDate).slice(0,7) !== key) return;
+      t += regNum(ev.CommissionNet) || 0;
+    });
+    return regRound(t);
+  }
+  var h = window._reg.hist && window._reg.hist.months;
+  if(!h || h[key] === undefined || h[key] === null || h[key] === '') return null;
+  return regNum(h[key]);
+}
+function regMonthsDone(y){ var n = new Date(); return +y < n.getFullYear() ? 12 : +y > n.getFullYear() ? 0 : n.getMonth() + 1; }
+function regSalesYears(){
+  var ys = {}; ys[String(new Date().getFullYear())] = 1;
+  var h = window._reg.hist && window._reg.hist.months;
+  if(h) Object.keys(h).forEach(function(k){ ys[k.slice(0,4)] = 1; });
+  (window._reg.events || []).forEach(function(ev){ if(ev.AcceptedDate && String(ev.AcceptedDate) >= REG_FROM) ys[String(ev.AcceptedDate).slice(0,4)] = 1; });
+  return Object.keys(ys).sort();
+}
+function regYearSum(y, upTo){
+  var t = 0, have = 0;
+  for(var m = 1; m <= upTo; m++){ var v = regMonthNet(y+'-'+String(m).padStart(2,'0')); if(v !== null){ t += v; have++; } }
+  return {total: regRound(t), months: have};
+}
+function regShort(v){
+  var a = Math.abs(v);
+  var s = a >= 1e6 ? (Math.round(a / 1e5) / 10)+'m' : a >= 1e3 ? Math.round(a / 1e3)+'k' : String(Math.round(a));
+  return (v < 0 ? '-' : '')+'R'+s;
+}
+function regPctChange(a, b){ if(!b) return ''; var p = Math.round((a - b) / Math.abs(b) * 100); return (p >= 0 ? '+' : '')+p+'%'; }
+function regDaysSince(d){ if(!d) return null; var p = String(d).slice(0,10).split('-'); var t = new Date(+p[0], +p[1]-1, +p[2]); var n = new Date(); n.setHours(0,0,0,0); return Math.round((n - t) / 86400000); }
+function regNiceMax(v){ if(v <= 0) return 1; var e = Math.pow(10, Math.floor(Math.log10(v))), f = v / e; return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * e; }
+
+function regSalesChart(y){
+  var ly = String(+y - 1), done = regMonthsDone(y);
+  var a = [], b = [];
+  for(var m = 1; m <= 12; m++){
+    var k = String(m).padStart(2,'0');
+    a.push(m <= done ? regMonthNet(y+'-'+k) : null);
+    b.push(regMonthNet(ly+'-'+k));
+  }
+  var max = regNiceMax(Math.max.apply(null, a.concat(b).map(function(v){ return v || 0; })));
+  var W = 1000, H = 280, L = 58, Rm = 10, T = 10, B = 26, pw = W - L - Rm, ph = H - T - B, bw = pw / 12, bar = 18, y0 = T + ph;
+  function Y(v){ return T + ph - Math.max(0, v) / max * ph; }
+  function col(x, v, fill){
+    if(v === null || v <= 0) return '';
+    var top = Y(v), h = y0 - top, r = Math.min(4, h);
+    return '<path d="M'+x+','+y0+' V'+(top + r)+' Q'+x+','+top+' '+(x + r)+','+top+' H'+(x + bar - r)+' Q'+(x + bar)+','+top+' '+(x + bar)+','+(top + r)+' V'+y0+' Z" fill="'+fill+'"/>';
+  }
+  var svg = '<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;height:auto;display:block" role="img" aria-label="Commission after 15% by month, '+y+' against '+ly+'">';
+  for(var t = 0; t <= 4; t++){
+    var v = max * t / 4, yy = Y(v);
+    svg += '<line x1="'+L+'" x2="'+(W - Rm)+'" y1="'+yy+'" y2="'+yy+'" stroke="'+(t ? '#ebe9e4' : '#c9c6bf')+'" stroke-width="1"/>'+
+      '<text x="'+(L - 8)+'" y="'+(yy + 4)+'" text-anchor="end" font-size="11" fill="#6b6b73">'+regShort(v)+'</text>';
+  }
+  for(var i = 0; i < 12; i++){
+    var cx = L + bw * i + bw / 2;
+    svg += col(cx - bar - 1, b[i], REG_SALES_LAST) + col(cx + 1, a[i], REG_SALES_THIS);   // last year left, this year right, 2px gap
+    svg += '<text x="'+cx+'" y="'+(H - 8)+'" text-anchor="middle" font-size="11" fill="#6b6b73">'+REG_MONTHS[i].slice(0,3)+'</text>';
+    svg += '<rect class="rs-hit" x="'+(L + bw * i)+'" y="'+T+'" width="'+bw+'" height="'+ph+'" fill="transparent" tabindex="0" '+
+      'data-m="'+i+'" data-a="'+(a[i] === null ? '' : a[i])+'" data-b="'+(b[i] === null ? '' : b[i])+'" data-y="'+y+'" data-ly="'+ly+'" '+
+      'onmouseenter="regSalesTip(this)" onfocus="regSalesTip(this)" onmouseleave="regSalesTipHide()" onblur="regSalesTipHide()"></rect>';
+  }
+  return svg + '</svg>';
+}
+function regSalesTip(el){
+  var tip = document.getElementById('rsTip'), box = document.getElementById('rsChart'); if(!tip || !box) return;
+  var m = +el.getAttribute('data-m'), a = el.getAttribute('data-a'), b = el.getAttribute('data-b');
+  tip.textContent = '';
+  function line(val, label, colr, strong){
+    var d = document.createElement('div'); d.style.cssText = 'display:flex;align-items:center;gap:6px;white-space:nowrap';
+    var k = document.createElement('span'); k.style.cssText = 'display:inline-block;width:12px;height:2px;background:'+colr;
+    var v = document.createElement('b'); v.textContent = val; if(!strong) v.style.fontWeight = '600';
+    var l = document.createElement('span'); l.style.color = '#6b6b73'; l.textContent = label;
+    d.appendChild(k); d.appendChild(v); d.appendChild(l); tip.appendChild(d);
+  }
+  var h = document.createElement('div'); h.style.cssText = 'font-weight:700;margin-bottom:3px'; h.textContent = REG_MONTHS[m]; tip.appendChild(h);
+  line(a === '' ? 'not yet' : regMoney(+a), el.getAttribute('data-y'), REG_SALES_THIS, true);
+  line(b === '' ? 'no figure' : regMoney(+b), el.getAttribute('data-ly'), REG_SALES_LAST, false);
+  if(a !== '' && b !== '' && +b){ var c = document.createElement('div'); c.style.cssText = 'color:#6b6b73;margin-top:2px'; c.textContent = regPctChange(+a, +b)+' on '+el.getAttribute('data-ly'); tip.appendChild(c); }
+  var bb = box.getBoundingClientRect(), r = el.getBoundingClientRect();
+  tip.style.display = 'block';
+  var left = r.left - bb.left + r.width / 2 - tip.offsetWidth / 2;
+  tip.style.left = Math.max(0, Math.min(bb.width - tip.offsetWidth, left))+'px';
+  tip.style.top = '4px';
+}
+function regSalesTipHide(){ var t = document.getElementById('rsTip'); if(t) t.style.display = 'none'; }
+
+function regSalesHtml(){
+  var R = window._reg;
+  var years = regSalesYears();
+  if(!R.f.syear || years.indexOf(R.f.syear) < 0) R.f.syear = String(new Date().getFullYear());
+  var y = R.f.syear, ly = String(+y - 1), done = regMonthsDone(y);
+  var upTo = done || 12, cur = regYearSum(y, upTo), prev = regYearSum(ly, upTo);
+  var period = upTo === 12 ? 'full year' : 'Jan to '+REG_MONTHS[upTo - 1].slice(0,3)+' (to date)';
+  var hasHist = !!(R.hist && R.hist.months && Object.keys(R.hist.months).length);
+  // pipeline
+  var piped = (R.events || []).filter(function(ev){ return regInApps(ev) && regStatus(ev).k === 'submitted'; });
+  var pipeNet = regRound(piped.reduce(function(t, e){ return t + (regNum(e.CommissionNet) || 0); }, 0));
+  // trail now
+  var tNow = regTrailSums(regTrailRows(regMonthKey()));
+  // hit rate: submitted from 1 Oct
+  var sub = (R.events || []).filter(function(ev){ return ev.SubmittedDate && String(ev.SubmittedDate) >= REG_FROM; });
+  var acc = sub.filter(function(e){ return e.AcceptedDate && e.Status !== 'ntu'; }), ntu = sub.filter(function(e){ return e.Status === 'ntu'; });
+  var waiting = sub.length - acc.length - ntu.length;
+  var days = acc.map(function(e){ var a = String(e.AcceptedDate).slice(0,10).split('-'), s = String(e.SubmittedDate).slice(0,10).split('-');
+    return Math.round((new Date(+a[0], +a[1]-1, +a[2]) - new Date(+s[0], +s[1]-1, +s[2])) / 86400000); });
+  var avgDays = days.length ? Math.round(days.reduce(function(t, d){ return t + d; }, 0) / days.length) : null;
+
+  var sel = 'border:1.5px solid var(--mist);border-radius:7px;padding:5px 8px;font-size:12px;font-family:inherit';
+  function tile(label, value, sub2, extra){
+    return '<div style="flex:1;min-width:190px;background:#fff;border:1px solid var(--smoke);border-radius:10px;padding:12px 14px">'+
+      '<div style="font-size:11px;color:#6b6b73;text-transform:uppercase;letter-spacing:.5px">'+label+'</div>'+
+      '<div style="font-family:\'DM Serif Display\',serif;font-size:24px;color:var(--navy);margin:2px 0">'+value+'</div>'+
+      '<div style="font-size:12px;color:#52514e">'+sub2+'</div>'+(extra || '')+'</div>';
+  }
+  var ch = regPctChange(cur.total, prev.total);
+  var html = '<div class="card" style="padding:0">'+
+    '<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;padding:10px 14px;border-bottom:1px solid var(--smoke)">'+
+      '<select onchange="regSet(\'syear\',this.value)" style="'+sel+'">'+years.map(function(v){ return '<option'+(v === y ? ' selected' : '')+'>'+v+'</option>'; }).join('')+'</select>'+
+      '<span style="font-size:12px;color:#667">All figures after 15% (HFS\'s share, excl VAT) · before '+regDate(REG_FROM)+' from Tracy\'s activations spreadsheet, from then on from the Register</span>'+
+      '<button class="btn b-gh xs" data-act="reg-hist-edit" style="margin-left:auto;font-size:11px;padding:3px 10px">Edit history</button>'+
+    '</div>';
+  if(!hasHist) html += '<div style="margin:10px 14px;padding:8px 12px;background:#fdf2e6;border-left:3px solid #b95900;border-radius:4px;font-size:12px;color:#8a4a00">The history from Tracy\'s spreadsheet has not been loaded yet (run Register_History.sql), so months before '+regDate(REG_FROM)+' are empty.</div>';
+  html += '<div style="display:flex;gap:10px;flex-wrap:wrap;padding:12px 14px">'+
+    tile(y+' '+period, regMoney(cur.total), (prev.months ? (ch ? '<b style="color:'+(cur.total >= prev.total ? '#2d7a3e' : '#9e2a2b')+'">'+(cur.total >= prev.total ? '▲ ' : '▼ ')+ch+'</b> on '+ly+' ('+regMoney(prev.total)+')' : 'Same as '+ly) : 'No '+ly+' figures to compare'))+
+    tile('In the pipeline', regMoney(pipeNet), piped.length+' case'+(piped.length === 1 ? '' : 's')+' submitted, not yet accepted')+
+    tile('Trail this month', tNow.ZAR ? regMoney(regRound(tNow.ZAR.net)) : 'R0.00', 'after 15%, a month'+(Object.keys(tNow).some(function(k){ return k !== 'ZAR'; }) ? ' · plus offshore '+regTrailSumText((function(){ var o = {}; Object.keys(tNow).forEach(function(k){ if(k !== 'ZAR') o[k] = tNow[k]; }); return o; })(), 'net') : ''))+
+    tile('Hit rate from '+regDate(REG_FROM).slice(3), (acc.length + ntu.length) ? Math.round(acc.length / (acc.length + ntu.length) * 100)+'%' : '—',
+      acc.length+' accepted · '+ntu.length+' NTU · '+waiting+' waiting'+(avgDays !== null ? '<br>'+avgDays+' days from submitted to accepted, on average' : ''))+
+  '</div>';
+  // chart
+  html += '<div style="padding:4px 14px 6px"><div style="display:flex;gap:16px;align-items:center;font-size:12px;color:#52514e;margin-bottom:4px">'+
+      '<b style="color:var(--navy);font-size:13px">Commission after 15%, by month of acceptance</b>'+
+      '<span style="display:inline-flex;align-items:center;gap:5px"><span style="width:10px;height:10px;border-radius:2px;background:'+REG_SALES_LAST+'"></span>'+ly+'</span>'+
+      '<span style="display:inline-flex;align-items:center;gap:5px"><span style="width:10px;height:10px;border-radius:2px;background:'+REG_SALES_THIS+'"></span>'+y+'</span></div>'+
+    '<style>.rs-hit{cursor:default;outline:none}.rs-hit:hover,.rs-hit:focus{fill:rgba(14,65,58,.06)}</style>'+
+    '<div id="rsChart" style="position:relative">'+regSalesChart(y)+
+      '<div id="rsTip" style="display:none;position:absolute;pointer-events:none;background:#fff;border:1px solid #ddd;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.12);padding:8px 10px;font-size:12px;z-index:5"></div></div></div>';
+  // month table (the chart's table view)
+  var th = 'style="font-size:10px;text-transform:uppercase;letter-spacing:.6px;color:#889;padding:6px 8px;border-bottom:1px solid var(--smoke);white-space:nowrap;text-align:right"';
+  var td = 'padding:5px 8px;border-bottom:1px solid var(--smoke);text-align:right;white-space:nowrap';
+  html += '<div style="overflow-x:auto;padding:0 6px"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr><th '+th.replace('text-align:right','text-align:left')+'>Month</th><th '+th+'>'+y+'</th><th '+th+'>'+ly+'</th><th '+th+'>Difference</th></tr></thead><tbody>';
+  var ta = 0, tb = 0;
+  for(var m = 1; m <= 12; m++){
+    var k = String(m).padStart(2,'0'), va = m <= done ? regMonthNet(y+'-'+k) : null, vb = regMonthNet(ly+'-'+k);
+    if(m <= upTo){ ta += va || 0; tb += vb || 0; }
+    html += '<tr><td style="'+td+';text-align:left">'+REG_MONTHS[m-1]+'</td><td style="'+td+'">'+(va === null ? '<span style="color:#bbc">—</span>' : regMoney(va))+'</td>'+
+      '<td style="'+td+'">'+(vb === null ? '<span style="color:#bbc">—</span>' : regMoney(vb))+'</td>'+
+      '<td style="'+td+';color:#52514e">'+(va !== null && vb !== null ? (va - vb >= 0 ? '+' : '')+regMoney(regRound(va - vb)).replace('R-','-R') : '')+'</td></tr>';
+  }
+  html += '<tr style="font-weight:700;background:#f6f8f7"><td style="'+td+';text-align:left">'+(upTo === 12 ? 'Year' : 'Jan to '+REG_MONTHS[upTo-1].slice(0,3))+'</td><td style="'+td+'">'+regMoney(regRound(ta))+'</td><td style="'+td+'">'+regMoney(regRound(tb))+'</td>'+
+    '<td style="'+td+'">'+(tb ? regPctChange(ta, tb) : '')+'</td></tr></tbody></table></div>';
+  // years
+  html += '<div style="padding:14px 14px 4px;font-weight:700;color:var(--navy);font-size:13px">Year by year</div><div style="overflow-x:auto;padding:0 6px"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr>'+
+    '<th '+th.replace('text-align:right','text-align:left')+'>Year</th><th '+th+'>After 15%</th><th '+th+'>Change</th></tr></thead><tbody>';
+  years.forEach(function(yy){
+    var n = regMonthsDone(yy) || 12, s1 = regYearSum(yy, n), s0 = regYearSum(String(+yy - 1), n);
+    html += '<tr><td style="'+td+';text-align:left">'+yy+(n < 12 ? ' <span style="color:#889">(Jan to '+REG_MONTHS[n-1].slice(0,3)+')</span>' : '')+'</td><td style="'+td+'">'+regMoney(s1.total)+'</td>'+
+      '<td style="'+td+'">'+(s0.months ? regPctChange(s1.total, s0.total)+' <span style="color:#889">on same months '+(+yy - 1)+'</span>' : '')+'</td></tr>';
+  });
+  html += '</tbody></table></div>';
+  // pipeline by provider + chase list
+  var byP = {};
+  piped.forEach(function(e){ var k = e.Provider || '(provider not filled in)'; var d = regDaysSince(e.SubmittedDate);
+    byP[k] = byP[k] || {n:0, net:0, old:0}; byP[k].n++; byP[k].net += regNum(e.CommissionNet) || 0; if(d !== null && d > byP[k].old) byP[k].old = d; });
+  html += '<div style="padding:16px 14px 4px;font-weight:700;color:var(--navy);font-size:13px">Pipeline by provider <span style="font-weight:400;color:#889;font-size:12px">· submitted, not yet accepted</span></div>';
+  if(!piped.length) html += '<div style="padding:4px 14px 8px;font-size:12px;color:#889">Nothing waiting for acceptance.</div>';
+  else {
+    html += '<div style="overflow-x:auto;padding:0 6px"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr><th '+th.replace('text-align:right','text-align:left')+'>Provider</th><th '+th+'>Cases</th><th '+th+'>After 15%</th><th '+th+'>Oldest waiting</th></tr></thead><tbody>';
+    Object.keys(byP).sort(function(a2, b2){ return byP[b2].net - byP[a2].net; }).forEach(function(k){
+      html += '<tr><td style="'+td+';text-align:left">'+escHtml(k)+'</td><td style="'+td+'">'+byP[k].n+'</td><td style="'+td+'">'+regMoney(regRound(byP[k].net))+'</td><td style="'+td+(byP[k].old > 30 ? ';color:#b95900;font-weight:700' : '')+'">'+byP[k].old+' days</td></tr>';
+    });
+    html += '</tbody></table></div>';
+    var chase = piped.filter(function(e){ return (regDaysSince(e.SubmittedDate) || 0) > 30; }).sort(function(a2, b2){ return regDaysSince(b2.SubmittedDate) - regDaysSince(a2.SubmittedDate); });
+    if(chase.length){
+      html += '<div style="padding:12px 14px 4px;font-weight:700;color:#b95900;font-size:13px">To chase: waiting more than 30 days</div><div style="overflow-x:auto;padding:0 6px"><table style="width:100%;border-collapse:collapse;font-size:12px"><tbody>';
+      chase.forEach(function(e){ var c = regClient(e);
+        html += '<tr class="ri" style="cursor:pointer;display:table-row" data-act="open-board-case" data-cid="'+escHtml(e.ClientID)+'" data-eid="'+e.ID+'">'+
+          '<td style="'+td+';text-align:left"><b>'+escHtml(c ? c.Name : '(client)')+'</b> <span style="color:#889">'+escHtml(e.Provider || '')+(e.Outcome ? ' · '+escHtml(e.Outcome) : '')+'</span></td>'+
+          '<td style="'+td+'">submitted '+regDate(e.SubmittedDate)+'</td><td style="'+td+';color:#b95900;font-weight:700">'+regDaysSince(e.SubmittedDate)+' days</td><td style="'+td+'">'+regMoney(e.CommissionNet)+'</td></tr>';
+      });
+      html += '</tbody></table></div>';
+    }
+  }
+  // lead source
+  var ls = {}, lsRows = (R.events || []).filter(function(e){ return e.AcceptedDate && String(e.AcceptedDate) >= REG_FROM && e.Status !== 'ntu' && String(e.AcceptedDate).slice(0,4) === y; });
+  lsRows.forEach(function(e){ var k = e.LeadSource || '(not recorded)'; ls[k] = ls[k] || {n:0, net:0}; ls[k].n++; ls[k].net += regNum(e.CommissionNet) || 0; });
+  html += '<div style="padding:16px 14px 4px;font-weight:700;color:var(--navy);font-size:13px">Commission by lead source, '+y+' <span style="font-weight:400;color:#889;font-size:12px">· accepted from '+regDate(REG_FROM)+'</span></div>';
+  if(!lsRows.length) html += '<div style="padding:4px 14px 14px;font-size:12px;color:#889">Nothing accepted from '+regDate(REG_FROM)+' in '+y+' yet. Lead source is filled in on each case\'s Case details.</div>';
+  else {
+    html += '<div style="overflow-x:auto;padding:0 6px 12px"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr><th '+th.replace('text-align:right','text-align:left')+'>Lead source</th><th '+th+'>Policies</th><th '+th+'>After 15%</th></tr></thead><tbody>';
+    Object.keys(ls).sort(function(a2, b2){ return ls[b2].net - ls[a2].net; }).forEach(function(k){
+      html += '<tr><td style="'+td+';text-align:left">'+escHtml(k)+'</td><td style="'+td+'">'+ls[k].n+'</td><td style="'+td+'">'+regMoney(regRound(ls[k].net))+'</td></tr>';
+    });
+    html += '</tbody></table></div>';
+  }
+  return html + '</div>';
+}
+
+// History before the Register: monthly after-15% totals, editable (months before 1 Oct only).
+function regEditHistory(){
+  var R = window._reg, hist = JSON.parse(JSON.stringify(R.hist || {source:'Entered in the CRM', months:{}}));
+  hist.months = hist.months || {};
+  var years = {}; Object.keys(hist.months).forEach(function(k){ years[k.slice(0,4)] = 1; }); years[REG_FROM.slice(0,4)] = 1;
+  var ylist = Object.keys(years).sort(), yy = ylist.indexOf(R.f.syear) >= 0 ? R.f.syear : ylist[ylist.length - 1];
+  var ov = document.createElement('div');
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(10,20,40,.55);z-index:10000;display:flex;align-items:center;justify-content:center';
+  var box = document.createElement('div');
+  box.style.cssText = 'background:#fff;border-radius:12px;padding:20px 24px;max-width:520px;width:94%;max-height:90vh;overflow:auto;box-shadow:0 12px 48px rgba(0,0,0,.25);font-family:inherit';
+  function draw(){
+    var rows = '';
+    for(var m = 1; m <= 12; m++){
+      var k = yy+'-'+String(m).padStart(2,'0'), locked = k >= regFromKey();
+      rows += '<div style="display:flex;align-items:center;gap:10px;margin-bottom:5px"><span style="width:90px;font-size:13px">'+REG_MONTHS[m-1]+'</span>'+
+        (locked ? '<span style="font-size:12px;color:#889">from the Register</span>'
+                : '<input data-k="'+k+'" type="number" step="0.01" value="'+(hist.months[k] === undefined || hist.months[k] === null ? '' : hist.months[k])+'" style="flex:1;padding:6px 8px;border:1.5px solid #ccc;border-radius:6px;font-size:13px;font-family:inherit">')+'</div>';
+    }
+    box.innerHTML = '<div style="font-family:Georgia,serif;font-size:18px;color:#0e413a;margin-bottom:4px">Sales history, after 15%</div>'+
+      '<div style="font-size:12px;color:#667;margin-bottom:10px">Commission HFS received, by month of acceptance, before the Register started. Loaded from Tracy\'s activations spreadsheet (client rows added up). Correct any month here.</div>'+
+      '<select data-role="y" style="padding:6px 8px;border:1.5px solid #ccc;border-radius:6px;margin-bottom:10px;font-family:inherit">'+ylist.map(function(v){ return '<option'+(v === yy ? ' selected' : '')+'>'+v+'</option>'; }).join('')+'</select>'+
+      rows+
+      '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px"><button data-role="cancel" style="padding:8px 18px;border-radius:7px;border:1.5px solid #ddd;background:#fff;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;color:#555">Cancel</button>'+
+      '<button data-role="ok" style="padding:8px 22px;border-radius:7px;border:none;background:#0e413a;color:#fff;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">Save</button></div>';
+    box.querySelector('[data-role=y]').addEventListener('change', function(){ keep(); yy = this.value; draw(); });
+    box.querySelector('[data-role=cancel]').addEventListener('click', close);
+    box.querySelector('[data-role=ok]').addEventListener('click', save);
+  }
+  function keep(){
+    var bad = false;
+    box.querySelectorAll('input[data-k]').forEach(function(i){ var s2 = String(i.value).trim(); if(!s2){ delete hist.months[i.getAttribute('data-k')]; return; } var n = regNum(s2); if(n === null) bad = true; else hist.months[i.getAttribute('data-k')] = regRound(n); });
+    return !bad;
+  }
+  function close(){ if(ov.parentNode) document.body.removeChild(ov); }
+  function save(){
+    if(!keep()){ alert('Please enter amounts as numbers only, e.g. 137274.85'); return; }
+    hist.updated = localDateStr()+' by '+userLabel(curUserCode());
+    sbFetch('POST','/rest/v1/settings', [{Key:REG_HIST_KEY, Value:JSON.stringify(hist)}], function(res, err){
+      if(err){ alert('Could not save the history: '+err); return; }
+      R.hist = hist; close(); toast('✓ Sales history saved','ok'); render();
+    });
+  }
+  ov.appendChild(box); document.body.appendChild(ov); draw();
+  ov.addEventListener('click', function(e){ if(e.target === ov) close(); });
+}
+
 function regEditBf(){
   var R = window._reg, bf = R.bf || {year:2026, label:'Brought forward Jan to Sep 2026 (spreadsheet)', full:0, net:0};
   var full = prompt('Brought forward, FULL commission (excl VAT), Jan to Sep '+bf.year+':', String(bf.full));
@@ -5295,7 +5555,26 @@ function regExcel(){
     function zarTrail(rows, which){ var t = regTrailSums(rows).ZAR; return t ? regRound(which === 'net' ? t.net : t.pm) : 0; }
     function invCell(ev){ return ev.InvoicedDate ? regDate(ev.InvoicedDate) : regUpfrontZero(ev) ? 'NO UPFRONT' : (ev.AcceptedDate ? 'NOT INVOICED' : ''); }
     var wb = X.utils.book_new(), ws, name;
-    if(R.tab === 'trail'){
+    if(R.tab === 'sales'){
+      var ys = regSalesYears(), cols = 'BCDEFGHIJK';
+      aoa.push(['SALES BY MONTH OF ACCEPTANCE · commission after 15% (HFS share, excl VAT) · Duwalcoe Financial Consultants · as of '+regDate(today)]);
+      aoa.push(['Before '+regDate(REG_FROM)+': Tracy\'s activations spreadsheet (client rows added up). From '+regDate(REG_FROM)+': the CRM Register.']);
+      aoa.push(['MONTH'].concat(ys));
+      for(var mm = 1; mm <= 12; mm++){
+        aoa.push([REG_MONTHS[mm-1]].concat(ys.map(function(yv){
+          var v = (+yv === new Date().getFullYear() && mm > regMonthsDone(yv)) ? null : regMonthNet(yv+'-'+String(mm).padStart(2,'0'));
+          return v === null ? '' : {t:'n', v:v, z:numFmt};
+        })));
+      }
+      aoa.push(['TOTAL'].concat(ys.map(function(yv, i){
+        var c = cols[i], tot = regYearSum(yv, regMonthsDone(yv) || 12).total;
+        return {t:'n', f:'SUM('+c+'4:'+c+'15)', v:tot, z:numFmt};
+      })));
+      ws = X.utils.aoa_to_sheet(aoa);
+      ws['!cols'] = [14].concat(ys.map(function(){ return 16; })).map(function(w){ return {wch:w}; });
+      name = 'Register - Sales by month (as of '+today+').xlsx';
+      X.utils.book_append_sheet(wb, ws, 'Sales by month');
+    } else if(R.tab === 'trail'){
       if(!R.f.tmonth) R.f.tmonth = regMonthKey();
       var key = R.f.tmonth, trows = regTrailRows(key), kp = key.split('-'), mName = REG_MONTHS[+kp[1]-1]+' '+kp[0];
       aoa.push(['RECURRING (TRAIL) COMMISSION · '+mName.toUpperCase()+' · Duwalcoe Financial Consultants · as of '+regDate(today)]);
@@ -14548,7 +14827,7 @@ document.addEventListener('click', function(e){
           })();
           break;
         case 'reg-tab':
-          window._reg.tab = ({acts:'acts', trail:'trail'})[el.getAttribute('data-tab')] || 'apps';
+          window._reg.tab = ({acts:'acts', trail:'trail', sales:'sales'})[el.getAttribute('data-tab')] || 'apps';
           render();
           break;
         case 'reg-refresh':
@@ -14561,6 +14840,9 @@ document.addEventListener('click', function(e){
           break;
         case 'reg-bf-edit':
           regEditBf();
+          break;
+        case 'reg-hist-edit':
+          regEditHistory();
           break;
         case 'task-doc-upload':
           openTaskDocUpload(el.getAttribute('data-tid'));
