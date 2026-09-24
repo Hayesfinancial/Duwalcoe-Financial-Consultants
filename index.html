@@ -175,6 +175,7 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--cream);c
     <div class="ni" data-nav="clients">👥 Clients</div>
     <div class="ni" data-nav="tasks">✅ Tasks <span id="tbadge" style="margin-left:auto;background:var(--rose);color:#fff;border-radius:10px;padding:1px 7px;font-size:10px;display:none"></span></div>
     <div class="ni" data-nav="cases">📂 Open Cases <span id="cbadge" style="margin-left:auto;background:var(--gold);color:#fff;border-radius:10px;padding:1px 7px;font-size:10px;display:none"></span></div>
+    <div class="ni" data-nav="reviews">🔄 Annual Reviews</div>
     <div class="ni" data-nav="suppliers">🏢 Suppliers</div>
     <div class="ndiv"></div>
     <div class="nsec">Tools</div>
@@ -1354,6 +1355,7 @@ function render(){
   else if(PAGE==='client')  m.innerHTML=renderProfile();
   else if(PAGE==='suppliers') m.innerHTML=renderSuppliers();
   else if(PAGE==='cases') m.innerHTML=renderCasesPage();
+  else if(PAGE==='reviews') m.innerHTML=renderReviewsPage();
   else if(PAGE==='tasks'){  if(!window.TASK_USER_FILTER) window.TASK_USER_FILTER=cu(); m.innerHTML=renderTasks();}
   // Restore dashboard search value
   if(_dashQ){
@@ -1389,8 +1391,8 @@ function renderDash(){
       }
     }
     if(clean(c.ReviewDate)){
-      var d2=reviewDaysTo(c.ReviewDate);
-      if(d2!==null&&d2<=60)up.push({name:c.Name,id:c.ID,cell:c.Cell||'',type:'📋 Review Due',days:d2,col:'var(--sky)',reviewDate:c.ReviewDate,reviewMonth:reviewIsMonth(c.ReviewDate)});
+      var d2=daysTo(c.ReviewDate);
+      if(d2!==null&&d2<=60)up.push({name:c.Name,id:c.ID,cell:c.Cell||'',type:'📋 Review Due',days:d2,col:'var(--sky)',reviewDate:c.ReviewDate});
     }
     if(clean(c.Anniversary)){
       var d3=daysTo(c.Anniversary);
@@ -1501,7 +1503,7 @@ function renderDash(){
     '<div class="stat s-gd" style="cursor:pointer;padding:10px" data-act="go-clients"><div class="v" style="font-size:18px">'+active.length+'</div><div class="l" style="font-size:10px">Active Clients</div></div>'+
     '<div class="stat s-sg" style="padding:10px"><div class="v" style="font-size:18px">'+up.filter(function(u){return u.days<=30;}).length+'</div><div class="l" style="font-size:10px">Reminders (30d)</div></div>'+
     '<div class="stat s-sk" style="padding:10px"><div class="v" style="font-size:18px">'+open.length+'</div><div class="l" style="font-size:10px">Open Tasks</div></div>'+
-    '<div class="stat s-rd" style="padding:10px"><div class="v" style="font-size:18px">'+reviewsDue+'</div><div class="l" style="font-size:10px">Reviews Due</div></div>'+
+    '<div class="stat s-rd" style="cursor:pointer;padding:10px" data-nav="reviews" title="Open the Annual Reviews list"><div class="v" style="font-size:18px">'+reviewsDue+'</div><div class="l" style="font-size:10px">Reviews Due</div></div>'+
     '<div class="stat s-gd" style="cursor:pointer;padding:10px" data-act="go-clients-no-will" title="Click to see active clients who explicitly said No to having a will. Headline shows wills-with-me / active clients.">'+
       '<div class="v" style="font-size:18px">📜 '+willsThroughMe+'<span style="font-size:11px;color:#889;font-weight:400"> / '+active.length+'</span></div>'+
       '<div style="font-size:10px;font-weight:600;color:#667;margin-top:4px;display:flex;gap:8px;flex-wrap:wrap">'+
@@ -1615,7 +1617,7 @@ function renderDash(){
           return detail?'<div style="font-size:11px;color:#889;margin-top:1px">'+detail+'</div>':'';
         })()+
         '</div>'+
-        '<div style="font-weight:700;font-size:11px;color:'+(done?'#ccc':col)+'">'+(u.reviewMonth&&u.days===0?'This mth':u.days===0?'Today':u.days===1?'Tmrw':''+u.days+'d')+'</div></div>';
+        '<div style="font-weight:700;font-size:11px;color:'+(done?'#ccc':col)+'">'+(u.days===0?'Today':u.days===1?'Tmrw':''+u.days+'d')+'</div></div>';
     }).join(''))+
     '</div></div>'+
 
@@ -4422,6 +4424,99 @@ function renderCasesPage(){
     '<div style="font-size:12px;color:#889">New Business and Servicing cases in progress · newest first · click a case to open it</div>'+
     '</div>'+
     renderBoardCard();
+}
+
+// ── Annual Reviews page (Build 5, 24 Sep 2026) ─────────────────────────────
+// Each client's Review Date field holds the time of year their annual review
+// is due: a real date (repeats every year) or, for imported clients, a month
+// word such as "September" or "March; October". This page lists active
+// clients due THIS month and NEXT month, with their last Annual Review Work
+// Event, plus a count of active clients with no review month set.
+window._revEvents = window._revEvents || {loadedAt:0, loading:false, byClient:{}, err:false};
+function loadReviewEvents(){
+  var R = window._revEvents;
+  if(R.loading) return;
+  R.loading = true;
+  sbFetch('GET','/rest/v1/work_events?EventType=in.(REV_LIFE,REV_INVEST)&select=ClientID,EventDate,EventType,Status&order=EventDate.desc', null, function(rows, err){
+    R.loading = false; R.loadedAt = Date.now();
+    if(err){ R.err = true; }
+    else {
+      R.err = false; R.byClient = {};
+      (rows || []).forEach(function(r){ if(!R.byClient[r.ClientID]) R.byClient[r.ClientID] = r; }); // newest first
+    }
+    if(PAGE === 'reviews') render();
+  });
+}
+// Month numbers (0-11) a client's review falls in: from a real date or month words.
+function clientReviewMonths(c){
+  var v = clean(c.ReviewDate);
+  if(!v) return [];
+  var p = String(v).split(/[-\/]/);
+  if(p.length === 3 && daysTo(v) !== null){
+    var m = +p[1]-1;   // month is the middle part in both YYYY-MM-DD and DD/MM/YYYY
+    return (m >= 0 && m < 12) ? [m] : [];
+  }
+  return reviewMonths(v);
+}
+var MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+
+function renderReviewsPage(){
+  var R = window._revEvents;
+  if(!R.loading && Date.now() - R.loadedAt > BOARD_REFRESH_MS) loadReviewEvents();
+  var today = new Date(); today.setHours(0,0,0,0);
+  var thisM = today.getMonth(), nextM = (thisM + 1) % 12;
+  var active = DB.clients.filter(isActiveClient);
+  var noMonth = 0, dueThis = [], dueNext = [];
+  active.forEach(function(c){
+    var ms = clientReviewMonths(c);
+    if(!ms.length){ noMonth++; return; }
+    if(ms.indexOf(thisM) >= 0) dueThis.push(c);
+    if(ms.indexOf(nextM) >= 0) dueNext.push(c);
+  });
+  var byName = function(a, b){ return String(a.Name || '').localeCompare(String(b.Name || '')); };
+  dueThis.sort(byName); dueNext.sort(byName);
+
+  function row(c){
+    var last = R.byClient[c.ID];
+    var lastTxt, lastClr = '#889';
+    if(!R.loadedAt){ lastTxt = 'Checking last review…'; }
+    else if(R.err){ lastTxt = 'Last review could not be loaded'; }
+    else if(!last){ lastTxt = 'No Annual Review recorded yet'; }
+    else {
+      var p = String(last.EventDate || '').split('-');
+      var ld = p.length === 3 ? new Date(+p[0], +p[1]-1, +p[2]) : null;
+      var ago = ld ? Math.round((today - ld) / 86400000) : null;
+      var recent = ago !== null && ago <= 90;
+      lastTxt = (recent ? '✓ ' : '')+'Last review '+fdate(last.EventDate)+(last.Status === 'complete' ? '' : ' (in progress)');
+      if(recent) lastClr = '#2d7a3e';
+    }
+    return '<div class="ri" style="cursor:pointer;padding:9px 14px;border-bottom:1px solid var(--smoke)" data-act="open-client" data-id="'+escHtml(c.ID)+'">'+
+      '<div style="width:30px;height:30px;border-radius:50%;background:var(--navy);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:var(--gold);flex-shrink:0">'+ini(c.Name)+'</div>'+
+      '<div style="flex:1;min-width:0">'+
+        '<div style="font-weight:700;font-size:13px">'+escHtml(c.Name || '')+'</div>'+
+        '<div style="font-size:11px;color:#889">'+escHtml(c.Cell || c.Email || '')+(clean(c.Cell) || clean(c.Email) ? ' · ' : '')+'Review: '+escHtml(clean(c.ReviewDate))+'</div>'+
+      '</div>'+
+      '<div style="font-size:11px;color:'+lastClr+';font-weight:'+(lastClr === '#889' ? '400' : '700')+';text-align:right;white-space:nowrap">'+escHtml(lastTxt)+'</div>'+
+    '</div>';
+  }
+  function section(title, list){
+    return '<div class="card" style="padding:0;margin-bottom:14px">'+
+      '<div class="ch" style="padding:10px 16px"><h2>'+title+' <span style="font-size:12px;color:#889;font-weight:400">('+list.length+')</span></h2></div>'+
+      (list.length ? list.map(row).join('') : '<div class="empty" style="padding:14px">No clients due</div>')+
+    '</div>';
+  }
+
+  return '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">'+
+      '<h1 style="font-family:\'DM Serif Display\',serif;font-size:22px;color:var(--navy)">Annual Reviews</h1>'+
+      '<div style="display:flex;gap:10px;align-items:center"><span style="font-size:12px;color:#889">Active clients by review month · click a client to open them</span>'+
+      '<button class="btn b-gh xs" data-act="reviews-refresh" title="Refresh last reviews">↻</button></div>'+
+    '</div>'+
+    section('📅 Due this month · '+MONTH_NAMES[thisM], dueThis)+
+    section('🗓 Due next month · '+MONTH_NAMES[nextM], dueNext)+
+    '<div style="padding:12px 16px;background:#fdf2e6;border-left:3px solid #b95900;border-radius:6px;font-size:12px;color:#8a4a00">'+
+      '<b>'+noMonth+' of '+active.length+' active clients have no review month set.</b> '+
+      'To add one: open the client, click Edit, and set <b>Review Date</b> to any day in the month their annual review is due. It repeats every year.'+
+    '</div>';
 }
 
 function openBoardCase(clientId, eventId){
@@ -13564,6 +13659,10 @@ document.addEventListener('click', function(e){
         case 'board-refresh':
           window._board.loadedAt = 0;
           loadBoard();
+          render();
+          break;
+        case 'reviews-refresh':
+          window._revEvents.loadedAt = 0;
           render();
           break;
         case 'open-board-case':
