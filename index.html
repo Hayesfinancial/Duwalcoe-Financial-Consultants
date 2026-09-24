@@ -4582,6 +4582,22 @@ function regNtuText(ev){
   var d = regNtuDate(ev);
   return 'NTU'+(d ? ' '+regDate(d) : '')+(ev.ClosedReason ? ': '+String(ev.ClosedReason) : '');
 }
+// ── Recurring (trail) commission ──
+// Trail = investment amount x annual % / 12, before VAT (like "FULL COMM DUE less VAT"); 15% comes off it too.
+// Shown in the investment's own currency. Tracy invoices it monthly from the Register's Trail tab.
+function regIsInvest(ev){ return /_INVEST$/.test(String(ev.EventType || '')); }
+function regHasTrail(ev){ var b = regNum(ev.TrailBase), p = regNum(ev.TrailPct); return b !== null && p !== null && b > 0 && p > 0; }
+function regTrailPm(ev){ return regHasTrail(ev) ? Math.round(regNum(ev.TrailBase) * regNum(ev.TrailPct) / 12) / 100 : 0; }
+function regTrailNet(ev){ return Math.round(regTrailPm(ev) * REG_NET_PCT) / 100; }
+function regPct(v){ var n = regNum(v); return n === null ? '' : String(Math.round(n * 1000) / 1000)+'%'; }
+function regTrailText(ev){
+  if(!regHasTrail(ev)) return '';
+  return regPct(ev.TrailPct)+' of '+regMoney(ev.TrailBase, ev.PremiumCurrency)+' = '+regMoney(regTrailPm(ev), ev.PremiumCurrency)+' pm ('+
+    regMoney(regTrailNet(ev), ev.PremiumCurrency)+' after 15%)'+(ev.TrailEndDate ? ' · stops '+regDate(ev.TrailEndDate) : '');
+}
+// Upfront commission to invoice? A trail-only case (upfront entered as 0, e.g. a Section 14 transfer) has nothing to invoice upfront.
+function regUpfrontZero(ev){ return regNum(ev.CommissionDue) === 0; }
+function regNotInvoiced(ev){ return !!ev.AcceptedDate && !ev.InvoicedDate && !regUpfrontZero(ev); }
 function regIsOld(ev){ return String(ev.EventDate || '').slice(0,10) < REG_FROM; }
 // Which cases the Register's Applications list shows. The Register is about the APPLICATION
 // (submitted / accepted / commission), not about whether the file is complete (that is Open Cases).
@@ -4612,7 +4628,7 @@ function regStartDate(ev){
 // ── Case details box (inside the case) ────────────────────────────────────
 function renderCaseDetails(ev){
   if(!eventGetsCaseTask(ev.EventType)) return '';
-  var any = ['Provider','PolicyNo','PremiumAmount','PremiumNote','CommissionDue','SubmittedDate','AcceptedDate','ScheduleDate','InvoicedDate','LeadSource'].some(function(k){ return ev[k] !== null && ev[k] !== undefined && ev[k] !== ''; });
+  var any = ['Provider','PolicyNo','PremiumAmount','PremiumNote','CommissionDue','SubmittedDate','AcceptedDate','ScheduleDate','InvoicedDate','LeadSource','TrailBase','TrailPct'].some(function(k){ return ev[k] !== null && ev[k] !== undefined && ev[k] !== ''; });
   var st = regStatus(ev);
   // Accepted but no policy on the Policies tab yet (nothing linked as "created").
   var needsPolicy = !!ev.AcceptedDate && ev.Status !== 'ntu' &&
@@ -4637,7 +4653,7 @@ function renderCaseDetails(ev){
     return '<div style="min-width:0"><div style="font-size:10px;color:#889;text-transform:uppercase;letter-spacing:.5px">'+lbl+'</div>'+
       '<div style="font-size:13px;font-weight:600;color:'+(val ? 'var(--ink)' : '#bbc')+';word-break:break-word'+(extra||'')+'">'+(val ? escHtml(val) : '—')+'</div></div>';
   }
-  var notInvoiced = ev.AcceptedDate && !ev.InvoicedDate;
+  var notInvoiced = regNotInvoiced(ev);
   html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px 16px;padding:10px 12px">'+
     cell('Provider', ev.Provider)+cell('Policy no', ev.PolicyNo)+cell('Premium', regPremium(ev))+
     cell('Commission (excl VAT)', regMoney(ev.CommissionDue))+cell('After 15%', regMoney(ev.CommissionNet))+
@@ -4645,7 +4661,9 @@ function renderCaseDetails(ev){
     cell('Submitted', regDate(ev.SubmittedDate))+cell('Accepted', regDate(ev.AcceptedDate))+cell('Schedule received', regDate(ev.ScheduleDate))+
     (notInvoiced
       ? '<div><div style="font-size:10px;color:#889;text-transform:uppercase;letter-spacing:.5px">Invoiced</div><div style="font-size:12px;font-weight:700;color:#b95900">⚠ Not invoiced yet</div></div>'
-      : cell('Invoiced', regDate(ev.InvoicedDate)))+
+      : cell('Invoiced', regUpfrontZero(ev) && !ev.InvoicedDate ? 'No upfront commission' : regDate(ev.InvoicedDate)))+
+    (regHasTrail(ev) ? '<div style="grid-column:1/-1;min-width:0"><div style="font-size:10px;color:#889;text-transform:uppercase;letter-spacing:.5px">🔁 Recurring (trail) commission</div>'+
+      '<div style="font-size:13px;font-weight:600;color:var(--ink)">'+escHtml(regTrailText(ev))+'</div></div>' : '')+
   '</div></div>';
   return html;
 }
@@ -4667,6 +4685,7 @@ function openCaseDetailsModal(eventId){
   var lbl = 'font-size:11px;font-weight:600;color:#445;display:block;margin-bottom:3px';
   var inp = 'width:100%;padding:7px 9px;border:1.5px solid #ccc;border-radius:6px;font-size:13px;font-family:inherit;box-sizing:border-box';
   function sel(id, list, cur){ return '<select id="'+id+'" style="'+inp+'">'+list.map(function(o){ return '<option value="'+o[0]+'"'+(o[0] === (cur||'') ? ' selected' : '')+'>'+o[1]+'</option>'; }).join('')+'</select>'; }
+  var showTrail = regIsInvest(ev) || regHasTrail(ev);   // trail section on investment cases
   var ov = document.createElement('div');
   ov.style.cssText = 'position:fixed;inset:0;background:rgba(10,20,40,.55);z-index:10000;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(2px)';
   var box = document.createElement('div');
@@ -4691,6 +4710,16 @@ function openCaseDetailsModal(eventId){
       '<div><label style="'+lbl+'">Schedule received</label><input id="cd_sched" type="date" value="'+v('ScheduleDate')+'" style="'+inp+'"></div>'+
       '<div><label style="'+lbl+'">Invoiced</label><input id="cd_inv" type="date" value="'+v('InvoicedDate')+'" style="'+inp+'"></div>'+
       '<div style="grid-column:1/-1"><label style="'+lbl+'">Lead source</label><input id="cd_lead" list="cd_lead_list" value="'+v('LeadSource')+'" style="'+inp+'" autocomplete="off"></div>'+
+      (showTrail ?
+      '<div style="grid-column:1/-1;border-top:1px dashed #ccd;padding-top:10px;margin-top:2px">'+
+        '<div style="font-size:12px;font-weight:700;color:#0e413a;margin-bottom:6px">🔁 Recurring (trail) commission <span style="font-weight:400;color:#889">optional · before VAT · e.g. 0.5% a year. For a Section 14 transfer with no upfront, put 0 in Commission due.</span></div>'+
+        '<div style="display:grid;grid-template-columns:1.6fr 1fr 1.3fr;gap:10px">'+
+          '<div><label style="'+lbl+'">Investment amount</label><input id="cd_tbase" type="number" step="0.01" min="0" value="'+v('TrailBase')+'" style="'+inp+'"></div>'+
+          '<div><label style="'+lbl+'">Annual %</label><input id="cd_tpct" type="number" step="0.01" min="0" value="'+v('TrailPct')+'" placeholder="0.5" style="'+inp+'"></div>'+
+          '<div><label style="'+lbl+'">Trail stops <span style="font-weight:400;color:#889">(if ever)</span></label><input id="cd_tend" type="date" value="'+v('TrailEndDate')+'" style="'+inp+'"></div>'+
+        '</div>'+
+        '<div id="cd_tcalc" style="font-size:12px;color:#2d7a3e;font-weight:600;margin-top:6px;min-height:16px"></div>'+
+      '</div>' : '')+
     '</div>'+
     '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px">'+
       '<button data-role="cancel" style="padding:8px 18px;border-radius:7px;border:1.5px solid #ddd;background:#fff;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;color:#555">Cancel</button>'+
@@ -4709,6 +4738,27 @@ function openCaseDetailsModal(eventId){
     var n = regNum(this.value);
     $('cd_net').value = n === null ? '' : (Math.round(n * REG_NET_PCT) / 100).toFixed(2);
   });
+  if(showTrail){
+    // Investment amount follows a lump-sum premium until someone types in it themselves.
+    var baseTouched = regNum(ev.TrailBase) !== null && regNum(ev.TrailBase) !== regNum(ev.PremiumAmount);
+    var trailCalc = function(){
+      var b = regNum($('cd_tbase').value), pc = regNum($('cd_tpct').value), cur = $('cd_cur').value || 'ZAR';
+      if(b === null || pc === null || b <= 0 || pc <= 0){ $('cd_tcalc').textContent = ''; return; }
+      var pm = Math.round(b * pc / 12) / 100, net = Math.round(pm * REG_NET_PCT) / 100;
+      $('cd_tcalc').textContent = '= '+regMoney(pm, cur)+' a month · '+regMoney(net, cur)+' after 15% · '+regMoney(Math.round(pm * 1200) / 100, cur)+' a year';
+    };
+    var baseFollow = function(){
+      if(baseTouched || !String($('cd_tpct').value || '').trim()) { trailCalc(); return; }   // only once an annual % is entered
+      if(($('cd_freq').value === 'Lump sum') && regNum($('cd_prem').value) !== null) $('cd_tbase').value = $('cd_prem').value;
+      trailCalc();
+    };
+    $('cd_tbase').addEventListener('input', function(){ baseTouched = true; trailCalc(); });
+    $('cd_tpct').addEventListener('input', function(){ baseFollow(); });
+    $('cd_prem').addEventListener('input', baseFollow);
+    $('cd_freq').addEventListener('change', baseFollow);
+    $('cd_cur').addEventListener('change', trailCalc);
+    trailCalc();
+  }
   box.querySelector('[data-role=cancel]').addEventListener('click', close);
   ov.addEventListener('click', function(e){ if(e.target === ov) close(); });
   box.querySelector('[data-role=ok]').addEventListener('click', function(){
@@ -4725,10 +4775,23 @@ function openCaseDetailsModal(eventId){
       LeadSource: txt('cd_lead')
     };
     if(patch.CommissionDue !== null && patch.CommissionNet === null) patch.CommissionNet = Math.round(patch.CommissionDue * REG_NET_PCT) / 100;
+    if(showTrail){
+      var tb = String($('cd_tbase').value || '').trim(), tp = String($('cd_tpct').value || '').trim(), te = dte('cd_tend');
+      if(tb && !tp && !baseTouched && !te) tb = '';   // an amount copied in automatically, with no %: nothing to save
+      if((tb && (regNum(tb) === null || regNum(tb) < 0)) || (tp && (regNum(tp) === null || regNum(tp) < 0))){ alert('Please enter the investment amount and annual % as numbers only, e.g. 1525966 and 0.5'); return; }
+      if(tp && regNum(tp) > 5){ alert('The annual % looks too high. Enter it as a percentage, e.g. 0.5 for half a percent.'); return; }
+      if((tb && !tp) || (tp && !tb) || (te && !(tb && tp))){ alert('For recurring commission please fill in both the investment amount and the annual %.'); return; }
+      // Only send the trail fields when there is something to save or clear (keeps saves working before Register_Trail.sql is run).
+      if(tb || tp || te || ev.TrailBase !== undefined && ev.TrailBase !== null || ev.TrailPct !== undefined && ev.TrailPct !== null){
+        patch.TrailBase = tb ? regNum(tb) : null; patch.TrailPct = tp ? regNum(tp) : null; patch.TrailEndDate = te;
+      }
+    }
     var newlyAccepted = !ev.AcceptedDate && !!patch.AcceptedDate;
     sbFetch('PATCH','/rest/v1/work_events?ID=eq.'+encodeURIComponent(eventId), patch, function(res, err){
       if(err){
-        alert(/column|PGRST204/.test(String(err))
+        alert(/Trail/.test(String(err)) && /column|PGRST204/.test(String(err))
+          ? 'Could not save the recurring commission: the database has not been updated for it yet. Run Register_Trail.sql in Supabase first.'
+          : /column|PGRST204/.test(String(err))
           ? 'Could not save: the database has not been updated for the Case Register yet. Run Register_BuildA.sql in Supabase first.'
           : 'Could not save the case details: '+err);
         return;
@@ -4754,7 +4817,7 @@ function caseAcceptedSteps(ev, after){
     if(links.some(function(l){ return l.Action === 'created'; })) return;   // already has its policy
     openAddPolicyFromCase(ev);
   }
-  if(!ev.InvoicedDate && confirm('Case accepted.\n\nMark it as invoiced today ('+regDate(localDateStr())+')?')){
+  if(!ev.InvoicedDate && !regUpfrontZero(ev) && confirm('Case accepted.\n\nMark it as invoiced today ('+regDate(localDateStr())+')?')){
     var today = localDateStr();
     sbFetch('PATCH','/rest/v1/work_events?ID=eq.'+encodeURIComponent(ev.ID), {InvoicedDate: today}, function(res, err){
       if(err){ toast('Could not mark invoiced: '+err,'err'); }
@@ -4979,12 +5042,13 @@ function renderRegisterPage(){
     '<div style="display:flex;gap:6px;align-items:center">'+
       '<button class="btn '+(tab === 'apps' ? 'b-nv' : 'b-gh')+' sm" data-act="reg-tab" data-tab="apps">📝 Applications</button>'+
       '<button class="btn '+(tab === 'acts' ? 'b-nv' : 'b-gh')+' sm" data-act="reg-tab" data-tab="acts">💰 Activations &amp; Commission</button>'+
+      '<button class="btn '+(tab === 'trail' ? 'b-nv' : 'b-gh')+' sm" data-act="reg-tab" data-tab="trail">🔁 Trail</button>'+
       '<button class="btn b-gh sm" data-act="reg-xlsx" title="Download what is shown as an Excel file">⬇ Excel</button>'+
       '<button class="btn b-gh sm" data-act="reg-refresh" title="Refresh">↻</button>'+
     '</div></div>';
   if(!R.loadedAt) return head + '<div class="card"><div class="empty" style="padding:20px">Loading the register…</div></div>';
   if(R.err) return head + '<div class="card"><div class="empty" style="padding:20px;color:#b23">Could not load the register. Tap ↻ to try again.</div></div>';
-  return head + (tab === 'acts' ? regActsHtml() : regAppsHtml());
+  return head + (tab === 'acts' ? regActsHtml() : tab === 'trail' ? regTrailHtml() : regAppsHtml());
 }
 
 function regAppsHtml(){
@@ -5018,7 +5082,8 @@ function regAppsHtml(){
       '<td '+td()+'>'+escHtml(eventTypeLabel(ev))+(ev.Outcome ? '<div style="color:#0e413a;font-weight:600">'+escHtml(ev.Outcome)+'</div>' : '')+'</td>'+
       '<td '+td()+'>'+escHtml(ev.PolicyNo || '')+'</td>'+
       '<td '+td()+'>'+escHtml(regPremium(ev))+'</td>'+
-      '<td '+td('text-align:right;white-space:nowrap')+'>'+regMoney(ev.CommissionDue)+'</td>'+
+      '<td '+td('text-align:right;white-space:nowrap')+'>'+regMoney(ev.CommissionDue)+
+        (regHasTrail(ev) ? '<div style="font-size:11px;color:#2d7a3e;font-weight:600">+ '+regMoney(regTrailPm(ev), ev.PremiumCurrency)+' pm trail</div>' : '')+'</td>'+
       '<td '+td()+'><span style="background:'+st.bg+';color:'+st.clr+';border-radius:4px;padding:1px 6px;font-size:10px;font-weight:700;white-space:nowrap">'+st.t+'</span>'+
         (st.k === 'ntu' ? '<div style="font-size:11px;color:#6b6b6b;margin-top:2px">'+escHtml(regNtuText(ev).replace(/^NTU:? ?/, ''))+'</div>' : '')+'</td>'+
       '<td '+td('white-space:nowrap')+'>'+regDate(ev.AcceptedDate)+'</td>'+
@@ -5033,7 +5098,8 @@ function regActsHtml(){
   (R.events || []).forEach(function(e){ if(e.AcceptedDate && String(e.AcceptedDate) >= REG_FROM) years[String(e.AcceptedDate).slice(0,4)] = 1; });
   var sel = 'border:1.5px solid var(--mist);border-radius:7px;padding:5px 8px;font-size:12px;font-family:inherit';
   var all = [].concat.apply([], groups.map(function(g){ return g.rows; }));
-  var notInv = all.filter(function(e){ return !e.InvoicedDate; });
+  var notInv = all.filter(regNotInvoiced);
+  var trailYear = regTrailSums(all);
   var totFull = groups.reduce(function(t, g){ return t + g.full; }, 0) + (bf ? (regNum(bf.full) || 0) : 0);
   var totNet  = groups.reduce(function(t, g){ return t + g.net; }, 0)  + (bf ? (regNum(bf.net) || 0) : 0);
   var html = '<div class="card" style="padding:0">'+
@@ -5043,16 +5109,16 @@ function regActsHtml(){
       (notInv.length ? '<span style="margin-left:auto;background:#fdf2e6;color:#b95900;border-radius:5px;padding:3px 9px;font-size:11px;font-weight:700">⚠ '+notInv.length+' accepted but not invoiced</span>' : '')+
     '</div>';
   var th = 'style="font-size:10px;text-transform:uppercase;letter-spacing:.6px;color:#889;text-align:left;padding:6px 8px;border-bottom:1px solid var(--smoke);white-space:nowrap"';
-  var cols = ['#','Client','ID No.','Provider','Case','Policy no','Premium','Full comm','After 15%','Accepted','Start date','Invoiced','Lead source'];
+  var cols = ['#','Client','ID No.','Provider','Case','Policy no','Premium','Full comm','After 15%','Trail pm','Accepted','Start date','Invoiced','Lead source'];
   function td(x){ return 'style="padding:6px 8px;border-bottom:1px solid var(--smoke);vertical-align:top;'+(x||'')+'"'; }
   var money = 'text-align:right;white-space:nowrap';
   // One table for the whole year so the columns line up month to month.
-  html += '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr>'+cols.map(function(h, i){ return '<th '+th.replace('text-align:left', (i === 7 || i === 8) ? 'text-align:right' : 'text-align:left')+'>'+h+'</th>'; }).join('')+'</tr></thead><tbody>';
+  html += '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr>'+cols.map(function(h, i){ return '<th '+th.replace('text-align:left', (i >= 7 && i <= 9) ? 'text-align:right' : 'text-align:left')+'>'+h+'</th>'; }).join('')+'</tr></thead><tbody>';
   if(!groups.length){
-    html += '<tr><td colspan="13" class="empty" style="padding:18px">No policies accepted from '+regDate(REG_FROM)+' in '+escHtml(R.f.year)+' yet.</td></tr>';
+    html += '<tr><td colspan="14" class="empty" style="padding:18px">No policies accepted from '+regDate(REG_FROM)+' in '+escHtml(R.f.year)+' yet.</td></tr>';
   }
   groups.forEach(function(g){
-    html += '<tr><td colspan="13" style="padding:14px 8px 4px;font-family:\'DM Serif Display\',serif;font-size:15px;color:var(--navy)">'+regMonthTitle(g.key)+'</td></tr>';
+    html += '<tr><td colspan="14" style="padding:14px 8px 4px;font-family:\'DM Serif Display\',serif;font-size:15px;color:var(--navy)">'+regMonthTitle(g.key)+'</td></tr>';
     g.rows.forEach(function(ev, i){
       var c = regClient(ev), sd = regStartDate(ev);
       html += '<tr class="ri" style="cursor:pointer;display:table-row" data-act="open-board-case" data-cid="'+escHtml(ev.ClientID)+'" data-eid="'+ev.ID+'">'+
@@ -5062,23 +5128,121 @@ function regActsHtml(){
         '<td '+td()+'>'+escHtml(ev.PolicyNo || '')+'</td><td '+td()+'>'+escHtml(regPremium(ev))+'</td>'+
         '<td '+td(money)+'>'+regMoney(ev.CommissionDue)+'</td>'+
         '<td '+td(money)+'>'+regMoney(ev.CommissionNet)+'</td>'+
+        '<td '+td(money+';color:#2d7a3e')+'>'+(regHasTrail(ev) ? regMoney(regTrailPm(ev), ev.PremiumCurrency) : '')+'</td>'+
         '<td '+td('white-space:nowrap')+'>'+regDate(ev.AcceptedDate)+'</td>'+
         '<td '+td('white-space:nowrap')+'>'+(sd ? regDate(sd) : '<span style="color:#bbc" title="Comes from the linked policy on the Policies tab">—</span>')+'</td>'+
-        '<td '+td('white-space:nowrap')+'>'+(ev.InvoicedDate ? regDate(ev.InvoicedDate) : '<b style="color:#b95900">Not invoiced</b>')+'</td>'+
+        '<td '+td('white-space:nowrap')+'>'+(ev.InvoicedDate ? regDate(ev.InvoicedDate) : regUpfrontZero(ev) ? '<span style="color:#889">No upfront</span>' : '<b style="color:#b95900">Not invoiced</b>')+'</td>'+
         '<td '+td()+'>'+escHtml(ev.LeadSource || '')+'</td></tr>';
     });
     html += '<tr style="background:#f6f8f7;font-weight:700"><td colspan="7" style="padding:6px 8px">TOTAL '+REG_MONTHS[+g.key.slice(5)-1].toUpperCase()+'</td>'+
-      '<td style="padding:6px 8px;'+money+'">'+regMoney(g.full)+'</td><td style="padding:6px 8px;'+money+'">'+regMoney(g.net)+'</td><td colspan="4"></td></tr>';
+      '<td style="padding:6px 8px;'+money+'">'+regMoney(g.full)+'</td><td style="padding:6px 8px;'+money+'">'+regMoney(g.net)+'</td>'+
+      '<td style="padding:6px 8px;'+money+';color:#2d7a3e">'+regTrailSumText(regTrailSums(g.rows), 'pm')+'</td><td colspan="4"></td></tr>';
   });
-  html += '<tr><td colspan="13" style="padding:6px 0 0"></td></tr>';
+  html += '<tr><td colspan="14" style="padding:6px 0 0"></td></tr>';
   if(bf){
     html += '<tr style="border-top:2px solid var(--navy)"><td colspan="7" style="padding:8px 8px 4px;font-size:13px">'+escHtml(bf.label || 'Brought forward')+
         ' <button class="btn b-gh xs" data-act="reg-bf-edit" style="font-size:10px;padding:1px 8px;margin-left:6px">Edit</button></td>'+
-      '<td style="padding:8px 8px 4px;font-size:13px;'+money+'">'+regMoney(bf.full)+'</td><td style="padding:8px 8px 4px;font-size:13px;'+money+'">'+regMoney(bf.net)+'</td><td colspan="4"></td></tr>';
+      '<td style="padding:8px 8px 4px;font-size:13px;'+money+'">'+regMoney(bf.full)+'</td><td style="padding:8px 8px 4px;font-size:13px;'+money+'">'+regMoney(bf.net)+'</td><td colspan="5"></td></tr>';
   }
   html += '<tr style="font-weight:700;color:var(--navy)'+(bf ? '' : ';border-top:2px solid var(--navy)')+'"><td colspan="7" style="padding:6px 8px 14px;font-size:13px">TOTAL INCOME '+escHtml(R.f.year)+'</td>'+
-      '<td style="padding:6px 8px 14px;font-size:13px;'+money+'">'+regMoney(totFull)+'</td><td style="padding:6px 8px 14px;font-size:13px;'+money+'">'+regMoney(totNet)+'</td><td colspan="4"></td></tr>'+
+      '<td style="padding:6px 8px 14px;font-size:13px;'+money+'">'+regMoney(totFull)+'</td><td style="padding:6px 8px 14px;font-size:13px;'+money+'">'+regMoney(totNet)+'</td><td colspan="5"></td></tr>'+
+    (Object.keys(trailYear).length
+      ? '<tr style="color:#2d7a3e;font-weight:700"><td colspan="14" style="padding:0 8px 14px;font-size:13px">🔁 Recurring (trail) commission added '+escHtml(R.f.year)+': '+
+          regTrailSumText(trailYear, 'pm')+' a month · '+regTrailSumText(trailYear, 'net')+' after 15% · '+regTrailSumText(trailYear, 'pa')+' a year</td></tr>'
+      : '')+
     '</tbody></table></div></div>';
+  return html;
+}
+
+// Trail totals by currency: {ZAR:{pm,net}, USD:{...}}
+function regTrailSums(rows){
+  var t = {};
+  rows.forEach(function(ev){
+    if(!regHasTrail(ev)) return;
+    var c = ev.PremiumCurrency || 'ZAR';
+    t[c] = t[c] || {pm:0, net:0};
+    t[c].pm += regTrailPm(ev); t[c].net += regTrailNet(ev);
+  });
+  return t;
+}
+function regTrailSumText(sums, which){
+  var order = ['ZAR','USD','GBP','EUR'];
+  return Object.keys(sums).sort(function(a, b){ return order.indexOf(a) - order.indexOf(b); }).map(function(c){
+    var v = which === 'net' ? sums[c].net : which === 'pa' ? sums[c].pm * 12 : sums[c].pm;
+    return regMoney(regRound(v), c);
+  }).join(' + ');
+}
+function regMonthKey(d){ d = d || new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'); }
+function regMonthEnd(key){ var p = key.split('-'); return key+'-'+String(new Date(+p[0], +p[1], 0).getDate()).padStart(2,'0'); }
+// Cases paying trail in a month: trail filled in, accepted by the end of the month, not stopped before it began, not NTU.
+function regTrailRows(key){
+  var start = key+'-01', end = regMonthEnd(key);
+  return (window._reg.events || []).filter(function(ev){
+    if(!regHasTrail(ev) || ev.Status === 'ntu' || !ev.AcceptedDate) return false;
+    var acc = String(ev.AcceptedDate).slice(0,10);
+    if(acc > end) return false;
+    if(ev.TrailEndDate && String(ev.TrailEndDate).slice(0,10) < start) return false;
+    return true;
+  }).sort(function(a, b){
+    var ca = regClient(a), cb = regClient(b);
+    return String(ca ? ca.Name : '').localeCompare(String(cb ? cb.Name : ''));
+  });
+}
+function regTrailNote(ev, key){
+  var acc = String(ev.AcceptedDate).slice(0,10), stop = ev.TrailEndDate ? String(ev.TrailEndDate).slice(0,10) : '';
+  var n = [];
+  if(acc.slice(0,7) === key) n.push('First month (accepted '+regDate(acc)+')');
+  if(stop && stop.slice(0,7) === key) n.push('Last month (stops '+regDate(stop)+')');
+  return n.join(' · ');
+}
+function regTrailMonths(){
+  var keys = {}, now = new Date(), first = regMonthKey(now), last = regMonthKey(new Date(now.getFullYear(), now.getMonth()+1, 1));
+  (window._reg.events || []).forEach(function(ev){
+    if(!regHasTrail(ev) || !ev.AcceptedDate) return;
+    var k = String(ev.AcceptedDate).slice(0,7);
+    if(k < first) first = k;
+    if(k > last) last = k;
+  });
+  var sel = window._reg.f.tmonth;
+  if(sel && sel < first) first = sel;
+  if(sel && sel > last) last = sel;
+  var d = new Date(+first.slice(0,4), +first.slice(5,7)-1, 1);
+  while(regMonthKey(d) <= last){ keys[regMonthKey(d)] = 1; d = new Date(d.getFullYear(), d.getMonth()+1, 1); }
+  return Object.keys(keys).sort().reverse();
+}
+function regTrailHtml(){
+  var R = window._reg;
+  if(!R.f.tmonth) R.f.tmonth = regMonthKey();
+  var key = R.f.tmonth, rows = regTrailRows(key), sums = regTrailSums(rows);
+  var sel = 'border:1.5px solid var(--mist);border-radius:7px;padding:5px 8px;font-size:12px;font-family:inherit';
+  var p = key.split('-'), mName = REG_MONTHS[+p[1]-1]+' '+p[0];
+  var html = '<div class="card" style="padding:0">'+
+    '<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;padding:10px 14px;border-bottom:1px solid var(--smoke)">'+
+      '<select onchange="regSet(\'tmonth\',this.value)" style="'+sel+'">'+regTrailMonths().map(function(k){ var q = k.split('-'); return '<option value="'+k+'"'+(k === key ? ' selected' : '')+'>'+REG_MONTHS[+q[1]-1]+' '+q[0]+'</option>'; }).join('')+'</select>'+
+      '<span style="font-size:12px;color:#667">Recurring (trail) commission to invoice for '+mName+' · amount × annual % ÷ 12, before VAT</span>'+
+    '</div>';
+  if(!rows.length) return html + '<div class="empty" style="padding:18px">No recurring commission for '+mName+'. Add it in a case: Case details, 🔁 Recurring (trail) commission.</div></div>';
+  var th = 'style="font-size:10px;text-transform:uppercase;letter-spacing:.6px;color:#889;text-align:left;padding:6px 8px;border-bottom:1px solid var(--smoke);white-space:nowrap"';
+  var cols = ['#','Client','ID No.','Provider','Case','Policy no','Investment','Annual %','Trail pm','After 15%','Accepted','Note'];
+  function td(x){ return 'style="padding:6px 8px;border-bottom:1px solid var(--smoke);vertical-align:top;'+(x||'')+'"'; }
+  var money = 'text-align:right;white-space:nowrap';
+  html += '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr>'+cols.map(function(h, i){ return '<th '+th.replace('text-align:left', (i >= 6 && i <= 9) ? 'text-align:right' : 'text-align:left')+'>'+h+'</th>'; }).join('')+'</tr></thead><tbody>';
+  rows.forEach(function(ev, i){
+    var c = regClient(ev), cur = ev.PremiumCurrency;
+    html += '<tr class="ri" style="cursor:pointer;display:table-row" data-act="open-board-case" data-cid="'+escHtml(ev.ClientID)+'" data-eid="'+ev.ID+'">'+
+      '<td '+td()+'>'+(i+1)+'</td><td '+td()+'><b>'+escHtml(c ? c.Name : '(client)')+'</b></td>'+
+      '<td '+td('white-space:nowrap')+'>'+escHtml(c ? clean(c.IDNumber) : '')+'</td><td '+td()+'>'+escHtml(ev.Provider || '')+'</td>'+
+      '<td '+td()+'>'+escHtml(eventTypeLabel(ev))+(ev.Outcome ? '<div style="color:#0e413a;font-weight:600">'+escHtml(ev.Outcome)+'</div>' : '')+'</td>'+
+      '<td '+td()+'>'+escHtml(ev.PolicyNo || '')+'</td>'+
+      '<td '+td(money)+'>'+regMoney(ev.TrailBase, cur)+'</td><td '+td(money)+'>'+regPct(ev.TrailPct)+'</td>'+
+      '<td '+td(money+';font-weight:700')+'>'+regMoney(regTrailPm(ev), cur)+'</td><td '+td(money)+'>'+regMoney(regTrailNet(ev), cur)+'</td>'+
+      '<td '+td('white-space:nowrap')+'>'+regDate(ev.AcceptedDate)+'</td><td '+td('color:#b95900')+'>'+escHtml(regTrailNote(ev, key))+'</td></tr>';
+  });
+  html += '<tr style="background:#f6f8f7;font-weight:700"><td colspan="8" style="padding:8px">TOTAL '+mName.toUpperCase()+'</td>'+
+    '<td style="padding:8px;'+money+'">'+regTrailSumText(sums, 'pm')+'</td><td style="padding:8px;'+money+'">'+regTrailSumText(sums, 'net')+'</td><td colspan="2"></td></tr>'+
+    '</tbody></table></div>'+
+    (Object.keys(sums).some(function(k){ return k !== 'ZAR'; }) ? '<div style="padding:8px 14px 12px;font-size:11px;color:#889">Offshore trail is shown in the investment\'s own currency.</div>' : '')+
+    '</div>';
   return html;
 }
 
@@ -5112,12 +5276,46 @@ function regExcel(){
     var R = window._reg, X = window.XLSX, aoa = [], formulas = [], today = localDateStr();
     var numFmt = '#,##0.00';
     function num(v){ var n = regNum(v); return n === null ? null : {t:'n', v:n, z:numFmt}; }
+    // Trail cell: a number for rand (so it adds up), text for offshore (kept out of rand totals).
+    function trailCell(ev, which){
+      if(!regHasTrail(ev)) return '';
+      var v = which === 'net' ? regTrailNet(ev) : regTrailPm(ev);
+      return (ev.PremiumCurrency && ev.PremiumCurrency !== 'ZAR') ? regMoney(v, ev.PremiumCurrency) : {t:'n', v:v, z:numFmt};
+    }
+    function zarTrail(rows, which){ var t = regTrailSums(rows).ZAR; return t ? regRound(which === 'net' ? t.net : t.pm) : 0; }
+    function invCell(ev){ return ev.InvoicedDate ? regDate(ev.InvoicedDate) : regUpfrontZero(ev) ? 'NO UPFRONT' : (ev.AcceptedDate ? 'NOT INVOICED' : ''); }
     var wb = X.utils.book_new(), ws, name;
-    if(R.tab === 'acts'){
-      var groups = regActsGroups(), bf = regBf(), totalRefs = {H:[], I:[]}, sumH = 0, sumI = 0;
+    if(R.tab === 'trail'){
+      if(!R.f.tmonth) R.f.tmonth = regMonthKey();
+      var key = R.f.tmonth, trows = regTrailRows(key), kp = key.split('-'), mName = REG_MONTHS[+kp[1]-1]+' '+kp[0];
+      aoa.push(['RECURRING (TRAIL) COMMISSION · '+mName.toUpperCase()+' · Duwalcoe Financial Consultants · as of '+regDate(today)]);
+      aoa.push(['Trail = investment amount x annual % / 12, before VAT. Offshore trail is in the investment\'s own currency (CUR column).']);
+      aoa.push(['#','CLIENT','ID No.','FSP','NB TYPE','POLICY NO','CUR','INVESTMENT','ANNUAL %','TRAIL pm less VAT','TRAIL pm less 15%','ACCEPTED','NOTE']);
+      var t0 = aoa.length + 1;
+      trows.forEach(function(ev, i){
+        var c = regClient(ev), r = aoa.length + 1;
+        // Live formulas: change the amount or % in Excel and the trail recalculates.
+        aoa.push([i+1, c ? c.Name : '', c ? clean(c.IDNumber) : '', ev.Provider || '', eventTypeLabel(ev)+(ev.Outcome ? ' · '+ev.Outcome : ''), ev.PolicyNo || '',
+          ev.PremiumCurrency || 'ZAR', num(ev.TrailBase), {t:'n', v:regNum(ev.TrailPct), z:'0.00'},
+          {t:'n', f:'ROUND(H'+r+'*I'+r+'/100/12,2)', v:regTrailPm(ev), z:numFmt}, {t:'n', f:'ROUND(J'+r+'*'+REG_NET_PCT+'/100,2)', v:regTrailNet(ev), z:numFmt},
+          regDate(ev.AcceptedDate), regTrailNote(ev, key)]);
+      });
+      var t1 = aoa.length, sums = regTrailSums(trows);
+      ['ZAR','USD','GBP','EUR'].forEach(function(cur){
+        if(!sums[cur] || !trows.length) return;
+        aoa.push(['', 'TOTAL '+mName.toUpperCase()+(cur === 'ZAR' ? ' (R)' : ' ('+cur+')'), '', '', '', '', cur, '', '',
+          {t:'n', f:'SUMIF(G'+t0+':G'+t1+',"'+cur+'",J'+t0+':J'+t1+')', v:regRound(sums[cur].pm), z:numFmt},
+          {t:'n', f:'SUMIF(G'+t0+':G'+t1+',"'+cur+'",K'+t0+':K'+t1+')', v:regRound(sums[cur].net), z:numFmt}]);
+      });
+      ws = X.utils.aoa_to_sheet(aoa);
+      ws['!cols'] = [4,26,15,16,40,16,6,16,10,16,16,12,30].map(function(w){ return {wch:w}; });
+      name = 'Register - Trail '+mName+' (as of '+today+').xlsx';
+      X.utils.book_append_sheet(wb, ws, 'Trail '+REG_MONTHS[+kp[1]-1].slice(0,3)+' '+kp[0]);
+    } else if(R.tab === 'acts'){
+      var groups = regActsGroups(), bf = regBf(), totalRefs = {H:[], I:[]}, trailRefs = {N:[], O:[]}, sumH = 0, sumI = 0, sumN = 0, sumO = 0;
       aoa.push(['NEW BUSINESS ACCEPTANCE COMMISSION · '+R.f.year+' · Duwalcoe Financial Consultants · as of '+regDate(today)]);
       aoa.push([]);
-      var hdr = ['#','CLIENT','ID No.','FSP','NB TYPE','POLICY NO','Premium AMT','FULL COMM DUE less VAT','COMM due HFS - less 15%','Accepted','Start Date','INVOICED','LEAD SOURCE'];
+      var hdr = ['#','CLIENT','ID No.','FSP','NB TYPE','POLICY NO','Premium AMT','FULL COMM DUE less VAT','COMM due HFS - less 15%','Accepted','Start Date','INVOICED','LEAD SOURCE','TRAIL pm less VAT','TRAIL pm less 15%'];
       groups.forEach(function(g){
         aoa.push([regMonthTitle(g.key)]);
         aoa.push(hdr);
@@ -5125,13 +5323,15 @@ function regExcel(){
         g.rows.forEach(function(ev, i){
           var c = regClient(ev);
           aoa.push([i+1, c ? c.Name : '', c ? clean(c.IDNumber) : '', ev.Provider || '', eventTypeLabel(ev)+(ev.Outcome ? ' · '+ev.Outcome : ''), ev.PolicyNo || '', regPremium(ev),
-            num(ev.CommissionDue), num(ev.CommissionNet), regDate(ev.AcceptedDate), regDate(regStartDate(ev)), ev.InvoicedDate ? regDate(ev.InvoicedDate) : 'NOT INVOICED', ev.LeadSource || '']);
+            num(ev.CommissionDue), num(ev.CommissionNet), regDate(ev.AcceptedDate), regDate(regStartDate(ev)), invCell(ev), ev.LeadSource || '', trailCell(ev, 'pm'), trailCell(ev, 'net')]);
         });
         var last = aoa.length, tr = aoa.length + 1;
         // Formulas keep the sheet live; v is the worked-out value so previews (phone, WhatsApp) show the total too.
-        aoa.push(['', 'TOTAL '+REG_MONTHS[+g.key.slice(5)-1].toUpperCase(), '', '', '', '', '', {t:'n', f:'SUM(H'+first+':H'+last+')', v:regRound(g.full), z:numFmt}, {t:'n', f:'SUM(I'+first+':I'+last+')', v:regRound(g.net), z:numFmt}]);
-        sumH += g.full; sumI += g.net;
-        totalRefs.H.push('H'+tr); totalRefs.I.push('I'+tr);
+        var gN = zarTrail(g.rows, 'pm'), gO = zarTrail(g.rows, 'net');
+        aoa.push(['', 'TOTAL '+REG_MONTHS[+g.key.slice(5)-1].toUpperCase(), '', '', '', '', '', {t:'n', f:'SUM(H'+first+':H'+last+')', v:regRound(g.full), z:numFmt}, {t:'n', f:'SUM(I'+first+':I'+last+')', v:regRound(g.net), z:numFmt},
+          '', '', '', '', {t:'n', f:'SUM(N'+first+':N'+last+')', v:gN, z:numFmt}, {t:'n', f:'SUM(O'+first+':O'+last+')', v:gO, z:numFmt}]);
+        sumH += g.full; sumI += g.net; sumN += gN; sumO += gO;
+        totalRefs.H.push('H'+tr); totalRefs.I.push('I'+tr); trailRefs.N.push('N'+tr); trailRefs.O.push('O'+tr);
         aoa.push([]);
       });
       if(bf){
@@ -5143,27 +5343,31 @@ function regExcel(){
       aoa.push(['', 'TOTAL INCOME '+R.f.year, '', '', '', '', '',
         totalRefs.H.length ? {t:'n', f:'SUM('+totalRefs.H.join(',')+')', v:regRound(sumH), z:numFmt} : 0,
         totalRefs.I.length ? {t:'n', f:'SUM('+totalRefs.I.join(',')+')', v:regRound(sumI), z:numFmt} : 0]);
+      if(trailRefs.N.length && (sumN || sumO)){
+        aoa.push(['', 'RECURRING (TRAIL) ADDED '+R.f.year+' · rand, a month (offshore trail is listed per case)', '', '', '', '', '', '', '', '', '', '', '',
+          {t:'n', f:'SUM('+trailRefs.N.join(',')+')', v:regRound(sumN), z:numFmt}, {t:'n', f:'SUM('+trailRefs.O.join(',')+')', v:regRound(sumO), z:numFmt}]);
+      }
       ws = X.utils.aoa_to_sheet(aoa);
-      ws['!cols'] = [4,26,15,16,40,16,22,16,16,12,12,13,18].map(function(w){ return {wch:w}; });
+      ws['!cols'] = [4,26,15,16,40,16,22,16,16,12,12,13,18,16,16].map(function(w){ return {wch:w}; });
       name = 'Register - Activations '+R.f.year+' (as of '+today+').xlsx';
       X.utils.book_append_sheet(wb, ws, 'Activations '+R.f.year);
     } else {
       var rows = regAppsRows();
       aoa.push(['NEW BUSINESS APPLICATIONS · LIFE & INVEST · Duwalcoe Financial Consultants · as of '+regDate(today)]);
       aoa.push([]);
-      aoa.push(['SUBMITTED','CLIENT','ID No.','FSP','NB TYPE','POLICY NO','Premium AMT','FULL COMM DUE less VAT','COMM due HFS - less 15%','STATUS','ACCEPTED','SCHEDULE REC','RESPONSIBLE','LEAD SOURCE','NOTES']);
+      aoa.push(['SUBMITTED','CLIENT','ID No.','FSP','NB TYPE','POLICY NO','Premium AMT','FULL COMM DUE less VAT','COMM due HFS - less 15%','STATUS','ACCEPTED','SCHEDULE REC','RESPONSIBLE','LEAD SOURCE','NOTES','TRAIL pm less VAT']);
       var f0 = aoa.length + 1;
       rows.forEach(function(ev){
         var c = regClient(ev);
         aoa.push([regDate(ev.SubmittedDate), c ? c.Name : '', c ? clean(c.IDNumber) : '', ev.Provider || '', eventTypeLabel(ev)+(ev.Outcome ? ' · '+ev.Outcome : ''), ev.PolicyNo || '', regPremium(ev),
-          num(ev.CommissionDue), num(ev.CommissionNet), (ev.Status === 'ntu' ? regNtuText(ev) : regStatus(ev).t), regDate(ev.AcceptedDate), regDate(ev.ScheduleDate), userLabel(ev.ResponsibleUser || ''), ev.LeadSource || '', String(ev.Notes || '').replace(/\s+/g, ' ').trim()]);
+          num(ev.CommissionDue), num(ev.CommissionNet), (ev.Status === 'ntu' ? regNtuText(ev) : regStatus(ev).t), regDate(ev.AcceptedDate), regDate(ev.ScheduleDate), userLabel(ev.ResponsibleUser || ''), ev.LeadSource || '', String(ev.Notes || '').replace(/\s+/g, ' ').trim(), trailCell(ev, 'pm')]);
       });
       var l0 = aoa.length;
       var aH = rows.reduce(function(t, e){ return t + (regNum(e.CommissionDue) || 0); }, 0);
       var aI = rows.reduce(function(t, e){ return t + (regNum(e.CommissionNet) || 0); }, 0);
       if(rows.length) aoa.push(['', 'TOTAL', '', '', '', '', '', {t:'n', f:'SUM(H'+f0+':H'+l0+')', v:regRound(aH), z:numFmt}, {t:'n', f:'SUM(I'+f0+':I'+l0+')', v:regRound(aI), z:numFmt}]);
       ws = X.utils.aoa_to_sheet(aoa);
-      ws['!cols'] = [12,26,15,16,40,16,22,16,16,16,12,12,12,18,40].map(function(w){ return {wch:w}; });
+      ws['!cols'] = [12,26,15,16,40,16,22,16,16,16,12,12,12,18,40,16].map(function(w){ return {wch:w}; });
       name = 'Register - Applications (as of '+today+').xlsx';
       X.utils.book_append_sheet(wb, ws, 'Applications');
     }
@@ -14334,7 +14538,7 @@ document.addEventListener('click', function(e){
           })();
           break;
         case 'reg-tab':
-          window._reg.tab = el.getAttribute('data-tab') === 'acts' ? 'acts' : 'apps';
+          window._reg.tab = ({acts:'acts', trail:'trail'})[el.getAttribute('data-tab')] || 'apps';
           render();
           break;
         case 'reg-refresh':
