@@ -4565,7 +4565,23 @@ function regStatus(ev){
   if(ev.Status === 'ntu') return {k:'ntu', t:'NTU', clr:'#6b6b6b', bg:'#ececec'};
   if(ev.AcceptedDate) return {k:'accepted', t:'Accepted', clr:'#2d7a3e', bg:'#eaf5ec'};
   if(ev.SubmittedDate) return {k:'submitted', t:'Submitted', clr:'#2563ab', bg:'#e8f0fb'};
+  // Opened before the Register started: its application is on Tracy's spreadsheet, not "not submitted".
+  if(regIsOld(ev)) return {k:'old', t:'Before the Register', clr:'#6b6b6b', bg:'#ececec'};
   return {k:'notsub', t:'Not yet submitted', clr:'#b95900', bg:'#fdf2e6'};
+}
+function regIsOld(ev){ return String(ev.EventDate || '').slice(0,10) < REG_FROM; }
+// Which cases the Register's Applications list shows. The Register is about the APPLICATION
+// (submitted / accepted / commission), not about whether the file is complete (that is Open Cases).
+//  - submitted from 1 Oct, or
+//  - opened from 1 Oct and still open (a new case not yet submitted), or
+//  - submitted (any date) and still waiting: no accepted date and not NTU.
+// A case opened before 1 Oct with no case details is NOT listed: it is on Tracy's spreadsheet.
+function regInApps(ev){
+  var sub = ev.SubmittedDate ? String(ev.SubmittedDate).slice(0,10) : '';
+  if(sub && sub >= REG_FROM) return true;
+  if(!regIsOld(ev) && ev.Status === 'in_progress') return true;
+  if(sub && !ev.AcceptedDate && ev.Status !== 'ntu') return true;
+  return false;
 }
 function regClient(ev){ return DB.clients.find(function(c){ return String(c.ID) === String(ev.ClientID); }) || null; }
 function regStartDate(ev){
@@ -4596,6 +4612,10 @@ function renderCaseDetails(ev){
       '</div>'+
     '</div>';
   if(!any){
+    if(regIsOld(ev)){
+      return html + '<div style="padding:10px 12px;font-size:12px;color:#667">Opened before '+regDate(REG_FROM)+'. If this policy was accepted before then, it is on Tracy\'s spreadsheet: <b>nothing to fill in</b>. '+
+        'Fill in only if it is still waiting for the insurer, so its commission shows in the Register when it is accepted.</div></div>';
+    }
     return html + '<div style="padding:10px 12px;font-size:12px;color:#889;font-style:italic">No case details yet. Click Fill in to add the provider, policy number, premium, commission and dates.</div></div>';
   }
   function cell(lbl, val, extra){
@@ -4898,8 +4918,7 @@ function regSet(k, v){
 function regAppsRows(){
   var R = window._reg, f = R.f, q = (f.q || '').toLowerCase();
   return (R.events || []).filter(function(ev){
-    var inRange = (ev.SubmittedDate && String(ev.SubmittedDate) >= REG_FROM) || ev.Status === 'in_progress';
-    if(!inRange) return false;
+    if(!regInApps(ev)) return false;
     var st = regStatus(ev).k;
     if(f.kind === 'nb' && String(ev.EventType).indexOf('NB_') !== 0) return false;
     if(f.kind === 'svc' && String(ev.EventType).indexOf('SVC_') !== 0) return false;
@@ -4967,7 +4986,7 @@ function regAppsHtml(){
       '<select onchange="regSet(\'provider\',this.value)" style="'+sel+'"><option value="">All providers</option>'+Object.keys(provs).sort().map(function(p){ return '<option'+(f.provider === p ? ' selected' : '')+'>'+escHtml(p)+'</option>'; }).join('')+'</select>'+
     '</div>'+
     '<div style="padding:8px 14px;font-size:12px;color:#667;border-bottom:1px solid var(--smoke)">'+rows.length+' case'+(rows.length === 1 ? '' : 's')+
-      ' · submitted from '+regDate(REG_FROM)+' plus everything still open'+
+      ' · submitted or opened from '+regDate(REG_FROM)+', plus anything submitted and still waiting for acceptance'+
       (pipeline ? ' · <b style="color:#2563ab">In the pipeline (submitted, not yet accepted): '+regMoney(pipeline)+'</b>' : '')+'</div>';
   if(!rows.length) return html + '<div class="empty" style="padding:18px">No cases match.</div></div>';
   var th = 'style="font-size:10px;text-transform:uppercase;letter-spacing:.6px;color:#889;text-align:left;padding:7px 8px;border-bottom:1px solid var(--smoke);white-space:nowrap"';
