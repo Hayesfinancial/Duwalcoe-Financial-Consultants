@@ -4569,6 +4569,19 @@ function regStatus(ev){
   if(regIsOld(ev)) return {k:'old', t:'Before the Register', clr:'#6b6b6b', bg:'#ececec'};
   return {k:'notsub', t:'Not yet submitted', clr:'#b95900', bg:'#fdf2e6'};
 }
+// Local (SA) date the case was marked NTU. CompletedAt is stored in UTC as "YYYY-MM-DD HH:MM".
+function regNtuDate(ev){
+  if(ev.Status !== 'ntu' || !ev.CompletedAt) return '';
+  var s = String(ev.CompletedAt).trim();
+  var m = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})/.exec(s);
+  if(m){ var d = new Date(m[1]+'T'+m[2]+':00Z'); if(!isNaN(d)) return localDateStr(d); }
+  return s.slice(0,10);
+}
+function regNtuText(ev){
+  if(ev.Status !== 'ntu') return '';
+  var d = regNtuDate(ev);
+  return 'NTU'+(d ? ' '+regDate(d) : '')+(ev.ClosedReason ? ': '+String(ev.ClosedReason) : '');
+}
 function regIsOld(ev){ return String(ev.EventDate || '').slice(0,10) < REG_FROM; }
 // Which cases the Register's Applications list shows. The Register is about the APPLICATION
 // (submitted / accepted / commission), not about whether the file is complete (that is Open Cases).
@@ -4579,6 +4592,8 @@ function regIsOld(ev){ return String(ev.EventDate || '').slice(0,10) < REG_FROM;
 function regInApps(ev){
   var sub = ev.SubmittedDate ? String(ev.SubmittedDate).slice(0,10) : '';
   if(sub && sub >= REG_FROM) return true;
+  // Compliance: every case NTU'd from 1 Oct is listed with its NTU date, submitted or not.
+  if(ev.Status === 'ntu' && regNtuDate(ev) >= REG_FROM) return true;
   if(!regIsOld(ev) && ev.Status === 'in_progress') return true;
   if(sub && !ev.AcceptedDate && ev.Status !== 'ntu') return true;
   return false;
@@ -4986,7 +5001,7 @@ function regAppsHtml(){
       '<select onchange="regSet(\'provider\',this.value)" style="'+sel+'"><option value="">All providers</option>'+Object.keys(provs).sort().map(function(p){ return '<option'+(f.provider === p ? ' selected' : '')+'>'+escHtml(p)+'</option>'; }).join('')+'</select>'+
     '</div>'+
     '<div style="padding:8px 14px;font-size:12px;color:#667;border-bottom:1px solid var(--smoke)">'+rows.length+' case'+(rows.length === 1 ? '' : 's')+
-      ' · submitted or opened from '+regDate(REG_FROM)+', plus anything submitted and still waiting for acceptance'+
+      ' · submitted, opened or NTU\'d from '+regDate(REG_FROM)+', plus anything submitted and still waiting for acceptance'+
       (pipeline ? ' · <b style="color:#2563ab">In the pipeline (submitted, not yet accepted): '+regMoney(pipeline)+'</b>' : '')+'</div>';
   if(!rows.length) return html + '<div class="empty" style="padding:18px">No cases match.</div></div>';
   var th = 'style="font-size:10px;text-transform:uppercase;letter-spacing:.6px;color:#889;text-align:left;padding:7px 8px;border-bottom:1px solid var(--smoke);white-space:nowrap"';
@@ -5004,7 +5019,8 @@ function regAppsHtml(){
       '<td '+td()+'>'+escHtml(ev.PolicyNo || '')+'</td>'+
       '<td '+td()+'>'+escHtml(regPremium(ev))+'</td>'+
       '<td '+td('text-align:right;white-space:nowrap')+'>'+regMoney(ev.CommissionDue)+'</td>'+
-      '<td '+td()+'><span style="background:'+st.bg+';color:'+st.clr+';border-radius:4px;padding:1px 6px;font-size:10px;font-weight:700;white-space:nowrap">'+st.t+'</span></td>'+
+      '<td '+td()+'><span style="background:'+st.bg+';color:'+st.clr+';border-radius:4px;padding:1px 6px;font-size:10px;font-weight:700;white-space:nowrap">'+st.t+'</span>'+
+        (st.k === 'ntu' ? '<div style="font-size:11px;color:#6b6b6b;margin-top:2px">'+escHtml(regNtuText(ev).replace(/^NTU:? ?/, ''))+'</div>' : '')+'</td>'+
       '<td '+td('white-space:nowrap')+'>'+regDate(ev.AcceptedDate)+'</td>'+
       '<td '+td('white-space:nowrap')+'>'+regDate(ev.ScheduleDate)+'</td></tr>';
   });
@@ -5140,7 +5156,7 @@ function regExcel(){
       rows.forEach(function(ev){
         var c = regClient(ev);
         aoa.push([regDate(ev.SubmittedDate), c ? c.Name : '', c ? clean(c.IDNumber) : '', ev.Provider || '', eventTypeLabel(ev)+(ev.Outcome ? ' · '+ev.Outcome : ''), ev.PolicyNo || '', regPremium(ev),
-          num(ev.CommissionDue), num(ev.CommissionNet), regStatus(ev).t, regDate(ev.AcceptedDate), regDate(ev.ScheduleDate), userLabel(ev.ResponsibleUser || ''), ev.LeadSource || '', String(ev.Notes || '').replace(/\s+/g, ' ').trim()]);
+          num(ev.CommissionDue), num(ev.CommissionNet), (ev.Status === 'ntu' ? regNtuText(ev) : regStatus(ev).t), regDate(ev.AcceptedDate), regDate(ev.ScheduleDate), userLabel(ev.ResponsibleUser || ''), ev.LeadSource || '', String(ev.Notes || '').replace(/\s+/g, ' ').trim()]);
       });
       var l0 = aoa.length;
       var aH = rows.reduce(function(t, e){ return t + (regNum(e.CommissionDue) || 0); }, 0);
