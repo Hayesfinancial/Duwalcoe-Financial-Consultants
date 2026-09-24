@@ -174,6 +174,7 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--cream);c
     <div class="ni on" data-nav="dash">🏠 Dashboard</div>
     <div class="ni" data-nav="clients">👥 Clients</div>
     <div class="ni" data-nav="tasks">✅ Tasks <span id="tbadge" style="margin-left:auto;background:var(--rose);color:#fff;border-radius:10px;padding:1px 7px;font-size:10px;display:none"></span></div>
+    <div class="ni" data-nav="cases">📂 Open Cases <span id="cbadge" style="margin-left:auto;background:var(--gold);color:#fff;border-radius:10px;padding:1px 7px;font-size:10px;display:none"></span></div>
     <div class="ni" data-nav="suppliers">🏢 Suppliers</div>
     <div class="ndiv"></div>
     <div class="nsec">Tools</div>
@@ -1127,6 +1128,19 @@ function updateBadge(){
   var n=DB.tasks.filter(function(t){return !isdone(t);}).length;
   var b=document.getElementById('tbadge');
   if(b){b.textContent=n;b.style.display=n>0?'':'none';}
+  updateCasesBadge();
+}
+// Open Cases sidebar badge (Build 4). Keeps the board data fresh in the
+// background so the count is right on every page, not only on the board.
+function updateCasesBadge(){
+  var B = window._board;
+  if(!B) return;
+  if(!B.loading && Date.now() - B.loadedAt > BOARD_REFRESH_MS && sbLoggedIn()) loadBoard();
+  var cb = document.getElementById('cbadge');
+  if(!cb) return;
+  var n = (B.loadedAt && !B.err) ? (B.events || []).length : 0;
+  cb.textContent = n;
+  cb.style.display = n > 0 ? '' : 'none';
 }
 
 // ══ HTML BUILDERS (zero inline onclicks) ═════════════════════
@@ -1339,6 +1353,7 @@ function render(){
   else if(PAGE==='clients') m.innerHTML=renderClients();
   else if(PAGE==='client')  m.innerHTML=renderProfile();
   else if(PAGE==='suppliers') m.innerHTML=renderSuppliers();
+  else if(PAGE==='cases') m.innerHTML=renderCasesPage();
   else if(PAGE==='tasks'){  if(!window.TASK_USER_FILTER) window.TASK_USER_FILTER=cu(); m.innerHTML=renderTasks();}
   // Restore dashboard search value
   if(_dashQ){
@@ -1556,9 +1571,6 @@ function renderDash(){
     '</div></div>'+
 
   '</div>'+
-
-  // Open Cases board (Build 2)
-  renderBoardCard()+
 
   // Bottom row: Reminders + Recent Clients
   '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">'+
@@ -4283,8 +4295,8 @@ function openReuseDocs(eventId, docKey){
   });
 }
 
-// ── Open Cases board (dashboard) ───────────────────────────────────────────
-// Every in-progress NB/Servicing case across all clients, oldest first, with
+// ── Open Cases board (own sidebar page since Build 4) ─────────────────────
+// Every in-progress NB/Servicing case across all clients, newest first, with
 // open insurer requirements and missing mandatory documents by name. Missing
 // uses exactly the rule the case itself uses: mandatory or conditional for
 // this sub-type, not uploaded, not marked N/A.
@@ -4305,16 +4317,16 @@ function loadBoard(){
   var B = window._board;
   if(B.loading) return;
   B.loading = true;
-  var q = '/rest/v1/work_events?Status=eq.in_progress&EventType=in.('+CASE_EVENT_TYPES.join(',')+')&select=*&order=EventDate.asc,CreatedAt.asc';
+  var q = '/rest/v1/work_events?Status=eq.in_progress&EventType=in.('+CASE_EVENT_TYPES.join(',')+')&select=*&order=EventDate.desc,CreatedAt.desc';
   sbFetch('GET', q, null, function(rows, err){
-    if(err){ B.loading = false; B.err = true; B.loadedAt = Date.now(); if(PAGE === 'dash') render(); return; }
+    if(err){ B.loading = false; B.err = true; B.loadedAt = Date.now(); if(PAGE === 'cases') render(); else updateCasesBadge(); return; }
     rows = rows || [];
     var docs = {}, na = {}, reqs = {}, failed = false, reqsMissing = false;
     function finish(){
       B.loading = false; B.loadedAt = Date.now();
       if(failed){ B.err = true; }
       else { B.err = false; B.events = rows; B.docs = docs; B.na = na; B.reqs = reqs; B.reqsUnavailable = reqsMissing; }
-      if(PAGE === 'dash') render();
+      if(PAGE === 'cases') render(); else updateCasesBadge();
     }
     if(!rows.length){ finish(); return; }
     var ids = encodeURIComponent(rows.map(function(r){ return '"'+r.ID+'"'; }).join(','));
@@ -4342,7 +4354,7 @@ function renderBoardCard(){
   var list = all.filter(function(e){ return window.BOARD_FILTER === 'All' || e.ResponsibleUser === window.BOARD_FILTER; });
 
   var html = '<div class="card" style="padding:0;margin-bottom:12px">'+
-    '<div class="ch" style="padding:10px 16px"><h2>📂 Open Cases'+(B.loadedAt && !B.err ? ' <span style="font-size:12px;color:#889;font-weight:400">('+all.length+')</span>' : '')+'</h2>'+
+    '<div class="ch" style="padding:10px 16px"><h2>📂 Cases in progress'+(B.loadedAt && !B.err ? ' <span style="font-size:12px;color:#889;font-weight:400">('+all.length+')</span>' : '')+'</h2>'+
     '<div style="display:flex;gap:4px;align-items:center">'+
     ['All'].concat(USER_CODES).map(function(u){
       var on = window.BOARD_FILTER === u;
@@ -4365,7 +4377,7 @@ function renderBoardCard(){
     return html + '<div class="empty" style="padding:16px">'+(all.length ? 'No open cases for '+escHtml(userLabel(window.BOARD_FILTER))+' ✅' : 'No open cases ✅')+'</div></div>';
   }
 
-  html += '<div style="max-height:460px;overflow-y:auto">';
+  html += '<div>';
   list.forEach(function(ev){
     var c = DB.clients.find(function(x){ return String(x.ID) === String(ev.ClientID); });
     var naSet = new Set((B.na[ev.ID] || []).map(function(x){ return x.DocType; }));
@@ -4401,6 +4413,15 @@ function renderBoardCard(){
   });
   html += '</div></div>';
   return html;
+}
+
+// Open Cases page (Build 4): its own sidebar page, newest first.
+function renderCasesPage(){
+  return '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">'+
+    '<h1 style="font-family:\'DM Serif Display\',serif;font-size:22px;color:var(--navy)">Open Cases</h1>'+
+    '<div style="font-size:12px;color:#889">New Business and Servicing cases in progress · newest first · click a case to open it</div>'+
+    '</div>'+
+    renderBoardCard();
 }
 
 function openBoardCase(clientId, eventId){
