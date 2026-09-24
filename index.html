@@ -4049,7 +4049,9 @@ function openNtuModal(eventId){
   });
 }
 function reopenEvent(eventId){
-  if(!confirm('Reopen this case? It goes back to In Progress and onto the Open Cases board. The NTU reason is cleared.')) return;
+  var rev = (window._events[SEL] || []).find(function(e){ return String(e.ID) === String(eventId); });
+  var wasNtu = rev && rev.Status === 'ntu';
+  if(!confirm('Reopen this case? It goes back to In Progress'+(rev && eventGetsCaseTask(rev.EventType) ? ' and onto the Open Cases board' : '')+'.'+(wasNtu ? ' The NTU reason is cleared.' : '')+' Documents are not affected.')) return;
   var clientId = SEL;
   sbFetch('PATCH','/rest/v1/work_events?ID=eq.'+encodeURIComponent(eventId), {Status:'in_progress', ClosedReason:null, CompletedAt:null}, function(res, err){
     if(err){ alert('Could not reopen: '+err); return; }
@@ -4152,6 +4154,134 @@ function removeEventReq(reqId, eventId){
     }
   });
 })();
+
+// ── Reuse a document from an earlier case (Build 3, 24 Sep 2026) ───────────
+// Documents that describe the CLIENT (not the transaction) can be attached to
+// a new case from the client's earlier cases without uploading again. The new
+// record points at the same stored file and carries an audit note. TFS Check
+// and FICA Risk Assessment must be fresh per case, and transaction documents
+// (application, quote, ROA, contract, compliance email, FICA checklist) belong
+// to one case only, so those headings get no Reuse button.
+var REUSABLE_DOC_KEYS = ['PROOF_ADDRESS','PROOF_BANK','PROOF_SARS','CK_DOCS','CSA','FNA','FACT_FINDER','RISK_ANAL'];
+// Age limits that trigger an amber warning in the picker (days).
+var REUSE_AGE_WARN = {PROOF_ADDRESS:{days:90, text:'older than 3 months'}, FACT_FINDER:{days:365, text:'over a year old'}, RISK_ANAL:{days:365, text:'over a year old'}};
+
+// When the file first came into the CRM: a reused record carries
+// "(originally uploaded YYYY-MM-DD)" in its Notes, so age is never reset by reuse.
+function docOriginalDate(d){
+  var m = String((d && d.Notes) || '').match(/originally uploaded (\d{4}-\d{2}-\d{2})/);
+  var s = m ? m[1] : String((d && d.UploadedAt) || '').slice(0, 10);
+  var p = s.split('-');
+  return p.length === 3 ? new Date(+p[0], +p[1]-1, +p[2]) : null;
+}
+function reuseAgeText(days){
+  if(days === null) return '';
+  if(days < 1) return 'today';
+  if(days < 31) return days+' day'+(days === 1 ? '' : 's')+' ago';
+  var mo = Math.floor(days / 30.4);
+  if(mo < 12) return mo+' month'+(mo === 1 ? '' : 's')+' ago';
+  var yr = Math.floor(days / 365);
+  return yr+' year'+(yr === 1 ? '' : 's')+' ago';
+}
+function caseLabelFor(ev){
+  return eventTypeLabel(ev)+(ev.Outcome ? ' · '+ev.Outcome : '')+' · '+fdate(ev.EventDate);
+}
+
+function openReuseDocs(eventId, docKey){
+  var clientId = SEL;
+  var events = window._events[clientId] || [];
+  var ev = events.find(function(e){ return String(e.ID) === String(eventId); });
+  if(!ev){ toast('Work Event not found. Refresh and try again.','err'); return; }
+  if(REUSABLE_DOC_KEYS.indexOf(docKey) < 0){ toast('That heading must have its own document for this case.','err'); return; }
+  var cat = eventChecklist(ev).find(function(x){ return x.key === docKey; });
+  var label = cat ? cat.label : docKey;
+  var others = events.filter(function(e){ return String(e.ID) !== String(eventId); });
+  if(!others.length){ toast('This client has no other cases to reuse from.','err'); return; }
+  var byId = {}; others.forEach(function(e){ byId[e.ID] = e; });
+  var ids = encodeURIComponent(others.map(function(e){ return '"'+e.ID+'"'; }).join(','));
+  toast('Looking for '+label+' on earlier cases…','ok');
+  sbFetch('GET','/rest/v1/work_event_documents?WorkEventID=in.('+ids+')&DocType=eq.'+encodeURIComponent(docKey)+'&select=*&order=UploadedAt.desc', null, function(rows, err){
+    if(err){ toast('Could not load earlier documents. Try again.','err'); return; }
+    // One entry per stored file (a file reused before appears on several cases).
+    var seen = {}, list = [];
+    (rows || []).forEach(function(d){ if(!seen[d.FilePath]){ seen[d.FilePath] = true; list.push(d); } });
+    if(!list.length){ toast('No '+label+' on this client\'s other cases.','err'); return; }
+    var already = {};
+    (window._eventDocs[eventId] || []).forEach(function(d){ already[d.FilePath] = true; });
+    var today = new Date(); today.setHours(0,0,0,0);
+    var warn = REUSE_AGE_WARN[docKey];
+
+    var ov = document.createElement('div');
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(10,20,40,.55);z-index:10000;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(2px)';
+    var box = document.createElement('div');
+    box.style.cssText = 'background:#fff;border-radius:12px;padding:22px 26px;max-width:620px;width:92%;max-height:80vh;overflow:auto;box-shadow:0 12px 48px rgba(0,0,0,.25);font-family:inherit';
+    var rowsHtml = list.map(function(d, i){
+      var src = byId[d.WorkEventID];
+      var od = docOriginalDate(d);
+      var days = od ? Math.max(0, Math.round((today - od) / 86400000)) : null;
+      var old = warn && days !== null && days > warn.days;
+      var dup = !!already[d.FilePath];
+      return '<label style="display:flex;gap:10px;align-items:flex-start;padding:8px 10px;border-radius:6px;margin-bottom:4px;background:'+(dup ? '#f0f0f0' : old ? '#fdf2e6' : '#fafaf5')+';cursor:'+(dup ? 'default' : 'pointer')+'">'+
+        '<input type="checkbox" data-i="'+i+'"'+(dup ? ' disabled' : '')+' style="margin-top:3px;width:15px;height:15px;accent-color:#0e413a">'+
+        '<div style="flex:1;min-width:0">'+
+          '<div style="font-size:13px;font-weight:600;word-break:break-word">📄 '+escHtml(d.FileName || 'file')+'</div>'+
+          '<div style="font-size:11px;color:#667">'+escHtml(src ? caseLabelFor(src) : 'Earlier case')+'</div>'+
+          '<div style="font-size:11px;color:'+(old ? '#b95900' : '#889')+';font-weight:'+(old ? '700' : '400')+'">'+
+            'Added '+(od ? fdate(localDateStr(od)) : '?')+' ('+reuseAgeText(days)+')'+(old ? ' · ⚠ '+warn.text : '')+(dup ? ' · already on this case' : '')+'</div>'+
+        '</div>'+
+        '<button type="button" class="btn b-gh sm" data-view="'+escHtml(d.ID)+'" style="font-size:11px;padding:3px 10px">View</button>'+
+      '</label>';
+    }).join('');
+    box.innerHTML =
+      '<div style="font-family:Georgia,serif;font-size:17px;color:#0e413a;margin-bottom:4px">Reuse '+escHtml(label)+'</div>'+
+      '<div style="font-size:12px;color:#556;margin-bottom:12px">From this client\'s other cases. The file is not uploaded again: this case gets its own record of it, noting where it came from.'+
+        (warn ? ' Dates show when the file was first added to the CRM, not the date on the document itself.' : '')+'</div>'+
+      rowsHtml+
+      '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px">'+
+        '<button data-role="cancel" style="padding:8px 18px;border-radius:7px;border:1.5px solid #ddd;background:#fff;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;color:#555">Cancel</button>'+
+        '<button data-role="ok" style="padding:8px 22px;border-radius:7px;border:none;background:#0e413a;color:#fff;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">Reuse selected</button>'+
+      '</div>';
+    ov.appendChild(box);
+    document.body.appendChild(ov);
+    function close(){ if(ov.parentNode) document.body.removeChild(ov); }
+    box.querySelector('[data-role=cancel]').addEventListener('click', close);
+    ov.addEventListener('click', function(e){ if(e.target === ov) close(); });
+    Array.prototype.forEach.call(box.querySelectorAll('[data-view]'), function(b){
+      b.addEventListener('click', function(e){
+        e.preventDefault(); e.stopPropagation();
+        var d = list.find(function(x){ return String(x.ID) === b.getAttribute('data-view'); });
+        if(!d) return;
+        // viewEventDoc() looks in the cache, so park the row there first.
+        window._eventDocs['__reuse__'] = [d];
+        viewEventDoc(d.ID);
+      });
+    });
+    box.querySelector('[data-role=ok]').addEventListener('click', function(){
+      var picked = Array.prototype.filter.call(box.querySelectorAll('input[data-i]'), function(c){ return c.checked; })
+        .map(function(c){ return list[+c.getAttribute('data-i')]; });
+      if(!picked.length){ alert('Tick at least one file.'); return; }
+      var who = curUserCode(), stamp = nowStamp();
+      var when = new Date().toLocaleDateString('en-ZA', {day:'numeric', month:'short', year:'numeric'});
+      var newRows = picked.map(function(d){
+        var src = byId[d.WorkEventID];
+        var od = docOriginalDate(d);
+        return {
+          WorkEventID: eventId, DocType: docKey, Status: 'complete',
+          FilePath: d.FilePath, FileName: d.FileName, FileSize: d.FileSize, MimeType: d.MimeType || '',
+          UploadedBy: who, UploadedAt: stamp,
+          Notes: 'Reused from '+(src ? caseLabelFor(src) : 'an earlier case')+' by '+userLabel(who)+', '+when+
+                 (od ? ' (originally uploaded '+localDateStr(od)+')' : '')
+        };
+      });
+      sbFetch('POST','/rest/v1/work_event_documents', newRows, function(res, e2){
+        if(e2){ alert('Could not reuse: '+e2); return; }
+        close();
+        toast(newRows.length+' file'+(newRows.length === 1 ? '' : 's')+' reused under '+label,'ok');
+        loadEventDocs(eventId);
+      });
+    });
+  });
+}
 
 // ── Open Cases board (dashboard) ───────────────────────────────────────────
 // Every in-progress NB/Servicing case across all clients, oldest first, with
@@ -4485,7 +4615,7 @@ function renderEventDetail(ev, c, pols){
   html += '<button class="btn b-gh sm" data-act="edit-event" data-eid="'+ev.ID+'">Edit Event</button>';
   if(ev.Status!=='complete' && ev.Status!=='ntu') html += '<button class="btn b-nv sm" data-act="mark-event-complete" data-eid="'+ev.ID+'">Mark Complete</button>';
   if(ev.Status!=='complete' && ev.Status!=='ntu' && eventGetsCaseTask(ev.EventType)) html += '<button class="btn b-gh sm" data-act="mark-event-ntu" data-eid="'+ev.ID+'" style="color:#555" title="Not taken up: close the case and keep all documents">Mark NTU</button>';
-  if(ev.Status==='ntu') html += '<button class="btn b-gh sm" data-act="reopen-event" data-eid="'+ev.ID+'">↩ Reopen case</button>';
+  if(ev.Status==='ntu' || ev.Status==='complete') html += '<button class="btn b-gh sm" data-act="reopen-event" data-eid="'+ev.ID+'">↩ Reopen case</button>';
   html += '<button class="btn b-gh sm" data-act="delete-event" data-eid="'+ev.ID+'" data-cid="'+c.ID+'" style="color:#b23">Delete Event</button>';
   html += '</div>';
   if(ev.Status==='ntu'){
@@ -4600,6 +4730,9 @@ function renderEventDetail(ev, c, pols){
             (isExpanded ? '▲ Hide' : '▼ Show ('+matching.length+')')+'</button>';
         }
         html += '<button class="btn b-nv sm" data-act="event-doc-upload" data-eid="'+ev.ID+'" data-dk="'+escHtml(item.key)+'">+ Upload</button>';
+        if(REUSABLE_DOC_KEYS.indexOf(item.key) >= 0 && (window._events[ev.ClientID] || []).length > 1){
+          html += '<button class="btn b-gh sm" data-act="event-doc-reuse" data-eid="'+ev.ID+'" data-dk="'+escHtml(item.key)+'" style="padding:4px 10px;font-size:11px" title="Attach a file already filed under this heading on another case for this client">↻ Reuse</button>';
+        }
         // N/A toggle only offered when there are no files yet — once you've uploaded
         // something, it's clearly applicable, and the NA toggle would be confusing.
         // Extra headings are optional by definition, so they never get N/A.
@@ -4940,7 +5073,12 @@ function markEventComplete(eventId){
     if(naSet.has(item.key)) return false; // N/A doesn't count as missing
     return !docs.some(function(d){return d.DocType===item.key;});
   });
-  if(missing.length && !confirm('⚠ '+missing.length+' mandatory document'+(missing.length===1?'':'s')+' missing (not uploaded, not marked N/A):\n\n'+missing.map(function(m){return '• '+m.label;}).join('\n')+'\n\nMark complete anyway?')){
+  // Build 3: always confirm and name the case, so a mis-click can't close it.
+  var caseLine = eventTypeLabel(ev) + (ev.Outcome ? '\n'+ev.Outcome : '');
+  var question = missing.length
+    ? 'Mark this case complete?\n\n'+caseLine+'\n\n⚠ '+missing.length+' mandatory document'+(missing.length===1?'':'s')+' missing (not uploaded, not marked N/A):\n\n'+missing.map(function(m){return '• '+m.label;}).join('\n')+'\n\nMark complete anyway?'
+    : 'Mark this case complete?\n\n'+caseLine+'\n\nIt leaves the Open Cases board. You can reopen it if needed.';
+  if(!confirm(question)){
     return;
   }
   sbFetch('PATCH','/rest/v1/work_events?ID=eq.'+encodeURIComponent(eventId),
@@ -4957,11 +5095,10 @@ function deleteEvent(eventId, clientId){
   if(!confirm('Delete this event, all its linked documents, and policy links? This cannot be undone.')) return;
   // First delete docs (and their files in storage)
   var docs = window._eventDocs[eventId] || [];
+  // Build 3: skip stored files that a reused copy on another case still needs.
+  var ownIds = docs.map(function(d){ return d.ID; });
   var deletePromises = docs.map(function(d){
-    return fetch(SB_URL+'/storage/v1/object/client-documents/'+encodeURI(d.FilePath), {
-      method:'DELETE',
-      headers:{'apikey':SB_KEY,'Authorization':'Bearer '+sbBearer()}
-    }).catch(function(){}); // don't fail if storage already gone
+    return deleteStorageIfUnshared(d.FilePath, ownIds);
   });
   Promise.all(deletePromises).then(function(){
     // Delete doc records
@@ -5102,7 +5239,7 @@ function docDropAttrs(kind, ownerId, docKey, label, isNA){
 // Small italic line under a file showing where it was moved from (latest move;
 // hover shows the full history).
 function docMoveNoteHtml(d){
-  var lines = String((d && d.Notes) || '').split('\n').filter(function(l){ return l.indexOf('Moved from ') === 0; });
+  var lines = String((d && d.Notes) || '').split('\n').filter(function(l){ return l.indexOf('Moved from ') === 0 || l.indexOf('Reused from ') === 0; });
   if(!lines.length) return '';
   return '<span style="display:block;font-size:10px;color:#8a6d1f;font-style:italic;margin-top:1px" title="'+escHtml(lines.join('\n'))+'">↪ '+
     escHtml(lines[lines.length-1])+(lines.length > 1 ? ' (+'+(lines.length-1)+' earlier)' : '')+'</span>';
@@ -5432,16 +5569,36 @@ function deleteEventDoc(docId, eventId){
 }
 
 function deleteEventDocRecord(doc, cb){
-  fetch(SB_URL+'/storage/v1/object/client-documents/'+encodeURI(doc.FilePath), {
-    method:'DELETE',
-    headers:{'apikey':SB_KEY,'Authorization':'Bearer '+sbBearer()}
-  }).then(function(){
+  // Build 3: a reused file is shared by several cases. Only remove the stored
+  // file when no other case still points at it; always remove this record.
+  deleteStorageIfUnshared(doc.FilePath, [doc.ID]).then(function(){
     sbFetch('DELETE','/rest/v1/work_event_documents?ID=eq.'+encodeURIComponent(doc.ID), null, function(res, err){
       if(cb) cb(!err);
     });
-  }).catch(function(){
-    sbFetch('DELETE','/rest/v1/work_event_documents?ID=eq.'+encodeURIComponent(doc.ID), null, function(res, err){
-      if(cb) cb(!err);
+  });
+}
+
+// ── Shared files (Build 3, Reuse) ─────────────────────────────────────────
+// cb(true) when another work_event_documents row (not in exceptIds) uses the
+// same stored file. If the check itself fails we answer true: keeping a file
+// we are unsure about is safe; deleting one another case needs is not.
+function storageFileShared(path, exceptIds, cb){
+  if(!path){ cb(false); return; }
+  var except = (exceptIds || []).map(String);
+  sbFetch('GET','/rest/v1/work_event_documents?FilePath=eq.'+encodeURIComponent(path)+'&select=ID', null, function(rows, err){
+    if(err){ cb(true); return; }
+    cb((rows || []).some(function(r){ return except.indexOf(String(r.ID)) < 0; }));
+  });
+}
+// Resolves (never rejects) once the stored file is deleted or kept.
+function deleteStorageIfUnshared(path, exceptIds){
+  return new Promise(function(resolve){
+    storageFileShared(path, exceptIds, function(shared){
+      if(shared){ resolve(); return; }
+      fetch(SB_URL+'/storage/v1/object/client-documents/'+encodeURI(path), {
+        method:'DELETE',
+        headers:{'apikey':SB_KEY,'Authorization':'Bearer '+sbBearer()}
+      }).then(function(){ resolve(); }, function(){ resolve(); });
     });
   });
 }
@@ -13357,6 +13514,9 @@ document.addEventListener('click', function(e){
           break;
         case 'event-add-heading':
           openAddEventHeading(el.getAttribute('data-eid'));
+          break;
+        case 'event-doc-reuse':
+          openReuseDocs(el.getAttribute('data-eid'), el.getAttribute('data-dk'));
           break;
         case 'mark-event-ntu':
           openNtuModal(el.getAttribute('data-eid'));
