@@ -1876,7 +1876,7 @@ function renderProfile(){
     '<a href="https://drive.google.com/drive/search?q='+encodeURIComponent(c.Name)+'" target="_blank" style="text-decoration:none"><button class="btn b-gh sm" style="color:#fff;border-color:#334466">📁 Drive</button></a>'+
     '</div></div>'+
     // ── Broker Authority (ASTUTE) expired banner ───────────────────────────
-    // Shows ONLY when a previously-uploaded form has aged past 90 days.
+    // Shows ONLY when a previously-uploaded form has aged past BROKER_AUTH_EXPIRY_DAYS (365).
     // Silent when no form exists (first-time clients) and silent when valid.
     (function(){
       // Make sure the doc cache is populated for this client. renderDocs
@@ -3135,16 +3135,22 @@ function renderROA(c,roas){
 // TFS, FICA Risk Assessment) live in Work Event checklists.
 // EXCEPTION (6 May 2026): Broker Authority Form (ASTUTE) lives at client
 // level despite being case-relevant, because it's a single mandate valid for
-// 90 days that covers ALL cases in that window — not a per-case artifact.
+// 12 months that covers ALL cases in that window — not a per-case artifact.
 // Tracked separately with expiry-rule logic (see brokerAuthStatus()).
+// 24 Sep 2026: validity changed from 90 days to 12 months (365 days) per
+// Clinton. Single source of truth — used by the catalogue, brokerAuthStatus()
+// and the signed-date prompt. Change this one number to change the rule.
+var BROKER_AUTH_EXPIRY_DAYS = 365;
+// Upload prompt warns when this many days (or fewer) of validity remain.
+var BROKER_AUTH_WARN_DAYS = 10;
 var CLIENT_DOC_CATALOGUE = [
   // Identity (permanent, changes only if new ID issued)
   {key:'ID',            label:'ID Document',               group:'Identity',   required:'Mandatory'},
   // Agreements (once per relationship)
   {key:'LOI',           label:'Letter of Introduction (LOI)', group:'Agreements', required:'Mandatory'},
   {key:'WILL',          label:'Will',                      group:'Agreements', required:'Optional'},
-  // ASTUTE broker authority — multi-file archive, 90-day expiry on most recent
-  {key:'BROKER_AUTH',   label:'Broker Authority Form (ASTUTE)', group:'ASTUTE', required:'Optional', multiple:true, expiryDays:90, note:'Valid for 90 days. Refresh before pulling new ASTUTE data.'},
+  // ASTUTE broker authority — multi-file archive, 12-month expiry on most recent
+  {key:'BROKER_AUTH',   label:'Broker Authority Form (ASTUTE)', group:'ASTUTE', required:'Optional', multiple:true, expiryDays:BROKER_AUTH_EXPIRY_DAYS, note:'Valid for 12 months. Refresh before pulling new ASTUTE data.'},
   // Catch-all for ad-hoc correspondence at client level
   {key:'CORRESPONDENCE',label:'General Correspondence',    group:'Other',      required:'Optional',multiple:true}
 ];
@@ -3155,8 +3161,8 @@ window._clientDocs = window._clientDocs || {};
 // ── Broker Authority (ASTUTE) expiry helper ───────────────────────────────
 // Returns the current state of the broker authority form for a given client.
 // {state:'none'}                          — no form ever uploaded
-// {state:'valid',  daysLeft:N, signedAt} — within 90-day window
-// {state:'expired',daysAgo:N,  signedAt} — beyond 90-day window
+// {state:'valid',  daysLeft:N, signedAt} — within BROKER_AUTH_EXPIRY_DAYS window
+// {state:'expired',daysAgo:N,  signedAt} — beyond BROKER_AUTH_EXPIRY_DAYS window
 // "signedAt" is treated as the most recent UploadedAt — that's our best proxy
 // for "when was this form signed". If we ever want a separate signed-date
 // field we can add it later, but for now upload date == signed date in
@@ -3175,7 +3181,7 @@ function brokerAuthStatus(clientId){
   var now = new Date();
   var msPerDay = 1000*60*60*24;
   var ageDays = Math.floor((now.getTime() - signedAt.getTime()) / msPerDay);
-  var EXPIRY_DAYS = 90;
+  var EXPIRY_DAYS = BROKER_AUTH_EXPIRY_DAYS;
   if(ageDays >= EXPIRY_DAYS){
     return {state:'expired', daysAgo: ageDays - EXPIRY_DAYS, signedAt: signedAt};
   } else {
@@ -3430,10 +3436,10 @@ function promptSignedDate(docLabel, callback){
     var picked = new Date(v);
     var today = new Date(todayIso);
     var ageDays = Math.floor((today - picked)/(1000*60*60*24));
-    if(ageDays >= 90){
+    if(ageDays >= BROKER_AUTH_EXPIRY_DAYS){
       warnEl.textContent = '⚠ This date is '+ageDays+' days old — the form will be uploaded already expired.';
-    } else if(ageDays >= 60){
-      warnEl.textContent = 'Note: only '+(90-ageDays)+' days of validity remain.';
+    } else if(ageDays >= BROKER_AUTH_EXPIRY_DAYS - BROKER_AUTH_WARN_DAYS){
+      warnEl.textContent = 'Note: only '+(BROKER_AUTH_EXPIRY_DAYS-ageDays)+' days of validity remain.';
     } else {
       warnEl.textContent = '';
     }
