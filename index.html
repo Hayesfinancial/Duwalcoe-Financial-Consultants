@@ -161,9 +161,9 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--cream);c
       <span id="syncSt" class="ss ss-ld">⏳ Loading…</span>
       <button class="btn b-gh" style="color:#fff;border-color:#334466;font-size:11px;padding:4px 10px" onclick="window.open('diary.html','_blank','width=1200,height=900')">📅 Diary</button><button class="btn b-gh" style="color:#fff;border-color:#334466;font-size:11px;padding:4px 10px" onclick="window.open('planner_ref.html','_blank','width=1200,height=800')">📋 Planner</button><button class="btn b-gh" style="color:#fff;border-color:#334466;font-size:11px;padding:4px 10px" data-act="logout">🔓 Log out</button><div class="upill">👤
         <select id="userSel">
-          <option>Clinton</option>
-          <option>Wife</option>
-          <option>Daughter</option>
+          <option value="Clinton">Clinton</option>
+          <option value="Wife">Tracy</option>
+          <option value="Daughter">Courtney</option>
         </select>
       </div>
     </div>
@@ -866,7 +866,57 @@ function daysTo(ds){
   if(ty<today)ty.setFullYear(today.getFullYear()+1);
   return Math.round((ty-today)/86400000);
 }
+// Review dates (Build 2): most clients have a review MONTH typed as a word
+// ("October", "March; October") which daysTo() cannot read, so they never
+// showed as due. A real date still works exactly as before (repeats yearly).
+// A month counts as due (0 days) for the whole of that month, otherwise the
+// days until the 1st of it. Several months: the nearest one wins.
+var REVIEW_MONTHS = ['january','february','march','april','may','june','july','august','september','october','november','december'];
+function reviewMonths(ds){
+  var out = [];
+  String(ds || '').toLowerCase().split(/[;,\/&+]|\band\b/).forEach(function(tok){
+    var w = tok.trim().replace(/\.$/, '');
+    if(w.length < 3) return;
+    // Whole month name or an abbreviation of it (Oct, Sept); nothing else.
+    var i = REVIEW_MONTHS.findIndex(function(m){ return m.indexOf(w) === 0; });
+    if(i >= 0 && out.indexOf(i) < 0) out.push(i);
+  });
+  return out;
+}
+function reviewDaysTo(ds){
+  var d = daysTo(ds);
+  if(d !== null) return d;
+  var months = reviewMonths(ds);
+  if(!months.length) return null;
+  var today = new Date(); today.setHours(0,0,0,0);
+  var best = null;
+  months.forEach(function(m){
+    var n;
+    if(m === today.getMonth()) n = 0;
+    else {
+      var first = new Date(today.getFullYear(), m, 1);
+      if(first < today) first = new Date(today.getFullYear()+1, m, 1);
+      n = Math.round((first - today) / 86400000);
+    }
+    if(best === null || n < best) best = n;
+  });
+  return best;
+}
+function reviewIsMonth(ds){ return daysTo(ds) === null && reviewMonths(ds).length > 0; }
 function cu(){ return document.getElementById('userSel').value||'Clinton'; }
+// ── Staff display names (Build 2, 24 Sep 2026) ──────────────────────────────
+// Records store the codes 'Wife' and 'Daughter' (tasks, work events, uploads,
+// task logs, and diary.html). Renaming the stored data would break filters,
+// old tasks and the Diary, so the codes stay and only the DISPLAY changes.
+// Always compare against the code; show userLabel(code).
+var USER_LABELS = {Wife:'Tracy', Daughter:'Courtney'};
+var USER_CODES = ['Clinton','Wife','Daughter'];
+function userLabel(v){ return USER_LABELS[v] || v; }
+// <select> of staff: value = stored code, text = display name.
+function userOptions(selected){
+  return USER_CODES.map(function(u){ return '<option value="'+u+'"'+(u===selected?' selected':'')+'>'+userLabel(u)+'</option>'; }).join('');
+}
+function fsUser(id,lbl,val){ return '<div class="fld"><label>'+lbl+'</label><select id="'+id+'">'+userOptions(val)+'</select></div>'; }
 function remKey(name,type){
   var yr=new Date().getFullYear();
   return 'du_rem_'+yr+'_'+String(name||'').replace(/\s+/g,'_')+'_'+String(type||'').replace(/[^a-z0-9]/gi,'_');
@@ -1121,7 +1171,7 @@ function openClient(id){
   checkEditing(id, function(lock){
     if(lock){
       // Show warning but still open - just warn
-      window.CONCURRENT_EDIT_WARNING = '⚠️ '+lock.user+' is also editing this client right now. Last save wins — coordinate before saving.';
+      window.CONCURRENT_EDIT_WARNING = '⚠️ '+userLabel(lock.user)+' is also editing this client right now. Last save wins — coordinate before saving.';
     } else {
       window.CONCURRENT_EDIT_WARNING = null;
     }
@@ -1324,8 +1374,8 @@ function renderDash(){
       }
     }
     if(clean(c.ReviewDate)){
-      var d2=daysTo(c.ReviewDate);
-      if(d2!==null&&d2<=60)up.push({name:c.Name,id:c.ID,cell:c.Cell||'',type:'📋 Review Due',days:d2,col:'var(--sky)',reviewDate:c.ReviewDate});
+      var d2=reviewDaysTo(c.ReviewDate);
+      if(d2!==null&&d2<=60)up.push({name:c.Name,id:c.ID,cell:c.Cell||'',type:'📋 Review Due',days:d2,col:'var(--sky)',reviewDate:c.ReviewDate,reviewMonth:reviewIsMonth(c.ReviewDate)});
     }
     if(clean(c.Anniversary)){
       var d3=daysTo(c.Anniversary);
@@ -1389,7 +1439,7 @@ function renderDash(){
   if(!window.DASH_USER_FILTER) window.DASH_USER_FILTER=cu();
   var reviewsDue=DB.clients.filter(function(c){
     if(!isActiveClient(c)) return false;
-    var d=daysTo(c.ReviewDate);
+    var d=reviewDaysTo(c.ReviewDate);
     return d!==null&&d<=30;
   }).length;
 
@@ -1457,7 +1507,7 @@ function renderDash(){
     '<div style="display:flex;gap:4px;align-items:center">'+
     ['All','Clinton','Wife','Daughter'].map(function(u){
       var isAct=window.DASH_USER_FILTER===u;
-      return '<button class="btn '+(isAct?'b-nv':'b-gh')+' xs" style="font-size:10px;padding:3px 8px" data-act="dash-user-filter" data-filter="'+u+'">'+u+'</button>';
+      return '<button class="btn '+(isAct?'b-nv':'b-gh')+' xs" style="font-size:10px;padding:3px 8px" data-act="dash-user-filter" data-filter="'+u+'">'+userLabel(u)+'</button>';
     }).join('')+
     '<button class="btn b-gd xs" style="font-size:10px;padding:3px 8px" data-act="open-task">+ Task</button>'+
     '</div></div>'+
@@ -1507,6 +1557,9 @@ function renderDash(){
 
   '</div>'+
 
+  // Open Cases board (Build 2)
+  renderBoardCard()+
+
   // Bottom row: Reminders + Recent Clients
   '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">'+
 
@@ -1550,7 +1603,7 @@ function renderDash(){
           return detail?'<div style="font-size:11px;color:#889;margin-top:1px">'+detail+'</div>':'';
         })()+
         '</div>'+
-        '<div style="font-weight:700;font-size:11px;color:'+(done?'#ccc':col)+'">'+(u.days===0?'Today':u.days===1?'Tmrw':''+u.days+'d')+'</div></div>';
+        '<div style="font-weight:700;font-size:11px;color:'+(done?'#ccc':col)+'">'+(u.reviewMonth&&u.days===0?'This mth':u.days===0?'Today':u.days===1?'Tmrw':''+u.days+'d')+'</div></div>';
     }).join(''))+
     '</div></div>'+
 
@@ -2596,7 +2649,7 @@ function renderOverview(c,pols,roas,ctasks){
     dr('Smoker', clean(c.Smoker)||'—')+
     dr('Risk Category', clean(c.RiskCategory)||'—')+
     dr('Gender', clean(c.Gender)||'—')+
-    dr('Adviser', clean(c.Adviser)||'Clinton')+
+    dr('Adviser', userLabel(clean(c.Adviser)||'Clinton'))+
     dr('Review Date', clean(c.ReviewDate)?fdate(c.ReviewDate):'—')+
     dr('Family Type', clean(c.FamilyType)||'—')+
     (clean(c.Address)?'<div class="dr" style="flex-direction:column;gap:3px"><span class="dl">Physical Address</span><span class="dv" style="text-align:left;font-weight:600">'+c.Address+'</span></div>':'')+
@@ -3126,7 +3179,7 @@ function renderROA(c,roas){
         '<div style="font-size:12px;color:#667;line-height:1.7">'+(r.Recommendation||'')+'</div>'+
         (r.Products?'<div style="margin-top:6px">'+bx('bx-gd',r.Products)+'</div>':'')+
         '</div>'+
-        bx('bx-sk',r.Adviser||'Clinton')+
+        bx('bx-sk',userLabel(r.Adviser||'Clinton'))+
         '</div></div>';
     }).join(''))+
     '</div></div>';
@@ -3336,7 +3389,7 @@ function renderDocs(c){
           '</div>';
         if(hasDoc){
           html += '<div style="font-size:11px;color:#778">'+escHtml(d.FileName||'')+' · uploaded '+fdate(d.UploadedAt||'')+
-            (d.UploadedBy?' by '+escHtml(d.UploadedBy):'')+docMoveNoteHtml(d)+'</div>';
+            (d.UploadedBy?' by '+escHtml(userLabel(d.UploadedBy)):'')+docMoveNoteHtml(d)+'</div>';
         } else if(item.note){
           html += '<div style="font-size:11px;color:#889;font-style:italic">'+escHtml(item.note)+'</div>';
         } else {
@@ -3901,6 +3954,334 @@ function openAddEventHeading(eventId){
   setTimeout(function(){ input.focus(); }, 50);
 }
 
+// ══ BUILD 2 (24 Sep 2026): new-case task · NTU · requirements · Open Cases ══
+
+// Event types that are "cases" the office works: they go on the Open Cases
+// board, get pre-acceptance requirements, and send a new-case task.
+var CASE_EVENT_TYPES = ['NB_RISK','NB_INVEST','SVC_RISK','SVC_INVEST'];
+function eventGetsCaseTask(t){ return CASE_EVENT_TYPES.indexOf(t) >= 0; }
+function curUserCode(){ return localStorage.getItem('du_user') || 'Clinton'; }
+function nowStamp(){ return new Date().toISOString().replace('T',' ').slice(0,16); }
+function localDateStr(d){
+  d = d || new Date();
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+}
+function eventTypeLabel(ev){
+  var t = EVENT_TYPES.find(function(x){ return x.key === ev.EventType; });
+  return (t ? t.label : ev.EventType) + (ev.EventSubType ? ' ('+ev.EventSubType+')' : '');
+}
+
+// ── New-case task ────────────────────────────────────────────────────────────
+// Same record shape and save path as saveTask(), so it behaves like any task.
+function createCaseTask(ev, clientId, creator){
+  var c = DB.clients.find(function(x){ return String(x.ID) === String(clientId); });
+  var title = ('New case: '+eventTypeLabel(ev)+(ev.Outcome ? ' · '+ev.Outcome : '')).replace(/[<>]/g, '');
+  var now = new Date().toISOString();
+  var text = 'Case opened by '+userLabel(creator)+'. Open the client\'s Work Events tab to work it.'+
+    (ev.Notes && String(ev.Notes).trim() ? '\nCase notes: '+String(ev.Notes).trim() : '');
+  var task = {ID:'t_'+Date.now(), Title:title, Assignee:ev.ResponsibleUser, DueDate:localDateStr(),
+    Priority:'Normal', CCWife:'', ClientName:c ? c.Name : '',
+    Notes:JSON.stringify([{date:now, text:text, user:creator}]),
+    Done:false, Timestamp:now, OpenedBy:creator, OpenedDate:now};
+  task._pendingSave = true;   // same sync protection as saveTask()
+  DB.tasks.push(task);
+  try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
+  post({action:'saveTask', task:task}, function(res){
+    if(!(res && res.ok)) toast('⚠️ Case created, but the task for '+userLabel(task.Assignee)+' could not be saved. Please add it by hand.','err');
+  });
+  return task;
+}
+
+// ── Status display (in progress / complete / NTU) ─────────────────────────
+function eventStatusInfo(ev){
+  if(ev.Status === 'complete')  return {txt:'✓ Complete', clr:'#2d7a3e', bg:'#eaf5ec'};
+  if(ev.Status === 'ntu')       return {txt:'NTU',        clr:'#6b6b6b', bg:'#ececec'};
+  if(ev.Status === 'cancelled') return {txt:'Cancelled',  clr:'#888',    bg:'#f0f0f0'};
+  return {txt:'In Progress', clr:'#b95900', bg:'#fdf2e6'};
+}
+
+// ── Mark NTU ───────────────────────────────────────────────────────────────
+var NTU_REASONS = ['Client declined','Declined by insurer','Counter offer not accepted','No first premium / debit order','Client withdrew','Other'];
+function openNtuModal(eventId){
+  var clientId = SEL;
+  var ev = (window._events[clientId] || []).find(function(e){ return String(e.ID) === String(eventId); });
+  if(!ev){ toast('Work Event not found. Refresh and try again.','err'); return; }
+  var ov = document.createElement('div');
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(10,20,40,.55);z-index:10000;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(2px)';
+  var box = document.createElement('div');
+  box.style.cssText = 'background:#fff;border-radius:12px;padding:22px 26px;max-width:460px;width:90%;box-shadow:0 12px 48px rgba(0,0,0,.25);font-family:inherit';
+  box.innerHTML =
+    '<div style="font-family:Georgia,serif;font-size:17px;color:#0e413a;margin-bottom:6px">Mark case NTU</div>'+
+    '<div style="font-size:12px;color:#556;margin-bottom:12px">'+escHtml(eventTypeLabel(ev))+(ev.Outcome ? '<br><b>'+escHtml(ev.Outcome)+'</b>' : '')+
+      '<br>The case closes and leaves the Open Cases board. All its documents are kept. You can reopen it later.</div>'+
+    '<label style="font-size:12px;font-weight:600;color:#445;display:block;margin-bottom:4px">Reason *</label>'+
+    '<select data-role="reason" style="width:100%;padding:8px 10px;border:1.5px solid #ccc;border-radius:6px;font-size:13px;font-family:inherit;margin-bottom:10px">'+
+      '<option value="">Choose a reason…</option>'+NTU_REASONS.map(function(r){ return '<option>'+escHtml(r)+'</option>'; }).join('')+
+    '</select>'+
+    '<label style="font-size:12px;font-weight:600;color:#445;display:block;margin-bottom:4px">Note (optional)</label>'+
+    '<input data-role="note" type="text" maxlength="200" placeholder="e.g. Client chose to stay with Old Mutual" style="width:100%;padding:8px 10px;border:1.5px solid #ccc;border-radius:6px;font-size:13px;font-family:inherit;margin-bottom:16px;box-sizing:border-box">'+
+    '<div style="display:flex;justify-content:flex-end;gap:8px">'+
+      '<button data-role="cancel" style="padding:8px 18px;border-radius:7px;border:1.5px solid #ddd;background:#fff;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;color:#555">Cancel</button>'+
+      '<button data-role="ok" style="padding:8px 22px;border-radius:7px;border:none;background:#6b6b6b;color:#fff;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">Mark NTU</button>'+
+    '</div>';
+  ov.appendChild(box);
+  document.body.appendChild(ov);
+  function close(){ if(ov.parentNode) document.body.removeChild(ov); }
+  box.querySelector('[data-role=cancel]').addEventListener('click', close);
+  ov.addEventListener('click', function(e){ if(e.target === ov) close(); });
+  box.querySelector('[data-role=ok]').addEventListener('click', function(){
+    var reason = box.querySelector('[data-role=reason]').value;
+    var note = String(box.querySelector('[data-role=note]').value || '').trim();
+    if(!reason){ alert('Please choose a reason.'); return; }
+    var patch = {Status:'ntu', ClosedReason: reason + (note ? ' · '+note : ''), CompletedAt: nowStamp()};
+    sbFetch('PATCH','/rest/v1/work_events?ID=eq.'+encodeURIComponent(eventId), patch, function(res, err){
+      if(err){
+        alert(/ClosedReason/.test(String(err))
+          ? 'Could not mark NTU: the database has not been updated for Build 2 yet. Run the Build 2 SQL file in Supabase first.'
+          : 'Could not mark NTU: '+err);
+        return;
+      }
+      close();
+      if(window._board) window._board.loadedAt = 0;
+      toast('Case marked NTU','ok');
+      loadEvents(clientId);
+    });
+  });
+}
+function reopenEvent(eventId){
+  if(!confirm('Reopen this case? It goes back to In Progress and onto the Open Cases board. The NTU reason is cleared.')) return;
+  var clientId = SEL;
+  sbFetch('PATCH','/rest/v1/work_events?ID=eq.'+encodeURIComponent(eventId), {Status:'in_progress', ClosedReason:null, CompletedAt:null}, function(res, err){
+    if(err){ alert('Could not reopen: '+err); return; }
+    if(window._board) window._board.loadedAt = 0;
+    toast('Case reopened','ok');
+    loadEvents(clientId);
+  });
+}
+
+// ── Pre-acceptance requirements ────────────────────────────────────────────
+// One row per requirement in work_event_requirements (Build 2 SQL). Open =
+// ReceivedAt empty. Nothing is deleted except by "Remove" (for typos).
+window._eventReqs = window._eventReqs || {};   // EventID -> [rows]
+window._reqsUnavailable = false;                // true if the SQL has not been run
+function loadEventReqs(eventId, cb){
+  sbFetch('GET','/rest/v1/work_event_requirements?WorkEventID=eq.'+encodeURIComponent(eventId)+'&select=*&order=AddedAt.asc', null, function(rows, err){
+    if(err){ window._eventReqs[eventId] = []; window._reqsUnavailable = true; }
+    else { window._eventReqs[eventId] = rows || []; window._reqsUnavailable = false; }
+    if(cb) cb();
+  });
+}
+function renderEventReqs(ev){
+  if(!eventGetsCaseTask(ev.EventType)) return '';
+  var reqs = window._eventReqs[ev.ID] || [];
+  var open = reqs.filter(function(r){ return !r.ReceivedAt; });
+  var got  = reqs.filter(function(r){ return !!r.ReceivedAt; });
+  var closed = ev.Status === 'complete' || ev.Status === 'ntu';
+  var html = '<div style="margin-bottom:18px">';
+  html += '<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:.8px;margin-bottom:6px">⏳ Before Acceptance: Awaiting From Insurer'+
+    (open.length ? ' <span style="background:#b95900;color:#fff;border-radius:8px;padding:0 6px;font-size:10px;margin-left:4px">'+open.length+' open</span>' : '')+'</div>';
+  if(window._reqsUnavailable){
+    html += '<div style="padding:8px 12px;background:#fdecea;border-radius:4px;font-size:12px;color:#9a1f1f">Requirements are not available yet: the Build 2 SQL file has not been run in Supabase.</div></div>';
+    return html;
+  }
+  if(!reqs.length){
+    html += '<div style="padding:8px 12px;background:#fafaf5;border-radius:4px;font-size:12px;color:#889;font-style:italic;margin-bottom:6px">Nothing outstanding from the insurer. Add medicals, reports or letters the insurer asks for.</div>';
+  }
+  open.forEach(function(r){
+    html += '<div style="padding:7px 12px;background:#fdf2e6;border-radius:4px;display:flex;gap:10px;align-items:center;margin-bottom:3px">'+
+      '<span style="font-size:14px">⏳</span>'+
+      '<div style="flex:1"><div style="font-size:13px;font-weight:600">'+escHtml(r.Requirement)+'</div>'+
+      '<div style="font-size:10px;color:#889">Added by '+escHtml(userLabel(r.AddedBy||''))+(r.AddedAt ? ', '+fdate(r.AddedAt) : '')+'</div></div>'+
+      '<button class="btn b-nv sm" data-act="req-received" data-rid="'+escHtml(r.ID)+'" data-eid="'+ev.ID+'" style="font-size:11px;padding:4px 10px">✓ Received</button>'+
+      '<button class="btn b-gh sm" data-act="req-remove" data-rid="'+escHtml(r.ID)+'" data-eid="'+ev.ID+'" style="font-size:11px;padding:4px 8px;color:#b23" title="Remove (for mistakes only)">✕</button>'+
+      '</div>';
+  });
+  got.forEach(function(r){
+    html += '<div style="padding:5px 12px;background:#f4f8f4;border-radius:4px;display:flex;gap:10px;align-items:center;margin-bottom:3px;opacity:.85">'+
+      '<span style="font-size:13px">✅</span>'+
+      '<div style="flex:1;font-size:12px;color:#556"><span style="text-decoration:line-through">'+escHtml(r.Requirement)+'</span>'+
+      ' <span style="font-size:10px;color:#889">received '+fdate(r.ReceivedAt)+' by '+escHtml(userLabel(r.ReceivedBy||''))+'</span></div>'+
+      '<button class="btn b-gh sm" data-act="req-undo" data-rid="'+escHtml(r.ID)+'" data-eid="'+ev.ID+'" style="font-size:10px;padding:3px 8px;color:#889" title="Mark as not received">Undo</button>'+
+      '</div>';
+  });
+  if(!closed){
+    html += '<div style="display:flex;gap:6px;margin-top:6px">'+
+      '<input data-req-input="1" data-eid="'+ev.ID+'" id="req_in_'+ev.ID+'" type="text" maxlength="150" placeholder="e.g. Blood test, GP report Dr Smit, source of funds letter" style="flex:1;padding:6px 10px;border:1.5px solid #ccc;border-radius:6px;font-size:12px;font-family:inherit">'+
+      '<button class="btn b-gh sm" data-act="req-add" data-eid="'+ev.ID+'" style="font-size:11px;padding:4px 12px">+ Add</button></div>';
+  }
+  html += '</div>';
+  return html;
+}
+function reqChanged(eventId){
+  if(window._board) window._board.loadedAt = 0;
+  loadEventReqs(eventId, function(){ if(SEL && CTAB === 'events') render(); });
+}
+function addEventReq(eventId){
+  var inp = document.getElementById('req_in_'+eventId);
+  var text = inp ? String(inp.value || '').replace(/\s+/g,' ').trim() : '';
+  if(!text){ toast('Type what the insurer needs first','err'); return; }
+  sbFetch('POST','/rest/v1/work_event_requirements', [{WorkEventID:eventId, Requirement:text, AddedBy:curUserCode(), AddedAt:nowStamp()}], function(res, err){
+    if(err){ toast('Could not add requirement','err'); return; }
+    toast('Added: '+text,'ok');
+    reqChanged(eventId);
+  });
+}
+function setEventReqReceived(reqId, eventId, received){
+  var patch = received ? {ReceivedBy:curUserCode(), ReceivedAt:nowStamp()} : {ReceivedBy:null, ReceivedAt:null};
+  sbFetch('PATCH','/rest/v1/work_event_requirements?ID=eq.'+encodeURIComponent(reqId), patch, function(res, err){
+    if(err){ toast('Could not update requirement','err'); return; }
+    reqChanged(eventId);
+  });
+}
+function removeEventReq(reqId, eventId){
+  if(!confirm('Remove this requirement?\n\nUse this only for mistakes. When it arrives, click ✓ Received instead so there is a record.')) return;
+  sbFetch('DELETE','/rest/v1/work_event_requirements?ID=eq.'+encodeURIComponent(reqId), null, function(res, err){
+    if(err){ toast('Could not remove requirement','err'); return; }
+    reqChanged(eventId);
+  });
+}
+// Enter in a requirement box = + Add (installed once; delegation survives re-renders)
+(function(){
+  if(window._reqKeyInstalled) return;
+  window._reqKeyInstalled = true;
+  document.addEventListener('keydown', function(e){
+    var t = e.target;
+    if(e.key === 'Enter' && t && t.getAttribute && t.getAttribute('data-req-input')){
+      e.preventDefault();
+      addEventReq(t.getAttribute('data-eid'));
+    }
+  });
+})();
+
+// ── Open Cases board (dashboard) ───────────────────────────────────────────
+// Every in-progress NB/Servicing case across all clients, oldest first, with
+// open insurer requirements and missing mandatory documents by name. Missing
+// uses exactly the rule the case itself uses: mandatory or conditional for
+// this sub-type, not uploaded, not marked N/A.
+window._board = window._board || {loadedAt:0, loading:false, events:[], docs:{}, na:{}, reqs:{}};
+window.BOARD_FILTER = window.BOARD_FILTER || 'All';
+var BOARD_REFRESH_MS = 120000;
+
+function eventMissingDocs(ev, docs, naSet){
+  return (EVENT_DOC_CHECKLISTS[ev.EventType] || []).filter(function(item){
+    if(item.onlyIf && item.onlyIf.subType && ev.EventSubType !== item.onlyIf.subType) return false;
+    if(item.required !== 'mandatory' && item.required !== 'conditional') return false;
+    if(naSet.has(item.key)) return false;
+    return !docs.some(function(d){ return d.DocType === item.key; });
+  });
+}
+
+function loadBoard(){
+  var B = window._board;
+  if(B.loading) return;
+  B.loading = true;
+  var q = '/rest/v1/work_events?Status=eq.in_progress&EventType=in.('+CASE_EVENT_TYPES.join(',')+')&select=*&order=EventDate.asc,CreatedAt.asc';
+  sbFetch('GET', q, null, function(rows, err){
+    if(err){ B.loading = false; B.err = true; B.loadedAt = Date.now(); if(PAGE === 'dash') render(); return; }
+    rows = rows || [];
+    var docs = {}, na = {}, reqs = {}, failed = false, reqsMissing = false;
+    function finish(){
+      B.loading = false; B.loadedAt = Date.now();
+      if(failed){ B.err = true; }
+      else { B.err = false; B.events = rows; B.docs = docs; B.na = na; B.reqs = reqs; B.reqsUnavailable = reqsMissing; }
+      if(PAGE === 'dash') render();
+    }
+    if(!rows.length){ finish(); return; }
+    var ids = encodeURIComponent(rows.map(function(r){ return '"'+r.ID+'"'; }).join(','));
+    var pending = 3;
+    function one(){ if(--pending === 0) finish(); }
+    function group(map, r){ (map[r.WorkEventID] = map[r.WorkEventID] || []).push(r); }
+    sbFetch('GET','/rest/v1/work_event_documents?WorkEventID=in.('+ids+')&select=WorkEventID,DocType', null, function(r, e){
+      if(e) failed = true; else (r || []).forEach(function(x){ group(docs, x); }); one();
+    });
+    sbFetch('GET','/rest/v1/work_event_checklist_na?WorkEventID=in.('+ids+')&select=WorkEventID,DocType', null, function(r, e){
+      if(e) failed = true; else (r || []).forEach(function(x){ group(na, x); }); one();
+    });
+    sbFetch('GET','/rest/v1/work_event_requirements?WorkEventID=in.('+ids+')&ReceivedAt=is.null&select=WorkEventID,Requirement,AddedAt&order=AddedAt.asc', null, function(r, e){
+      if(e) reqsMissing = true; else (r || []).forEach(function(x){ group(reqs, x); }); one();
+    });
+  });
+}
+
+function renderBoardCard(){
+  var B = window._board;
+  if(!B.loading && Date.now() - B.loadedAt > BOARD_REFRESH_MS) loadBoard();
+  var today = new Date(); today.setHours(0,0,0,0);
+  var all = B.events || [];
+  var count = function(u){ return all.filter(function(e){ return u === 'All' || e.ResponsibleUser === u; }).length; };
+  var list = all.filter(function(e){ return window.BOARD_FILTER === 'All' || e.ResponsibleUser === window.BOARD_FILTER; });
+
+  var html = '<div class="card" style="padding:0;margin-bottom:12px">'+
+    '<div class="ch" style="padding:10px 16px"><h2>📂 Open Cases'+(B.loadedAt && !B.err ? ' <span style="font-size:12px;color:#889;font-weight:400">('+all.length+')</span>' : '')+'</h2>'+
+    '<div style="display:flex;gap:4px;align-items:center">'+
+    ['All'].concat(USER_CODES).map(function(u){
+      var on = window.BOARD_FILTER === u;
+      var n = B.loadedAt && !B.err ? count(u) : 0;
+      return '<button class="btn '+(on ? 'b-nv' : 'b-gh')+' xs" style="font-size:10px;padding:3px 8px" data-act="board-filter" data-filter="'+u+'">'+userLabel(u)+(n ? ' ('+n+')' : '')+'</button>';
+    }).join('')+
+    '<button class="btn b-gh xs" style="font-size:10px;padding:3px 8px" data-act="board-refresh" title="Refresh">↻</button>'+
+    '</div></div>';
+
+  if(!B.loadedAt){
+    return html + '<div class="empty" style="padding:16px">Loading open cases…</div></div>';
+  }
+  if(B.err){
+    return html + '<div class="empty" style="padding:16px;color:#b23">Could not load open cases. Tap ↻ to try again.</div></div>';
+  }
+  if(B.reqsUnavailable){
+    html += '<div style="background:#fdecea;padding:6px 14px;font-size:11px;color:#9a1f1f">Insurer requirements are not showing: the Build 2 SQL file has not been run in Supabase yet.</div>';
+  }
+  if(!list.length){
+    return html + '<div class="empty" style="padding:16px">'+(all.length ? 'No open cases for '+escHtml(userLabel(window.BOARD_FILTER))+' ✅' : 'No open cases ✅')+'</div></div>';
+  }
+
+  html += '<div style="max-height:460px;overflow-y:auto">';
+  list.forEach(function(ev){
+    var c = DB.clients.find(function(x){ return String(x.ID) === String(ev.ClientID); });
+    var naSet = new Set((B.na[ev.ID] || []).map(function(x){ return x.DocType; }));
+    var missing = eventMissingDocs(ev, B.docs[ev.ID] || [], naSet);
+    var reqs = B.reqs[ev.ID] || [];
+    var p = String(ev.EventDate || '').split('-');
+    var opened = p.length === 3 ? new Date(+p[0], +p[1]-1, +p[2]) : null;
+    var days = opened ? Math.max(0, Math.round((today - opened) / 86400000)) : null;
+    var ageClr = days === null ? '#889' : days > 60 ? '#b23' : days > 30 ? '#b95900' : '#2d7a3e';
+    var ageBg  = days === null ? '#f0f0f0' : days > 60 ? '#fdecea' : days > 30 ? '#fdf2e6' : '#eaf5ec';
+
+    html += '<div class="ri" style="padding:9px 14px;cursor:pointer;display:block;border-bottom:1px solid var(--smoke)" data-act="open-board-case" data-cid="'+escHtml(ev.ClientID)+'" data-eid="'+ev.ID+'">';
+    html += '<div style="display:flex;gap:10px;align-items:flex-start">';
+    html += '<span style="background:'+ageBg+';color:'+ageClr+';border-radius:6px;padding:2px 7px;font-size:11px;font-weight:700;white-space:nowrap;min-width:38px;text-align:center" title="Opened '+fdate(ev.EventDate)+'">'+(days === null ? '—' : days+'d')+'</span>';
+    html += '<div style="flex:1;min-width:0">';
+    html += '<div style="font-size:13px;font-weight:700;color:var(--ink)">'+escHtml(c ? c.Name : '(client not found)')+
+      ' <span style="font-weight:400;color:#667;font-size:12px">· '+escHtml(eventTypeLabel(ev))+'</span></div>';
+    html += '<div style="font-size:12px;color:'+(ev.Outcome ? '#0e413a' : '#aab')+';font-weight:'+(ev.Outcome ? '600' : '400')+(ev.Outcome ? '' : ';font-style:italic')+'">'+
+      (ev.Outcome ? escHtml(ev.Outcome) : 'No case name')+'<span style="color:#889;font-weight:400;font-style:normal"> · opened '+fdate(ev.EventDate)+'</span></div>';
+    if(reqs.length){
+      html += '<div style="font-size:11px;color:#8a4a00;margin-top:3px">⏳ <b>Awaiting from insurer:</b> '+reqs.map(function(r){ return escHtml(r.Requirement); }).join(' · ')+'</div>';
+    }
+    if(missing.length){
+      var shown = missing.slice(0, 6).map(function(m){ return escHtml(m.label); });
+      html += '<div style="font-size:11px;color:#b23;margin-top:3px">❌ <b>Missing:</b> '+shown.join(' · ')+(missing.length > 6 ? ' <span style="color:#889">+'+(missing.length - 6)+' more</span>' : '')+'</div>';
+    }
+    if(!reqs.length && !missing.length){
+      html += '<div style="font-size:11px;color:#2d7a3e;margin-top:3px;font-weight:700">✓ Ready to mark complete</div>';
+    }
+    html += '</div>';
+    html += '<span style="font-size:10px;color:#889;white-space:nowrap">'+escHtml(userLabel(ev.ResponsibleUser || '—'))+'</span>';
+    html += '</div></div>';
+  });
+  html += '</div></div>';
+  return html;
+}
+
+function openBoardCase(clientId, eventId){
+  openClient(clientId);
+  CTAB = 'events';
+  window._selectedEvent = eventId;
+  loadEvents(clientId);
+  loadEventDocs(eventId);
+  render();
+}
+
 // Load NA state for one event — rows where user has marked "Not Applicable"
 function loadEventNA(eventId, cb){
   sbFetch('GET','/rest/v1/work_event_checklist_na?WorkEventID=eq.'+encodeURIComponent(eventId)+'&select=*', null, function(rows, err){
@@ -3912,6 +4293,7 @@ function loadEventNA(eventId, cb){
 
 // Load events for a client (and their policy links) from Supabase
 function loadEvents(clientId){
+  if(window._board) window._board.loadedAt = 0;
   sbFetch('GET','/rest/v1/work_events?ClientID=eq.'+encodeURIComponent(clientId)+'&select=*&order=EventDate.desc', null, function(rows, err){
     if(err){ console.error('loadEvents error:',err); window._events[clientId] = []; }
     else window._events[clientId] = rows || [];
@@ -3938,11 +4320,16 @@ function loadEventDocs(eventId, cb){
   sbFetch('GET','/rest/v1/work_event_documents?WorkEventID=eq.'+encodeURIComponent(eventId)+'&select=*&order=UploadedAt.desc', null, function(rows, err){
     if(err){ console.error('loadEventDocs error:',err); window._eventDocs[eventId] = []; }
     else window._eventDocs[eventId] = rows || [];
-    // Also load NA state in parallel
-    loadEventNA(eventId, function(){
+    // Also load NA state and pre-acceptance requirements in parallel
+    if(window._board) window._board.loadedAt = 0;
+    var waiting = 2;
+    function both(){
+      if(--waiting > 0) return;
       if(cb) cb();
       else if(SEL && CTAB==='events') render();
-    });
+    }
+    loadEventNA(eventId, both);
+    loadEventReqs(eventId, both);
   });
 }
 
@@ -3964,6 +4351,11 @@ function renderEvents(c, pols){
       html += renderEventDetail(ev, c, pols);
       html += '</div></div>';
       return html;
+    } else if(!window._events[clientId]){
+      // Events for this client still loading (e.g. opened from the Open Cases
+      // board): keep the selection and wait instead of dropping to the list.
+      html += '<div class="empty">Loading case…</div></div></div>';
+      return html;
     } else {
       // Event not found in list — try reloading
       window._selectedEvent = null;
@@ -3980,9 +4372,8 @@ function renderEvents(c, pols){
       var subTxt = ev.EventSubType ? ' ('+ev.EventSubType+')' : '';
       var linkedPols = window._eventPolicies[ev.ID] || [];
 
-      var statusClr = ev.Status==='complete' ? '#2d7a3e' : (ev.Status==='cancelled' ? '#888' : '#b95900');
-      var statusBg  = ev.Status==='complete' ? '#eaf5ec' : (ev.Status==='cancelled' ? '#f0f0f0' : '#fdf2e6');
-      var statusTxt = ev.Status==='complete' ? '✓ Complete' : (ev.Status==='cancelled' ? 'Cancelled' : 'In Progress');
+      var stI = eventStatusInfo(ev);
+      var statusClr = stI.clr, statusBg = stI.bg, statusTxt = stI.txt;
 
       html += '<div class="roa-card" style="cursor:pointer;border-left:3px solid '+statusClr+'" data-act="open-event" data-eid="'+ev.ID+'">';
       html += '<div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start">';
@@ -3997,6 +4388,9 @@ function renderEvents(c, pols){
       // Compare letters and digits only, so "Replacing: Momentum" = "Replacing Momentum".
       var squash = function(s){ return String(s || '').toLowerCase().replace(/[^a-z0-9]/g, ''); };
       var sameAsName = evNote && ev.Outcome && squash(evNote) === squash(ev.Outcome);
+      if(ev.Status==='ntu' && ev.ClosedReason){
+        html += '<div style="font-size:11px;color:#6b6b6b;margin:2px 0">NTU: '+escHtml(ev.ClosedReason)+'</div>';
+      }
       if(evNote && !sameAsName){
         html += '<div title="'+escHtml(evNote)+'" style="font-size:12px;color:#3d3300;background:#fff8dc;border-left:3px solid #e0b800;border-radius:3px;padding:3px 8px;margin:4px 0">'+
           '<div style="white-space:pre-line;word-break:break-word;line-height:1.4;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">📝 '+escHtml(evNote)+'</div></div>';
@@ -4019,7 +4413,7 @@ function renderEvents(c, pols){
       html += '</div>';
       html += '<div style="display:flex;flex-direction:column;gap:4px;align-items:flex-end">';
       html += '<span style="background:'+statusBg+';color:'+statusClr+';padding:3px 8px;border-radius:4px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.5px">'+statusTxt+'</span>';
-      if(ev.ResponsibleUser) html += '<span style="font-size:10px;color:#889">'+escHtml(ev.ResponsibleUser)+'</span>';
+      if(ev.ResponsibleUser) html += '<span style="font-size:10px;color:#889">'+escHtml(userLabel(ev.ResponsibleUser))+'</span>';
       html += '</div>';
       html += '</div></div>';
     });
@@ -4083,16 +4477,25 @@ function renderEventDetail(ev, c, pols){
       '<div style="font-size:13px;color:#3d3300;white-space:pre-wrap;word-break:break-word">'+escHtml(String(ev.Notes).replace(/\s+$/,''))+'</div></div>';
   }
   html += '<div style="display:flex;gap:14px;font-size:12px;color:#667;margin-top:6px">';
-  html += '<span>Status: <b>'+escHtml(ev.Status||'in_progress')+'</b></span>';
-  html += '<span>Responsible: <b>'+escHtml(ev.ResponsibleUser||'—')+'</b></span>';
+  html += '<span>Status: <b style="color:'+eventStatusInfo(ev).clr+'">'+escHtml(eventStatusInfo(ev).txt)+'</b></span>';
+  html += '<span>Responsible: <b>'+escHtml(userLabel(ev.ResponsibleUser||'—'))+'</b></span>';
   if(ev.ClientWithAdvice===false) html += '<span style="color:#b95900;font-weight:700">⚠ Against advice</span>';
   html += '</div>';
   html += '<div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">';
   html += '<button class="btn b-gh sm" data-act="edit-event" data-eid="'+ev.ID+'">Edit Event</button>';
-  if(ev.Status!=='complete') html += '<button class="btn b-nv sm" data-act="mark-event-complete" data-eid="'+ev.ID+'">Mark Complete</button>';
+  if(ev.Status!=='complete' && ev.Status!=='ntu') html += '<button class="btn b-nv sm" data-act="mark-event-complete" data-eid="'+ev.ID+'">Mark Complete</button>';
+  if(ev.Status!=='complete' && ev.Status!=='ntu' && eventGetsCaseTask(ev.EventType)) html += '<button class="btn b-gh sm" data-act="mark-event-ntu" data-eid="'+ev.ID+'" style="color:#555" title="Not taken up: close the case and keep all documents">Mark NTU</button>';
+  if(ev.Status==='ntu') html += '<button class="btn b-gh sm" data-act="reopen-event" data-eid="'+ev.ID+'">↩ Reopen case</button>';
   html += '<button class="btn b-gh sm" data-act="delete-event" data-eid="'+ev.ID+'" data-cid="'+c.ID+'" style="color:#b23">Delete Event</button>';
   html += '</div>';
+  if(ev.Status==='ntu'){
+    html += '<div style="margin-top:10px;padding:8px 12px;background:#ececec;border-left:3px solid #6b6b6b;border-radius:4px;font-size:12px;color:#444">'+
+      '<b>NTU</b>'+(ev.ClosedReason ? ': '+escHtml(ev.ClosedReason) : '')+(ev.CompletedAt ? ' <span style="color:#889">· '+fdate(ev.CompletedAt)+'</span>' : '')+'</div>';
+  }
   html += '</div>';
+
+  // Pre-acceptance requirements (NB + Servicing)
+  html += renderEventReqs(ev);
 
   // Linked Policies section
   var links = window._eventPolicies[ev.ID] || [];
@@ -4247,7 +4650,7 @@ function renderEventDetail(ev, c, pols){
         html += '<div style="font-size:11px;color:#889;font-style:italic">Marked not applicable — click ✓ to re-enable</div>';
       } else if(hasDoc){
         html += '<div style="font-size:11px;color:#778">'+escHtml(d.FileName||'')+' · '+fdate(d.UploadedAt||'')+
-          (d.UploadedBy?' by '+escHtml(d.UploadedBy):'')+docMoveNoteHtml(d)+'</div>';
+          (d.UploadedBy?' by '+escHtml(userLabel(d.UploadedBy)):'')+docMoveNoteHtml(d)+'</div>';
       } else if(item.note){
         html += '<div style="font-size:11px;color:#889;font-style:italic">'+escHtml(item.note)+'</div>';
       } else {
@@ -4336,10 +4739,9 @@ function openNewEventModal(clientId){
 
     '<div style="margin-bottom:12px"><label style="font-size:12px;font-weight:600;color:#445;display:block;margin-bottom:4px">Responsible</label>'+
     '<select id="ev_responsible" style="width:100%;padding:8px 10px;border:1.5px solid #ccc;border-radius:6px;font-size:13px;font-family:inherit">'+
-    '<option value="Clinton">Clinton</option>'+
-    '<option value="Wife">Wife</option>'+
-    '<option value="Daughter">Daughter</option>'+
-    '</select></div>'+
+    userOptions('Wife')+
+    '</select>'+
+    '<div id="ev_task_hint" style="font-size:11px;color:#778;margin-top:4px"></div></div>'+
 
     '<div style="margin-bottom:12px"><label style="font-size:12px;font-weight:600;color:#445;display:block;margin-bottom:4px">Notes (optional)</label>'+
     '<textarea id="ev_notes" rows="3" style="width:100%;padding:8px 10px;border:1.5px solid #ccc;border-radius:6px;font-size:13px;font-family:inherit;resize:vertical"></textarea></div>'+
@@ -4352,9 +4754,23 @@ function openNewEventModal(clientId){
   ov.appendChild(box);
   document.body.appendChild(ov);
 
-  // Preselect current user as responsible
-  var cu = localStorage.getItem('du_user');
-  if(cu) document.getElementById('ev_responsible').value = cu;
+  // Responsible defaults to Tracy (code 'Wife'): she allocates the work and
+  // can hand a case to Courtney via Edit Event. (Build 2, 24 Sep 2026)
+  // Named curUser, not cu, so the global cu() function is not shadowed.
+  var curUser = localStorage.getItem('du_user') || 'Clinton';
+  // Live hint: tells the creator whether a task will be sent.
+  function updateTaskHint(){
+    var t = document.getElementById('ev_type').value;
+    var r = document.getElementById('ev_responsible').value;
+    var h = document.getElementById('ev_task_hint');
+    if(!h) return;
+    if(!eventGetsCaseTask(t)){ h.textContent = ''; return; }
+    h.textContent = (r === curUser)
+      ? 'No task: you are responsible for this case yourself.'
+      : '📨 A task "New case" will go to '+userLabel(r)+', due today.';
+  }
+  document.getElementById('ev_responsible').addEventListener('change', updateTaskHint);
+  document.getElementById('ev_type').addEventListener('change', updateTaskHint);
 
   // Dynamic sub-type based on event type
   document.getElementById('ev_type').addEventListener('change', function(){
@@ -4393,7 +4809,7 @@ function openNewEventModal(clientId){
       ResponsibleUser: resp,
       Outcome: caseName || null,
       Notes: notes,
-      CreatedBy: cu || 'Clinton',
+      CreatedBy: curUser,
       CreatedAt: new Date().toISOString().replace('T',' ').slice(0,16)
     };
     sbFetch('POST','/rest/v1/work_events?select=*', [row], function(res, err){
@@ -4402,7 +4818,15 @@ function openNewEventModal(clientId){
         return;
       }
       document.body.removeChild(ov);
-      toast('✓ Event created','ok');
+      // New-case task to the Responsible person (NB + Servicing only, and not
+      // when you assign the case to yourself).
+      var sentTo = null;
+      if(eventGetsCaseTask(type) && resp !== curUser){
+        createCaseTask(row, clientId, curUser);
+        sentTo = resp;
+      }
+      if(window._board) window._board.loadedAt = 0;
+      toast('✓ Event created'+(sentTo ? ' · task sent to '+userLabel(sentTo) : ''),'ok');
       // Open the new event's detail view
       if(res && res.length){ window._selectedEvent = res[0].ID; }
       loadEvents(clientId);
@@ -4446,9 +4870,7 @@ function openEditEventModal(eventId){
 
     '<div style="margin-bottom:12px"><label style="font-size:12px;font-weight:600;color:#445;display:block;margin-bottom:4px">Responsible</label>'+
     '<select id="edit_ev_responsible" style="width:100%;padding:8px 10px;border:1.5px solid #ccc;border-radius:6px;font-size:13px;font-family:inherit">'+
-    '<option value="Clinton"'+(ev.ResponsibleUser==='Clinton'?' selected':'')+'>Clinton</option>'+
-    '<option value="Wife"'+(ev.ResponsibleUser==='Wife'?' selected':'')+'>Wife</option>'+
-    '<option value="Daughter"'+(ev.ResponsibleUser==='Daughter'?' selected':'')+'>Daughter</option>'+
+    userOptions(ev.ResponsibleUser)+
     '</select></div>'+
 
     '<div style="margin-bottom:12px"><label style="font-size:12px;font-weight:600;color:#445;display:block;margin-bottom:4px">Case name</label>'+
@@ -4894,7 +5316,7 @@ function docPickHeading(fileName, fromLabel, options, cb){
 
 // Append "Moved from X to Y by <user>, <date>" to existing notes.
 function docMoveNote(prevNotes, fromLabel, toLabel){
-  var who = localStorage.getItem('du_user') || 'Clinton';
+  var who = userLabel(localStorage.getItem('du_user') || 'Clinton');
   var when = new Date().toLocaleDateString('en-ZA', {day:'numeric', month:'short', year:'numeric'});
   var line = 'Moved from '+fromLabel+' to '+toLabel+' by '+who+', '+when;
   var prev = String(prevNotes || '').replace(/\s+$/, '');
@@ -5074,7 +5496,7 @@ function renderTaskDocsSection(taskId){
       '<span style="font-size:14px">'+icon+'</span>'+
       '<div style="flex:1;min-width:0">'+
         '<div style="font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escHtml(d.FileName||'file')+'</div>'+
-        '<div style="font-size:10px;color:#889">'+escHtml(d.UploadedBy||'')+' · '+(d.UploadedAt?new Date(d.UploadedAt).toLocaleString('en-ZA',{day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}):'')+sizeStr+'</div>'+
+        '<div style="font-size:10px;color:#889">'+escHtml(userLabel(d.UploadedBy||''))+' · '+(d.UploadedAt?new Date(d.UploadedAt).toLocaleString('en-ZA',{day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}):'')+sizeStr+'</div>'+
       '</div>'+
       '<button class="btn b-gh xs" data-act="task-doc-view" data-did="'+d.ID+'">View</button>'+
       '<button class="btn b-gh xs" data-act="task-doc-delete" data-did="'+d.ID+'" data-tid="'+taskId+'" style="color:#b23">Del</button>'+
@@ -5295,7 +5717,7 @@ function renderTasks(){
   var filterBtns = '<div style="display:flex;gap:6px;flex-wrap:wrap">';
   ['All','Clinton','Wife','Daughter'].forEach(function(u){
     var active = window.TASK_USER_FILTER===u;
-    filterBtns += '<button class="btn '+(active?'b-nv':'b-gh')+' xs" data-act="task-user-filter" data-filter="'+u+'">'+u+'</button>';
+    filterBtns += '<button class="btn '+(active?'b-nv':'b-gh')+' xs" data-act="task-user-filter" data-filter="'+u+'">'+userLabel(u)+'</button>';
   });
   filterBtns += '</div>';
 
@@ -5328,8 +5750,8 @@ function taskRowColored(t, color){
     '<div style="font-size:13px;font-weight:600;color:var(--ink)">'+( t.Priority==='Urgent'?'🔴 ':'')+( t.Title||'')+'</div>'+
     '<div style="font-size:11px;color:#889;margin-top:2px;display:flex;gap:8px;flex-wrap:wrap">'+
     (t.Priority==='Urgent'?'<span style="background:#fde8e8;color:var(--rose);border-radius:10px;padding:1px 7px;font-size:10px;font-weight:700">URGENT</span>':'')+
-    (String(t.CCWife||'').toLowerCase()==='yes'&&assignee!=='Wife'?'<span style="background:#e0eeff;color:#2563ab;border-radius:10px;padding:1px 7px;font-size:10px;font-weight:700">👁 CC Wife</span>':'')+
-    '<span style="'+nameBg+';border-radius:10px;padding:1px 7px;font-size:10px;font-weight:700">'+assignee+'</span>'+
+    (String(t.CCWife||'').toLowerCase()==='yes'&&assignee!=='Wife'?'<span style="background:#e0eeff;color:#2563ab;border-radius:10px;padding:1px 7px;font-size:10px;font-weight:700">👁 CC Tracy</span>':'')+
+    '<span style="'+nameBg+';border-radius:10px;padding:1px 7px;font-size:10px;font-weight:700">'+userLabel(assignee)+'</span>'+
     (t.ClientName?'<span>👤 '+t.ClientName+'</span>':'')+
     (clean(t.DueDate)?'<span>📅 '+fdate(t.DueDate)+'</span>':'')+
     (entryCount?'<span style="color:var(--sky)">📝 '+entryCount+'</span>':'')+
@@ -5358,8 +5780,8 @@ function taskRow(t){
     '<div style="font-size:13px;font-weight:500'+(done?';text-decoration:line-through;color:#aaa':'')+'">'+(t.Priority==='Urgent'?'🔴 ':'')+( t.Title||'')+'</div>'+
     '<div class="tmeta" style="font-size:11px;color:#889;margin-top:2px;display:flex;gap:8px;flex-wrap:wrap">'+
     (t.Priority==='Urgent'?'<span style="background:#fde8e8;color:var(--rose);border-radius:10px;padding:1px 7px;font-size:10px;font-weight:700">URGENT</span>':'')+
-    (String(t.CCWife||'').toLowerCase()==='yes'&&assignee!=='Wife'?'<span style="background:#e0eeff;color:#2563ab;border-radius:10px;padding:1px 7px;font-size:10px;font-weight:700">👁 CC Wife</span>':'')+
-    '<span style="'+(done?'background:var(--smoke)':nameBg)+';border-radius:10px;padding:1px 7px;font-size:10px;font-weight:700">'+assignee+'</span>'+
+    (String(t.CCWife||'').toLowerCase()==='yes'&&assignee!=='Wife'?'<span style="background:#e0eeff;color:#2563ab;border-radius:10px;padding:1px 7px;font-size:10px;font-weight:700">👁 CC Tracy</span>':'')+
+    '<span style="'+(done?'background:var(--smoke)':nameBg)+';border-radius:10px;padding:1px 7px;font-size:10px;font-weight:700">'+userLabel(assignee)+'</span>'+
     (t.ClientName?'<span>👤 '+t.ClientName+'</span>':'')+
     (clean(t.DueDate)?'<span>📅 '+fdate(t.DueDate)+'</span>':'')+
     (entryCount?'<span style="color:var(--sky)">📝 '+entryCount+' '+(entryCount===1?'entry':'entries')+'</span>':'')+
@@ -12444,7 +12866,7 @@ function openROAModal(cid){
   document.getElementById('rModB').innerHTML=
     '<div class="g2">'+
     fdp('rd','Date',new Date().toISOString().slice(0,10))+
-    fs('radv','Adviser',['Clinton','Wife','Daughter'],cu())+
+    fsUser('radv','Adviser',cu())+
     '</div>'+
     fld('rt','Title / Summary','')+
     fld('rp','Products','')+
@@ -12473,7 +12895,7 @@ function openTaskModal(clientName){
   document.getElementById('tModB').innerHTML=
     fld('tt','Task Title *','')+
     '<div class="g2">'+
-    fs('tas','Assign To',['Clinton','Wife','Daughter'],cu())+
+    fsUser('tas','Assign To',cu())+
     fdp('tdue','Due Date',new Date().toISOString().slice(0,10))+
     '</div>'+
     '<div style="display:flex;align-items:center;gap:16px;margin-bottom:4px">'+
@@ -12484,7 +12906,7 @@ function openTaskModal(clientName){
     '</div>'+
     '<label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:13px;font-weight:600;color:var(--navy)">'+
     '<input type="checkbox" id="tccwife" style="width:16px;height:16px;cursor:pointer;accent-color:var(--navy)">'+
-    '👁 CC Wife</label>'+
+    '👁 CC Tracy</label>'+
     '</div>'+
     '<div class="fld"><label>Client</label><select id="tcl">'+
     '<option value="">— No client —</option>'+
@@ -12512,7 +12934,7 @@ function openTaskLogModal(taskId){
     '<div style="margin-bottom:12px">'+
     '<div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap">'+
     (t.Priority==='Urgent'?'<span style="background:#fde8e8;color:var(--rose);border-radius:10px;padding:2px 9px;font-size:10px;font-weight:700">🔴 URGENT</span>':'')+
-    bx(t.Assignee==='Clinton'?'bx-sk':t.Assignee==='Wife'?'bx-gd':'bx-sg', t.Assignee||'Clinton')+
+    bx(t.Assignee==='Clinton'?'bx-sk':t.Assignee==='Wife'?'bx-gd':'bx-sg', userLabel(t.Assignee||'Clinton'))+
     (t.ClientName ? (_lc
         ? '<button class="btn xs" data-act="goto-client" data-name="'+String(t.ClientName).replace(/"/g,'&quot;')+'" title="Open this client\'s card" style="background:#dcfce7;color:#166534;border:1px solid #86efac;border-radius:10px;padding:2px 10px;font-size:11px;font-weight:700;cursor:pointer">👤 '+_lc.Name+' ↗</button>'
         : '<span title="This task&#39;s client name does not match any client — use the Client re-link selector below to fix it" style="background:#fde8e8;color:var(--rose);border-radius:10px;padding:2px 9px;font-size:10px;font-weight:700">⚠ 👤 '+t.ClientName+' (not linked)</span>')
@@ -12524,7 +12946,7 @@ function openTaskLogModal(taskId){
     log.slice().reverse().map(function(e){
       return '<div style="margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid var(--smoke);last-child:border:none">'+
         '<div style="font-size:10px;font-weight:700;color:var(--gold);margin-bottom:4px">'+
-        (e.date?new Date(e.date).toLocaleString('en-ZA',{day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}):'')+'  ·  '+(e.user||cu())+'</div>'+
+        (e.date?new Date(e.date).toLocaleString('en-ZA',{day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}):'')+'  ·  '+userLabel(e.user||cu())+'</div>'+
         '<div style="font-size:13px;line-height:1.7;white-space:pre-wrap">'+e.text+'</div>'+
         '</div>';
     }).join(''))+
@@ -12560,11 +12982,11 @@ function openTaskLogModal(taskId){
     (!isDone?'<div style="display:flex;align-items:center;gap:8px">'+
     '<select id="treassign" style="border:1.5px solid var(--mist);border-radius:7px;padding:6px 10px;font-size:12px;font-family:inherit">'+
     '<option value="">Reassign to…</option>'+
-    ['Clinton','Wife','Daughter'].map(function(p){ return '<option value="'+p+'"'+(t.Assignee===p?' selected':'')+'>'+p+'</option>'; }).join('')+
+    USER_CODES.map(function(p){ return '<option value="'+p+'"'+(t.Assignee===p?' selected':'')+'>'+userLabel(p)+'</option>'; }).join('')+
     '</select>'+
     '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;font-weight:600;color:var(--navy);white-space:nowrap">'+
     '<input type="checkbox" id="tccwife" '+(String(t.CCWife||'').toLowerCase()==='yes'?'checked':'')+' style="width:14px;height:14px;cursor:pointer;accent-color:var(--navy)">'+
-    '👁 CC Wife</label>'+
+    '👁 CC Tracy</label>'+
     '<button type="button" id="tpriBtn" onclick="toggleTaskPri()" style="background:'+(t.Priority==='Urgent'?'#fde8e8':'#f5f5f5')+';border:1.5px solid '+(t.Priority==='Urgent'?'var(--rose)':'var(--mist)')+';border-radius:7px;padding:5px 12px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;color:'+(t.Priority==='Urgent'?'var(--rose)':'inherit')+'">'+(t.Priority==='Urgent'?'🔴 Urgent':'Normal')+'</button>'+
     '<input type="hidden" id="tpri" value="'+(t.Priority||'Normal')+'">'+
     '<button class="btn b-gd sm" data-save="task-log">📝 Add Entry</button>'+
@@ -12649,7 +13071,7 @@ function saveTaskLog(){
   var newPri = priEl ? priEl.value : '';
   var entryText = entry.value.trim();
   if(newAssignee && newAssignee !== t.Assignee){
-    entryText += ' [Reassigned to '+newAssignee+']';
+    entryText += ' [Reassigned to '+userLabel(newAssignee)+']';
     t.Assignee = newAssignee;
   }
   if(newPri && newPri !== t.Priority){
@@ -12936,6 +13358,36 @@ document.addEventListener('click', function(e){
         case 'event-add-heading':
           openAddEventHeading(el.getAttribute('data-eid'));
           break;
+        case 'mark-event-ntu':
+          openNtuModal(el.getAttribute('data-eid'));
+          break;
+        case 'reopen-event':
+          reopenEvent(el.getAttribute('data-eid'));
+          break;
+        case 'req-add':
+          addEventReq(el.getAttribute('data-eid'));
+          break;
+        case 'req-received':
+          setEventReqReceived(el.getAttribute('data-rid'), el.getAttribute('data-eid'), true);
+          break;
+        case 'req-undo':
+          setEventReqReceived(el.getAttribute('data-rid'), el.getAttribute('data-eid'), false);
+          break;
+        case 'req-remove':
+          removeEventReq(el.getAttribute('data-rid'), el.getAttribute('data-eid'));
+          break;
+        case 'board-filter':
+          window.BOARD_FILTER = el.getAttribute('data-filter') || 'All';
+          render();
+          break;
+        case 'board-refresh':
+          window._board.loadedAt = 0;
+          loadBoard();
+          render();
+          break;
+        case 'open-board-case':
+          openBoardCase(el.getAttribute('data-cid'), el.getAttribute('data-eid'));
+          break;
         case 'task-doc-upload':
           openTaskDocUpload(el.getAttribute('data-tid'));
           break;
@@ -12961,7 +13413,7 @@ document.addEventListener('click', function(e){
         case 'unlink-policy':
           unlinkPolicy(el.getAttribute('data-lid'), el.getAttribute('data-eid'));
           break;
-        case 'sync':           syncNow(); break;
+        case 'sync':           if(window._board) window._board.loadedAt=0; syncNow(); break;
         case 'add-supplier':   openSupplierModal(); break;
         case 'edit-supplier':  openSupplierModal(el.getAttribute('data-id')); break;
         case 'del-supplier':   deleteSupplier(el.getAttribute('data-id')); break;
