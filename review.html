@@ -44,6 +44,11 @@ tr.case{cursor:pointer}tr.case:hover td{background:#fafaf5}
 .login button{width:100%;margin-top:16px;background:var(--gold);color:#fff;border:none;border-radius:8px;padding:12px;font-size:14px;font-weight:700;cursor:pointer}
 .err{color:#ff9a9a;font-size:12px;min-height:16px;margin-top:8px}
 .foot{text-align:center;font-size:11px;color:#99a;margin-top:30px}
+.nav{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap}
+.nav .btn{padding:8px 16px;font-size:13px}
+.num{text-align:right;white-space:nowrap}
+tr.tot td{background:#f6f8f7;font-weight:700}
+.mh td{padding:16px 12px 4px;font-family:'DM Serif Display',serif;font-size:15px;color:var(--navy);border-bottom:none}
 @media (max-width:760px){ .hide-sm{display:none} .wrap{padding:16px 12px 40px} }
 </style>
 </head>
@@ -51,7 +56,7 @@ tr.case{cursor:pointer}tr.case:hover td{background:#fafaf5}
 <div id="app"></div>
 <script>
 // ═══════════════════════════════════════════════════════════════════════════
-// Duwalcoe · Compliance Review (read-only) · 24 Sep 2026
+// Duwalcoe · Compliance Review (read-only) · 24 Sep 2026 · Register added 24 Sep 2026
 // A separate page for the compliance officer. Everything she can see is
 // enforced by the database (Compliance_access.sql): Work Events dated from
 // 24 June 2026, their documents, N/A marks and requirements, client-level
@@ -216,6 +221,97 @@ var EVENT_DOC_CHECKLISTS = {
   ]
 };
 
+// ── Register rules: copied verbatim from index.html at build time, so this page ──
+// ── and the CRM always agree on which cases are listed and how they are counted. ──
+var REG_FROM = '2026-10-01';
+var REG_NET_PCT = 85;                        // "COMM due HFS - less 15%"
+var REG_MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+function regNum(v){
+  if(v === null || v === undefined || v === '') return null;
+  var n = typeof v === 'number' ? v : parseFloat(String(v).replace(/[\s,]/g, ''));
+  return isFinite(n) ? n : null;
+}
+function regMoney(v, cur){
+  var n = regNum(v); if(n === null) return '';
+  var s = n.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  return (cur && cur !== 'ZAR' ? ({USD:'$', GBP:'£', EUR:'€'}[cur] || cur+' ') : 'R') + s;
+}
+function regRound(n){ return Math.round((n || 0) * 100) / 100; }
+function regDate(d){ if(!d) return ''; var p = String(d).slice(0,10).split('-'); return p.length === 3 ? p[2]+' '+REG_MONTHS[+p[1]-1].slice(0,3)+' '+p[0] : String(d); }
+function regPremium(ev){
+  var a = regMoney(ev.PremiumAmount, ev.PremiumCurrency);
+  var f = ev.PremiumFreq ? (ev.PremiumFreq === 'Monthly' ? ' pm' : ev.PremiumFreq === 'Annual' ? ' pa' : ' '+ev.PremiumFreq.toLowerCase()) : '';
+  return (a ? a+f : '') + (ev.PremiumNote ? (a ? ' · ' : '')+ev.PremiumNote : '');
+}
+function regStatus(ev){
+  if(ev.Status === 'ntu') return {k:'ntu', t:'NTU', clr:'#6b6b6b', bg:'#ececec'};
+  if(ev.AcceptedDate) return {k:'accepted', t:'Accepted', clr:'#2d7a3e', bg:'#eaf5ec'};
+  if(ev.SubmittedDate) return {k:'submitted', t:'Submitted', clr:'#2563ab', bg:'#e8f0fb'};
+  // Opened before the Register started: its application is on Tracy's spreadsheet, not "not submitted".
+  if(regIsOld(ev) && !regHasDetails(ev)) return {k:'old', t:'Before the Register', clr:'#6b6b6b', bg:'#ececec'};
+  return {k:'notsub', t:'Not yet submitted', clr:'#b95900', bg:'#fdf2e6'};
+}
+function regNtuDate(ev){
+  if(ev.Status !== 'ntu' || !ev.CompletedAt) return '';
+  var s = String(ev.CompletedAt).trim();
+  var m = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})/.exec(s);
+  if(m){ var d = new Date(m[1]+'T'+m[2]+':00Z'); if(!isNaN(d)) return localDateStr(d); }
+  return s.slice(0,10);
+}
+function regNtuText(ev){
+  if(ev.Status !== 'ntu') return '';
+  var d = regNtuDate(ev);
+  return 'NTU'+(d ? ' '+regDate(d) : '')+(ev.ClosedReason ? ': '+String(ev.ClosedReason) : '');
+}
+function regIsInvest(ev){ return /_INVEST$/.test(String(ev.EventType || '')); }
+function regHasTrail(ev){ var b = regNum(ev.TrailBase), p = regNum(ev.TrailPct); return b !== null && p !== null && b > 0 && p > 0; }
+function regTrailPm(ev){ return regHasTrail(ev) ? Math.round(regNum(ev.TrailBase) * regNum(ev.TrailPct) / 12) / 100 : 0; }
+function regTrailNet(ev){ return Math.round(regTrailPm(ev) * REG_NET_PCT) / 100; }
+function regPct(v){ var n = regNum(v); return n === null ? '' : String(Math.round(n * 1000) / 1000)+'%'; }
+function regUpfrontZero(ev){ return regNum(ev.CommissionDue) === 0; }
+function regNotInvoiced(ev){ return !!ev.AcceptedDate && !ev.InvoicedDate && !regUpfrontZero(ev); }
+function regHasDetails(ev){
+  return ['Provider','PolicyNo','PremiumAmount','CommissionDue','SubmittedDate','TrailPct'].some(function(k){ return ev[k] !== null && ev[k] !== undefined && ev[k] !== ''; });
+}
+function regIsOld(ev){ return String(ev.EventDate || '').slice(0,10) < REG_FROM; }
+function regInApps(ev){
+  var sub = ev.SubmittedDate ? String(ev.SubmittedDate).slice(0,10) : '';
+  if(sub && sub >= REG_FROM) return true;
+  // Compliance: every case NTU'd from 1 Oct is listed with its NTU date, submitted or not.
+  if(ev.Status === 'ntu' && regNtuDate(ev) >= REG_FROM) return true;
+  if(!regIsOld(ev) && ev.Status === 'in_progress') return true;
+  // Opened before 1 Oct but case details filled in and not yet accepted: it is a live application.
+  if(ev.Status === 'in_progress' && !ev.AcceptedDate && regHasDetails(ev)) return true;
+  if(sub && !ev.AcceptedDate && ev.Status !== 'ntu') return true;
+  return false;
+}
+function regMonthTitle(key){
+  var p = key.split('-'), y = +p[0], m = +p[1];
+  var last = new Date(y, m, 0).getDate();
+  return '1 TO '+last+' '+REG_MONTHS[m-1].toUpperCase()+' '+y;
+}
+function regTrailSums(rows){
+  var t = {};
+  rows.forEach(function(ev){
+    if(!regHasTrail(ev)) return;
+    var c = ev.PremiumCurrency || 'ZAR';
+    t[c] = t[c] || {pm:0, net:0};
+    t[c].pm += regTrailPm(ev); t[c].net += regTrailNet(ev);
+  });
+  return t;
+}
+function regTrailSumText(sums, which){
+  var order = ['ZAR','USD','GBP','EUR'];
+  return Object.keys(sums).sort(function(a, b){ return order.indexOf(a) - order.indexOf(b); }).map(function(c){
+    var v = which === 'net' ? sums[c].net : which === 'pa' ? sums[c].pm * 12 : sums[c].pm;
+    return regMoney(regRound(v), c);
+  }).join(' + ');
+}
+function localDateStr(d){
+  d = d || new Date();
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+}
+
 // ── Helpers ────────────────────────────────────────────────────────────────
 function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function fdate(d){ if(!d) return '—'; var s=String(d).slice(0,10), p=s.split('-'); return p.length===3 ? p[2]+' '+['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][+p[1]-1]+' '+p[0] : esc(d); }
@@ -270,7 +366,8 @@ function api(method, path, body, retried){
 }
 
 // ── Data ───────────────────────────────────────────────────────────────────
-function freshState(){ return {loaded:false,error:'',isCompliance:null,events:[],names:{},docs:{},na:{},reqs:{},clientDocs:{},view:'list',sel:null,q:'',status:'',type:''}; }
+function freshState(){ return {loaded:false,error:'',isCompliance:null,events:[],names:{},docs:{},na:{},reqs:{},clientDocs:{},view:'list',sel:null,q:'',status:'',type:'',
+  page:'events', rtab:'apps', rq:'', rstatus:'', rkind:'', ryear:String(new Date().getFullYear())}; }
 var S=freshState();
 function inList(ids){ return encodeURIComponent(ids.map(function(i){return '"'+i+'"';}).join(',')); }
 function groupBy(rows,key){ var m={}; (rows||[]).forEach(function(r){ (m[r[key]]=m[r[key]]||[]).push(r); }); return m; }
@@ -354,8 +451,11 @@ function render(){
   var app=document.getElementById('app');
   if(!S.loaded){ app.innerHTML=shell('<div class="card" style="padding:30px;text-align:center;color:#889">Loading records…</div>'); return; }
   if(S.error){ app.innerHTML=shell('<div class="banner" style="background:#fdecea;color:#9a1f1f">'+esc(S.error)+'</div><button class="btn" data-act="reload">Try again</button>'); return; }
-  app.innerHTML=shell(S.view==='case' ? caseView() : listView());
-  if(S.view==='list'){ var q=document.getElementById('fq'); if(q){ q.value=S.q; q.focus(); q.setSelectionRange(S.q.length,S.q.length); } }
+  app.innerHTML=shell(S.view==='case' ? caseView() : (navBar()+(S.page==='register' ? registerView() : listView())));
+  if(S.view==='list'){
+    var fid=S.page==='register'?'rq':'fq', fv=S.page==='register'?S.rq:S.q, q=document.getElementById(fid);
+    if(q){ q.value=fv; q.focus(); q.setSelectionRange(fv.length,fv.length); }
+  }
 }
 function preview(){
   return S.isCompliance===false
@@ -391,7 +491,7 @@ function listView(){
 function caseView(){
   var e=S.events.find(function(x){return x.ID===S.sel;}); if(!e){ S.view='list'; return listView(); }
   var docs=S.docs[e.ID]||[], na=S.na[e.ID]||{}, reqs=S.reqs[e.ID]||[], miss=missingFor(e);
-  var html='<button class="btn" data-act="back" style="margin-bottom:14px">← All Work Events</button>'+preview()+
+  var html='<button class="btn" data-act="back" style="margin-bottom:14px">← '+(S.page==='register'?'Back to the Register':'All Work Events')+'</button>'+preview()+
     '<div class="card" style="padding:18px 20px"><div class="muted" style="color:var(--gold);font-weight:700;text-transform:uppercase">'+fdate(e.EventDate)+'</div>'+
     '<h1 style="margin:4px 0">'+esc(S.names[e.ClientID]||'(client)')+'</h1>'+
     '<div style="font-size:15px;font-weight:600">'+esc(typeLabel(e))+'</div>'+
@@ -456,6 +556,145 @@ function caseView(){
   return html+'</div>';
 }
 
+// ── Register (Applications, Activations & Commission) ──────────────────────
+function navBar(){
+  return '<div class="nav"><button class="btn'+(S.page==='events'?' pri':'')+'" data-act="page-events">📋 Work Events</button>'+
+    '<button class="btn'+(S.page==='register'?' pri':'')+'" data-act="page-register">📊 Register</button></div>';
+}
+function isCase(e){ return /^(NB|SVC)_/.test(String(e.EventType||'')); }
+function rName(e){ return S.names[e.ClientID]||'(client)'; }
+function rAppsRows(){
+  var q=S.rq.toLowerCase();
+  return S.events.filter(function(e){
+    if(!isCase(e) || !regInApps(e)) return false;
+    var st=regStatus(e).k;
+    if(S.rstatus && st!==S.rstatus) return false;
+    if(S.rkind && String(e.EventType).indexOf(S.rkind)!==0) return false;
+    if(q){ var hay=(rName(e)+' '+(e.Outcome||'')+' '+(e.PolicyNo||'')+' '+(e.Provider||'')).toLowerCase(); if(hay.indexOf(q)<0) return false; }
+    return true;
+  }).sort(function(a,b){ var ka=String(a.SubmittedDate||a.EventDate||''), kb=String(b.SubmittedDate||b.EventDate||''); return ka<kb?1:ka>kb?-1:0; });
+}
+// Same rule as the CRM: accepted from 1 Oct, not NTU, in the chosen year, grouped by the month of acceptance.
+function rActsGroups(){
+  var rows=S.events.filter(function(e){
+    return isCase(e) && e.AcceptedDate && String(e.AcceptedDate)>=REG_FROM && e.Status!=='ntu' && String(e.AcceptedDate).slice(0,4)===S.ryear;
+  }).sort(function(a,b){ return String(a.AcceptedDate)<String(b.AcceptedDate)?-1:String(a.AcceptedDate)>String(b.AcceptedDate)?1:0; });
+  var groups=[], by={};
+  rows.forEach(function(e){
+    var k=String(e.AcceptedDate).slice(0,7);
+    if(!by[k]){ by[k]={key:k,rows:[],full:0,net:0}; groups.push(by[k]); }
+    by[k].rows.push(e); by[k].full+=regNum(e.CommissionDue)||0; by[k].net+=regNum(e.CommissionNet)||0;
+  });
+  return groups;
+}
+function registerView(){
+  var html='<div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:12px;gap:10px;flex-wrap:wrap"><h1>Register</h1>'+
+    '<div style="display:flex;gap:6px;flex-wrap:wrap"><button class="btn'+(S.rtab==='apps'?' pri':'')+'" data-act="rtab" data-tab="apps">📝 Applications</button>'+
+    '<button class="btn'+(S.rtab==='acts'?' pri':'')+'" data-act="rtab" data-tab="acts">💰 Activations &amp; Commission</button>'+
+    '<button class="btn" data-act="rxlsx">⬇ Excel</button></div></div>'+preview()+
+    '<div class="banner" style="background:#f6f8f7;color:#445">New business register kept in the CRM from '+fdate(REG_FROM)+'. Applications and activations before then are on the spreadsheets already supplied. '+
+    'Commission is shown excluding VAT; "after 15%" is Duwalcoe\'s share.</div>';
+  return html+(S.rtab==='acts'?actsView():appsView());
+}
+function appsView(){
+  var rows=rAppsRows();
+  var html='<div class="card"><div class="filters">'+
+    '<input id="rq" type="search" placeholder="Search client, case, policy no, provider" style="flex:1;min-width:200px">'+
+    '<select id="rk"><option value="">New Business &amp; Servicing</option><option value="NB_"'+(S.rkind==='NB_'?' selected':'')+'>New Business only</option><option value="SVC_"'+(S.rkind==='SVC_'?' selected':'')+'>Servicing only</option></select>'+
+    '<select id="rs">'+[['','All statuses'],['notsub','Not yet submitted'],['submitted','Submitted'],['accepted','Accepted'],['ntu','NTU']].map(function(o){ return '<option value="'+o[0]+'"'+(S.rstatus===o[0]?' selected':'')+'>'+o[1]+'</option>'; }).join('')+'</select>'+
+    '<button class="btn" data-act="reload" title="Reload">↻</button></div>'+
+    '<div class="muted" style="padding:8px 18px;border-bottom:1px solid var(--smoke)">'+rows.length+' case'+(rows.length===1?'':'s')+' · submitted, opened or NTU\'d from '+fdate(REG_FROM)+', plus anything submitted and still waiting for acceptance</div>';
+  if(!rows.length) return html+'<div style="padding:24px;text-align:center;color:#889">No cases match.</div></div>';
+  html+='<div style="overflow-x:auto"><table><thead><tr><th>Submitted</th><th>Client</th><th>Provider</th><th>Case</th><th>Policy no</th><th>Premium</th><th class="num">Full comm</th><th class="num">After 15%</th><th>Status</th><th>Accepted</th></tr></thead><tbody>';
+  rows.forEach(function(e){
+    var st=regStatus(e);
+    html+='<tr class="case" data-case="'+esc(e.ID)+'"><td style="white-space:nowrap">'+(e.SubmittedDate?fdate(e.SubmittedDate):'—')+'</td><td><b>'+esc(rName(e))+'</b></td>'+
+      '<td>'+esc(e.Provider||'')+'</td><td>'+esc(typeLabel(e))+(e.Outcome?'<div class="muted" style="color:#0e413a;font-weight:600">'+esc(e.Outcome)+'</div>':'')+'</td>'+
+      '<td>'+esc(e.PolicyNo||'')+'</td><td>'+esc(regPremium(e))+'</td>'+
+      '<td class="num">'+regMoney(e.CommissionDue)+(regHasTrail(e)?'<div style="font-size:11px;color:#2d7a3e">+ '+regMoney(regTrailPm(e),e.PremiumCurrency)+' pm trail</div>':'')+'</td>'+
+      '<td class="num">'+regMoney(e.CommissionNet)+'</td>'+
+      '<td><span class="pill" style="background:'+st.bg+';color:'+st.clr+'">'+esc(st.t)+'</span>'+(st.k==='ntu'?'<div class="muted">'+esc(regNtuText(e).replace(/^NTU:? ?/,''))+'</div>':'')+'</td>'+
+      '<td style="white-space:nowrap">'+(e.AcceptedDate?fdate(e.AcceptedDate):'')+'</td></tr>';
+  });
+  return html+'</tbody></table></div></div>';
+}
+function actsView(){
+  var groups=rActsGroups(), years={}; years[String(new Date().getFullYear())]=1;
+  S.events.forEach(function(e){ if(isCase(e) && e.AcceptedDate && String(e.AcceptedDate)>=REG_FROM) years[String(e.AcceptedDate).slice(0,4)]=1; });
+  var all=[].concat.apply([],groups.map(function(g){return g.rows;}));
+  var tf=groups.reduce(function(t,g){return t+g.full;},0), tn=groups.reduce(function(t,g){return t+g.net;},0), trail=regTrailSums(all);
+  var html='<div class="card"><div class="filters"><select id="ry">'+Object.keys(years).sort().map(function(y){ return '<option'+(S.ryear===y?' selected':'')+'>'+y+'</option>'; }).join('')+'</select>'+
+    '<span class="muted">Grouped by the month the policy was accepted · NTU\'d policies are not counted · from '+fdate(REG_FROM)+'</span></div>';
+  html+='<div style="overflow-x:auto"><table><thead><tr><th>#</th><th>Client</th><th>Provider</th><th>Case</th><th>Policy no</th><th>Premium</th><th class="num">Full comm</th><th class="num">After 15%</th><th class="num">Trail pm</th><th>Accepted</th><th>Invoiced</th><th>Lead source</th></tr></thead><tbody>';
+  if(!groups.length) html+='<tr><td colspan="12" style="padding:24px;text-align:center;color:#889">No policies accepted from '+fdate(REG_FROM)+' in '+esc(S.ryear)+' yet.</td></tr>';
+  groups.forEach(function(g){
+    html+='<tr class="mh"><td colspan="12">'+regMonthTitle(g.key)+'</td></tr>';
+    g.rows.forEach(function(e,i){
+      html+='<tr class="case" data-case="'+esc(e.ID)+'"><td>'+(i+1)+'</td><td><b>'+esc(rName(e))+'</b></td><td>'+esc(e.Provider||'')+'</td>'+
+        '<td>'+esc(typeLabel(e))+(e.Outcome?'<div class="muted" style="color:#0e413a;font-weight:600">'+esc(e.Outcome)+'</div>':'')+'</td>'+
+        '<td>'+esc(e.PolicyNo||'')+'</td><td>'+esc(regPremium(e))+'</td><td class="num">'+regMoney(e.CommissionDue)+'</td><td class="num">'+regMoney(e.CommissionNet)+'</td>'+
+        '<td class="num" style="color:#2d7a3e">'+(regHasTrail(e)?regMoney(regTrailPm(e),e.PremiumCurrency):'')+'</td>'+
+        '<td style="white-space:nowrap">'+fdate(e.AcceptedDate)+'</td>'+
+        '<td style="white-space:nowrap">'+(e.InvoicedDate?fdate(e.InvoicedDate):regUpfrontZero(e)?'<span class="muted">No upfront</span>':'<b style="color:var(--amber)">Not invoiced</b>')+'</td><td>'+esc(e.LeadSource||'')+'</td></tr>';
+    });
+    html+='<tr class="tot"><td colspan="6">TOTAL '+REG_MONTHS[+g.key.slice(5)-1].toUpperCase()+'</td><td class="num">'+regMoney(g.full)+'</td><td class="num">'+regMoney(g.net)+'</td>'+
+      '<td class="num" style="color:#2d7a3e">'+regTrailSumText(regTrailSums(g.rows),'pm')+'</td><td colspan="3"></td></tr>';
+  });
+  html+='<tr class="tot" style="color:var(--navy)"><td colspan="6" style="border-top:2px solid var(--navy)">TOTAL FROM '+fdate(REG_FROM).toUpperCase()+' ('+esc(S.ryear)+')</td>'+
+    '<td class="num" style="border-top:2px solid var(--navy)">'+regMoney(regRound(tf))+'</td><td class="num" style="border-top:2px solid var(--navy)">'+regMoney(regRound(tn))+'</td>'+
+    '<td class="num" style="border-top:2px solid var(--navy);color:#2d7a3e">'+regTrailSumText(trail,'pm')+'</td><td colspan="3" style="border-top:2px solid var(--navy)"></td></tr>';
+  return html+'</tbody></table></div></div>';
+}
+// Excel of what is on screen (SheetJS, loaded only when needed).
+function withXLSX(cb){
+  if(window.XLSX){ cb(); return; }
+  var s=document.createElement('script'); s.src='https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+  s.onload=function(){ cb(); }; s.onerror=function(){ alert('Could not load the Excel tool. Check your internet connection and try again.'); };
+  document.head.appendChild(s);
+}
+function registerExcel(){
+  withXLSX(function(){
+    var X=window.XLSX, aoa=[], today=localDateStr(), fmt='#,##0.00', wb=X.utils.book_new(), ws, name;
+    function num(v){ var n=regNum(v); return n===null?null:{t:'n',v:n,z:fmt}; }
+    function trailCell(e){ if(!regHasTrail(e)) return ''; return (e.PremiumCurrency&&e.PremiumCurrency!=='ZAR')?regMoney(regTrailPm(e),e.PremiumCurrency):{t:'n',v:regTrailPm(e),z:fmt}; }
+    if(S.rtab==='acts'){
+      var groups=rActsGroups(), refH=[], refI=[], sH=0, sI=0;
+      aoa.push(['NEW BUSINESS ACCEPTANCE COMMISSION · '+S.ryear+' · Duwalcoe Financial Consultants (FSP 9978) · as of '+regDate(today)]);
+      aoa.push(['From '+regDate(REG_FROM)+'. Earlier months are on the spreadsheets already supplied.']);
+      groups.forEach(function(g){
+        aoa.push([regMonthTitle(g.key)]);
+        aoa.push(['#','CLIENT','FSP','NB TYPE','POLICY NO','Premium AMT','FULL COMM DUE less VAT','COMM due HFS - less 15%','TRAIL pm less VAT','Accepted','INVOICED','LEAD SOURCE']);
+        var first=aoa.length+1;
+        g.rows.forEach(function(e,i){
+          aoa.push([i+1, rName(e), e.Provider||'', typeLabel(e)+(e.Outcome?' · '+e.Outcome:''), e.PolicyNo||'', regPremium(e), num(e.CommissionDue), num(e.CommissionNet), trailCell(e),
+            regDate(e.AcceptedDate), e.InvoicedDate?regDate(e.InvoicedDate):regUpfrontZero(e)?'NO UPFRONT':'NOT INVOICED', e.LeadSource||'']);
+        });
+        var last=aoa.length, tr=aoa.length+1;
+        aoa.push(['','TOTAL '+REG_MONTHS[+g.key.slice(5)-1].toUpperCase(),'','','','',{t:'n',f:'SUM(G'+first+':G'+last+')',v:regRound(g.full),z:fmt},{t:'n',f:'SUM(H'+first+':H'+last+')',v:regRound(g.net),z:fmt}]);
+        refH.push('G'+tr); refI.push('H'+tr); sH+=g.full; sI+=g.net;
+        aoa.push([]);
+      });
+      aoa.push(['','TOTAL FROM '+regDate(REG_FROM).toUpperCase()+' ('+S.ryear+')','','','','',
+        refH.length?{t:'n',f:'SUM('+refH.join(',')+')',v:regRound(sH),z:fmt}:0, refI.length?{t:'n',f:'SUM('+refI.join(',')+')',v:regRound(sI),z:fmt}:0]);
+      ws=X.utils.aoa_to_sheet(aoa); ws['!cols']=[4,26,16,40,16,22,16,16,14,12,13,18].map(function(w){return {wch:w};});
+      name='Duwalcoe Register - Activations '+S.ryear+' (as of '+today+').xlsx'; X.utils.book_append_sheet(wb,ws,'Activations '+S.ryear);
+    } else {
+      var rows=rAppsRows();
+      aoa.push(['NEW BUSINESS APPLICATIONS · Duwalcoe Financial Consultants (FSP 9978) · as of '+regDate(today)]);
+      aoa.push([]);
+      aoa.push(['SUBMITTED','CLIENT','FSP','NB TYPE','POLICY NO','Premium AMT','FULL COMM DUE less VAT','COMM due HFS - less 15%','STATUS','ACCEPTED','TRAIL pm less VAT']);
+      var f0=aoa.length+1;
+      rows.forEach(function(e){
+        aoa.push([regDate(e.SubmittedDate), rName(e), e.Provider||'', typeLabel(e)+(e.Outcome?' · '+e.Outcome:''), e.PolicyNo||'', regPremium(e), num(e.CommissionDue), num(e.CommissionNet),
+          e.Status==='ntu'?regNtuText(e):regStatus(e).t, regDate(e.AcceptedDate), trailCell(e)]);
+      });
+      ws=X.utils.aoa_to_sheet(aoa); ws['!cols']=[12,26,16,40,16,22,16,16,30,12,14].map(function(w){return {wch:w};});
+      name='Duwalcoe Register - Applications (as of '+today+').xlsx'; X.utils.book_append_sheet(wb,ws,'Applications');
+    }
+    X.writeFile(wb,name);
+  });
+}
+
 // ── Events ─────────────────────────────────────────────────────────────────
 document.addEventListener('click',function(ev){
   var t=ev.target.closest('[data-act],[data-case],[data-view],[data-dl]'); if(!t) return;
@@ -466,11 +705,21 @@ document.addEventListener('click',function(ev){
   if(a==='logout') logout();
   else if(a==='back'){ S.view='list'; render(); }
   else if(a==='reload') loadAll();
+  else if(a==='page-events'){ S.page='events'; S.view='list'; render(); }
+  else if(a==='page-register'){ S.page='register'; S.view='list'; render(); }
+  else if(a==='rtab'){ S.rtab=t.getAttribute('data-tab')==='acts'?'acts':'apps'; render(); }
+  else if(a==='rxlsx') registerExcel();
 });
-document.addEventListener('input',function(ev){ if(ev.target.id==='fq'){ S.q=ev.target.value; render(); } });
+document.addEventListener('input',function(ev){
+  if(ev.target.id==='fq'){ S.q=ev.target.value; render(); }
+  if(ev.target.id==='rq'){ S.rq=ev.target.value; render(); }
+});
 document.addEventListener('change',function(ev){
   if(ev.target.id==='fs'){ S.status=ev.target.value; render(); }
   if(ev.target.id==='ft'){ S.type=ev.target.value; render(); }
+  if(ev.target.id==='rs'){ S.rstatus=ev.target.value; render(); }
+  if(ev.target.id==='rk'){ S.rkind=ev.target.value; render(); }
+  if(ev.target.id==='ry'){ S.ryear=ev.target.value; render(); }
 });
 
 // ── Start ──────────────────────────────────────────────────────────────────
