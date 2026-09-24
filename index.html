@@ -136,6 +136,10 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--cream);c
 .dl{color:#889;font-weight:500;flex-shrink:0}.dv{font-weight:600;text-align:right;max-width:65%;word-break:break-word}
 .roa-card{border:1.5px solid var(--smoke);border-radius:8px;padding:14px 16px;margin-bottom:10px}
 ::-webkit-scrollbar{width:6px}::-webkit-scrollbar-thumb{background:var(--mist);border-radius:3px}
+/* Drag-and-drop document rows (24 Sep 2026) */
+.doc-drop-row{position:relative}
+.doc-drop-row.drop-hot{outline:2px dashed #0e413a;outline-offset:-2px;background:#e3f1ec !important}
+.doc-drop-row.drop-hot::after{content:attr(data-drop-label);position:absolute;top:-9px;right:12px;background:#0e413a;color:#fff;font-size:10.5px;font-weight:700;padding:2px 10px;border-radius:10px;pointer-events:none;white-space:nowrap;z-index:5}
 </style>
 </head>
 <body>
@@ -3215,7 +3219,7 @@ function renderDocs(c){
   });
 
   var html = '<div class="card"><div class="ch"><h2>📁 Client Documents</h2>'+
-    '<div style="font-size:11px;color:#667">Per-client documents — ID, LOI, Will, Broker Authority (ASTUTE)</div>'+
+    '<div style="font-size:11px;color:#667">Per-client documents — ID, LOI, Will, Broker Authority (ASTUTE) · <span style="color:#0e413a;font-weight:600">drag files onto a heading to upload</span></div>'+
     '</div><div class="cb">';
 
   // Overall status strip
@@ -3272,7 +3276,7 @@ function renderDocs(c){
           rowBg = expiryInfo.expired ? '#fdecea' : '#eaf5ec';
         }
 
-        html += '<div style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:'+rowBg+';border-radius:6px">';
+        html += '<div'+docDropAttrs('client', clientId, item.key, 'Drop to add to: '+item.label, false)+' style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:'+rowBg+';border-radius:6px">';
         html += '<div style="width:20px;font-size:16px">'+(expiryInfo?(expiryInfo.expired?'❌':'✅'):'📂')+'</div>';
         html += '<div style="flex:1">';
         html += '<div style="font-size:13px;font-weight:600;color:var(--ink)">'+escHtml(item.label)+
@@ -3296,7 +3300,7 @@ function renderDocs(c){
           matching.forEach(function(d){
             html += '<div style="margin-left:30px;padding:5px 10px;font-size:12px;display:flex;align-items:center;gap:8px;color:#556">';
             html += '<span>📄</span>';
-            html += '<span style="flex:1">'+escHtml(d.FileName||'file')+'</span>';
+            html += '<span style="flex:1">'+escHtml(d.FileName||'file')+docMoveNoteHtml(d)+'</span>';
             // For items with expiryDays: show signed date as the primary date,
             // upload date as secondary in muted text. Otherwise just upload date.
             if(item.expiryDays){
@@ -3312,6 +3316,7 @@ function renderDocs(c){
               html += '<span style="color:#889;font-size:10px">'+fdate(d.UploadedAt||'')+'</span>';
             }
             html += '<button class="btn b-gh sm" data-act="doc-view" data-did="'+d.ID+'" style="padding:4px 10px;font-size:11px">View</button>';
+            html += '<button class="btn b-gh sm" data-act="doc-move" data-did="'+d.ID+'" data-cid="'+clientId+'" style="padding:4px 10px;font-size:11px" title="Move this file to a different heading">Move</button>';
             html += '<button class="btn b-gh sm" data-act="doc-delete" data-did="'+d.ID+'" data-cid="'+clientId+'" style="padding:4px 10px;font-size:11px;color:#b23">Delete</button>';
             html += '</div>';
           });
@@ -3322,7 +3327,7 @@ function renderDocs(c){
         var hasDoc = !!d;
         var dot = hasDoc ? '✅' : (item.required==='Mandatory' ? '❌' : '⬜');
         var bg  = hasDoc ? '#eaf5ec' : (item.required==='Mandatory' ? '#fdf2e6' : '#fafaf5');
-        html += '<div style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:'+bg+';border-radius:6px">';
+        html += '<div'+docDropAttrs('client', clientId, item.key, (hasDoc?'Drop to replace: ':'Drop to add to: ')+item.label, false)+' style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:'+bg+';border-radius:6px">';
         html += '<div style="width:20px;font-size:16px">'+dot+'</div>';
         html += '<div style="flex:1">';
         html += '<div style="font-size:13px;font-weight:600;color:var(--ink)">'+escHtml(item.label)+
@@ -3331,7 +3336,7 @@ function renderDocs(c){
           '</div>';
         if(hasDoc){
           html += '<div style="font-size:11px;color:#778">'+escHtml(d.FileName||'')+' · uploaded '+fdate(d.UploadedAt||'')+
-            (d.UploadedBy?' by '+escHtml(d.UploadedBy):'')+'</div>';
+            (d.UploadedBy?' by '+escHtml(d.UploadedBy):'')+docMoveNoteHtml(d)+'</div>';
         } else if(item.note){
           html += '<div style="font-size:11px;color:#889;font-style:italic">'+escHtml(item.note)+'</div>';
         } else {
@@ -3341,6 +3346,7 @@ function renderDocs(c){
         if(hasDoc){
           html += '<button class="btn b-gh sm" data-act="doc-view" data-did="'+d.ID+'" style="padding:4px 12px">View</button>';
           html += '<button class="btn b-gh sm" data-act="doc-upload" data-cid="'+clientId+'" data-dk="'+item.key+'" data-replace="1" style="padding:4px 12px">Replace</button>';
+          html += '<button class="btn b-gh sm" data-act="doc-move" data-did="'+d.ID+'" data-cid="'+clientId+'" style="padding:4px 12px" title="Move this file to a different heading">Move</button>';
           html += '<button class="btn b-gh sm" data-act="doc-delete" data-did="'+d.ID+'" data-cid="'+clientId+'" style="padding:4px 12px;color:#b23">Delete</button>';
         } else {
           html += '<button class="btn b-nv sm" data-act="doc-upload" data-cid="'+clientId+'" data-dk="'+item.key+'">Upload</button>';
@@ -3381,7 +3387,16 @@ function openDocUpload(clientId, docKey, isReplace){
   input.type = 'file';
   input.accept = '.pdf,.jpg,.jpeg,.png,.docx,.xlsx,.tiff,.tif';
   input.style.display = 'none';
+  // Multi-file rows: allow selecting several files at once (24 Sep 2026).
+  // These go through the same batch path as drag-and-drop.
+  if(cat.multiple) input.multiple = true;
   input.addEventListener('change', function(){
+    if(cat.multiple){
+      var picked = Array.prototype.slice.call(input.files || []);
+      document.body.removeChild(input);
+      if(picked.length) handleClientDocFiles(clientId, docKey, picked);
+      return;
+    }
     var file = input.files && input.files[0];
     document.body.removeChild(input);
     if(!file) return;
@@ -3472,14 +3487,20 @@ function promptSignedDate(docLabel, callback){
 // Upload a file to Supabase Storage and create a DB record.
 // signedDate (YYYY-MM-DD or null) is set for items with expiryDays so the
 // expiry clock can run from the actual signing date, not the upload date.
-function uploadClientDoc(clientId, docKey, docLabel, file, isReplace, signedDate){
+// opts (optional, added 24 Sep 2026 for drag-and-drop batches):
+//   opts.done(ok, errMsg) — called when this file finishes. When supplied,
+//   per-file toasts and the doc reload are skipped; the caller shows one
+//   summary toast and reloads once after the whole batch.
+function uploadClientDoc(clientId, docKey, docLabel, file, isReplace, signedDate, opts){
+  opts = opts || {};
+  var batch = typeof opts.done === 'function';
   // Build a safe storage path: clients/{clientId}/{docKey}_{timestamp}_{filename}
   var safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
   var ts = Date.now();
   var path = 'clients/'+clientId+'/'+docKey+'_'+ts+'_'+safeName;
 
   // Show progress toast
-  toast('Uploading '+docLabel+'…','ok');
+  if(!batch) toast('Uploading '+docLabel+'…','ok');
 
   // If this is a replace, we need to find and delete the existing record (and storage file) first
   var deletePromise = Promise.resolve();
@@ -3526,16 +3547,18 @@ function uploadClientDoc(clientId, docKey, docLabel, file, isReplace, signedDate
       if(signedDate) row.SignedDate = signedDate;
       sbFetch('POST', '/rest/v1/client_documents', [row], function(res, err){
         if(err){
-          toast('Database save failed — file uploaded but not recorded','err');
           console.error('DB insert error:', err);
+          if(batch) opts.done(false, 'database save failed');
+          else toast('Database save failed — file uploaded but not recorded','err');
         } else {
-          toast('✓ '+docLabel+' uploaded','ok');
-          loadClientDocs(clientId);
+          if(batch) opts.done(true);
+          else { toast('✓ '+docLabel+' uploaded','ok'); loadClientDocs(clientId); }
         }
       });
     }).catch(function(e){
       console.error('Upload failed:', e);
-      toast('Upload failed: '+e.message,'err');
+      if(batch) opts.done(false, e.message);
+      else toast('Upload failed: '+e.message,'err');
     });
   });
 }
@@ -3967,7 +3990,7 @@ function renderEventDetail(ev, c, pols){
   html += (mandatoryMissing.length===0 ? '✓ All mandatory documents present' : '⚠ '+mandatoryMissing.length+' mandatory document'+(mandatoryMissing.length===1?'':'s')+' missing');
   html += '</div>';
 
-  html += '<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:.8px;margin-bottom:6px;border-bottom:1px solid var(--mist);padding-bottom:4px">Required Documents</div>';
+  html += '<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:.8px;margin-bottom:6px;border-bottom:1px solid var(--mist);padding-bottom:4px">Required Documents <span style="text-transform:none;letter-spacing:0;font-weight:600;color:#0e413a;font-size:11px">· drag files onto a heading to upload</span></div>';
 
   checklist.forEach(function(item){
     var matching = docs.filter(function(d){return d.DocType===item.key;});
@@ -4003,7 +4026,7 @@ function renderEventDetail(ev, c, pols){
         mDot = '<span style="color:#aab;font-weight:700">✗</span>'; mBg = '#fafaf5';
       }
 
-      html += '<div style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:'+mBg+';border-radius:6px;margin-bottom:4px'+(mIsNA?';opacity:.55':'')+'">';
+      html += '<div'+docDropAttrs('event', ev.ID, item.key, 'Drop to add to: '+item.label, mIsNA)+' style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:'+mBg+';border-radius:6px;margin-bottom:4px'+(mIsNA?';opacity:.55':'')+'">';
       html += '<div style="width:20px;font-size:16px">'+mDot+'</div>';
       html += '<div style="flex:1">';
       html += '<div style="font-size:13px;font-weight:600'+(mIsNA?';text-decoration:line-through':'')+'">'+escHtml(item.label)+
@@ -4042,9 +4065,10 @@ function renderEventDetail(ev, c, pols){
         matching.forEach(function(d){
           html += '<div style="margin-left:30px;padding:5px 10px;font-size:12px;display:flex;align-items:center;gap:8px;color:#556;margin-bottom:2px">';
           html += '<span>📄</span>';
-          html += '<span style="flex:1">'+escHtml(d.FileName||'file')+'</span>';
+          html += '<span style="flex:1">'+escHtml(d.FileName||'file')+docMoveNoteHtml(d)+'</span>';
           html += '<span style="color:#889;font-size:10px">'+fdate(d.UploadedAt||'')+'</span>';
           html += '<button class="btn b-gh sm" data-act="event-doc-view" data-did="'+d.ID+'" style="padding:4px 10px;font-size:11px">View</button>';
+          html += '<button class="btn b-gh sm" data-act="event-doc-move" data-did="'+d.ID+'" data-eid="'+ev.ID+'" style="padding:4px 10px;font-size:11px" title="Move this file to a different heading">Move</button>';
           html += '<button class="btn b-gh sm" data-act="event-doc-delete" data-did="'+d.ID+'" data-eid="'+ev.ID+'" style="padding:4px 10px;font-size:11px;color:#b23">Delete</button>';
           html += '</div>';
         });
@@ -4067,7 +4091,7 @@ function renderEventDetail(ev, c, pols){
         // the red ❌ for empty mandatory (same shape, different colour).
         dot = '<span style="color:#aab;font-weight:700">✗</span>'; bg = '#fafaf5';
       }
-      html += '<div style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:'+bg+';border-radius:6px;margin-bottom:4px'+(isNA?';opacity:.55':'')+'">';
+      html += '<div'+docDropAttrs('event', ev.ID, item.key, (hasDoc?'Drop to replace: ':'Drop to add to: ')+item.label, isNA)+' style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:'+bg+';border-radius:6px;margin-bottom:4px'+(isNA?';opacity:.55':'')+'">';
       html += '<div style="width:20px;font-size:16px">'+dot+'</div>';
       html += '<div style="flex:1">';
       html += '<div style="font-size:13px;font-weight:600'+(isNA?';text-decoration:line-through':'')+'">'+escHtml(item.label)+
@@ -4079,7 +4103,7 @@ function renderEventDetail(ev, c, pols){
         html += '<div style="font-size:11px;color:#889;font-style:italic">Marked not applicable — click ✓ to re-enable</div>';
       } else if(hasDoc){
         html += '<div style="font-size:11px;color:#778">'+escHtml(d.FileName||'')+' · '+fdate(d.UploadedAt||'')+
-          (d.UploadedBy?' by '+escHtml(d.UploadedBy):'')+'</div>';
+          (d.UploadedBy?' by '+escHtml(d.UploadedBy):'')+docMoveNoteHtml(d)+'</div>';
       } else if(item.note){
         html += '<div style="font-size:11px;color:#889;font-style:italic">'+escHtml(item.note)+'</div>';
       } else {
@@ -4093,6 +4117,7 @@ function renderEventDetail(ev, c, pols){
         if(hasDoc){
           html += '<button class="btn b-gh sm" data-act="event-doc-view" data-did="'+d.ID+'" style="padding:4px 12px">View</button>';
           html += '<button class="btn b-gh sm" data-act="event-doc-upload" data-eid="'+ev.ID+'" data-dk="'+item.key+'" data-replace="1" style="padding:4px 12px">Replace</button>';
+          html += '<button class="btn b-gh sm" data-act="event-doc-move" data-did="'+d.ID+'" data-eid="'+ev.ID+'" style="padding:4px 12px" title="Move this file to a different heading">Move</button>';
           html += '<button class="btn b-gh sm" data-act="event-doc-delete" data-did="'+d.ID+'" data-eid="'+ev.ID+'" style="padding:4px 12px;color:#b23">Delete</button>';
         } else {
           html += '<button class="btn b-nv sm" data-act="event-doc-upload" data-eid="'+ev.ID+'" data-dk="'+item.key+'">Upload</button>';
@@ -4396,7 +4421,15 @@ function openEventDocUpload(eventId, docKey, isReplace){
   input.type = 'file';
   input.accept = '.pdf,.jpg,.jpeg,.png,.docx,.xlsx,.tiff,.tif';
   input.style.display = 'none';
+  // Multi-file rows: allow selecting several files at once (24 Sep 2026).
+  if(cat.multiple) input.multiple = true;
   input.addEventListener('change', function(){
+    if(cat.multiple){
+      var picked = Array.prototype.slice.call(input.files || []);
+      document.body.removeChild(input);
+      if(picked.length) handleEventDocFiles(eventId, docKey, picked);
+      return;
+    }
     var file = input.files && input.files[0];
     document.body.removeChild(input);
     if(!file) return;
@@ -4407,12 +4440,16 @@ function openEventDocUpload(eventId, docKey, isReplace){
   input.click();
 }
 
-function uploadEventDoc(eventId, clientId, docKey, docLabel, file, isReplace){
+// opts (optional): same contract as uploadClientDoc — opts.done(ok, errMsg)
+// suppresses per-file toasts/reload so a batch reports once.
+function uploadEventDoc(eventId, clientId, docKey, docLabel, file, isReplace, opts){
+  opts = opts || {};
+  var batch = typeof opts.done === 'function';
   var safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
   var ts = Date.now();
   // Separate folder per event for storage tidiness
   var path = 'events/'+clientId+'/'+eventId+'/'+docKey+'_'+ts+'_'+safeName;
-  toast('Uploading '+docLabel+'…','ok');
+  if(!batch) toast('Uploading '+docLabel+'…','ok');
 
   var deletePromise = Promise.resolve();
   if(isReplace){
@@ -4448,12 +4485,339 @@ function uploadEventDoc(eventId, clientId, docKey, docLabel, file, isReplace){
         Notes: ''
       };
       sbFetch('POST','/rest/v1/work_event_documents', [row], function(res, err){
-        if(err){ toast('Database save failed','err'); console.error(err); }
+        if(err){ console.error(err); if(batch) opts.done(false, 'database save failed'); else toast('Database save failed','err'); }
+        else if(batch){ opts.done(true); }
         else { toast('✓ '+docLabel+' uploaded','ok'); loadEventDocs(eventId); }
       });
     }).catch(function(e){
-      toast('Upload failed: '+e.message,'err');
       console.error(e);
+      if(batch) opts.done(false, e.message);
+      else toast('Upload failed: '+e.message,'err');
+    });
+  });
+}
+
+// ══ DRAG-AND-DROP UPLOAD + MOVE (24 Sep 2026) ═══════════════════════════════
+// Staff drag FILES (from Google Drive for desktop in File Explorer, or any
+// local folder) onto a document row in the client Documents tab or a Work
+// Event checklist. The ROW decides the document type — nothing is inferred
+// from the filename. Folders are refused. Dragging out of the Google Drive
+// website does not hand the browser a file, so that is refused with a hint.
+// A "Move" button on every uploaded file corrects a mislabel without
+// re-uploading; each move is appended to the document's Notes column
+// ("Moved from X to Y by <user>, <date>") so there is an audit trail.
+// No schema change: Notes already exists on client_documents and
+// work_event_documents, and the authenticated RLS policy allows UPDATE.
+
+var DOC_ALLOWED_EXT = ['pdf','jpg','jpeg','png','docx','xlsx','tiff','tif'];
+var DOC_MAX_BYTES = 50*1024*1024;
+
+// Attributes that make a document row a drop target. Rendered by renderDocs()
+// and renderEventDetail(); read by the document-level drag handlers below.
+function docDropAttrs(kind, ownerId, docKey, label, isNA){
+  return ' class="doc-drop-row" data-drop="'+kind+'" data-drop-owner="'+escHtml(ownerId)+'"'+
+    ' data-drop-dk="'+escHtml(docKey)+'" data-drop-label="'+escHtml(label)+'"'+
+    (isNA ? ' data-drop-na="1"' : '');
+}
+
+// Small italic line under a file showing where it was moved from (latest move;
+// hover shows the full history).
+function docMoveNoteHtml(d){
+  var lines = String((d && d.Notes) || '').split('\n').filter(function(l){ return l.indexOf('Moved from ') === 0; });
+  if(!lines.length) return '';
+  return '<span style="display:block;font-size:10px;color:#8a6d1f;font-style:italic;margin-top:1px" title="'+escHtml(lines.join('\n'))+'">↪ '+
+    escHtml(lines[lines.length-1])+(lines.length > 1 ? ' (+'+(lines.length-1)+' earlier)' : '')+'</span>';
+}
+
+// Split a file list into accepted files and human-readable rejections.
+function docValidateFiles(files){
+  var ok = [], bad = [];
+  files.forEach(function(f){
+    var name = f.name || 'file';
+    var dot = name.lastIndexOf('.');
+    var ext = dot >= 0 ? name.slice(dot+1).toLowerCase() : '';
+    if(['gdoc','gsheet','gslides','gform','gdraw'].indexOf(ext) >= 0){
+      bad.push(name+' (Google Docs/Sheets shortcut, not a real file: open it in Drive and download it as PDF first)');
+    } else if(DOC_ALLOWED_EXT.indexOf(ext) < 0){
+      bad.push(name+' (file type not allowed: PDF, JPG, PNG, DOCX, XLSX or TIFF only)');
+    } else if(f.size > DOC_MAX_BYTES){
+      bad.push(name+' (too large: '+Math.round(f.size/1024/1024)+' MB, maximum is 50 MB)');
+    } else if(f.size === 0){
+      bad.push(name+' (empty file)');
+    } else {
+      ok.push(f);
+    }
+  });
+  return {ok:ok, bad:bad};
+}
+
+// Upload files one after another (keeps storage paths unique and Replace
+// safe), then reload once and show a single summary.
+// uploadOne(file, isFirst, done(ok, errMsg))
+function docRunBatch(files, uploadOne, label, reload){
+  var total = files.length, okCount = 0, fails = [], i = 0;
+  toast('Uploading '+total+' file'+(total === 1 ? '' : 's')+' to '+label+'…', 'ok');
+  function next(){
+    if(i >= total){
+      reload();
+      if(fails.length === 0){
+        toast(okCount+' file'+(okCount === 1 ? '' : 's')+' added to '+label, 'ok');
+      } else {
+        toast(okCount+' of '+total+' added to '+label+'. '+fails.length+' failed', 'err');
+        alert('These files did not upload to '+label+':\n\n• '+fails.join('\n• ')+'\n\nAny others uploaded fine. Please try the failed ones again.');
+      }
+      return;
+    }
+    var f = files[i++];
+    uploadOne(f, i === 1, function(ok, msg){
+      if(ok) okCount++; else fails.push((f.name || 'file')+' ('+(msg || 'error')+')');
+      next();
+    });
+  }
+  next();
+}
+
+// Files dropped (or multi-picked) onto a client Documents row.
+function handleClientDocFiles(clientId, docKey, files){
+  var cat = CLIENT_DOC_CATALOGUE.find(function(x){ return x.key === docKey; });
+  if(!cat){ toast('Unknown document heading', 'err'); return; }
+  if(!window._clientDocs[clientId]){ toast('Documents are still loading. Try again in a moment.', 'err'); return; }
+  var v = docValidateFiles(files);
+  if(v.bad.length) alert('These files were not uploaded to '+cat.label+':\n\n• '+v.bad.join('\n• '));
+  if(!v.ok.length) return;
+  var isReplace = false;
+  if(!cat.multiple){
+    if(v.ok.length > 1){ toast(cat.label+' takes one file only. Drop one file at a time.', 'err'); return; }
+    var existing = window._clientDocs[clientId].filter(function(d){ return d.DocType === docKey; });
+    if(existing.length){
+      if(!confirm('Replace the existing '+cat.label+' ('+(existing[0].FileName || 'file')+') with '+v.ok[0].name+'?')) return;
+      isReplace = true;
+    }
+  }
+  function go(signedDate){
+    docRunBatch(v.ok, function(file, isFirst, done){
+      uploadClientDoc(clientId, docKey, cat.label, file, isReplace && isFirst, signedDate, {done:done});
+    }, cat.label, function(){ loadClientDocs(clientId); });
+  }
+  // Broker Authority: one signed-date prompt per drop, applied to every file in it.
+  if(cat.expiryDays){
+    promptSignedDate(cat.label + (v.ok.length > 1 ? ' ('+v.ok.length+' files, one date for all)' : ''), function(sd){ if(sd) go(sd); });
+  } else {
+    go(null);
+  }
+}
+
+// Files dropped (or multi-picked) onto a Work Event checklist row.
+function handleEventDocFiles(eventId, docKey, files){
+  var clientId = SEL;
+  var ev = (window._events[clientId] || []).find(function(e){ return String(e.ID) === String(eventId); });
+  if(!ev){ toast('Work Event not found. Refresh and try again.', 'err'); return; }
+  var cat = (EVENT_DOC_CHECKLISTS[ev.EventType] || []).find(function(x){ return x.key === docKey; });
+  if(!cat){ toast('Unknown document heading', 'err'); return; }
+  var naSet = window._eventNA[eventId] || new Set();
+  if(naSet.has(docKey)){ toast(cat.label+' is marked N/A for this case. Click ✓ Applicable first.', 'err'); return; }
+  if(!window._eventDocs[eventId]){ toast('Documents are still loading. Try again in a moment.', 'err'); return; }
+  var v = docValidateFiles(files);
+  if(v.bad.length) alert('These files were not uploaded to '+cat.label+':\n\n• '+v.bad.join('\n• '));
+  if(!v.ok.length) return;
+  var isReplace = false;
+  if(!cat.multiple){
+    if(v.ok.length > 1){ toast(cat.label+' takes one file only. Drop one file at a time.', 'err'); return; }
+    var existing = window._eventDocs[eventId].filter(function(d){ return d.DocType === docKey; });
+    if(existing.length){
+      if(!confirm('Replace the existing '+cat.label+' ('+(existing[0].FileName || 'file')+') with '+v.ok[0].name+'?')) return;
+      isReplace = true;
+    }
+  }
+  docRunBatch(v.ok, function(file, isFirst, done){
+    uploadEventDoc(eventId, clientId, docKey, cat.label, file, isReplace && isFirst, {done:done});
+  }, cat.label, function(){ loadEventDocs(eventId); });
+}
+
+// Document-level drag handlers — installed once. Event delegation means they
+// keep working when the tabs re-render.
+(function installDocDropHandlers(){
+  if(window._docDropInstalled) return;
+  window._docDropInstalled = true;
+  var hot = null;
+  function isFileDrag(e){
+    var t = e.dataTransfer && e.dataTransfer.types;
+    if(!t) return false;
+    for(var i = 0; i < t.length; i++){ if(t[i] === 'Files') return true; }
+    return false;
+  }
+  function setHot(row){
+    if(hot === row) return;
+    if(hot) hot.classList.remove('drop-hot');
+    hot = row;
+    if(hot) hot.classList.add('drop-hot');
+  }
+  // Leave native file inputs (e.g. the Astute XML import box) alone.
+  function onNativeFileInput(e){ return !!(e.target && e.target.closest && e.target.closest('input[type=file]')); }
+  function rowFor(e){ return (e.target && e.target.closest) ? e.target.closest('[data-drop]') : null; }
+  function over(e){
+    if(onNativeFileInput(e)) return;
+    var file = isFileDrag(e), row = rowFor(e);
+    if(!file && !row) return;
+    // Always cancel for file drags so a missed drop never makes the browser
+    // open the file in place of the CRM.
+    e.preventDefault();
+    if(row && !row.hasAttribute('data-drop-na')){
+      e.dataTransfer.dropEffect = 'copy';
+      setHot(file ? row : null);
+    } else {
+      e.dataTransfer.dropEffect = 'none';
+      setHot(null);
+    }
+  }
+  document.addEventListener('dragenter', over);
+  document.addEventListener('dragover', over);
+  document.addEventListener('dragleave', function(e){
+    if(!hot) return;
+    // relatedTarget = where the pointer went (null when it left the window).
+    if(!e.relatedTarget || !hot.contains(e.relatedTarget)) setHot(null);
+  });
+  document.addEventListener('dragend', function(){ setHot(null); });
+  document.addEventListener('drop', function(e){
+    if(onNativeFileInput(e)) return;
+    var file = isFileDrag(e), row = rowFor(e);
+    if(!file && !row) return;
+    e.preventDefault();
+    setHot(null);
+    if(!row){ toast('Drop files onto a document heading', 'err'); return; }
+    if(row.hasAttribute('data-drop-na')){ toast('That heading is marked N/A for this case. Click ✓ Applicable first.', 'err'); return; }
+    if(!file){ toast('No file received. Drag from Google Drive in File Explorer, not the Drive website.', 'err'); return; }
+    // Folders are not supported: detect them before reading the file list.
+    var items = e.dataTransfer.items;
+    if(items){
+      for(var i = 0; i < items.length; i++){
+        var entry = items[i].webkitGetAsEntry ? items[i].webkitGetAsEntry() : null;
+        if(entry && entry.isDirectory){ toast('Folders can\'t be dropped. Open the folder and drag the files.', 'err'); return; }
+      }
+    }
+    var files = Array.prototype.slice.call(e.dataTransfer.files || []);
+    if(!files.length){ toast('No file received. Drag from Google Drive in File Explorer, not the Drive website.', 'err'); return; }
+    var kind = row.getAttribute('data-drop'), owner = row.getAttribute('data-drop-owner'), dk = row.getAttribute('data-drop-dk');
+    if(kind === 'client') handleClientDocFiles(owner, dk, files);
+    else if(kind === 'event') handleEventDocFiles(owner, dk, files);
+  });
+})();
+
+// ── Move a document to a different heading ────────────────────────────────
+// Heading picker dialog. options: [{key, label, disabled, why}]. cb(key|null).
+function docPickHeading(fileName, fromLabel, options, cb){
+  var ov = document.createElement('div');
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(10,20,40,.55);z-index:10000;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(2px)';
+  var box = document.createElement('div');
+  box.style.cssText = 'background:#fff;border-radius:12px;padding:22px 26px;max-width:460px;width:90%;box-shadow:0 12px 48px rgba(0,0,0,.25);font-family:inherit';
+  var opts = '<option value="">Choose the correct heading…</option>' + options.map(function(o){
+    return '<option value="'+escHtml(o.key)+'"'+(o.disabled ? ' disabled' : '')+'>'+escHtml(o.label + (o.why ? ' ('+o.why+')' : ''))+'</option>';
+  }).join('');
+  box.innerHTML =
+    '<div style="font-family:Georgia,serif;font-size:17px;color:#0e413a;margin-bottom:6px">Move document</div>'+
+    '<div style="font-size:12px;color:#556;margin-bottom:12px;word-break:break-word">'+escHtml(fileName)+'<br>Currently under: <b>'+escHtml(fromLabel)+'</b></div>'+
+    '<select data-role="sel" style="width:100%;padding:9px 12px;border:1.5px solid #ccc;border-radius:6px;font-size:14px;font-family:inherit;margin-bottom:8px">'+opts+'</select>'+
+    '<div style="font-size:11px;color:#778;margin-bottom:14px">The file is not uploaded again. The move is recorded on the document.</div>'+
+    '<div style="display:flex;justify-content:flex-end;gap:8px">'+
+      '<button data-role="cancel" style="padding:8px 18px;border-radius:7px;border:1.5px solid #ddd;background:#fff;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;color:#555">Cancel</button>'+
+      '<button data-role="ok" style="padding:8px 22px;border-radius:7px;border:none;background:#0e413a;color:#fff;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">Move</button>'+
+    '</div>';
+  ov.appendChild(box);
+  document.body.appendChild(ov);
+  var sel = box.querySelector('[data-role=sel]');
+  function close(result){ if(ov.parentNode) document.body.removeChild(ov); cb(result); }
+  box.querySelector('[data-role=cancel]').addEventListener('click', function(){ close(null); });
+  box.querySelector('[data-role=ok]').addEventListener('click', function(){
+    if(!sel.value){ alert('Please choose a heading.'); return; }
+    close(sel.value);
+  });
+  ov.addEventListener('click', function(e){ if(e.target === ov) close(null); });
+  setTimeout(function(){ sel.focus(); }, 50);
+}
+
+// Append "Moved from X to Y by <user>, <date>" to existing notes.
+function docMoveNote(prevNotes, fromLabel, toLabel){
+  var who = localStorage.getItem('du_user') || 'Clinton';
+  var when = new Date().toLocaleDateString('en-ZA', {day:'numeric', month:'short', year:'numeric'});
+  var line = 'Moved from '+fromLabel+' to '+toLabel+' by '+who+', '+when;
+  var prev = String(prevNotes || '').replace(/\s+$/, '');
+  return prev ? prev+'\n'+line : line;
+}
+
+// Move within the same client's Documents tab only.
+function openMoveClientDoc(docId, clientId){
+  var docs = window._clientDocs[clientId] || [];
+  var doc = docs.find(function(d){ return String(d.ID) === String(docId); });
+  if(!doc){ toast('Document not found. Refresh and try again.', 'err'); return; }
+  var fromCat = CLIENT_DOC_CATALOGUE.find(function(x){ return x.key === doc.DocType; });
+  var fromLabel = fromCat ? fromCat.label : doc.DocType;
+  function taken(key){
+    var c = CLIENT_DOC_CATALOGUE.find(function(x){ return x.key === key; });
+    return c && !c.multiple && (window._clientDocs[clientId] || []).some(function(d){ return d.DocType === key; });
+  }
+  var options = CLIENT_DOC_CATALOGUE.filter(function(x){ return x.key !== doc.DocType; }).map(function(x){
+    var t = taken(x.key);
+    return {key:x.key, label:x.label, disabled:t, why: t ? 'already has a file: delete or replace it first' : ''};
+  });
+  docPickHeading(doc.FileName || 'file', fromLabel, options, function(toKey){
+    if(!toKey) return;
+    var toCat = CLIENT_DOC_CATALOGUE.find(function(x){ return x.key === toKey; });
+    if(!toCat) return;
+    if(taken(toKey)){ toast(toCat.label+' already has a file. Delete or replace it first.', 'err'); return; }
+    function apply(signedDate){
+      var patch = {DocType: toKey, Notes: docMoveNote(doc.Notes, fromLabel, toCat.label)};
+      // Keep the Broker Authority expiry clock correct in both directions.
+      if(toCat.expiryDays) patch.SignedDate = signedDate;
+      else if(fromCat && fromCat.expiryDays) patch.SignedDate = null;
+      sbFetch('PATCH', '/rest/v1/client_documents?ID=eq.'+encodeURIComponent(doc.ID), patch, function(res, err){
+        if(err){ toast('Move failed. Nothing was changed.', 'err'); return; }
+        toast('Moved to '+toCat.label, 'ok');
+        loadClientDocs(clientId);
+      });
+    }
+    if(toCat.expiryDays) promptSignedDate(toCat.label, function(sd){ if(sd) apply(sd); });
+    else apply(null);
+  });
+}
+
+// Move within the same Work Event only.
+function openMoveEventDoc(docId, eventId){
+  var clientId = SEL;
+  var ev = (window._events[clientId] || []).find(function(e){ return String(e.ID) === String(eventId); });
+  if(!ev){ toast('Work Event not found. Refresh and try again.', 'err'); return; }
+  var docs = window._eventDocs[eventId] || [];
+  var doc = docs.find(function(d){ return String(d.ID) === String(docId); });
+  if(!doc){ toast('Document not found. Refresh and try again.', 'err'); return; }
+  var full = EVENT_DOC_CHECKLISTS[ev.EventType] || [];
+  // Same sub-type filter renderEventDetail() uses, so only visible headings are offered.
+  var checklist = full.filter(function(item){
+    if(item.onlyIf && item.onlyIf.subType) return ev.EventSubType === item.onlyIf.subType;
+    return true;
+  });
+  var fromCat = full.find(function(x){ return x.key === doc.DocType; });
+  var fromLabel = fromCat ? (fromCat.label || fromCat.key) : doc.DocType;
+  function blockedWhy(key){
+    var naSet = window._eventNA[eventId] || new Set();
+    if(naSet.has(key)) return 'marked N/A';
+    var c = checklist.find(function(x){ return x.key === key; });
+    if(c && !c.multiple && (window._eventDocs[eventId] || []).some(function(d){ return d.DocType === key; })) return 'already has a file: delete or replace it first';
+    return '';
+  }
+  var options = checklist.filter(function(x){ return x.key !== doc.DocType; }).map(function(x){
+    var why = blockedWhy(x.key);
+    return {key:x.key, label:(x.label || x.key), disabled:!!why, why:why};
+  });
+  docPickHeading(doc.FileName || 'file', fromLabel, options, function(toKey){
+    if(!toKey) return;
+    var toCat = checklist.find(function(x){ return x.key === toKey; });
+    if(!toCat) return;
+    var why = blockedWhy(toKey);
+    if(why){ toast((toCat.label || toKey)+': '+why, 'err'); return; }
+    var patch = {DocType: toKey, Notes: docMoveNote(doc.Notes, fromLabel, (toCat.label || toKey))};
+    sbFetch('PATCH', '/rest/v1/work_event_documents?ID=eq.'+encodeURIComponent(doc.ID), patch, function(res, err){
+      if(err){ toast('Move failed. Nothing was changed.', 'err'); return; }
+      toast('Moved to '+(toCat.label || toKey), 'ok');
+      loadEventDocs(eventId);
     });
   });
 }
@@ -12380,6 +12744,9 @@ document.addEventListener('click', function(e){
         case 'doc-delete':
           deleteClientDoc(el.getAttribute('data-did'), cid);
           break;
+        case 'doc-move':
+          openMoveClientDoc(el.getAttribute('data-did'), cid);
+          break;
         case 'new-event':
           openNewEventModal(cid);
           break;
@@ -12406,6 +12773,9 @@ document.addEventListener('click', function(e){
           break;
         case 'event-doc-delete':
           deleteEventDoc(el.getAttribute('data-did'), el.getAttribute('data-eid'));
+          break;
+        case 'event-doc-move':
+          openMoveEventDoc(el.getAttribute('data-did'), el.getAttribute('data-eid'));
           break;
         case 'task-doc-upload':
           openTaskDocUpload(el.getAttribute('data-tid'));
