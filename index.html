@@ -10093,7 +10093,10 @@ function crmCurrentEAC(p){
   var out='';
   notes.split('\n').forEach(function(l){ var t=l.trim(); if(t.slice(0,4).toLowerCase()==='eac:') out=t.slice(4).trim(); });
   if(out) return out;
-  var low=notes.toLowerCase(), i=low.indexOf('eac');
+  // Whole word only: a bare indexOf('eac') matched inside "each", "reach",
+  // "teach" and pre-filled junk ("h 1 June; est") that saving then wrote into
+  // Notes as a fake EAC (Yvette Baudewig, Sanlam 046356755X2, Sep 2026).
+  var i=notes.search(/\beac\b/i);
   if(i<0) return '';
   return notes.slice(i).split(/[\n.]/)[0].replace(/\bIRR\b.*$/i,'').replace(/^eac\s*[:=]?\s*/i,'').trim();
 }
@@ -12836,10 +12839,18 @@ function runPasteClaudeImport(){
       post({action:'updateFamMember',member:spEx});
     }
   }
-  // Children links
+  // Children links — never add a child who is already on the family card, even
+  // when the pasted spelling differs slightly (same ID number, or a name that
+  // matches by whole words / initials — famNameGrade; 25 Sep 2026).
   (PC_PARSED.children||[]).forEach(function(ch,ci){
     var nm=String(ch.Name||ch.name||'').trim(); if(!nm) return;
-    var exCh=DB.links.find(function(l){return String(l.PrincipalID)===String(c.ID)&&l.Type==='Child'&&String(l.Name).toLowerCase().trim()===nm.toLowerCase();});
+    var chId=String(ch.IDNumber||ch.id||'').replace(/\D/g,'');
+    var exCh=DB.links.find(function(l){
+      if(String(l.PrincipalID)!==String(c.ID)) return false;
+      if(chId.length===13 && String(l.IDNumber||'').replace(/\D/g,'')===chId) return true;
+      if(l.Type!=='Child') return false;
+      var g=famNameGrade(l.Name, nm); return g==='exact'||g==='initials';
+    });
     if(exCh) return; // don't duplicate a child already linked
     var link={ID:'fam_'+Date.now()+'_'+ci,PrincipalID:c.ID,Name:nm,IDNumber:ch.IDNumber||ch.id||'',DOB:ch.DOB||ch.dob||'',Cell:'',Email:'',Type:'Child',IsClient:'No',ClientID:''};
     DB.links.push(link); post({action:'saveFamMember',member:link});
@@ -13428,6 +13439,191 @@ function astuteNameMatch(a, b){
   return small.every(function(t){ return big.indexOf(t)>=0; });
 }
 
+// ── Beneficiary ↔ family member matching (25 Sep 2026) ────────────────────
+// Clinton: when a statement spells a child slightly differently ("M Baudewig",
+// "Lara J Baudewig", a typo, Discovery's raw "Vallabh,Sunita Uttamlal,68…"),
+// the import did not recognise the family member, ticked "create" by default
+// and added the person AGAIN; he then had to delete the duplicate and re-edit
+// every policy's beneficiaries (live: Bhana, Breytenbach, Hariparsad).
+// These helpers are shared by the Astute XML import, the "Provider not on
+// Astute?" paste and the client paste. A beneficiary matched to a family
+// member is saved under the FAMILY MEMBER'S name, so every policy and the
+// schedule's Beneficiaries table carry one consistent spelling.
+
+// Discovery's Astute feed sends some beneficiaries as one raw string:
+// "Surname,First names,ID number[,dd/mm/yyyy]". Recognised ONLY when the
+// string carries an ID number or a date — a plain "Matthew, Thomas Baudewig"
+// is left exactly as typed (reordering it would turn the surname into a
+// first name).
+function famCleanRawName(raw){
+  var s = String(raw||'').trim();
+  var out = {name:s, idNumber:'', dob:''};
+  if(s.indexOf(',')<0) return out;
+  var parts = s.split(',').map(function(x){ return x.trim(); }).filter(Boolean);
+  var words = [], sawData = false;
+  parts.forEach(function(p){
+    var digits = p.replace(/\s/g,'');
+    if(/^\d{13}$/.test(digits)){ sawData = true; if(saIdValid(digits)) out.idNumber = digits; return; }
+    var dm = p.match(/^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{4})$/);
+    if(dm){ sawData = true; out.dob = dm[3]+'-'+('0'+dm[2]).slice(-2)+'-'+('0'+dm[1]).slice(-2); return; }
+    if(/^\d{4}-\d{2}-\d{2}$/.test(p)){ sawData = true; out.dob = p; return; }
+    words.push(p);
+  });
+  if(!sawData || !words.length) return {name:s, idNumber:'', dob:''};
+  // Surname first, then the given names → "Given names Surname".
+  out.name = (words.slice(1).join(' ')+' '+words[0]).replace(/\s+/g,' ').trim();
+  if(!out.dob && out.idNumber) out.dob = dobFromID(out.idNumber);
+  return out;
+}
+
+// Estate / trust nominations are never family members.
+function famIsNonPerson(name, benType){
+  if(benType==='Estate' || benType==='Trust') return true;
+  return /^(the\s+)?(deceased\s+)?(estate|trust|trustees?)\b|\btrust$|§\s*37c/i.test(String(name||'').trim());
+}
+
+// The people a beneficiary could be: the client, the spouse on the client
+// record, and the client's own family links (PrincipalID = client).
+function famKnownPeople(cid){
+  var people = [];
+  var c = DB.clients.find(function(x){ return String(x.ID)===String(cid); });
+  if(c && clean(c.Name)) people.push({name:String(c.Name).trim(), type:'Self', idNumber:clean(c.IDNumber), dob:clean(c.DOB), self:true});
+  var links = DB.links.filter(function(l){ return String(l.PrincipalID)===String(cid) && l.Name && String(l.Name).trim(); });
+  links.forEach(function(l){
+    people.push({name:String(l.Name).trim(), type:l.Type||'Other', idNumber:clean(l.IDNumber), dob:clean(l.DOB), linkId:l.ID});
+  });
+  // Spouse on the client record — only when no spouse link already stands for them.
+  if(c && clean(c.SpouseName) && !links.some(function(l){ return l.Type==='Spouse' || astuteNameMatch(l.Name, c.SpouseName); })){
+    people.push({name:String(c.SpouseName).trim(), type:'Spouse', idNumber:clean(c.SpouseIDNumber), dob:clean(c.SpouseDOB)});
+  }
+  return people;
+}
+
+function famTokens(s){ return String(s||'').toLowerCase().split(/[^a-z]+/).filter(Boolean); }
+function famEdit1(a,b){        // true when a and b differ by at most one letter (typo)
+  if(a===b) return true;
+  if(Math.abs(a.length-b.length)>1) return false;
+  var i=0, j=0, diff=0;
+  while(i<a.length && j<b.length){
+    if(a[i]===b[j]){ i++; j++; continue; }
+    if(++diff>1) return false;
+    if(a.length>b.length) i++; else if(b.length>a.length) j++; else { i++; j++; }
+  }
+  return diff + (a.length-i) + (b.length-j) <= 1;
+}
+// Compare two names word by word. Every word of the shorter name must pair
+// with a different word of the longer: the same word, an initial ("M" ↔
+// "Matthew", either side), or — only for the 'probable' grade — a one-letter
+// typo in a word of 4+ letters. At least one full word must be identical, so a
+// shared first letter alone ("Mia" / "Michelle") never matches.
+// Returns 'exact' | 'initials' | 'typo' | ''.
+function famNameGrade(a, b){
+  var ta = famTokens(a), tb = famTokens(b);
+  if(!ta.length || !tb.length) return '';
+  function pair(small, big){
+    var used = [], full = 0, grade = 'exact';
+    for(var k=0; k<small.length; k++){
+      var t = small[k], hit = -1, how = '';
+      for(var m=0; m<big.length && hit<0; m++){ if(used.indexOf(m)<0 && big[m]===t){ hit=m; how='exact'; } }
+      for(var m2=0; m2<big.length && hit<0; m2++){
+        var u = big[m2]; if(used.indexOf(m2)>=0) continue;
+        if((t.length===1 && u.length>1 && u[0]===t) || (u.length===1 && t.length>1 && t[0]===u)){ hit=m2; how='initials'; }
+      }
+      for(var m3=0; m3<big.length && hit<0; m3++){
+        var v = big[m3]; if(used.indexOf(m3)>=0) continue;
+        if(t.length>=4 && v.length>=4 && famEdit1(t,v)){ hit=m3; how='typo'; }
+      }
+      if(hit<0) return '';
+      used.push(hit);
+      if(how==='exact' && t.length>1) full++;
+      if(how==='typo') grade = 'typo';
+      else if(how==='initials' && grade==='exact') grade = 'initials';
+    }
+    return full ? grade : '';
+  }
+  if(ta.length===tb.length){
+    var g1 = pair(ta,tb), g2 = pair(tb,ta), rank = {'exact':3,'initials':2,'typo':1,'':0};
+    return rank[g1]>=rank[g2] ? g1 : g2;
+  }
+  return ta.length<tb.length ? pair(ta,tb) : pair(tb,ta);
+}
+
+// Who is this beneficiary? Returns
+//   {status:'definite'|'probable'|'ambiguous'|'none'|'nonperson', person, options:[people]}
+// definite  — same ID number; or the name matches one person only (whole
+//             words / initials); or a typo-grade name with the same date of birth
+// probable  — one person only, but spelt differently (typo) — pre-selected, flagged
+// ambiguous — the name fits more than one person ("M Eckhardt": Micha or Mason)
+function famMatchPerson(people, ben){
+  var name = ben.name, id = String(ben.idNumber||'').replace(/\D/g,''), dob = String(ben.dob||'').slice(0,10);
+  if(famIsNonPerson(name, ben.benType)) return {status:'nonperson', person:null, options:[]};
+  if(id.length===13){
+    var byId = people.filter(function(p){ return String(p.idNumber||'').replace(/\D/g,'')===id; });
+    if(byId.length===1) return {status:'definite', person:byId[0], options:byId};
+  }
+  var graded = people.map(function(p){ return {p:p, g:famNameGrade(p.name, name)}; }).filter(function(x){ return x.g; });
+  var strong = graded.filter(function(x){ return x.g==='exact' || x.g==='initials'; });
+  if(strong.length===1) return {status:'definite', person:strong[0].p, options:[strong[0].p]};
+  if(strong.length>1){
+    // A date of birth can settle it.
+    if(dob){ var s2 = strong.filter(function(x){ return String(x.p.dob||'').slice(0,10)===dob; }); if(s2.length===1) return {status:'definite', person:s2[0].p, options:[s2[0].p]}; }
+    // Several people with the same words (e.g. the client and a same-named
+    // child are rare) — or a surname on its own.
+    var ex = strong.filter(function(x){ return x.g==='exact' && famTokens(x.p.name).length===famTokens(name).length; });
+    if(ex.length===1) return {status:'definite', person:ex[0].p, options:[ex[0].p]};
+    return {status:'ambiguous', person:null, options:strong.map(function(x){ return x.p; })};
+  }
+  if(graded.length===1){
+    var p1 = graded[0].p;
+    if(dob && String(p1.dob||'').slice(0,10)===dob) return {status:'definite', person:p1, options:[p1]};
+    return {status:'probable', person:p1, options:[p1]};
+  }
+  if(graded.length>1) return {status:'ambiguous', person:null, options:graded.map(function(x){ return x.p; })};
+  return {status:'none', person:null, options:[]};
+}
+
+// Beneficiary type follows the family relationship when the statement gave none.
+function famBenTypeFor(person, benType){
+  if(!person || person.self) return benType||'Other';
+  var map = {'Spouse':'Spouse','Life Partner':'Life Partner','Child':'Child','Parent':'Parent','Dependant':'Dependant'};
+  if((!benType || benType==='Other') && map[person.type]) return map[person.type];
+  return benType||'Other';
+}
+
+// Build one import beneficiary row (XML and paste use the same shape).
+// pick: 'p:<index into ASTUTE_PEOPLE>' | 'new' | 'none'
+function famImportBen(people, raw){
+  var cl = famCleanRawName(raw.name);
+  var ben = {name:cl.name, rawName:(cl.name!==String(raw.name||'').trim()?String(raw.name).trim():''),
+             idNumber:cl.idNumber, dob:clean(raw.dob)||cl.dob, pct:(raw.pct!=null?String(raw.pct):''),
+             benType:clean(raw.benType)||'Other', linkType:clean(raw.linkType)||'Other'};
+  var m = famMatchPerson(people, ben);
+  ben.matchStatus = m.status;
+  ben.options = m.options.map(function(p){ return people.indexOf(p); });
+  if(m.status==='nonperson'){ ben.pick = 'none'; }
+  else if(m.person){ ben.pick = 'p:'+people.indexOf(m.person); ben.benType = famBenTypeFor(m.person, ben.benType); }
+  else if(m.status==='ambiguous'){ ben.pick = 'none'; }                // nothing created until Clinton picks
+  else { ben.pick = 'new';
+    // A new person tagged Spouse/Child/Parent/Dependant on the statement gets that relationship.
+    if(ben.linkType==='Other' && ASTUTE_LINK_TYPES.indexOf(ben.benType)>=0) ben.linkType = ben.benType;
+  }
+  famSyncPick(ben);
+  return ben;
+}
+// Keep the legacy flags the import step reads in step with the pick.
+function famSyncPick(ben){
+  ben.matched = /^p:/.test(ben.pick||'');
+  ben.createLink = ben.pick==='new';
+}
+function astuteBenPick(i, bi, val){
+  var b = ASTUTE_ROWS[i] && ASTUTE_ROWS[i].bens[bi]; if(!b) return;
+  b.pick = val;
+  if(/^p:/.test(val)){ var p = ASTUTE_PEOPLE[+val.slice(2)]; if(p) b.benType = famBenTypeFor(p, b.benType); }
+  famSyncPick(b);
+  renderAstutePreview();
+}
+var ASTUTE_PEOPLE = [];   // famKnownPeople(ASTUTE_CID) for the preview in progress
+
 function astuteMapFreq(mode){
   var s = String(mode||'').toLowerCase();
   if(s.indexOf('month')>=0) return 'Monthly';
@@ -13558,11 +13754,8 @@ function parseAstuteXML(txt){
   if(!contents.length){ toast('No provider data found in this file','err'); return; }
 
   var c = DB.clients.find(function(x){return String(x.ID)===String(ASTUTE_CID);});
-  // Known people for beneficiary matching: spouse on the client record + family links.
-  var known = [];
-  if(c && clean(c.SpouseName)) known.push(c.SpouseName.trim());
-  DB.links.filter(function(l){ return String(l.PrincipalID)===String(ASTUTE_CID) || String(l.ClientID)===String(ASTUTE_CID); })
-    .forEach(function(l){ if(l.Name && l.Name.trim()) known.push(l.Name.trim()); });
+  // Known people for beneficiary matching: the client, spouse and own family links.
+  ASTUTE_PEOPLE = famKnownPeople(ASTUTE_CID);   // beneficiary matching (famImportBen)
 
   ASTUTE_ROWS = [];
   for(var ci=0; ci<contents.length; ci++){
@@ -13740,12 +13933,11 @@ function parseAstuteXML(txt){
           else { if(!insuredRel) insuredRel = r; }
         }
         if(role==='beneficiary' && !r.isOrg && r.name){
-          // Dedupe identical beneficiary relations within one holding
-          var dup = bens.some(function(b){ return astuteNorm(b.name)===astuteNorm(r.name); });
-          if(!dup){
-            var matched = known.some(function(k){ return astuteNameMatch(k, r.name); });
-            bens.push({name:r.name, dob:r.dob, pct:r.pct||'', benType:'Other', matched:matched, createLink:!matched, linkType:'Other'});
-          }
+          // Clean Discovery's raw "Surname,Names,ID" strings and match the
+          // person to the family (famImportBen). Dedupe within one holding.
+          var fb = famImportBen(ASTUTE_PEOPLE, {name:r.name, dob:r.dob, pct:r.pct||'', benType:'Other', linkType:'Other'});
+          var dup = bens.some(function(b){ return astuteNorm(b.name)===astuteNorm(fb.name); });
+          if(!dup) bens.push(fb);
         }
       });
       // Only-joint edge case: treat the joint life as primary rather than losing it
@@ -13839,18 +14031,41 @@ function renderAstutePreview(){
       r.bens.forEach(function(b,bi){
         html += '<div style="background:#fff;border:1px solid var(--mist);border-radius:7px;padding:8px 10px;margin-top:8px">'+
           '<div style="font-size:12.5px;font-weight:600;color:var(--ink)">Beneficiary: '+astuteEsc(b.name)+(b.pct?' ('+astuteEsc(b.pct)+'%)':'')+(b.dob?' <span style="font-weight:400;color:#667">b. '+b.dob+'</span>':'')+'</div>'+
+          (b.rawName?'<div style="font-size:11px;color:#889;margin-top:1px">On the statement as “'+astuteEsc(b.rawName)+'”</div>':'')+
           '<div style="display:flex;gap:10px;margin-top:6px;flex-wrap:wrap;align-items:flex-end">'+
           '<label style="font-size:11px;color:#667">Beneficiary type (drives s.4(q))<br><select onchange="ASTUTE_ROWS['+i+'].bens['+bi+'].benType=this.value" style="border:1.5px solid var(--mist);border-radius:7px;padding:6px 8px;font-family:inherit;font-size:12.5px;margin-top:2px">'+
           ASTUTE_BEN_TYPES.map(function(o){return '<option'+(b.benType===o?' selected':'')+'>'+o+'</option>';}).join('')+'</select></label>';
-        if(b.matched){
-          html += '<div style="font-size:11.5px;color:#2e7d32;padding-bottom:8px">✓ Matched to existing family link</div>';
+        if(b.matchStatus==='nonperson'){
+          html += '<div style="font-size:11.5px;color:#667;padding-bottom:8px">Estate / trust nomination — not a family member</div>';
         } else {
-          html += '<label style="font-size:11.5px;color:var(--ink);display:flex;align-items:center;gap:6px;padding-bottom:8px;cursor:pointer">'+
-            '<input type="checkbox" '+(b.createLink?'checked':'')+' onchange="ASTUTE_ROWS['+i+'].bens['+bi+'].createLink=this.checked;renderAstutePreview()" style="width:15px;height:15px;cursor:pointer;accent-color:var(--sage)">Not in family links — create as</label>';
-          if(b.createLink){
+          // One picker for every case: an existing person, a new family member,
+          // or not a family member at all. Nothing is created unless "New" is picked.
+          var pick = b.pick||'none';
+          var opts = ASTUTE_PEOPLE.map(function(p,pi){
+            var rel = p.self ? 'the client' : (p.type||'Other');
+            return '<option value="p:'+pi+'"'+(pick==='p:'+pi?' selected':'')+'>'+astuteEsc(p.name)+' ('+astuteEsc(rel)+')</option>';
+          }).join('');
+          opts += '<option value="new"'+(pick==='new'?' selected':'')+'>➕ New family member</option>';
+          opts += '<option value="none"'+(pick==='none'?' selected':'')+'>Not a family member (keep as on statement)</option>';
+          html += '<label style="font-size:11px;color:#667">Who is this?<br><select onchange="astuteBenPick('+i+','+bi+',this.value)" style="border:1.5px solid var(--mist);border-radius:7px;padding:6px 8px;font-family:inherit;font-size:12.5px;margin-top:2px;max-width:320px">'+opts+'</select></label>';
+          if(pick==='new'){
             html += '<label style="font-size:11px;color:#667">Relationship<br><select onchange="ASTUTE_ROWS['+i+'].bens['+bi+'].linkType=this.value" style="border:1.5px solid var(--mist);border-radius:7px;padding:6px 8px;font-family:inherit;font-size:12.5px;margin-top:2px">'+
               ASTUTE_LINK_TYPES.map(function(o){return '<option'+(b.linkType===o?' selected':'')+'>'+o+'</option>';}).join('')+'</select></label>';
           }
+          var who = /^p:/.test(pick) ? ASTUTE_PEOPLE[+pick.slice(2)] : null;
+          var msg = '', col = '#667';
+          if(who && b.matchStatus==='probable' && b.options.indexOf(+pick.slice(2))>=0){
+            msg = '⚠ Spelt differently on the statement — check this is '+astuteEsc(who.name); col = '#b45309';
+          } else if(who){
+            msg = '✓ Saved on the policy as '+astuteEsc(who.name); col = '#2e7d32';
+          } else if(b.matchStatus==='ambiguous' && pick==='none'){
+            msg = '⚠ Could be '+b.options.map(function(x){ return astuteEsc((ASTUTE_PEOPLE[x]||{}).name||''); }).join(' or ')+' — choose who this is'; col = '#b45309';
+          } else if(pick==='new'){
+            msg = 'Will be added to the family card';
+          } else {
+            msg = 'Kept as on the statement; not added to the family card';
+          }
+          html += '<div style="font-size:11.5px;color:'+col+';padding-bottom:8px;flex-basis:100%">'+msg+'</div>';
         }
         html += '</div></div>';
       });
@@ -13911,14 +14126,6 @@ function astuteFundsToNotes(r){
 //     funds:[{name,value,alloc,units,price,asOf}],
 //     covers:[{plan,code,amt,prem,mode,monthlyAmt,period,elim,benEsc}],
 //     bens:[{name,pct,benType,linkType,dob}] }
-function astutePasteKnownNames(){
-  var c = DB.clients.find(function(x){return String(x.ID)===String(ASTUTE_CID);});
-  var known = [];
-  if(c && clean(c.SpouseName)) known.push(c.SpouseName.trim());
-  DB.links.filter(function(l){ return String(l.PrincipalID)===String(ASTUTE_CID) || String(l.ClientID)===String(ASTUTE_CID); })
-    .forEach(function(l){ if(l.Name && l.Name.trim()) known.push(l.Name.trim()); });
-  return known;
-}
 function parseAstutePasteJSON(txt){
   var raw = String(txt||'').trim();
   if(!raw){ toast('Paste the policy block first','err'); return; }
@@ -13936,7 +14143,7 @@ function parseAstutePasteJSON(txt){
 
   var c = DB.clients.find(function(x){return String(x.ID)===String(ASTUTE_CID);});
   var clientName = c ? c.Name : '';
-  var known = astutePasteKnownNames();
+  ASTUTE_PEOPLE = famKnownPeople(ASTUTE_CID);   // beneficiary matching (famImportBen)
   var added = 0, skipped = 0;
   list.forEach(function(o){
     if(!o || (typeof o!=='object') || (!clean(o.insurer) && !clean(o.product))){ skipped++; return; }
@@ -13957,9 +14164,8 @@ function parseAstutePasteJSON(txt){
     var ownerIsClient = !ownerName || astuteNameMatch(ownerName, clientName);
     var insuredName = (clean(o.insured) && !astuteNameMatch(o.insured, clientName)) ? clean(o.insured).trim() : '';
     var bens = (Array.isArray(o.bens)?o.bens:[]).filter(function(b){return b && clean(b.name);}).map(function(b){
-      var matched = known.some(function(k){ return astuteNameMatch(k, b.name); });
-      return {name:String(b.name).trim(), dob:clean(b.dob), pct:(b.pct!=null?String(b.pct):''),
-              benType:clean(b.benType)||'Other', matched:matched, createLink:!matched, linkType:clean(b.linkType)||'Other'};
+      return famImportBen(ASTUTE_PEOPLE, {name:String(b.name).trim(), dob:clean(b.dob), pct:(b.pct!=null?String(b.pct):''),
+                                          benType:clean(b.benType), linkType:clean(b.linkType)});
     });
     var fundSum = funds.reduce(function(s,f){return s+N(f.value);},0);
     ASTUTE_ROWS.push({
@@ -14073,12 +14279,14 @@ function runAstuteImport(){
   var now = new Date().toISOString().slice(0,10);
   var c = DB.clients.find(function(x){return String(x.ID)===String(ASTUTE_CID);});
 
-  // ── 1. Family links: dedupe by name across all selected policies ──
-  var linkMap = {}; // normName → {name, dob, linkType}
+  // ── 1. Family links: only for beneficiaries marked "New family member",
+  //       deduped across all selected policies (same ID number or same name) ──
+  var linkMap = {}; // key → {name, dob, idNumber, linkType}
   rows.forEach(function(r){ r.bens.forEach(function(b){
     if(!b.matched && b.createLink){
-      var k = astuteNorm(b.name);
-      if(!linkMap[k]) linkMap[k] = {name:b.name, dob:b.dob||'', linkType:b.linkType||'Other'};
+      var k = (b.idNumber && b.idNumber.length===13) ? ('id:'+b.idNumber) : astuteNorm(b.name);
+      var dupKey = Object.keys(linkMap).filter(function(x){ var o=linkMap[x]; return x===k || famNameGrade(o.name, b.name)==='exact'; })[0];
+      if(!dupKey) linkMap[k] = {name:b.name, dob:b.dob||'', idNumber:b.idNumber||'', linkType:b.linkType||'Other'};
     }
   });});
   var spouseExists = !!(c && clean(c.SpouseName)) || DB.links.some(function(l){ return String(l.PrincipalID)===String(ASTUTE_CID) && l.Type==='Spouse'; });
@@ -14090,7 +14298,7 @@ function runAstuteImport(){
       return;
     }
     if(lk.linkType==='Spouse') spouseExists = true;
-    var link = {ID:'fam_'+Date.now()+'_'+(li++), PrincipalID:ASTUTE_CID, Name:lk.name, IDNumber:'', DOB:lk.dob, Cell:'', Email:'', Type:lk.linkType, IsClient:'No', ClientID:''};
+    var link = {ID:'fam_'+Date.now()+'_'+(li++), PrincipalID:ASTUTE_CID, Name:lk.name, IDNumber:lk.idNumber||'', DOB:lk.dob, Cell:'', Email:'', Type:lk.linkType, IsClient:'No', ClientID:''};
     link._pendingSave = true;
     DB.links.push(link);
     linksCreated++;
@@ -14126,7 +14334,12 @@ function runAstuteImport(){
     // Policy fee: PolFee tag on the policy + any fee riders found above
     var policyFee = N(r.polFee) + coverFee;
     function lumpSum(t){ var s=0; lumps.forEach(function(x){if(x.type===t)s+=N(x.cover);}); return s?String(s):''; }
-    var bensJson = JSON.stringify(r.bens.map(function(b){ return {type:b.benType, name:b.name, pct:b.pct}; }));
+    // A beneficiary matched to a family member is saved under that member's
+    // name, so every policy carries one spelling (famImportBen, 25 Sep 2026).
+    var bensJson = JSON.stringify(r.bens.map(function(b){
+      var who = /^p:/.test(b.pick||'') ? ASTUTE_PEOPLE[+String(b.pick).slice(2)] : null;
+      return {type:b.benType, name:(who ? who.name : b.name), pct:b.pct};
+    }));
 
     // Offshore (foreign-currency) handling: keep the ZAR EQUIVALENT in the money
     // fields (so all rand totals stay valid) and record the native amounts + the
@@ -16011,7 +16224,7 @@ function openPolicySchedule(cid){
     var src=null;
     notes.split('\n').forEach(function(l){ var t=l.trim(); if(t.slice(0,4).toLowerCase()==='eac:') src=t.slice(4).trim(); });
     if(src===null){
-      var low=notes.toLowerCase(), idx=low.indexOf('eac');
+      var idx=notes.search(/\beac\b/i);   // whole word — never inside "each" (see crmCurrentEAC)
       if(idx<0) return null;
       src=notes.slice(idx).split(/[\n.]/)[0].replace(/\bIRR\b.*$/i,'').replace(/^eac\s*[:=]?\s*/i,'').trim();
     }
@@ -16205,7 +16418,7 @@ function openPolicySchedule(cid){
     // stay uncluttered.
     if(p.Notes){
       var resid=crmCleanScheduleNote(crmStripFXLine(funds.length?notesWithoutFunds(p.Notes):p.Notes));
-      resid=resid.split(/(?<=\.)\s+/).filter(function(t){return !/eac|wealth\s*bonus|\birr\b/i.test(t);}).join(' ').trim();
+      resid=resid.split(/(?<=\.)\s+/).filter(function(t){return !/\beac\b|wealth\s*bonus|\birr\b/i.test(t);}).join(' ').trim();
       if(resid) card+='<div style="padding:8px 18px;border-top:1px solid '+LINE+';font-size:10.5px;color:'+MUT+';font-style:italic;line-height:1.6">'+escHtml(resid)+'</div>';
     }
     card+='</div>';
@@ -16249,9 +16462,14 @@ function openPolicySchedule(cid){
        (c.IDNumber?' &middot; ID '+escHtml(c.IDNumber):'')+(c.Cell?' &middot; '+escHtml(c.Cell):'')+'</div>';
 
   // ── HERO TILES ──
-  var invFV=0, invContribAll=0;
+  var invFV=0, invContribAll=0, fvInvN=0, fvRetN=0;
   allPols.forEach(function(p){
-    if(raSet.indexOf(p.Type)>=0||invSet.indexOf(p.Type)>=0){ invFV+=N(p.BenFundValue); }
+    if(raSet.indexOf(p.Type)>=0||invSet.indexOf(p.Type)>=0){
+      invFV+=N(p.BenFundValue);
+      // Count only the policies that actually make up the value (a life policy
+      // has none — "Across 5 active policies" under a 4-policy value was wrong).
+      if(N(p.BenFundValue)>0){ if(raSet.indexOf(p.Type)>=0) fvRetN++; else fvInvN++; }
+    }
   });
   var provCount={};
   allPols.forEach(function(p){ var i=(p.Insurer||'').trim(); if(i) provCount[i]=(provCount[i]||0)+1; });
@@ -16264,7 +16482,9 @@ function openPolicySchedule(cid){
   }
   var tiles=[];
   if(invFV>0){
-    tiles.push(tile('Portfolio value','R\u00a0'+Math.round(invFV).toLocaleString('en-ZA'),'Across '+allPols.length+' active polic'+(allPols.length===1?'y':'ies')));
+    var fvN=fvInvN+fvRetN;
+    var fvKind=(fvInvN&&fvRetN)?'investment and retirement polic':(fvRetN?'retirement polic':'investment polic');
+    tiles.push(tile('Portfolio value','R\u00a0'+Math.round(invFV).toLocaleString('en-ZA'),'Across '+fvN+' '+fvKind+(fvN===1?'y':'ies')));
   }
   if(tPersM>0){
     var cb=costByPayer.client.byCategory;
@@ -16377,6 +16597,8 @@ function openPolicySchedule(cid){
       else if(_ty.length && _ty.every(function(t){return t==='Estate';})) subTag='Estate';
       else if(_ty.length && _ty.every(function(t){return t==='Trust';})) subTag='Trust';
       else subTag='';
+      // Never repeat the name as its own label ("Estate" over "Estate").
+      if(subTag && subTag.toLowerCase()===String(e.displayName||'').trim().toLowerCase()) subTag='';
       doc+='<tr>'+
         '<td><div style="font-weight:700;color:'+INK+'">'+escHtml(e.displayName)+'</div>'+(subTag?'<div style="font-size:9.5px;color:'+MUT+';margin-top:1px">'+escHtml(subTag)+'</div>':'')+'</td>'+
         '<td style="font-weight:600">'+(e.death>0?'R\u00a0'+Math.round(e.death).toLocaleString('en-ZA'):'<span style="color:#bbb">&mdash;</span>')+'</td>'+
@@ -16393,7 +16615,10 @@ function openPolicySchedule(cid){
   if(tPersM>0) footTiles.push('<div><div style="font-size:9.5px;opacity:.75;text-transform:uppercase;letter-spacing:.6px">Personal /pm</div><div class="serif" style="font-size:19px;font-weight:700">R\u00a0'+Math.round(tPersM).toLocaleString('en-ZA')+'</div></div>');
   if(tBizM>0)  footTiles.push('<div><div style="font-size:9.5px;opacity:.75;text-transform:uppercase;letter-spacing:.6px">Business /pm</div><div class="serif" style="font-size:19px;font-weight:700">R\u00a0'+Math.round(tBizM).toLocaleString('en-ZA')+'</div></div>');
   if(totAnnual>0) footTiles.push('<div><div style="font-size:9.5px;opacity:.75;text-transform:uppercase;letter-spacing:.6px">Annual</div><div class="serif" style="font-size:19px;font-weight:700">R\u00a0'+Math.round(totAnnual).toLocaleString('en-ZA')+'</div></div>');
-  if(footTiles.length) doc+='<div style="margin-top:16px;background:'+INK+';color:#fff;border-radius:9px;padding:14px 22px;display:flex;gap:36px;flex-wrap:wrap">'+footTiles.join('')+'</div>';
+  // The band is only worth printing when it adds something the Monthly
+  // contribution tile at the top does not already show (business or annual
+  // premiums); on its own "Personal /pm" just repeated that tile.
+  if(footTiles.length && (tBizM>0 || totAnnual>0)) doc+='<div style="margin-top:16px;background:'+INK+';color:#fff;border-radius:9px;padding:14px 22px;display:flex;gap:36px;flex-wrap:wrap">'+footTiles.join('')+'</div>';
 
   doc+='<div style="margin-top:22px;font-size:9.5px;color:#aaa;border-top:1px solid '+LINE+';padding-top:11px;line-height:1.6">Portfolio schedule prepared by Clinton Hayes, Duwalcoe Financial Consultants CC (FSP No. 9978) on '+today+'. Based on information captured in the practice management system. All values are indicative and will fluctuate with market conditions. Please verify all details with the respective product providers before acting. This schedule is a summary of existing policies and does not constitute financial advice.</div>';
   doc+='</div>';   // end #schedBody
@@ -16413,16 +16638,22 @@ function openPolicySchedule(cid){
     +'}</scr'+'ipt>';
   // One-click PDF — fixed A4 landscape, so the browser print dialog can never
   // override the orientation/paper (the "printed as Letter portrait" problem).
+  // W MUST equal html2pdf's own printable width: A4 landscape 297mm less the two
+  // 8mm margins = 281mm = 1062 CSS px. It was 1123 (the full sheet), which cut
+  // ~60px off the right edge and made html2pdf plan page breaks for 733px pages
+  // while slicing 775px pages, stranding headings and splitting cards
+  // (Yvette Baudewig schedule, 25 Sep 2026). Keep this tied to the margins below.
   doc+='<scr'+'ipt>function dlPDF(){'
     +'var el=document.getElementById("schedBody");'
     +'var btn=document.getElementById("pdfBtn");'
     +'if(typeof html2pdf==="undefined"){alert("The PDF tool is still loading. Give it a second and click again.");return;}'
     +'var old=btn?btn.textContent:"";if(btn){btn.disabled=true;btn.style.opacity=".6";btn.textContent="Generating\\u2026";}'
-    +'var W=1123;'
+    +'var MG=8;'
+    +'var W=Math.floor((297-2*MG)*96/25.4);'
     +'var pbw=document.body.style.width,pew=el.style.width,pmw=el.style.maxWidth;'
     +'document.body.style.width=W+"px";el.style.width=W+"px";el.style.maxWidth=W+"px";'
     +'function done(){document.body.style.width=pbw;el.style.width=pew;el.style.maxWidth=pmw;if(btn){btn.disabled=false;btn.style.opacity="1";btn.textContent=old;}}'
-    +'var opt={margin:[8,8,8,8],filename:'+JSON.stringify('Portfolio Schedule - '+c.Name+'.pdf')+',image:{type:"jpeg",quality:0.98},html2canvas:{scale:2,useCORS:true,backgroundColor:"#ffffff",width:W,windowWidth:W,scrollX:0,scrollY:0},jsPDF:{unit:"mm",format:"a4",orientation:"landscape"},pagebreak:{mode:["css","legacy"],avoid:[".pcard"]}};'
+    +'var opt={margin:[MG,MG,MG,MG],filename:'+JSON.stringify('Portfolio Schedule - '+c.Name+'.pdf')+',image:{type:"jpeg",quality:0.98},html2canvas:{scale:2,useCORS:true,backgroundColor:"#ffffff",width:W,windowWidth:W,scrollX:0,scrollY:0},jsPDF:{unit:"mm",format:"a4",orientation:"landscape"},pagebreak:{mode:["css","legacy"],avoid:[".pcard"]}};'
     +'html2pdf().set(opt).from(el).save().then(done).catch(function(e){done();alert("PDF export failed: "+e);});'
     +'}</scr'+'ipt>';
   doc+='</body></html>';
