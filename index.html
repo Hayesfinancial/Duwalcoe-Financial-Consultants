@@ -2918,8 +2918,7 @@ function fpData(row){
 }
 // Tolerant number parse: "R 1,200,000" / "1200000.50" / "" → number (0 if unparsable)
 function fpN(v){
-  var x = parseFloat(String(v===undefined||v===null?'':v).replace(/[^0-9.\-]/g,''));
-  return isNaN(x) ? 0 : x;
+  return crmNum(v);   // decimal-comma aware (see crmNum)
 }
 // Money formatter that, unlike rnd(), shows R 0 and negatives honestly
 function fpR(n){
@@ -11359,7 +11358,18 @@ function calcPolicyIRR(startDateStr, premium, frequency, premEsc, fundValue){
   return Math.round(annualIRR * 1000) / 10;
 }
 
-function N(v){var n=parseFloat(String(v||'0').replace(/[^0-9.-]/g,''));return isNaN(n)?0:n;}
+// Read a captured amount or percentage as a number (25 Sep 2026). South African
+// entries often use a decimal COMMA ("1331,44", "R 3033,58", "2,7"); the old
+// readers stripped the comma and read those as 133144 / 303358 / 27. Rule: a
+// comma followed by 1–2 digits at the end (and no dot) is the decimal point;
+// every other comma is a thousands separator, so "1,500,000" is unchanged.
+function crmNum(v){
+  var s = String(v===undefined||v===null ? '' : v).replace(/[\s ]/g,'');
+  if(s.indexOf('.')<0 && /,\d{1,2}%?$/.test(s)){ var k=s.lastIndexOf(','); s = s.slice(0,k).replace(/,/g,'')+'.'+s.slice(k+1); }
+  var n = parseFloat(s.replace(/[^0-9.\-]/g,''));
+  return isNaN(n) ? 0 : n;
+}
+function N(v){ return crmNum(v||'0'); }
 
 // ── Cover aggregation helpers ────────────────────────────────────────────
 // Lump benefits within a policy are ADDITIVE — a Discovery policy with two
@@ -11423,6 +11433,30 @@ function invCalcGain(){
     gainEl.style.color=gain>=0?'#166534':'#991b1b';
     gainEl.style.background=gain>=0?'#f0fdf4':'#fef2f2';
   }
+}
+
+// ONE projection for the policy card AND the portfolio schedule (25 Sep 2026).
+// Before this the schedule grew only today's value and ignored every future
+// premium and its escalation, so a recurring policy printed far below the
+// card's own maturity value (Yvette Baudewig, Sanlam 046356755X2: schedule
+// R1.44m, card R3.17m). Recurring premiums are converted to a monthly
+// equivalent (the card used to treat an annual premium as monthly).
+//   fv: value today · prem: premium per payment · freq: Monthly/Quarterly/Annually
+//   (anything else = no further premiums) · ratePct: growth % p.a. ·
+//   escPct: premium increase % p.a. · yrs: years to the target date
+function crmProjectValue(fv, prem, freq, ratePct, escPct, yrs){
+  fv = +fv || 0; prem = +prem || 0;
+  var r = (+ratePct || 0) / 100;
+  if(!(yrs > 0) || !(r > 0) || !(fv > 0)) return 0;
+  var out = fv * Math.pow(1 + r, yrs);
+  var f = String(freq || 'Monthly');
+  var monthly = f==='Monthly' ? prem : f==='Quarterly' ? prem/3 : (f==='Annually'||f==='Annual') ? prem/12 : 0;
+  if(monthly > 0){
+    var g = (+escPct || 0) / 100, n = Math.floor(yrs * 12);
+    if(Math.abs(r/12 - g/12) > 0.0001) out += monthly * (Math.pow(1+r/12, n) - Math.pow(1+g/12, n)) / (r/12 - g/12);
+    else out += monthly * n * Math.pow(1 + r/12, n);
+  }
+  return out;
 }
 
 function invCalcMaturity(){
@@ -11489,22 +11523,11 @@ function invCalcMaturity(){
   if(!fv){   out.value=''; setHint('Enter the Current Fund Value to project maturity.'); return; }
   if(!rate){ out.value=''; setHint('Enter a Growth Rate % to project maturity.'); return; }
 
-  var r = rate / 100;
-  var projected = fv * Math.pow(1+r, yrs);
-
   var freqEl = document.getElementById('pfreq');
   var freq = freqEl ? freqEl.value : 'Monthly';
-  if(prem > 0 && freq !== 'Once Off' && freq !== 'Paid Up' && r > 0){
-    var escEl = document.getElementById('pprem_pct');
-    var escRate = parseFloat((escEl||{value:'0'}).value||0)||0;
-    var g = escRate / 100;
-    var n = Math.floor(yrs * 12);
-    if(Math.abs(r/12 - g/12) > 0.0001){
-      projected += prem * (Math.pow(1+r/12, n) - Math.pow(1+g/12, n)) / (r/12 - g/12);
-    } else {
-      projected += prem * n * Math.pow(1+r/12, n);
-    }
-  }
+  var escEl = document.getElementById('pprem_pct');
+  var escRate = parseFloat((escEl||{value:'0'}).value||0)||0;
+  var projected = crmProjectValue(fv, prem, freq, rate, escRate, yrs);   // shared with the schedule
   if(out) out.value = Math.round(projected);
   setHint('');
 }
@@ -15774,10 +15797,22 @@ function openPolicySchedule(cid){
   var allPols=polsFor(cid).filter(function(p){return p.Status!=='Replaced'&&p.Status!=='Cancelled'&&p.Status!=='Lapsed';});
   var today=new Date().toLocaleDateString('en-ZA',{day:'2-digit',month:'long',year:'numeric'});
 
-  function N(v){var n=parseFloat(String(v||'0').replace(/[^0-9.-]/g,''));return isNaN(n)?0:n;}
+  function N(v){ return crmNum(v||'0'); }   // decimal-comma aware (see crmNum)
   function R(v){if(!v||N(v)===0)return '—';return 'R\u00a0'+Math.round(N(v)).toLocaleString('en-ZA');}
   function Rpct(v){if(v===''||v===undefined||v===null)return '—';if(N(v)===0)return '0%';return v+'%';}
   function V(v){return (!v||v==='None')?'—':String(v);}
+  // Escalation / increase percentages as captured: "6", "16.15%", "2,7" (comma
+  // decimal), "Age Rated", "CPI". escNum → number for maths (words → 0);
+  // escTxt → what the client reads.
+  function escNum(v){ var m=String(v==null?'':v).trim().replace(',','.').match(/^(\d+(?:\.\d+)?)\s*%?$/); return m?+m[1]:0; }
+  function escTxt(v){
+    var s=String(v==null?'':v).trim(); if(!s) return '';
+    if(/age/i.test(s)) return 'Age rated';
+    var m=s.replace(',','.').match(/^(\d+(?:\.\d+)?)\s*%?$/);
+    return m ? (+m[1])+'%' : escHtml(s);
+  }
+  // Worth printing on an investment / medical card: anything captured except a plain zero.
+  function escNonZero(v){ var s=String(v==null?'':v).trim(); return !!s && !/^0+(?:[.,]0+)?\s*%?$/.test(s); }
   function FD(v){if(!v||v==='None')return '—';var p=parseDateVal(v);if(!p.y)return String(v);var mn=['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];return (p.d||'?')+' '+(mn[parseInt(p.m,10)]||'?')+' '+p.y;}
 
   // Projection helper for RA / Investment policies.
@@ -15816,15 +15851,18 @@ function openPolicySchedule(cid){
     var now = new Date(); now.setHours(0,0,0,0);
     var yrs = (tgt - now) / (365.25 * 86400000);
     if(yrs <= 0) return {value:0, targetDate:''};
-    var projected = fv * Math.pow(1 + rate/100, yrs);
+    // Same maths as the policy card (crmProjectValue): future premiums and their
+    // escalation included. A paid-up or once-off policy has no further premiums.
+    var _prem = (isLumpFreq(p) || p.Status==='Paid Up') ? 0 : N(p.Premium);
+    var projected = crmProjectValue(fv, _prem, p.Frequency||'Monthly', rate, escNum(p.PremEscalation), yrs);
     var mn=['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
     var tgtStr = mn[tgt.getMonth()+1]+' '+tgt.getFullYear();
-    return {value:projected, targetDate:tgtStr};
+    return {value:projected, targetDate:tgtStr, rate:rate};
   }
 
   // Classify policies
   var raTypes=['Retirement Annuity','Pension Fund','Provident Fund','Pension Preservation','Provident Preservation','Living Annuity','Life Annuity'];
-  var invTypes=['Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment','Unit Trust','Tax Free Savings'];
+  var invTypes=['Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment','Unit Trust','Tax Free Savings','Guaranteed Endowment'];   // Guaranteed Endowment added 25 Sep 2026 (printed almost nothing and was left out of totals)
 
   var groups={
     personal:{label:'Personal Life & Risk Cover', color:'#0e413a', pols:[]},
@@ -15980,7 +16018,7 @@ function openPolicySchedule(cid){
   // duplicate detector flags possible typos/variants (e.g. "M Beattie" vs
   // "Michelle Beattie") as a warning — never auto-merged.
   var _raTypesB =['Retirement Annuity','Pension Fund','Provident Fund','Pension Preservation','Provident Preservation','Living Annuity'];
-  var _invTypesB=['Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment','Unit Trust','Tax Free Savings'];
+  var _invTypesB=['Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment','Unit Trust','Tax Free Savings','Guaranteed Endowment'];
   var benMap={}; // key: normalised name; value: {displayName, types:[...], death, inv, ret, policyCount, policiesSeen:Set}
   function normName(s){ return String(s||'').toLowerCase().replace(/\s+/g,' ').replace(/[.,]/g,'').trim(); }
   personalGroups.forEach(function(g){
@@ -16269,7 +16307,7 @@ function openPolicySchedule(cid){
   function isLumpFreq(p){ var f=p.Frequency||'Monthly'; return f==='Once Off'||f==='Lump Sum'||f==='Paid Up'; }
 
   var raSet =['Retirement Annuity','Pension Fund','Provident Fund','Pension Preservation','Provident Preservation','Living Annuity','Life Annuity'];
-  var invSet=['Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment','Unit Trust','Tax Free Savings'];
+  var invSet=['Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment','Unit Trust','Tax Free Savings','Guaranteed Endowment'];
 
   // Ordered, flattened list of policies for the At-a-Glance table.
   function sortPols(arr){
@@ -16305,6 +16343,51 @@ function openPolicySchedule(cid){
     });
     s+='</div>';
     return s;
+  }
+
+  // Risk benefit breakdown (25 Sep 2026 — Clinton: "the schedule still misses
+  // information like the life cover escalations"). One row per captured benefit
+  // with its own cover, premium, cover escalation and premium escalation; income
+  // benefits add waiting period, term and in-claim escalation; the policy fee
+  // gets its own row. Returns {html, anyPremEsc, anyCoverEsc} so the card can
+  // show policy-level escalations only when the rows carry none.
+  function riskBenefitRows(p){
+    function arr(v){ try{ var a=JSON.parse(v||'[]'); return Array.isArray(a)?a:[]; }catch(e){ return []; } }
+    var typeName={'Life Cover':'Life cover','Capital Disability':'Disability','Dread Disease / Severe Illness':'Dread disease','Other Lump Sum':'Other benefit'};
+    var lumps=arr(p.LumpBenefits).filter(function(r){ return r && (N(r.cover)>0 || N(r.prem)>0); });
+    var incs=arr(p.IncomeBenefits).filter(function(r){ return r && (N(r.amount)>0 || N(r.prem)>0); });
+    var out={html:'', anyPremEsc:false, anyCoverEsc:false};
+    if(!lumps.length && !incs.length) return out;
+    var dash='<span style="color:#bbb">&mdash;</span>';
+    function nameCell(label, type){
+      var l=String(label||'').trim(), t=typeName[type]||type||'';
+      return '<td><span style="color:'+INK+';font-weight:600">'+escHtml(l||t)+'</span>'+(l&&t&&l.toLowerCase()!==t.toLowerCase()?'<span style="color:'+MUT+'"> &middot; '+escHtml(t)+'</span>':'')+'</td>';
+    }
+    var rows='';
+    lumps.forEach(function(r){
+      var ce=escTxt(r.benEsc), pe=escTxt(r.premEsc);
+      if(ce) out.anyCoverEsc=true; if(pe) out.anyPremEsc=true;
+      rows+='<tr>'+nameCell(r.label, r.type)+
+        '<td>'+(N(r.cover)>0?R(r.cover):dash)+'</td>'+
+        '<td>'+(N(r.prem)>0?R(r.prem):dash)+'</td>'+
+        '<td>'+(ce||dash)+'</td><td>'+(pe||dash)+'</td></tr>';
+    });
+    incs.forEach(function(r){
+      var ce=escTxt(r.benEsc);
+      var pe=(r.premEscType==='Age-rated') ? 'Age rated' : escTxt(r.premEsc||r.esc);
+      if(ce) out.anyCoverEsc=true; if(pe) out.anyPremEsc=true;
+      var sub=[];
+      if(clean(r.waiting)) sub.push(escHtml(r.waiting)+' waiting period');
+      if(clean(r.term)) sub.push(escHtml(r.term));
+      if(escTxt(r.claimEsc)) sub.push('in-claim escalation '+escTxt(r.claimEsc));
+      rows+='<tr>'+nameCell(r.label, r.type).replace('</td>', (sub.length?'<div style="font-size:10px;color:'+MUT+';margin-top:1px">'+sub.join(' &middot; ')+'</div>':'')+'</td>')+
+        '<td>'+(N(r.amount)>0?R(r.amount)+'<span style="font-size:10px;color:'+MUT+'"> /pm</span>':dash)+'</td>'+
+        '<td>'+(N(r.prem)>0?R(r.prem):dash)+'</td>'+
+        '<td>'+(ce||dash)+'</td><td>'+(pe||dash)+'</td></tr>';
+    });
+    if(N(p.PolicyFee)>0) rows+='<tr><td><span style="color:'+INK+';font-weight:600">Policy fee</span></td><td>'+dash+'</td><td>'+R(p.PolicyFee)+'</td><td>'+dash+'</td><td>'+dash+'</td></tr>';
+    out.html='<div style="padding:0 18px 12px"><table class="btbl"><thead><tr><th>Benefit</th><th>Cover</th><th>Premium</th><th>Cover escalation</th><th>Premium escalation</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
+    return out;
   }
 
   // Underlying-fund pills.
@@ -16343,30 +16426,51 @@ function openPolicySchedule(cid){
           '<div style="font-size:10.5px;color:'+MUT+';text-align:right">'+right.join(' &middot; ')+'</div></div>';
 
     var fields=[];
+    // "Owner" only when someone other than the client owns the policy.
+    var ownerTxt=(p.ClientIsOwner==='No' && clean(p.Owner) && p.Owner!==c.Name) ? escHtml(p.Owner) : '';
     if(isRiskP||isBizP){
-      fields.push({label:'Death benefit', value:R(lumpSum(p,'Life Cover','BenDeath'))});
+      var _death=lumpSum(p,'Life Cover','BenDeath');
+      // Older business policies hold the cover in LoanAmount (the policy card migrates it on edit).
+      if(!_death && N(p.LoanAmount)>0) _death=N(p.LoanAmount);
+      fields.push({label:'Death benefit', value:R(_death)});
       fields.push({label:'Disability',    value:R(lumpSum(p,'Capital Disability','BenDisability'))});
       fields.push({label:'Dread disease', value:R(lumpSum(p,'Dread Disease / Severe Illness','BenDreadDisease'))});
       var ipm=incomeMax(p);
       if(ipm>0) fields.push({label:'Income protection', value:R(ipm)+'<span style="font-size:10px;font-weight:400;color:'+MUT+'"> /pm</span>'});
       if(N(p.Premium)>0) fields.push({label:'Premium', value:R(p.Premium)+freqSuffix(p)});
+      // Policy-level escalations print here only when the benefit rows below do
+      // not carry their own (Clinton, 25 Sep 2026: escalations were missing).
+      var _bt=riskBenefitRows(p);
+      if(!_bt.anyPremEsc && escTxt(p.PremEscalation)) fields.push({label:'Premium escalation', value:escTxt(p.PremEscalation)});
+      if(!_bt.anyCoverEsc && escTxt(p.BenEscalation)) fields.push({label:'Cover escalation', value:escTxt(p.BenEscalation)});
       var wb=crmWealthBonus(p);
       if(wb) fields.push({label:'Wealth bonus at death', value:wb, accent:GRN});
       if(isBizP&&p.KeyPosition) fields.push({label:'Position', value:escHtml(p.KeyPosition)});
       if(p.Insured&&p.Insured!==c.Name) fields.push({label:'Insured life', value:escHtml(p.Insured)});
+      if(ownerTxt) fields.push({label:'Owner', value:ownerTxt});
+      if(p.MaturityDate) fields.push({label:'Cover ends', value:FD(p.MaturityDate)});
     } else if(isRAP||isInvP){
       if(p.Type==='Life Annuity'){
         var lai=N(p.BenLifeAnnuityIncome);
         if(lai>0){
           var laStr=R(lai)+'<span style="font-size:10px;font-weight:400;color:'+MUT+'"> /pm guaranteed</span>';
           fields.push({label:'Guaranteed income', value:laStr});
-          if(N(p.BenEscalation)>0) fields.push({label:'Escalation', value:p.BenEscalation+'%'});
+          if(escNonZero(p.BenEscalation)) fields.push({label:'Escalation', value:escTxt(p.BenEscalation)});
         }
+        if(N(p.LifeAnnuityGuarYrs)>0) fields.push({label:'Guaranteed period', value:N(p.LifeAnnuityGuarYrs)+' years'});
       } else {
         var fvCell=(fx&&fx.curNat)?(crmFmtCur(fx.curNat,fx.ccy)+'<div style="font-size:10px;color:'+MUT+';font-weight:400">&asymp; '+R(p.BenFundValue)+' @ '+fx.curRate+'</div>'):R(p.BenFundValue);
         fields.push({label:'Fund value', value:fvCell});
-        var proj=projectPolicy(p);
-        if(proj.value>0) fields.push({label:'Projected'+(proj.targetDate?' ('+proj.targetDate+')':''), value:R(proj.value)});
+        if(p.Type==='Guaranteed Endowment'){
+          // The provider's stated maturity value — never re-projected.
+          if(N(p.BenMaturityValue)>0) fields.push({label:'Maturity value', value:R(p.BenMaturityValue)});
+          if(p.PaysIncome==='Yes' && N(p.BenLAIncome)>0) fields.push({label:'Income', value:R(p.BenLAIncome)+'<span style="font-size:10px;font-weight:400;color:'+MUT+'"> /pm</span>'});
+        } else {
+          var proj=projectPolicy(p);
+          // The growth rate is shown with the figure: a projection is only as good as its assumption.
+          if(proj.value>0) fields.push({label:'Projected'+(proj.targetDate?' ('+proj.targetDate+(proj.rate?', '+proj.rate+'% p.a.':'')+')':''), value:R(proj.value)});
+        }
+        if(N(p.BenSurrenderValue)>0 && Math.abs(N(p.BenSurrenderValue)-N(p.BenFundValue))>=1) fields.push({label:'Surrender value', value:R(p.BenSurrenderValue)});
       }
       // Premium / contribution
       if(N(p.Premium)>0){
@@ -16376,11 +16480,23 @@ function openPolicySchedule(cid){
           fields.push({label:'Initial investment', value:R(initv)});
         } else {
           fields.push({label:'Premium', value:((fx&&fx.initNat)?crmFmtCur(fx.initNat,fx.ccy):R(p.Premium))+freqSuffix(p)});
+          // Recurring premium: what has gone in so far, beside what it is worth.
+          if(N(p.TotalInvested)>0) fields.push({label:'Total contributions', value:R(p.TotalInvested)});
         }
       } else if(N(p.TotalInvested)>0){
         fields.push({label:'Total contributions', value:R(p.TotalInvested)});
       }
-      if(N(p.PremEscalation)>0) fields.push({label:'Escalation', value:p.PremEscalation+'%'});
+      if(escNonZero(p.PremEscalation)) fields.push({label:'Premium escalation', value:escTxt(p.PremEscalation)});
+      if(N(p.TotalWithdrawn)>0) fields.push({label:'Withdrawn to date', value:R(p.TotalWithdrawn)});
+      // Retirement funds: retirement age and the two-pot components as captured.
+      if(isRAP && p.Type!=='Living Annuity' && p.Type!=='Life Annuity'){
+        if(N(p.RetirementAge)>0) fields.push({label:'Retirement age', value:String(N(p.RetirementAge))});
+        if(N(p.VestedValue)>0)         fields.push({label:'Vested component', value:R(p.VestedValue)});
+        if(N(p.NonVestedValue)>0)      fields.push({label:'Non-vested component', value:R(p.NonVestedValue)});
+        if(N(p.SavingsComponent)>0)    fields.push({label:'Savings component', value:R(p.SavingsComponent)});
+        if(N(p.RetirementComponent)>0) fields.push({label:'Retirement component', value:R(p.RetirementComponent)});
+      }
+      if(ownerTxt) fields.push({label:'Owner', value:ownerTxt});
       // Living-annuity income
       if(p.Type==='Living Annuity'){
         var base=N(p.BenLAIncome), bonus=N(p.LABonus||0), gross=base+bonus;
@@ -16399,11 +16515,17 @@ function openPolicySchedule(cid){
       var eac=crmParseEAC(p);
       if(eac) fields.push({label:'Cost (EAC)', value:eac.display+' <span style="font-size:10px;font-weight:400;color:'+MUT+'">p.a.</span>', accent:GOLD});
     } else {
-      // Medical / Other — show premium + any income
+      // Medical / Other — plan, lives covered, premium and escalation as captured.
+      if(clean(p.MedPlan)) fields.push({label:'Plan', value:escHtml(p.MedPlan)});
+      if(clean(p.MedLives)) fields.push({label:'Lives covered', value:escHtml(p.MedLives)});
       if(N(p.Premium)>0) fields.push({label:'Premium', value:R(p.Premium)+freqSuffix(p)});
+      if(escNonZero(p.PremEscalation)) fields.push({label:'Premium escalation', value:escTxt(p.PremEscalation)});
+      if(escNonZero(p.BenEscalation)) fields.push({label:'Cover escalation', value:escTxt(p.BenEscalation)});
+      if(ownerTxt) fields.push({label:'Owner', value:ownerTxt});
     }
 
     card+=fieldGrid(fields);
+    if(isRiskP||isBizP) card+=riskBenefitRows(p).html;
     card+=fundPills(funds, fx?fx.ccy:'');
 
     // Beneficiaries + payer strip
@@ -16444,6 +16566,11 @@ function openPolicySchedule(cid){
     +'.gtbl td{padding:9px 11px;border-bottom:1px solid '+LINE+';font-size:12.5px;text-align:right}'
     +'.gtbl td:first-child,.gtbl td:nth-child(2){text-align:left}'
     +'tr{page-break-inside:avoid;break-inside:avoid}'
+    +'.btbl{font-size:11.5px}'
+    +'.btbl th{font-size:9px;text-transform:uppercase;letter-spacing:.5px;color:'+MUT+';font-weight:600;text-align:right;padding:4px 8px;border-bottom:1px solid '+LINE+'}'
+    +'.btbl td{padding:5px 8px;border-bottom:1px solid '+PALE+';text-align:right;vertical-align:top;color:'+TXT+'}'
+    +'.btbl th:first-child,.btbl td:first-child{text-align:left;padding-left:0}'
+    +'.btbl tr:last-child td{border-bottom:none}'
     +'@media print{.noprint{display:none!important}body{padding:0;max-width:100%}}'
     +'</style>';
   doc+='<scr'+'ipt src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></scr'+'ipt>';
@@ -16626,7 +16753,7 @@ function openPolicySchedule(cid){
   // The band is only worth printing when it adds something the Monthly
   // contribution tile at the top does not already show (business or annual
   // premiums); on its own "Personal /pm" just repeated that tile.
-  if(footTiles.length && (tBizM>0 || totAnnual>0)) doc+='<div style="margin-top:16px;background:'+INK+';color:#fff;border-radius:9px;padding:14px 22px;display:flex;gap:36px;flex-wrap:wrap">'+footTiles.join('')+'</div>';
+  if(footTiles.length && (tBizM>0 || totAnnual>0)) doc+='<div style="margin-top:16px;background:'+INK+';color:#fff;border-radius:9px;padding:14px 22px;display:flex;gap:36px;flex-wrap:wrap;page-break-inside:avoid;break-inside:avoid">'+footTiles.join('')+'</div>';
 
   doc+='<div style="margin-top:22px;font-size:9.5px;color:#aaa;border-top:1px solid '+LINE+';padding-top:11px;line-height:1.6">Portfolio schedule prepared by Clinton Hayes, Duwalcoe Financial Consultants CC (FSP No. 9978) on '+today+'. Based on information captured in the practice management system. All values are indicative and will fluctuate with market conditions. Please verify all details with the respective product providers before acting. This schedule is a summary of existing policies and does not constitute financial advice.</div>';
   doc+='</div>';   // end #schedBody
