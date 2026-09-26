@@ -1053,6 +1053,7 @@ function tidyCandidates(showKept){
   var hold=clientIdsWithCurrentPolicy();
   return DB.clients.filter(function(c){
     if(!isActiveClient(c) || hold[String(c.ID)]) return false;
+    if(DUW_TICKS.some(function(t){ return hasDuwTick(c,t[1]); })) return false;
     return showKept ? isTidyKept(c) : !isTidyKept(c);
   });
 }
@@ -1359,8 +1360,29 @@ var CL_HOLDS_GROUPS = [
   ['invest',   'Investments',             ['Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment','Unit Trust','Tax Free Savings','Guaranteed Endowment']],
   ['annuity',  'Living & life annuities', ['Living Annuity','Life Annuity']],
   ['medical',  'Medical aid',             ['Medical Aid']],
-  ['business', 'Business assurance',      ['Business Assurance']]
+  ['business', 'Business assurance',      ['Business Assurance']],
+  // Not captured policies: ticks on the client record (Tracy updates them from the
+  // Duwalcoe commission statement). No policy types, so type lists are empty.
+  ['st',       'Short-term (Duwalcoe)',   []],
+  ['health',   'Health (Duwalcoe)',       []]
 ];
+// Duwalcoe referral ticks: [group key, clients column, short label, long label]
+var DUW_TICKS = [
+  ['st',     'ShortTermDuwalcoe', 'ST',     'Short-term through Duwalcoe'],
+  ['health', 'HealthDuwalcoe',    'Health', 'Health (medical aid / gap cover) through Duwalcoe']
+];
+function hasDuwTick(c, col){ return String(c && c[col] || '')==='Yes'; }
+// Tick / untick from the list or the profile. Saves the one client record.
+function toggleDuwTick(id, col, checked){
+  var c = DB.clients.find(function(x){ return String(x.ID)===String(id); });
+  if(!c) return;
+  c[col] = checked ? 'Yes' : '';
+  var t = DUW_TICKS.filter(function(x){ return x[1]===col; })[0];
+  var _sc=captureScrolls(); render(); restoreScrolls(_sc);
+  post({action:'saveClient', client:c}, function(res){
+    if(res && res.ok) toast((c.Name||'Client')+': '+(t?t[3]:col)+(checked?' ✓':' removed'),'ok');
+  });
+}
 // Set of ClientIDs (as strings) holding a current policy in the given group.
 function clientIdsHolding(groupKey){
   var g=null;
@@ -1384,6 +1406,9 @@ function clientGroupsHeld(){
     var g=byType[p.Type]; if(!g || willIsDeadPolicy(p)) return;
     (out[String(p.ClientID)]=out[String(p.ClientID)]||{})[g]=1;
   });
+  DB.clients.forEach(function(c){
+    DUW_TICKS.forEach(function(t){ if(hasDuwTick(c,t[1])) (out[String(c.ID)]=out[String(c.ID)]||{})[t[0]]=1; });
+  });
   return out;
 }
 // Does this client pass the Holds / But-not pair?
@@ -1405,7 +1430,9 @@ var XSELL_PICKS = [
   ['Risk, no retirement', 'risk',    'retire', 'Life & risk clients with no retirement fund'],
   ['Risk only',           'risk',    'other',  'Life & risk clients holding nothing else with you'],
   ['Investment, no risk', 'invest',  'risk',   'Investment clients with no life & risk cover'],
-  ['Annuity, no risk',    'annuity', 'risk',   'Living / life annuity clients with no life & risk cover']
+  ['Annuity, no risk',    'annuity', 'risk',   'Living / life annuity clients with no life & risk cover'],
+  ['No short-term',       '',        'st',     'Clients not ticked for Duwalcoe short-term: refer them'],
+  ['No health',           '',        'health', 'Clients not ticked for Duwalcoe health: refer them']
 ];
 function xsellHtml(){
   var f=window.CLIENT_LIST_FILTER||'clients';
@@ -1444,7 +1471,7 @@ function clientPageFiltered(){
     if(f==='family')      return c.IsLead!=='Yes' && isFamilyRecord(c) && c.Status!=='Inactive' && c.Status!=='Cancelled';
     if(f==='inactive')    return c.IsLead!=='Yes' && (c.Status==='Inactive'||c.Status==='Cancelled');
     if(isFamilyRecord(c)) return false;   // every other tab is clients only
-    if(f==='tidy')        return isActiveClient(c) && !_tidyHold[String(c.ID)] && (TIDY_SHOW_KEPT ? isTidyKept(c) : !isTidyKept(c));
+    if(f==='tidy')        return isActiveClient(c) && !_tidyHold[String(c.ID)] && !DUW_TICKS.some(function(t){ return hasDuwTick(c,t[1]); }) && (TIDY_SHOW_KEPT ? isTidyKept(c) : !isTidyKept(c));
     if(f==='nowill')      return c.IsLead!=='Yes' && c.Status!=='Inactive' && c.Status!=='Cancelled' && c.HasWill==='No';
     if(f==='willunasked') return c.IsLead!=='Yes' && c.Status!=='Inactive' && c.Status!=='Cancelled' && c.HasWill!=='Yes' && c.HasWill!=='No';
     return c.IsLead!=='Yes' && c.Status!=='Inactive' && c.Status!=='Cancelled';
@@ -2405,7 +2432,9 @@ function clientTable(list,mini,isLeads,isFamily){
   return '<table class="tbl"><thead'+theadStyle+'><tr>'+
     '<th>'+(isLeads?'Lead':'Client')+'</th>'+
     (isLeads&&!mini?'<th style="width:90px;text-align:center">Contacted</th>':'')+
-    '<th>Cell</th>'+(mini?'':'<th>Email</th>')+'<th>Status</th><th>'+(isLeads?'Tasks':'Policies')+'</th><th></th>'+
+    '<th>Cell</th>'+(mini?'':'<th>Email</th>')+'<th>Status</th><th>'+(isLeads?'Tasks':'Policies')+'</th>'+
+    (!isLeads&&!mini ? DUW_TICKS.map(function(t){ return '<th style="width:56px;text-align:center" title="'+t[3]+'">'+t[2]+'</th>'; }).join('') : '')+
+    '<th></th>'+
     '</tr></thead><tbody>'+
     list.map(function(c){
       var rev=daysTo(c.ReviewDate);
@@ -2428,6 +2457,9 @@ function clientTable(list,mini,isLeads,isFamily){
         (!mini?'<td style="font-size:12px">'+(em||'—')+'</td>':'')+
         '<td>'+bx(isLeads?(isContacted?'bx-sg':'bx-gd'):'bx-sg',isLeads?(isContacted?'✓ Contacted':'🎯 Lead'):(c.Status||'Active'))+'</td>'+
         '<td>'+(isLeads?bx('bx-gr',nt+' tasks'):bx('bx-gr',np+' pols'))+'</td>'+
+        (!isLeads&&!mini ? DUW_TICKS.map(function(t){
+          return '<td style="text-align:center"><input type="checkbox" data-act="toggle-duw" data-col="'+t[1]+'" data-id="'+c.ID+'" '+(hasDuwTick(c,t[1])?'checked':'')+' title="'+t[3]+'" style="width:18px;height:18px;cursor:pointer;accent-color:#0e413a"></td>';
+        }).join('') : '')+
         '<td style="display:flex;gap:4px">'+
         (isLeads?'<button class="btn b-sg xs" data-act="convert-lead" data-id="'+c.ID+'">✅ Convert</button>':'')+
         '<button class="btn b-gh xs" data-act="edit-client" data-id="'+c.ID+'">Edit</button></td>'+
@@ -2540,6 +2572,13 @@ function renderProfile(){
     (!isFamilyRecord(c) && c.IsLead!=='Yes' && !clientHasCurrentPolicy(c.ID) ?
       '<button class="btn b-gh sm" style="color:#fff;border-color:#334466" data-act="move-to-family" data-id="'+c.ID+'" title="Not really a client (e.g. a spouse, child or parent with no policy)? Move them to Family &amp; contacts.">↩ Move to Family &amp; contacts</button>'
       :'')+
+    '<div style="display:flex;gap:10px;flex-wrap:wrap;justify-content:flex-end">'+
+    DUW_TICKS.map(function(t){
+      return '<label style="display:flex;align-items:center;gap:6px;font-size:12px;font-weight:700;color:#fff;background:rgba(255,255,255,.08);border:1px solid #334466;border-radius:8px;padding:4px 10px;cursor:pointer" title="'+t[3]+'">'+
+        '<input type="checkbox" data-act="toggle-duw" data-col="'+t[1]+'" data-id="'+c.ID+'" '+(hasDuwTick(c,t[1])?'checked':'')+' style="width:16px;height:16px;cursor:pointer;accent-color:#a8b938">'+
+        (t[0]==='st'?'Duwalcoe short-term':'Duwalcoe health')+'</label>';
+    }).join('')+
+    '</div>'+
     '<button class="btn b-gh sm" style="color:#fff;border-color:#334466" data-act="edit-client" data-id="'+c.ID+'">✏️ Edit</button>'+
     "<a href='"+buildComplianceUrl(c)+"' target='_blank' style='text-decoration:none'><button class='btn b-sk sm' style='background:#0e413a;color:#d4af5a;border-color:#2a3a5e'>📋 Compliance Docs</button></a>"+
     "<a href='"+buildFormsUrl(c)+"' target='_blank' style='text-decoration:none'><button class='btn b-sk sm' style='background:#0e413a;color:#ccd660;border-color:#2a3a5e'>📝 Forms</button></a>"+
@@ -8230,6 +8269,12 @@ function openClientModal(id, isLead){
     '<div class="fld cmCompany" style="display:none"><label id="fnLabel">Company / Registered Name *</label><input type="text" id="fn" value="'+escHtml(clean(c.Name))+'" autocomplete="off"></div>'+
     fs('fst','Status',['Active','Inactive'],c.Status||'Active')+
     '</div>'+
+    // Duwalcoe referral ticks (Tracy updates these from the commission statement).
+    '<div style="display:flex;gap:18px;flex-wrap:wrap;margin:10px 0 4px;padding:8px 12px;background:#f0f7f4;border:1.5px solid #cfe3dc;border-radius:8px">'+
+    '<span style="font-size:12px;font-weight:700;color:#0e413a">Placed through Duwalcoe:</span>'+
+    '<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="checkbox" id="fduwst" '+(hasDuwTick(c,'ShortTermDuwalcoe')?'checked':'')+' style="width:16px;height:16px;accent-color:#0e413a"> Short-term</label>'+
+    '<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="checkbox" id="fduwhealth" '+(hasDuwTick(c,'HealthDuwalcoe')?'checked':'')+' style="width:16px;height:16px;accent-color:#0e413a"> Health (medical aid / gap cover)</label>'+
+    '</div>'+
     // Company Details — shown only when record type = Company (toggled by setClientType).
     '<div class="cmCompany" style="display:none">'+
     '<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:1px;padding:4px 0 8px;border-bottom:2px solid var(--gold);margin:18px 0 14px">Company Details</div>'+
@@ -10517,6 +10562,13 @@ function saveClient(openFNA){
     // the next sync, so an edited family member popped into Clients for ~30s.
     if(_existing.FamilyType!==undefined) c.FamilyType=_existing.FamilyType;
   }
+  // Duwalcoe ticks. A key is only sent when ticked, or when the record already has the
+  // column, so an untick saves '' but a save never names a column the database lacks.
+  [['fduwst','ShortTermDuwalcoe'],['fduwhealth','HealthDuwalcoe']].forEach(function(f){
+    var el=document.getElementById(f[0]); if(!el) return;
+    if(el.checked) c[f[1]]='Yes';
+    else if(_existing && _existing[f[1]]!==undefined) c[f[1]]='';
+  });
   // Surname: saved from its own box for individuals; left as it was for companies.
   if(!isCompany) c.Surname=_sur;
   else if(_existing && _existing.Surname!==undefined) c.Surname=_existing.Surname;
@@ -15554,6 +15606,7 @@ document.addEventListener('click', function(e){
         case 'convert-lead':   convertLead(id); break;
         case 'convert-family': convertFamilyToClient(id); break;
         case 'toggle-contacted': toggleContacted(id, el.checked); break;
+        case 'toggle-duw':       toggleDuwTick(id, el.getAttribute('data-col'), el.checked); break;
         case 'client-list-filter': window.CLIENT_LIST_FILTER=el.getAttribute('data-filter'); render(); break;
         case 'go-clients':     goPage('clients'); break;
         case 'go-clients-no-will': window.CLIENT_LIST_FILTER='nowill'; goPage('clients'); break;
