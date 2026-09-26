@@ -429,6 +429,8 @@ var CTAB = 'overview';
 var SRCH = '';
 var AGE_MIN = '';  // clients-page age filter, lower bound (inclusive); '' = unset
 var AGE_MAX = '';  // clients-page age filter, upper bound (inclusive); '' = unset
+var CL_LETTER = '';  // clients-page A–Z bar: surname initial ('A'..'Z' or '#'); '' = all
+var CL_HOLDS  = '';  // clients-page "Holds" filter: policy group key (see CL_HOLDS_GROUPS); '' = any
 var EC = null; // edit client id
 var EPC = null; // edit policy client id
 var EPI = null; // edit policy index
@@ -644,9 +646,14 @@ function syncNow(quiet) {
     // Quiet (background) sync: preserve scroll so a silent re-render doesn't jump
     // the page someone is reading. render() resets scroll via innerHTML; we restore
     // it in the same tick, before paint, so the jump is invisible.
+    // The window itself never scrolls (.shell is 100vh, overflow hidden); the
+    // scrolling happens inside #main and the inner list boxes. So save and put
+    // back THEIR scroll positions, not window.scrollY (which is always 0 and was
+    // why the Clients list jumped to the top on every 30s background refresh).
     var _qy = quiet ? window.scrollY : 0;
+    var _qs = quiet ? captureScrolls() : null;
     render();
-    if(quiet){ try{ window.scrollTo(0, _qy); }catch(e){} }
+    if(quiet){ try{ window.scrollTo(0, _qy); }catch(e){} restoreScrolls(_qs); }
     else toast('Synced — ' + DB.clients.length + ' clients','ok');
   }
 
@@ -655,6 +662,25 @@ function syncNow(quiet) {
       loaded[table] = data||[];
       checkDone();
     });
+  });
+}
+
+// Scroll containers whose position must survive a background re-render.
+// #main = the page itself; the rest are inner boxes that scroll on their own.
+var SCROLL_KEEP_IDS = ['main','clientTableWrap','dashTaskScroll','dashRemScroll'];
+function captureScrolls(){
+  var s={};
+  SCROLL_KEEP_IDS.forEach(function(id){
+    var el=document.getElementById(id);
+    if(el) s[id]={top:el.scrollTop,left:el.scrollLeft};
+  });
+  return s;
+}
+function restoreScrolls(s){
+  if(!s) return;
+  Object.keys(s).forEach(function(id){
+    var el=document.getElementById(id);
+    if(el){ try{ el.scrollTop=s[id].top; el.scrollLeft=s[id].left; }catch(e){} }
   });
 }
 
@@ -1027,16 +1053,89 @@ function clientMatchesAge(c){
   if(hi!==null && a>hi) return false;
   return true;
 }
+// ── Surname key (sorting + A–Z bar) ──────────────────────────────
+// Particles stay part of the surname as written: "Van Der Merwe" files under V,
+// "Du Plessis" under D, "Janse Van Rensburg" under J. Order of preference:
+//  1. Company records → full name.
+//  2. The stored Surname column (from the original import) when the Name still
+//     ends with it — it already handles double surnames like "Gey Von Pittius".
+//  3. Business-style names captured as Individual ("Blinds Mart cc") → full name.
+//  4. From the first particle word onward (never the first word of the name).
+//  5. Otherwise the last word.
+var SURNAME_PARTICLES = {van:1,von:1,de:1,du:1,der:1,den:1,le:1,la:1,da:1,di:1,dos:1,das:1,del:1,ter:1,ten:1};
+var BUSINESS_NAME_RE = /(\(pty\)|\bpty\b|\bltd\b|\blimited\b|\bcc\b|\binc\b|\btrust\b|\bholdings\b|\bnpc\b)/i;
+function clientSurnameKey(c){
+  // Leading stray punctuation is dropped so it can't pull a name to the top
+  // of the list ("Cecilia -Kok" sorts as Kok).
+  return clientSurnameKeyRaw(c).replace(/^[^A-Za-z0-9\u00C0-\u024F]+/,'');
+}
+function clientSurnameKeyRaw(c){
+  var name=String(c.Name||'').replace(/\s+/g,' ').trim();
+  if(!name) return '';
+  if(c.ClientType==='Company') return name;
+  var sn=String(c.Surname||'').replace(/\s+/g,' ').trim();
+  if(sn && name.toLowerCase().slice(-sn.length)===sn.toLowerCase()) return sn;
+  if(BUSINESS_NAME_RE.test(name)) return name;
+  var w=name.split(' ');
+  if(w.length<2) return name;
+  for(var i=1;i<w.length-1;i++){
+    var lw=w[i].toLowerCase();
+    if(SURNAME_PARTICLES[lw]) return w.slice(i).join(' ');
+    if((lw==='janse'||lw==='jansen') && w[i+1].toLowerCase()==='van') return w.slice(i).join(' ');
+  }
+  return w[w.length-1];
+}
+// Initial letter for the A–Z bar: accents folded (É → E), leading stray
+// punctuation skipped ("-Kok" → K); anything not A–Z files under '#'.
+function clientSurnameLetter(c){
+  var k=clientSurnameKey(c);
+  try{ k=k.normalize('NFD').replace(/[\u0300-\u036f]/g,''); }catch(e){}
+  var m=k.match(/[A-Za-z0-9]/);
+  if(!m) return '#';
+  var ch=m[0].toUpperCase();
+  return (ch>='A'&&ch<='Z') ? ch : '#';
+}
+// Alphabetical by surname key, then by full name (so first names are in order
+// within a surname). Same order for every user.
+function sortClientsBySurname(arr){
+  return arr.map(function(c){ return {c:c,k:clientSurnameKey(c).toLowerCase(),n:String(c.Name||'').toLowerCase()}; })
+    .sort(function(a,b){
+      var r=a.k.localeCompare(b.k,'en',{sensitivity:'base'});
+      return r!==0 ? r : a.n.localeCompare(b.n,'en',{sensitivity:'base'});
+    })
+    .map(function(x){ return x.c; });
+}
+
+// ── "Holds" filter: clients holding a current policy of a type group ─────
+// Current = not Replaced / Lapsed / Cancelled (willIsDeadPolicy). Paid Up counts.
+var CL_HOLDS_GROUPS = [
+  ['risk',     'Life & risk cover',       ['Life / Income Protector']],
+  ['retire',   'Retirement funds',        ['Retirement Annuity','Pension Fund','Provident Fund','Pension Preservation','Provident Preservation']],
+  ['invest',   'Investments',             ['Endowment','Offshore Endowment','Flexible Investment','Offshore Flexible Investment','Unit Trust','Tax Free Savings','Guaranteed Endowment']],
+  ['annuity',  'Living & life annuities', ['Living Annuity','Life Annuity']],
+  ['medical',  'Medical aid',             ['Medical Aid']],
+  ['business', 'Business assurance',      ['Business Assurance']]
+];
+// Set of ClientIDs (as strings) holding a current policy in the given group.
+function clientIdsHolding(groupKey){
+  var g=null;
+  CL_HOLDS_GROUPS.forEach(function(x){ if(x[0]===groupKey) g=x; });
+  if(!g) return null;
+  var types={}; g[2].forEach(function(t){ types[t]=1; });
+  var ids={};
+  (DB.policies||[]).forEach(function(p){
+    if(!types[p.Type]) return;
+    if(willIsDeadPolicy(p)) return;
+    ids[String(p.ClientID)]=1;
+  });
+  return ids;
+}
+
 // Sorted + tab-filtered client list (before search/age). The single source of
 // truth for which tab (Clients / Leads / Inactive / No Will / Unasked) is shown,
 // used by both renderClients() and the live refreshClientList().
 function clientPageFiltered(){
-  var base=DB.clients.slice().sort(function(a,b){
-    if(a.LastAccessed&&!b.LastAccessed) return -1;
-    if(!a.LastAccessed&&b.LastAccessed) return 1;
-    if(a.LastAccessed&&b.LastAccessed) return b.LastAccessed-a.LastAccessed;
-    return (a.Name||'').localeCompare(b.Name||'');
-  });
+  var base=sortClientsBySurname(DB.clients.slice());
   var f=window.CLIENT_LIST_FILTER||'clients';
   return base.filter(function(c){
     if(f==='leads')       return c.IsLead==='Yes';
@@ -1046,16 +1145,29 @@ function clientPageFiltered(){
     return c.IsLead!=='Yes' && c.Status!=='Inactive' && c.Status!=='Cancelled';
   });
 }
-// Apply the text search (SRCH) and the age filter to a tab-filtered array.
+// Apply the text search (SRCH), the age filter and the Holds filter to a
+// tab-filtered array. (The A–Z letter is applied separately, after this, so the
+// letter bar can show which letters have matches.)
 function applyClientSearchAge(arr){
-  var q=SRCH?SRCH.toLowerCase():'';
+  var q=SRCH?SRCH.toLowerCase().trim():'';
+  var holds=CL_HOLDS?clientIdsHolding(CL_HOLDS):null;
   return arr.filter(function(c){
     if(q && !((c.Name||'').toLowerCase().indexOf(q)>=0 ||
+              (c.CallingName||'').toLowerCase().indexOf(q)>=0 ||
               String(c.IDNumber||'').indexOf(q)>=0 ||
               (c.Email||'').toLowerCase().indexOf(q)>=0 ||
               String(c.Cell||'').indexOf(q)>=0)) return false;
+    if(holds && !holds[String(c.ID)]) return false;
     return clientMatchesAge(c);
   });
+}
+function applyClientLetter(arr){
+  if(!CL_LETTER) return arr;
+  return arr.filter(function(c){ return clientSurnameLetter(c)===CL_LETTER; });
+}
+// The full list shown on the Clients page: tab → search/age/holds → letter.
+function clientPageList(){
+  return applyClientLetter(applyClientSearchAge(clientPageFiltered()));
 }
 // Set an fdp date picker (hidden input + Y/M/D dropdowns) — or a plain date
 // input — to a YYYY-MM-DD value, keeping the visible dropdowns in step.
@@ -1170,6 +1282,16 @@ function goPage(p){
     }catch(e){}
   }
   render();
+  // Clients page: put the cursor in the search box so you can just start typing.
+  // Only on mouse/keyboard screens, so a tablet doesn't pop its keyboard up.
+  if(p==='clients'){
+    try{
+      if(window.matchMedia && window.matchMedia('(pointer:fine)').matches){
+        var sb=document.getElementById('srchBox');
+        if(sb){ sb.focus(); var L=sb.value.length; sb.setSelectionRange(L,L); }
+      }
+    }catch(e){}
+  }
 }
 function openClient(id){
   SEL=id; CTAB='overview'; PAGE='client'; window.CLIENT_TASK_FILTER='open';
@@ -1557,7 +1679,7 @@ function renderDash(){
       }).join('');
     })()+
     '</div>'+
-    '<div style="max-height:380px;overflow-y:auto">'+
+    '<div id="dashTaskScroll" style="max-height:380px;overflow-y:auto">'+
     (function(){
       var allDone=DB.tasks.filter(function(t){return isdone(t)&&(window.DASH_USER_FILTER==='All'||(t.Assignee||'Clinton')===window.DASH_USER_FILTER);});
       var upcoming=myT.filter(function(t){
@@ -1586,7 +1708,7 @@ function renderDash(){
 
     '<div class="card" style="padding:0">'+
     '<div class="ch" style="padding:8px 14px"><h2 style="font-size:13px">📅 Reminders (60 days)</h2></div>'+
-    '<div style="max-height:180px;overflow-y:auto">'+
+    '<div id="dashRemScroll" style="max-height:180px;overflow-y:auto">'+
     (up.length===0?'<div class="empty" style="padding:12px">Nothing coming up 🎉</div>':
     up.map(function(u){
       var col=u.days<=7?'var(--rose)':u.days<=14?'var(--gold)':'var(--sage)';
@@ -1735,8 +1857,11 @@ function toggleContacted(id, checked){
   if(!c) return;
   c.Contacted = checked ? 'Yes' : '';
   c.ContactedAt = checked ? new Date().toLocaleDateString('en-ZA',{day:'2-digit',month:'short',year:'numeric'}) : '';
-  // Optimistic local update + server save; re-render shows green immediately
+  // Optimistic local update + server save; re-render shows green immediately.
+  // Keep the list where it was — ticking a lead halfway down must not jump to the top.
+  var _sc=captureScrolls();
   render();
+  restoreScrolls(_sc);
   post({action:'saveClient', client:c}, function(){
     toast(checked ? (c.Name||'Lead')+' marked as contacted ✅' : (c.Name||'Lead')+' unmarked','ok');
   });
@@ -1744,18 +1869,14 @@ function toggleContacted(id, checked){
 
 // CLIENTS PAGE
 function renderClients(){
-  // Refresh LastAccessed from per-user store before sorting
+  // Refresh LastAccessed from per-user store (feeds the dashboard Recent Clients box;
+  // the Clients list itself is now sorted by surname, not by recently opened)
   try{
     var _ra=JSON.parse(localStorage.getItem(recentKey())||'{}');
     DB.clients.forEach(function(c){ if(_ra[String(c.ID)]) c.LastAccessed=_ra[String(c.ID)]; });
   }catch(e){}
   if(!window.CLIENT_LIST_FILTER) window.CLIENT_LIST_FILTER = 'clients';
-  var base=DB.clients.slice().sort(function(a,b){
-    if(a.LastAccessed&&!b.LastAccessed) return -1;
-    if(!a.LastAccessed&&b.LastAccessed) return 1;
-    if(a.LastAccessed&&b.LastAccessed) return b.LastAccessed-a.LastAccessed;
-    return (a.Name||'').localeCompare(b.Name||'');
-  });
+  var base=DB.clients;  // used for the tab counts only (order is irrelevant)
   var isLeads        = window.CLIENT_LIST_FILTER === 'leads';
   var isInactive     = window.CLIENT_LIST_FILTER === 'inactive';
   var isNoWill       = window.CLIENT_LIST_FILTER === 'nowill';
@@ -1763,8 +1884,7 @@ function renderClients(){
   // Tab filter + text search + age filter now share one code path
   // (clientPageFiltered / applyClientSearchAge) so the full render and the live
   // refreshClientList() can never drift apart.
-  var filtered = clientPageFiltered();
-  var list = applyClientSearchAge(filtered);
+  var list = clientPageList();
   var clientCount     = base.filter(function(c){ return c.IsLead!=='Yes' && c.Status!=='Inactive' && c.Status!=='Cancelled'; }).length;
   var leadCount       = base.filter(function(c){ return c.IsLead==='Yes'; }).length;
   var inactiveCount   = base.filter(function(c){ return c.IsLead!=='Yes' && (c.Status==='Inactive'||c.Status==='Cancelled'); }).length;
@@ -1787,7 +1907,7 @@ function renderClients(){
     '</div>'+
     '</div>'+
     '<div class="sb" style="flex-shrink:0"><span style="color:#aaa">🔍</span>'+
-    '<input type="text" id="srchBox" value="'+SRCH+'" placeholder="Search name, ID number, email, cell…">'+
+    '<input type="text" id="srchBox" value="'+SRCH+'" placeholder="Search name, calling name, ID number, email, cell…">'+
     '</div>'+
     // ── Age-range filter ────────────────────────────────────────────────
     // Filters the list below to clients whose current age falls in From..To
@@ -1800,6 +1920,18 @@ function renderClients(){
     '<input type="number" id="ageMax" value="'+AGE_MAX+'" min="0" max="120" inputmode="numeric" placeholder="To" oninput="AGE_MAX=this.value.trim();refreshClientList();" style="width:74px;border:1.5px solid var(--mist);border-radius:7px;padding:6px 8px;font-size:13px;font-family:inherit">'+
     '<button class="btn b-gh xs" onclick="clearAgeFilter()">Clear</button>'+
     '<span id="ageFilterInfo" style="font-size:11px;color:#889;font-style:italic">'+ageFilterInfoText(list.length)+'</span>'+
+    // ── Holds filter: clients with a current policy of this kind ──
+    '<span style="margin-left:auto;display:flex;align-items:center;gap:8px">'+
+    '<span style="font-size:13px;font-weight:700;color:var(--navy)">📂 Holds</span>'+
+    '<select id="clHolds" onchange="CL_HOLDS=this.value;refreshClientList();" title="Show only clients with a current policy of this kind (Replaced, Lapsed and Cancelled excluded; Paid Up counts)" style="border:1.5px solid var(--mist);border-radius:7px;padding:6px 8px;font-size:13px;font-family:inherit;background:#fff">'+
+    '<option value="">Any</option>'+
+    CL_HOLDS_GROUPS.map(function(g){ return '<option value="'+g[0]+'"'+(CL_HOLDS===g[0]?' selected':'')+'>'+g[1]+'</option>'; }).join('')+
+    '</select>'+
+    '</span>'+
+    '</div>'+
+    // ── A–Z surname bar ──
+    '<div id="clLetterBar" style="display:flex;flex-wrap:wrap;gap:3px;margin:0;flex-shrink:0">'+
+    clientLetterBarHtml()+
     '</div>'+
     // The card scrolls internally (overflow:auto + min-height:0) so a long client
     // list is fully reachable inside #main's fixed-height grid track, instead of
@@ -1838,11 +1970,41 @@ function refreshClientList(){
   var wrap=document.getElementById('clientTableWrap');
   if(!wrap) return;  // not on the clients page
   var isLeads=(window.CLIENT_LIST_FILTER||'clients')==='leads';
-  var list=applyClientSearchAge(clientPageFiltered());
+  var list=clientPageList();
   // #clientTableWrap is the scroll container itself now — just swap the table in.
   wrap.innerHTML=clientTable(list,false,isLeads);
+  wrap.scrollTop=0;  // a changed filter starts the list from the top
   var cnt=document.getElementById('clientPageCount'); if(cnt) cnt.textContent=list.length;
   var info=document.getElementById('ageFilterInfo'); if(info) info.textContent=ageFilterInfoText(list.length);
+  var bar=document.getElementById('clLetterBar'); if(bar) bar.innerHTML=clientLetterBarHtml();
+}
+// A–Z bar buttons. Each letter shows how many clients in the current tab +
+// search + age + Holds selection file under it; letters with none are greyed.
+// Click a letter to filter; click it again (or "All") to clear.
+function clientLetterBarHtml(){
+  var counts={};
+  applyClientSearchAge(clientPageFiltered()).forEach(function(c){
+    var L=clientSurnameLetter(c); counts[L]=(counts[L]||0)+1;
+  });
+  var letters='ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split(''); letters.push('#');
+  function b(val,label,n,on,off){
+    var st='min-width:22px;padding:3px 4px;font-size:12px;font-weight:700;border-radius:6px;font-family:inherit;cursor:'+(off?'default':'pointer')+';'+
+      (on?'background:var(--navy);color:#fff;border:1.5px solid var(--navy)':
+       off?'background:#f5f7fa;color:#c8ccd4;border:1.5px solid #eef0f4':
+           'background:#fff;color:var(--navy);border:1.5px solid var(--mist)');
+    return '<button type="button" onclick="setClientLetter(\''+val+'\')"'+(off?' disabled':'')+' title="'+n+' client'+(n===1?'':'s')+'" style="'+st+'">'+label+'</button>';
+  }
+  var total=0; Object.keys(counts).forEach(function(k){ total+=counts[k]; });
+  return b('','All',total,!CL_LETTER,false)+
+    letters.map(function(L){
+      var n=counts[L]||0;
+      if(L==='#' && !n && CL_LETTER!=='#') return '';
+      return b(L,L,n,CL_LETTER===L,!n && CL_LETTER!==L);
+    }).join('');
+}
+function setClientLetter(L){
+  CL_LETTER = (L && CL_LETTER!==L) ? L : '';
+  refreshClientList();
 }
 
 function clientTable(list,mini,isLeads){
