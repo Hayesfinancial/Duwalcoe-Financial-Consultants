@@ -177,6 +177,7 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--cream);c
     <div class="ni" data-nav="cases">📂 Open Cases <span id="cbadge" style="margin-left:auto;background:var(--gold);color:#fff;border-radius:10px;padding:1px 7px;font-size:10px;display:none"></span></div>
     <div class="ni" data-nav="reviews">🔄 Annual Reviews</div>
     <div class="ni" data-nav="register">📊 Register</div>
+    <div class="ni" data-nav="aum">💰 AUM</div>
     <div class="ni" data-nav="suppliers">🏢 Suppliers</div>
     <div class="ndiv"></div>
     <div class="nsec">Tools</div>
@@ -1829,6 +1830,7 @@ function render(){
   else if(PAGE==='cases') m.innerHTML=renderCasesPage();
   else if(PAGE==='reviews') m.innerHTML=renderReviewsPage();
   else if(PAGE==='register') m.innerHTML=renderRegisterPage();
+  else if(PAGE==='aum') m.innerHTML=renderAumPage();
   else if(PAGE==='tasks'){  if(!window.TASK_USER_FILTER) window.TASK_USER_FILTER=cu(); m.innerHTML=renderTasks();}
   // Restore dashboard search value
   if(_dashQ){
@@ -1839,6 +1841,7 @@ function render(){
   // save path's closeAll()+render() leaves it open — re-paint it with fresh data.
   if(window.FNA_CAP && FNA_CAP.active) fnaCapRender();
   if(PAGE==='clients' && window.CLIENT_LIST_FILTER==='tidy') tidyUpdateBar();
+  if(PAGE==='aum' && AUM_TAB==='notset' && Object.keys(AUM_CHOICES).length) aumSet('__none__','');
 }
 
 // DASHBOARD
@@ -5717,6 +5720,163 @@ function regMonthTitle(key){
   return '1 TO '+last+' '+REG_MONTHS[m-1].toUpperCase()+' '+y;
 }
 function regBf(){ var R = window._reg; return (R.bf && String(R.bf.year) === String(R.f.year)) ? R.bf : null; }
+
+// ══ AUM PAGE ═══════════════════════════════════════════════════════════
+// Built from the two ticks on every policy: AdvisorOfRecord ("Advisor / broker of
+// record") and CountsForAUM. Current policies only (Replaced / Lapsed / Cancelled
+// excluded; Paid Up counts). AUM = on record AND counts for AUM, valued at the
+// captured BenFundValue (rand equivalent). Policies never ticked either way are
+// "Not set" and are NOT counted (Clinton, 26 Sep 2026: confirmed only), with a
+// tick-list to set them. No schema change.
+var AUM_TAB = 'overview';
+var AUM_RISK_TYPES = {'Life / Income Protector':1,'Business Assurance':1,'Medical Aid':1};
+function aumIsRisk(p){ return !!AUM_RISK_TYPES[p.Type]; }
+var AUM_CHOICES = {};   // policyId -> 'mine_aum' | 'mine' | 'notmine', until Apply
+function aumFlag(v){ v=String(v==null?'':v).trim(); return v==='Yes'||v==='No' ? v : ''; }
+function aumState(p){
+  var aor=aumFlag(p.AdvisorOfRecord), aum=aumFlag(p.CountsForAUM);
+  if(aor==='No') return 'notmine';
+  // Life & risk, business assurance and medical aid are never assets under
+  // management, whatever the AUM tick says (live data had home-loan protectors
+  // with the cover amount captured as a fund value). Only "broker of record" counts.
+  if(aumIsRisk(p)) return aor==='Yes' ? 'mine' : 'notset';
+  if(aor==='Yes' && aum==='Yes') return 'aum';
+  if(aor==='Yes' && aum==='No') return 'mine';
+  return 'notset';
+}
+
+function aumData(){
+  var byClient={}; DB.clients.forEach(function(c){ byClient[String(c.ID)]=c; });
+  var rows=(DB.policies||[]).filter(function(p){ return !willIsDeadPolicy(p); }).map(function(p){
+    var c=byClient[String(p.ClientID)];
+    return {p:p, c:c, name:c?(c.Name||''):'(client not found)', state:aumState(p), val:N(p.BenFundValue), risk:aumIsRisk(p)};
+  });
+  var d={rows:rows, aum:[], mine:[], notmine:[], notset:[]};
+  rows.forEach(function(r){ d[r.state==='aum'?'aum':r.state].push(r); });
+  d.aumTotal=d.aum.reduce(function(t,r){ return t+r.val; },0);
+  d.notmineVal=d.notmine.reduce(function(t,r){ return t+(r.risk?0:r.val); },0);
+  d.notsetVal=d.notset.reduce(function(t,r){ return t+(r.risk?0:r.val); },0);
+  return d;
+}
+function aumMoney(v){ return v ? 'R '+Math.round(v).toLocaleString('en-ZA') : '—'; }
+function aumPremTxt(p){
+  var v=N(p.Premium); if(!v) return '—';
+  var f=p.Frequency||'Monthly';
+  var suf={'Monthly':' pm','Annually':' pa','Quarterly':' pq','Once Off':' once-off','Lump Sum':' lump sum'}[f]||(' '+f);
+  return 'R '+Math.round(v).toLocaleString('en-ZA')+suf;
+}
+function aumGroupTable(rows, keyFn, label, total){
+  var g={}, order=[];
+  rows.forEach(function(r){
+    var raw=String(keyFn(r)||'').trim(); var k=raw.toLowerCase()||'(not captured)';
+    if(!g[k]){ g[k]={label:raw||'(not captured)',n:0,v:0}; order.push(k); }
+    g[k].n++; g[k].v+=r.val;
+  });
+  order.sort(function(a,b){ return g[b].v-g[a].v; });
+  var thBase='padding:7px 10px;font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#667;border-bottom:2px solid var(--mist);';
+  var th='style="'+thBase+'text-align:left"', thR='style="'+thBase+'text-align:right"';
+  return '<table style="width:100%;border-collapse:collapse"><thead><tr><th '+th+'>'+label+'</th><th '+thR+'>Policies</th><th '+thR+'>Value</th><th '+thR+'>Share</th></tr></thead><tbody>'+
+    order.map(function(k){ var x=g[k]; var pct=total?Math.round(x.v/total*1000)/10:0;
+      return '<tr><td style="padding:7px 10px;border-bottom:1px solid var(--smoke);font-weight:600">'+escHtml(x.label)+'</td>'+
+        '<td style="padding:7px 10px;border-bottom:1px solid var(--smoke);text-align:right">'+x.n+'</td>'+
+        '<td style="padding:7px 10px;border-bottom:1px solid var(--smoke);text-align:right;font-weight:700">'+aumMoney(x.v)+'</td>'+
+        '<td style="padding:7px 10px;border-bottom:1px solid var(--smoke);text-align:right;color:#667">'+pct.toLocaleString('en-ZA')+'%</td></tr>';
+    }).join('')+
+    '</tbody></table>';
+}
+function aumPolicyRows(rows, withChoice){
+  var td='style="padding:7px 10px;border-bottom:1px solid var(--smoke);font-size:12.5px"';
+  return rows.map(function(r){
+    var p=r.p, cur=AUM_CHOICES[String(p.ID)]||'';
+    return '<tr class="row" data-act="open-client" data-id="'+escHtml(String(p.ClientID))+'"'+(cur?' style="background:#fffbeb"':'')+'>'+
+      '<td '+td+'><b>'+escHtml(r.name)+'</b></td>'+
+      '<td '+td+'>'+escHtml(p.Insurer||'—')+'</td>'+
+      '<td '+td+'>'+escHtml(p.Type||'—')+'</td>'+
+      '<td '+td+'>'+escHtml(p.PolicyNo||'—')+'</td>'+
+      '<td style="padding:7px 10px;border-bottom:1px solid var(--smoke);font-size:12.5px;text-align:right;font-weight:700;white-space:nowrap">'+(r.risk?aumPremTxt(p):aumMoney(r.val))+'</td>'+
+      (withChoice ? '<td '+td+' onclick="event.stopPropagation()"><select data-aumpol="'+escHtml(String(p.ID))+'" onclick="event.stopPropagation()" onchange="aumSet(this.getAttribute(\'data-aumpol\'),this.value);this.closest(\'tr\').style.background=this.value?\'#fffbeb\':\'\';" style="width:100%;border:1.5px solid var(--mist);border-radius:7px;padding:5px 8px;font-size:12px;font-family:inherit;background:#fff">'+
+        (r.risk ? [['','— choose —'],['mine','✓ Mine (broker of record)'],['notmine','✗ Not mine']]
+                : [['','— choose —'],['mine_aum','✓ Mine, counts for AUM'],['mine','✓ Mine, not AUM'],['notmine','✗ Not mine']]).map(function(o){ return '<option value="'+o[0]+'"'+(cur===o[0]?' selected':'')+'>'+o[1]+'</option>'; }).join('')+
+        '</select></td>' : '')+
+      '</tr>';
+  }).join('');
+}
+function aumPolicyTable(rows, withChoice, emptyTxt){
+  if(!rows.length) return '<div class="empty" style="padding:16px">'+emptyTxt+'</div>';
+  var th='style="text-align:left;padding:7px 10px;font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#667;border-bottom:2px solid var(--mist);position:sticky;top:0;background:#fff"';
+  var thR=th.replace('text-align:left','text-align:right'), thW=th.replace('text-align:left','text-align:left;width:230px');
+  return '<table style="width:100%;border-collapse:collapse"><thead><tr><th '+th+'>Client</th><th '+th+'>Provider</th><th '+th+'>Type</th><th '+th+'>Policy no</th><th '+thR+'>Value / premium</th>'+(withChoice?'<th '+thW+'>Whose is it?</th>':'')+'</tr></thead><tbody>'+
+    aumPolicyRows(rows, withChoice)+'</tbody></table>';
+}
+function aumSet(id,val){
+  if(val) AUM_CHOICES[String(id)]=val; else delete AUM_CHOICES[String(id)];
+  var n=Object.keys(AUM_CHOICES).length, b=document.getElementById('aumApplyBtn');
+  if(b){ b.textContent='Apply '+n+' change'+(n===1?'':'s'); b.disabled=!n; b.style.opacity=n?'1':'.5'; }
+}
+function aumApply(){
+  var ids=Object.keys(AUM_CHOICES); if(!ids.length) return;
+  if(!confirm('Set '+ids.length+' polic'+(ids.length===1?'y':'ies')+' now?')) return;
+  var saves=[];
+  ids.forEach(function(id){
+    var p=(DB.policies||[]).find(function(x){ return String(x.ID)===String(id); }); if(!p) return;
+    var a=AUM_CHOICES[id];
+    if(a==='mine_aum'){ p.AdvisorOfRecord='Yes'; p.CountsForAUM='Yes'; }
+    else if(a==='mine'){ p.AdvisorOfRecord='Yes'; p.CountsForAUM='No'; }
+    else if(a==='notmine'){ p.AdvisorOfRecord='No'; p.CountsForAUM='No'; }
+    else return;
+    saves.push(p);
+  });
+  AUM_CHOICES={};
+  var _sc=captureScrolls(); render(); restoreScrolls(_sc);
+  var pending=saves.length, fails=0;
+  saves.forEach(function(p){
+    post({action:'savePolicy', policy:p}, function(res){
+      if(!(res && res.ok)) fails++;
+      if(--pending===0) toast(fails ? ('⚠️ '+fails+' polic'+(fails===1?'y':'ies')+' did not save. Press Sync and try again.') : (saves.length+' polic'+(saves.length===1?'y':'ies')+' updated ✅'), fails?'err':'ok');
+    });
+  });
+}
+function renderAumPage(){
+  var d=aumData();
+  function tile(bg,fg,big,small,sub){
+    return '<div style="flex:1;min-width:180px;background:'+bg+';border-radius:12px;padding:14px 16px">'+
+      '<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:'+fg+';opacity:.85">'+small+'</div>'+
+      '<div style="font-family:\'DM Serif Display\',serif;font-size:26px;color:'+fg+';margin:2px 0">'+big+'</div>'+
+      '<div style="font-size:12px;color:'+fg+';opacity:.8">'+sub+'</div></div>';
+  }
+  var nmRisk=d.notmine.filter(function(r){ return r.risk; }), nmFund=d.notmine.filter(function(r){ return !r.risk; });
+  var tab=AUM_TAB;
+  function tb(k,l){ return '<button class="btn '+(tab===k?'b-nv':'b-gh')+' sm" onclick="AUM_TAB=\''+k+'\';AUM_CHOICES={};render();">'+l+'</button>'; }
+  var head='<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;flex-shrink:0">'+
+    '<h1 style="font-family:\'DM Serif Display\',serif;font-size:22px;color:var(--navy)">Assets under management</h1>'+
+    '<div style="display:flex;gap:6px">'+tb('overview','📊 AUM by provider')+tb('notmine','🎯 Not mine ('+d.notmine.length+')')+tb('notset','❓ Not set ('+d.notset.length+')')+'</div></div>'+
+    '<div style="display:flex;gap:12px;flex-wrap:wrap;flex-shrink:0">'+
+      tile('#0e413a','#fff',aumMoney(d.aumTotal),'AUM',d.aum.length+' policies on your record')+
+      tile('#fff7ed','#9a3412',aumMoney(d.notmineVal),'On your CRM, not yours',nmFund.length+' investments · '+nmRisk.length+' risk policies')+
+      tile('#eef6f2','#0e413a',String(d.mine.filter(function(r){ return r.risk; }).length),'Life &amp; risk on your record','policies you are broker of record on')+
+      tile('#f1f5f9','#334155',String(d.notset.length),'Not set yet',d.notsetVal?(aumMoney(d.notsetVal)+' in investments, not counted until set'):'nothing waiting')+
+    '</div>';
+  var body='';
+  if(tab==='overview'){
+    body='<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">'+
+      '<div class="card" style="padding:12px 14px"><div style="font-weight:700;color:var(--navy);margin-bottom:6px">By provider</div>'+aumGroupTable(d.aum,function(r){ return r.p.Insurer; },'Provider',d.aumTotal)+'</div>'+
+      '<div class="card" style="padding:12px 14px"><div style="font-weight:700;color:var(--navy);margin-bottom:6px">By policy type</div>'+aumGroupTable(d.aum,function(r){ return r.p.Type; },'Type',d.aumTotal)+'</div>'+
+      '</div>'+
+      '<div style="font-size:11px;color:#889;font-style:italic">AUM counts current investment and retirement policies ticked “Advisor / broker of record” and “Counts for AUM”, at the captured fund value. Life &amp; risk, business assurance and medical aid never count as AUM. Policies not yet ticked either way are on the “Not set” tab and are not counted.</div>';
+  } else if(tab==='notmine'){
+    nmFund.sort(function(a,b){ return b.val-a.val; });
+    nmRisk.sort(function(a,b){ return N(b.p.Premium)-N(a.p.Premium); });
+    body='<div class="card" style="padding:12px 14px"><div style="font-weight:700;color:#9a3412;margin-bottom:6px">Investments &amp; retirement you don\'t control ('+nmFund.length+', '+aumMoney(d.notmineVal)+')</div>'+aumPolicyTable(nmFund,false,'None')+'</div>'+
+      '<div class="card" style="padding:12px 14px"><div style="font-weight:700;color:#9a3412;margin-bottom:6px">Life &amp; risk you are not broker of record on ('+nmRisk.length+')</div>'+aumPolicyTable(nmRisk,false,'None')+'</div>';
+  } else {
+    var ns=d.notset.slice().sort(function(a,b){ return (a.risk-b.risk) || (b.val-a.val); });
+    body='<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 12px;background:#f1f5f9;border:1.5px solid #cbd5e1;border-radius:8px">'+
+      '<span style="font-size:13px;color:#334155"><b>Policies never ticked either way.</b> Choose whose each one is, then Apply. They move to AUM or Not mine and leave this list.</span>'+
+      '<button id="aumApplyBtn" class="btn b-gd sm" style="margin-left:auto;opacity:.5" disabled onclick="aumApply()">Apply 0 changes</button></div>'+
+      '<div class="card" style="padding:12px 14px">'+aumPolicyTable(ns,true,'Everything is set 🎉')+'</div>';
+  }
+  return head+body;
+}
 
 function renderRegisterPage(){
   var R = window._reg;
@@ -10940,11 +11100,11 @@ function buildPolicyForm(p){
   html+='<label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;font-weight:600;color:var(--navy)">'+
     '<input type="checkbox" id="pb_aor" '+(_aor==='Yes'?'checked':'')+
     ' onchange="(function(el){var aum=document.getElementById(\'pb_aum\');if(aum){aum.checked=el.checked;}})(this)"'+
-    ' style="width:16px;height:16px;cursor:pointer;accent-color:var(--sage)">Advisor of Record</label>';
+    ' style="width:16px;height:16px;cursor:pointer;accent-color:var(--sage)">Advisor / broker of record</label>';
   html+='<label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;font-weight:600;color:var(--navy)">'+
     '<input type="checkbox" id="pb_aum" '+(_aum==='Yes'?'checked':'')+
     ' style="width:16px;height:16px;cursor:pointer;accent-color:var(--sage)">Counts for AUM</label>';
-  html+='<span style="font-size:11px;color:#889;font-style:italic">Untick AOR for policies you have captured but do not service. Untick AUM only if you want to exclude this policy from your AUM dashboard while remaining advisor of record.</span>';
+  html+='<span style="font-size:11px;color:#889;font-style:italic">Untick "Advisor / broker of record" for policies you have captured but do not control (they show on the AUM page under Not mine). Untick AUM for policies you do control but that are not assets under management (e.g. life risk).</span>';
   html+='</div>';
 
   // BUSINESS ASSURANCE
