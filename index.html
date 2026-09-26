@@ -3480,7 +3480,13 @@ function renderPolicies(c,pols){
         var ageAtInception = calcAge(c.DOB, p.StartDate);
         return '<tr>'+
           '<td style="font-weight:600">'+(p.Insurer||'—')+'</td>'+
-          '<td>'+(p.Product||'—')+'</td>'+
+          '<td>'+(p.Product||'—')+(function(){
+            var out='';
+            var rl=polReplacesList(p).map(polById).filter(Boolean);
+            if(rl.length) out+='<div style="font-size:11px;color:#9a3412">↺ replaces '+escHtml(rl.map(polShortLabel).join(', '))+'</div>';
+            if(p.Status==='Replaced'){ var by=polReplacedByList(p.ID,''); if(by.length) out+='<div style="font-size:11px;color:#667">replaced by '+escHtml(by.map(polShortLabel).join(', '))+'</div>'; }
+            return out;
+          })()+'</td>'+
           '<td style="font-family:monospace;font-size:12px">'+(p.PolicyNo||'—')+'</td>'+
           '<td>'+bx('bx-sk',p.Type||'—')+'</td>'+
           '<td style="font-size:12px">'+(clean(p.StartDate)?fdate(p.StartDate):'—')+'</td>'+
@@ -5649,8 +5655,8 @@ function createPolicyCompletionTask(ev, pol, c, who){
   var isRepl = ev.EventSubType === 'Replacement';
   var now = new Date().toISOString();
   var text = 'Policy added from case "'+(ev.Outcome || eventTypeLabel(ev))+'" when it was accepted. Please add the start date and benefits on the Policies tab.'+
-    (isRepl ? '\nREPLACEMENT CASE: mark the policy or policies it replaces as Replaced (see the case name and RAR).'
-            : '\nIf this policy replaces or cancels another policy, mark that one Replaced or Cancelled.');
+    (isRepl ? '\nREPLACEMENT CASE: open this policy (Edit) and tick the policy or policies it replaces under "This policy replaces" (see the case name and RAR). Saving marks them Replaced.'
+            : '\nIf this policy replaces another, open it (Edit) and tick it under "This policy replaces". If it cancels one, mark that one Cancelled.');
   var task = {ID:'t_'+(Date.now()+1), Title:('Complete policy: '+pol.Insurer+(pol.PolicyNo ? ' '+pol.PolicyNo : '')+' · '+(c ? c.Name : '')+(isRepl ? ' (REPLACEMENT)' : '')).replace(/[<>]/g, ''),
     Assignee:'Clinton', DueDate:localDateStr(), Priority: isRepl ? 'Urgent' : 'Normal', CCWife:'', ClientName: c ? c.Name : '',
     Notes: JSON.stringify([{date:now, text:text, user:who}]), Done:false, Timestamp:now, OpenedBy:who, OpenedDate:now};
@@ -10921,6 +10927,7 @@ function openPolicyModal(cid,idx){
   // JSON round-trip ensures no reference sharing with DB.policies array
   window.POL_ORIGINAL_SNAP = (idx!==undefined&&pols[idx]) ? snapshotPolicy(JSON.parse(JSON.stringify(pols[idx]))) : null;
   document.getElementById('pModT').textContent=(idx!==undefined?'Edit Policy':'Add Policy');
+  window.POL_FORM_SELF_ID = (idx!==undefined&&pols[idx]) ? String(pols[idx].ID||'') : '';
   // Show delete button only when editing an existing policy
   var _delBtn = document.getElementById('delPolBtn');
   if(_delBtn) _delBtn.style.display = (idx!==undefined) ? '' : 'none';
@@ -11202,6 +11209,36 @@ function buildPolicyForm(p){
   }
   html+='<span style="font-size:11px;color:#889;font-style:italic">Untick "Advisor / broker of record" for policies you have captured but do not control (they show on the AUM page under Not mine). Untick AUM for policies you do control but that are not assets under management (e.g. life risk).</span>';
   html+='</div>';
+
+  // REPLACES: tick every policy this one replaces. Saving marks them Replaced;
+  // unticking puts them back. Works for one replacing three and three replacing one.
+  (function(){
+    var selfId=String(p.ID||window.POL_FORM_SELF_ID||'');
+    var ticked=polReplacesList(p);
+    var self=selfId?polById(selfId):null;
+    var others=polsFor(EPC).filter(function(o){
+      if(String(o.ID)===selfId) return false;
+      if(ticked.indexOf(String(o.ID))>=0) return true;
+      return o.Status!=='Lapsed' && o.Status!=='Cancelled';
+    }).sort(function(a,b){ return (a.Status==='Replaced')-(b.Status==='Replaced') || String(a.Insurer||'').localeCompare(String(b.Insurer||'')); });
+    var replacedBy = selfId ? polReplacedByList(selfId, '') : [];
+    if(!others.length && !replacedBy.length) return;
+    html+='<div style="margin:8px 0 4px;padding:10px 12px;background:#fdf8f3;border:1px solid #f1dcc4;border-radius:7px">';
+    if(replacedBy.length)
+      html+='<div style="font-size:12px;color:#9a3412;margin-bottom:'+(others.length?'8':'0')+'px"><b>This policy was replaced by:</b> '+escHtml(replacedBy.map(polShortLabel).join(', '))+'</div>';
+    if(others.length){
+      html+='<div style="font-size:12px;font-weight:700;color:var(--navy);margin-bottom:6px">🔄 This policy replaces <span style="font-weight:400;color:#889">tick every policy it replaces. Saving marks them Replaced; unticking puts them back.</span></div>';
+      html+=others.map(function(o){
+        var on=ticked.indexOf(String(o.ID))>=0;
+        var by=polReplacedByList(o.ID, selfId);
+        var note = o.Status==='Replaced' ? (by.length ? 'already replaced by '+by.map(polShortLabel).join(', ') : 'already replaced') : (o.Status||'Active');
+        return '<label style="display:flex;align-items:center;gap:8px;font-size:13px;padding:3px 0;cursor:pointer">'+
+          '<input type="checkbox" class="pol-repl" value="'+escHtml(String(o.ID))+'" '+(on?'checked':'')+' style="width:16px;height:16px;cursor:pointer;accent-color:#9e2a2b">'+
+          '<span><b>'+escHtml(o.Insurer||'—')+'</b> '+escHtml(o.PolicyNo||o.Product||'')+' <span style="color:#667">· '+escHtml(o.Type||'')+'</span> <span style="font-size:11px;color:#889">('+escHtml(note)+')</span></span></label>';
+      }).join('');
+    }
+    html+='</div>';
+  })();
 
   // BUSINESS ASSURANCE
   if(isBiz){
@@ -12670,6 +12707,8 @@ function collectPolicyForm(){
     Insurer:g('pi'),Product:g('pp'),PolicyNo:g('pn'),Type:g('pt'),
     StartDate:g('psd'),ClientIsOwner:getR('pisowner'),Owner:g('pown'),Status:g('pst'),EstateDutiable:getR('pestate'),
     AdvisorOfRecord:(document.getElementById('pb_aor')?(document.getElementById('pb_aor').checked?'Yes':'No'):'Yes'),
+    ReplacedBy:(function(){ var b=document.querySelectorAll('#pMod .pol-repl'); if(!b.length) return undefined;
+      return polReplacesValue(Array.prototype.filter.call(b,function(x){return x.checked;}).map(function(x){return x.value;})); })(),
     // No AUM box = the form was showing a risk type. Saving a risk type → 'No'.
     // Switching risk → investment (the form rebuilds from this) → start the AUM
     // tick the same as "broker of record", instead of off.
@@ -13265,7 +13304,13 @@ function openPolicyHistory(cid,idx){
   if(p.BenFundValue) html+='<div><span style="color:#888;font-size:11px">Fund Value</span><div style="font-weight:700">'+R(p.BenFundValue)+'</div></div>';
   if(p.LoanAmount) html+='<div><span style="color:#888;font-size:11px">Loan/Cover Amount</span><div style="font-weight:700">'+R(p.LoanAmount)+'</div></div>';
   html+='<div><span style="color:#888;font-size:11px">Last Updated</span><div style="font-weight:700">'+(p.LastUpdated||p.CapturedDate||'—')+'</div></div>';
-  if(p.ReplacedPolicyNo) html+='<div style="grid-column:1/-1"><span style="color:#888;font-size:11px">Replaces Policy</span><div style="font-weight:700;color:var(--sage)">'+p.ReplacedPolicyNo+'</div></div>';
+  (function(){
+    var rl=polReplacesList(p).map(polById).filter(Boolean);
+    var txt = rl.length ? rl.map(polShortLabel).join(', ') : (p.ReplacedPolicyNo||'');
+    if(txt) html+='<div style="grid-column:1/-1"><span style="color:#888;font-size:11px">Replaces</span><div style="font-weight:700;color:var(--sage)">'+escHtml(txt)+'</div></div>';
+    var by=polReplacedByList(p.ID,'');
+    if(by.length) html+='<div style="grid-column:1/-1"><span style="color:#888;font-size:11px">Replaced by</span><div style="font-weight:700;color:#9a3412">'+escHtml(by.map(polShortLabel).join(', '))+'</div></div>';
+  })();
   html+='</div></div>';
 
   // History entries
@@ -13274,11 +13319,11 @@ function openPolicyHistory(cid,idx){
   } else {
     html+='<div style="font-size:12px;font-weight:700;text-transform:uppercase;color:#888;margin-bottom:8px">History (newest first)</div>';
     history.slice().reverse().forEach(function(h){
-      var isReplace=h.type==='replaced';
-      var color=isReplace?'#b45309':'#0e413a';
+      var isReplace=h.type==='replaced', isUnreplace=h.type==='unreplaced';
+      var color=isReplace?'#b45309':isUnreplace?'#64748b':'#0e413a';
       html+='<div style="border:1px solid #eee;border-radius:8px;margin-bottom:10px;overflow:hidden">';
       html+='<div style="background:'+color+';color:#fff;padding:7px 14px;display:flex;justify-content:space-between;font-size:12px">';
-      html+='<span style="font-weight:700">'+(isReplace?'🔄 Policy Replaced':'📋 Policy Review')+'</span>';
+      html+='<span style="font-weight:700">'+(isReplace?'🔄 Policy Replaced':isUnreplace?'↩ Replacement undone':'📋 Policy Review')+'</span>';
       html+='<span>'+h.date+' · '+( h.by||'')+'</span></div>';
       html+='<div style="display:grid;grid-template-columns:1fr 1fr;padding:10px 14px;gap:6px;font-size:12px">';
       function chg(oldV,newV,lbl){
@@ -13321,6 +13366,61 @@ function openPolicyHistory(cid,idx){
   document.getElementById('polHistMod').classList.add('open');
 }
 
+// ── Replacements: one-to-many and many-to-one (26 Sep 2026) ──────────────
+// The NEW policy carries the link in ReplacedBy: the ID of the policy it replaces
+// (the original single-ID format) or a JSON array of IDs when it replaces several.
+// The old policy gets Status 'Replaced' + ReplacedDate + a 'replaced' history entry.
+// Three replaced by one: the new policy ticks all three. One replaced by three:
+// each new policy ticks the same old one. Unticking puts the old policy back to
+// its previous status, unless another policy still replaces it.
+function polReplacesList(p){
+  var v=String(p && p.ReplacedBy || '').trim();
+  if(!v) return [];
+  if(v.charAt(0)==='['){ try{ var a=JSON.parse(v); return Array.isArray(a) ? a.map(String).filter(Boolean) : []; }catch(e){ return []; } }
+  return [v];
+}
+function polReplacesValue(ids){ return !ids.length ? '' : (ids.length===1 ? ids[0] : JSON.stringify(ids)); }
+function polShortLabel(p){ return (p.Insurer||'?')+(clean(p.PolicyNo)?' '+p.PolicyNo:(clean(p.Product)?' '+p.Product:'')); }
+function polById(id){ return (DB.policies||[]).find(function(x){ return String(x.ID)===String(id); }) || null; }
+// New policies (other than excludeId) that say they replace this one.
+function polReplacedByList(oldId, excludeId){
+  return (DB.policies||[]).filter(function(n){
+    return String(n.ID)!==String(excludeId||'') && polReplacesList(n).indexOf(String(oldId))>=0;
+  });
+}
+function polSaveQuiet(o){
+  var clean_=JSON.parse(JSON.stringify(o)); delete clean_._pendingSave;
+  post({action:'savePolicy', policy:clean_}, function(res){
+    if(!(res && res.ok===1)) toast('⚠️ '+polShortLabel(o)+' was not updated on the server. Press Sync and check it.','err');
+  });
+}
+// Apply the ticks from the policy form: mark newly ticked policies Replaced and
+// put unticked ones back. newPol is the policy being saved.
+function applyReplacementTicks(newPol, prevIds, nextIds){
+  var now=new Date().toISOString().slice(0,10);
+  nextIds.filter(function(id){ return prevIds.indexOf(id)<0; }).forEach(function(id){
+    var o=polById(id); if(!o || o.Status==='Replaced') return;   // already replaced (e.g. one replaced by three)
+    var hist=[]; try{ hist=JSON.parse(o.ReviewHistory||'[]'); }catch(e){}
+    var snap=snapshotPolicy(o); snap.type='replaced'; snap.prevStatus=o.Status||'Active';
+    snap.note='Replaced by '+polShortLabel(newPol)+' on '+now+' ('+userLabel(cu())+')';
+    hist.push(snap);
+    o.ReviewHistory=JSON.stringify(hist); o.Status='Replaced'; o.ReplacedDate=now; o.LastUpdated=now;
+    polSaveQuiet(o);
+  });
+  prevIds.filter(function(id){ return nextIds.indexOf(id)<0; }).forEach(function(id){
+    var o=polById(id); if(!o || o.Status!=='Replaced') return;
+    if(polReplacedByList(id, newPol.ID).length) return;          // another policy still replaces it
+    var hist=[]; try{ hist=JSON.parse(o.ReviewHistory||'[]'); }catch(e){}
+    var prev='Active';
+    for(var i=hist.length-1;i>=0;i--){ if(hist[i] && hist[i].type==='replaced'){ prev=hist[i].prevStatus||'Active'; break; } }
+    var snap=snapshotPolicy(o); snap.type='unreplaced';
+    snap.note='Replacement undone: no longer replaced by '+polShortLabel(newPol)+'. Status back to '+prev+'.';
+    hist.push(snap);
+    o.ReviewHistory=JSON.stringify(hist); o.Status=prev; o.ReplacedDate=''; o.LastUpdated=now;
+    polSaveQuiet(o);
+  });
+}
+
 function snapshotPolicy(pol){
   // Returns a lightweight snapshot of current policy values for history
   return {
@@ -13349,9 +13449,17 @@ function savePolicy(){
   pol.ClientID=EPC;
   pol.LastUpdated=now;
   pol.CapturedDate=oldPol?(oldPol.CapturedDate||now):now;
-  pol.ReplacedBy=oldPol?oldPol.ReplacedBy:(window.REPLACING_POL_ID||'');
+  // Replacement ticks. No tick-list shown (client has no other policies) = keep as is.
+  var _prevRepl = oldPol ? polReplacesList(oldPol) : polReplacesList({ReplacedBy:window.REPLACING_POL_ID||''});
+  if(!oldPol) _prevRepl = [];   // a brand-new policy replaced nothing before this save
+  var _boxes = document.querySelectorAll('#pMod .pol-repl');
+  var _nextRepl = _boxes.length ? Array.prototype.filter.call(_boxes,function(b){return b.checked;}).map(function(b){return b.value;})
+                                : (oldPol ? polReplacesList(oldPol) : []);
+  pol.ReplacedBy = polReplacesValue(_nextRepl);
   pol.ReplacedDate=oldPol?oldPol.ReplacedDate:'';
-  pol.ReplacedPolicyNo=oldPol?oldPol.ReplacedPolicyNo:(window.REPLACING_POL_NO||'');
+  pol.ReplacedPolicyNo = _nextRepl.length
+    ? (_nextRepl.map(function(id){ var o=polById(id); return o ? polShortLabel(o) : ''; }).filter(Boolean).join('; ') || (oldPol ? (oldPol.ReplacedPolicyNo||'') : ''))
+    : '';
   // Preserve legacy Payer text from the existing record. It's archival —
   // structured PayerType/PayerName are the new source of truth, but Payer
   // is kept so un-migrated policies don't silently lose their typed payer
@@ -13364,6 +13472,7 @@ function savePolicy(){
   pol._pendingSave = true;
   if(EPI!==null&&oldPol){var gi=DB.policies.indexOf(oldPol);if(gi>=0)DB.policies[gi]=pol;}
   else DB.policies.push(pol);
+  applyReplacementTicks(pol, _prevRepl, _nextRepl);
   // Write to localStorage immediately — survives a refresh before server responds
   try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
   closeAll();render();
@@ -13393,10 +13502,15 @@ function deletePolicy(){
   var oldPol = (EPI!==null && existing[EPI]) ? existing[EPI] : null;
   if(!oldPol){ toast('Cannot find policy to delete','err'); return; }
   var label = (oldPol.Insurer||'') + (oldPol.Product?' — '+oldPol.Product:'') + (oldPol.PolicyNo?' ('+oldPol.PolicyNo+')':'');
-  if(!confirm('Permanently delete this policy?\n\n' + label + '\n\nThis cannot be undone.')) return;
+  var _rl = polReplacesList(oldPol).map(polById).filter(function(o){ return o && o.Status==='Replaced'; });
+  if(!confirm('Permanently delete this policy?\n\n' + label + '\n\nThis cannot be undone.' +
+     (_rl.length ? '\n\nIt replaced: '+_rl.map(polShortLabel).join(', ')+'. Those go back to their previous status (unless another policy also replaces them).' : ''))) return;
   // Remove from DB in memory
   var gi = DB.policies.indexOf(oldPol);
   if(gi >= 0) DB.policies.splice(gi, 1);
+  // Policies this one replaced: put them back (applyReplacementTicks skips any
+  // still replaced by another policy). Done after the splice so it isn't counted.
+  if(polReplacesList(oldPol).length) applyReplacementTicks(oldPol, polReplacesList(oldPol), []);
   try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
   closeAll(); render();
   // Delete from Supabase
@@ -15446,24 +15560,13 @@ function replacePolicy(cid,idx){
   var pols=polsFor(cid);
   var old=pols[idx];
   if(!old)return;
-  if(!confirm('This will archive '+old.Insurer+' policy '+( old.PolicyNo||'')+ ' and open a new replacement. Continue?'))return;
-  var gi=DB.policies.indexOf(old);
+  // Nothing is changed yet: the old policy is ticked in the new policy's
+  // "This policy replaces" list and is marked Replaced only when the new policy
+  // is saved. Cancel = no change (it used to archive the old one immediately).
   var now=new Date().toISOString().slice(0,10);
-  // Snapshot the old policy before archiving
-  var snap=snapshotPolicy(old);
-  snap.type='replaced';
-  snap.note='Policy replaced on '+now+' by '+cu();
-  var history=[];
-  try{history=JSON.parse(old.ReviewHistory||'[]');}catch(e){}
-  history.push(snap);
-  if(gi>=0){
-    DB.policies[gi].Status='Replaced';
-    DB.policies[gi].ReplacedDate=now;
-    DB.policies[gi].ReviewHistory=JSON.stringify(history);
-  }
-  post({action:'savePolicy',policy:DB.policies[gi]},function(){});
-  // Open new policy pre-filled with old details, linked back
   EPC=cid;EPI=null;
+  window.POL_FORM_SELF_ID='';
+  var _delBtn=document.getElementById('delPolBtn'); if(_delBtn) _delBtn.style.display='none';
   window.REPLACING_POL_ID=old.ID;
   window.REPLACING_POL_NO=old.PolicyNo||old.Insurer;
   document.getElementById('pModT').textContent='Replacement Policy — was '+old.Insurer+' '+( old.PolicyNo||'');
@@ -15475,7 +15578,7 @@ function replacePolicy(cid,idx){
   });
   buildPolicyForm(prefill);
   document.getElementById('pMod').classList.add('open');
-  toast('Old policy archived — update the details for the new policy','ok');
+  toast('Update the details for the new policy. '+polShortLabel(old)+' is marked Replaced when you save.','ok');
 }
 
 
