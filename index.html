@@ -1004,6 +1004,208 @@ function isFamilyRecord(c){
   var ft=String(c.FamilyType==null?'':c.FamilyType).trim();
   return ft!=='' && ft!=='Principal';
 }
+// Client IDs holding at least one current policy (Replaced / Lapsed / Cancelled
+// don't count; Paid Up does). Anyone in this set is a client by definition.
+function clientIdsWithCurrentPolicy(){
+  var ids={};
+  (DB.policies||[]).forEach(function(p){ if(!willIsDeadPolicy(p)) ids[String(p.ClientID)]=1; });
+  return ids;
+}
+function clientHasCurrentPolicy(id){
+  return (DB.policies||[]).some(function(p){ return String(p.ClientID)===String(id) && !willIsDeadPolicy(p); });
+}
+// How this person is linked to others, in words: "Child of Jeenesha Baichan".
+function familyRelationsText(c){
+  var out=[], seen={};
+  (DB.links||[]).forEach(function(l){
+    if(String(l.ClientID)!==String(c.ID) || !l.PrincipalID || String(l.PrincipalID)===String(c.ID)) return;
+    var p=DB.clients.find(function(x){ return String(x.ID)===String(l.PrincipalID); });
+    var t=(l.Type||'Related')+' of '+(p?p.Name:'?');
+    if(!seen[t]){ seen[t]=1; out.push(t); }
+  });
+  return out;
+}
+
+// ── 🧹 Tidy-up: active clients holding NO current policy ────────────────
+// Each gets a decision: keep as client / family / lead / inactive. "Keep" is
+// remembered for everyone in the settings table (key TIDY_KEEP_KEY, JSON
+// {clientId:{by,at}}), so kept clients leave the list for good. No schema change.
+var TIDY_KEEP_KEY = 'tidy_keep_clients';
+var TIDY_KEEP = null;        // null = not loaded yet
+var TIDY_SHOW_KEPT = false;  // show the kept list (to undo a Keep)
+var TIDY_CHOICES = {};       // clientId -> chosen action, until Apply
+var _tidyLoading = false;
+function loadTidyKeep(cb){
+  if(_tidyLoading) return;
+  _tidyLoading = true;
+  sbFetch('GET','/rest/v1/settings?Key=eq.'+TIDY_KEEP_KEY+'&select=*',null,function(rows,err){
+    _tidyLoading = false;
+    var obj={};
+    try{ obj=JSON.parse((rows&&rows[0]&&rows[0].Value)||'{}')||{}; }catch(e){ obj={}; }
+    if(!err) TIDY_KEEP=obj; else if(TIDY_KEEP===null) TIDY_KEEP={};
+    if(cb) cb(!err);
+  });
+}
+function isTidyKept(c){ return !!(TIDY_KEEP && TIDY_KEEP[String(c.ID)]); }
+// Needs review = an active client (not lead, not family) with no current policy, not kept.
+function tidyCandidates(showKept){
+  var hold=clientIdsWithCurrentPolicy();
+  return DB.clients.filter(function(c){
+    if(!isActiveClient(c) || hold[String(c.ID)]) return false;
+    return showKept ? isTidyKept(c) : !isTidyKept(c);
+  });
+}
+var TIDY_ACTIONS = [
+  ['',                   '— choose —'],
+  ['keep',               '✓ Keep as client'],
+  ['fam:Spouse',         '→ Family: Spouse'],
+  ['fam:Child',          '→ Family: Child'],
+  ['fam:Parent',         '→ Family: Parent'],
+  ['fam:Adult',          '→ Family: Other relative'],
+  ['fam:Contact Person', '→ Contact person'],
+  ['lead',               '→ Lead (prospect)'],
+  ['inactive',           '→ Inactive (old record)']
+];
+function tidySet(id,val){
+  if(val) TIDY_CHOICES[String(id)]=val; else delete TIDY_CHOICES[String(id)];
+  tidyUpdateBar();
+}
+function tidyUpdateBar(){
+  var n=Object.keys(TIDY_CHOICES).length;
+  var b=document.getElementById('tidyApplyBtn');
+  if(b){ b.textContent='Apply '+n+' change'+(n===1?'':'s'); b.disabled=!n; b.style.opacity=n?'1':'.5'; }
+}
+function tidyBarHtml(){
+  var kept=tidyCandidates(true).length;
+  return '<div id="tidyBar" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0;padding:8px 12px;background:#fff7ed;border:1.5px solid #fdba74;border-radius:8px;flex-shrink:0">'+
+    '<span style="font-size:13px;color:#7c2d12"><b>'+(TIDY_SHOW_KEPT?'Clients you chose to keep.':'Clients with no current policy.')+'</b> '+
+      (TIDY_SHOW_KEPT?'Pick “Back to review” to put one back on the list.':'Pick what each person really is, then press Apply. Anyone you keep leaves this list for good.')+'</span>'+
+    '<span style="margin-left:auto;display:flex;gap:8px;align-items:center">'+
+    '<button class="btn b-gh xs" onclick="TIDY_SHOW_KEPT=!TIDY_SHOW_KEPT;TIDY_CHOICES={};render();">'+(TIDY_SHOW_KEPT?'← Back to review':'Show kept ('+kept+')')+'</button>'+
+    '<button id="tidyApplyBtn" class="btn b-gd sm" onclick="tidyApply()" disabled style="opacity:.5">Apply 0 changes</button>'+
+    '</span></div>';
+}
+function tidyTable(list){
+  var theadStyle=' style="position:sticky;top:0;background:#fff;z-index:2;box-shadow:0 1px 0 var(--mist)"';
+  var opts = TIDY_SHOW_KEPT ? [['','— keep —'],['unkeep','↩ Back to review']] : TIDY_ACTIONS;
+  return '<table class="tbl"><thead'+theadStyle+'><tr>'+
+    '<th>Client</th><th>Linked as</th><th>Policies</th><th style="width:230px">What are they?</th>'+
+    '</tr></thead><tbody>'+
+    list.map(function(c){
+      var ag=ageOf(c);
+      var ageChip = ag!==null ? '<span style="font-size:10px;font-weight:700;color:#8a6d1a;background:#f5f0d8;border-radius:10px;padding:1px 7px;white-space:nowrap">'+ag+'y</span>' : '';
+      var rel=familyRelationsText(c);
+      var pols=polsFor(c.ID);
+      var polTxt = pols.length ? (pols.length+' old (replaced / lapsed / cancelled)') : 'None captured';
+      var cur=TIDY_CHOICES[String(c.ID)]||'';
+      return '<tr class="row" data-act="open-client" data-id="'+c.ID+'"'+(cur?' style="background:#fffbeb"':'')+'>'+
+        '<td><div style="display:flex;align-items:center;gap:10px">'+
+        '<div style="width:32px;height:32px;border-radius:50%;background:var(--navy);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:#fff;flex-shrink:0">'+ini(c.Name)+'</div>'+
+        '<div style="font-weight:600;display:flex;align-items:center;gap:6px;flex-wrap:wrap">'+escHtml(c.Name||'—')+ageChip+(c.ClientType==='Company'?'<span style="font-size:10px;color:#889">🏢 Company</span>':'')+'</div>'+
+        '</div></td>'+
+        '<td style="font-size:12px">'+(rel.length?escHtml(rel.join('; ')):'<span style="color:#b0b6c2;font-style:italic">Not linked</span>')+'</td>'+
+        '<td style="font-size:12px;color:#667">'+polTxt+'</td>'+
+        '<td onclick="event.stopPropagation()">'+
+        '<select data-tidy="'+c.ID+'" onchange="tidySet(this.getAttribute(\'data-tidy\'),this.value);this.closest(\'tr\').style.background=this.value?\'#fffbeb\':\'\';" onclick="event.stopPropagation()" style="width:100%;border:1.5px solid var(--mist);border-radius:7px;padding:5px 8px;font-size:12px;font-family:inherit;background:#fff">'+
+        opts.map(function(o){ return '<option value="'+escHtml(o[0])+'"'+(cur===o[0]?' selected':'')+'>'+escHtml(o[1])+'</option>'; }).join('')+
+        '</select></td>'+
+        '</tr>';
+    }).join('')+'</tbody></table>';
+}
+// Apply all chosen actions in one go. Client changes are saved per record (with
+// the usual failed-save protection); Keep / Back-to-review update the shared list.
+function tidyApply(){
+  var ids=Object.keys(TIDY_CHOICES);
+  if(!ids.length) return;
+  var n={keep:0,fam:0,lead:0,inactive:0,unkeep:0};
+  ids.forEach(function(id){ var a=TIDY_CHOICES[id]; n[a.indexOf('fam:')===0?'fam':a]++; });
+  var parts=[];
+  if(n.keep) parts.push(n.keep+' keep as client');
+  if(n.fam) parts.push(n.fam+' to Family & contacts');
+  if(n.lead) parts.push(n.lead+' to Leads');
+  if(n.inactive) parts.push(n.inactive+' to Inactive');
+  if(n.unkeep) parts.push(n.unkeep+' back to review');
+  if(!confirm('Apply '+ids.length+' change'+(ids.length===1?'':'s')+'?\n\n'+parts.join('\n'))) return;
+  var keepAdd=[], keepDel=[], saves=[];
+  ids.forEach(function(id){
+    var a=TIDY_CHOICES[id];
+    var c=DB.clients.find(function(x){ return String(x.ID)===String(id); });
+    if(!c) return;
+    if(a==='keep'){ keepAdd.push(String(id)); return; }
+    if(a==='unkeep'){ keepDel.push(String(id)); return; }
+    if(clientHasCurrentPolicy(id)) return;   // safety: a policyholder is a client
+    if(a.indexOf('fam:')===0) c.FamilyType=a.slice(4);
+    else if(a==='lead') c.IsLead='Yes';
+    else if(a==='inactive') c.Status='Inactive';
+    else return;
+    saves.push(c);
+  });
+  TIDY_CHOICES={};
+  // Keep list: read the latest from the server, merge, write back (two people
+  // tidying at once must not overwrite each other's decisions).
+  if(keepAdd.length||keepDel.length){
+    sbFetch('GET','/rest/v1/settings?Key=eq.'+TIDY_KEEP_KEY+'&select=*',null,function(rows,err){
+      var obj={};
+      try{ obj=JSON.parse((rows&&rows[0]&&rows[0].Value)||'{}')||{}; }catch(e){ obj={}; }
+      if(err && TIDY_KEEP) obj=JSON.parse(JSON.stringify(TIDY_KEEP));
+      keepAdd.forEach(function(id){ obj[id]={by:cu(),at:new Date().toISOString().slice(0,10)}; });
+      keepDel.forEach(function(id){ delete obj[id]; });
+      TIDY_KEEP=obj;
+      var _sc=captureScrolls(); render(); restoreScrolls(_sc);
+      sbFetch('POST','/rest/v1/settings',[{Key:TIDY_KEEP_KEY,Value:JSON.stringify(obj)}],function(r2,e2){
+        if(e2) toast('⚠️ Keep decisions not saved to the server. Please press Apply again later.','err');
+      });
+    });
+  }
+  var pending=saves.length, fails=0;
+  saves.forEach(function(c){
+    post({action:'saveClient', client:c}, function(res){
+      if(!(res && res.ok)) fails++;
+      if(--pending===0 && !fails) toast(saves.length+' record'+(saves.length===1?'':'s')+' updated ✅','ok');
+    });
+  });
+  var _sc2=captureScrolls(); render(); restoreScrolls(_sc2);
+  if(!saves.length && (keepAdd.length||keepDel.length)) toast('Saved ✅','ok');
+}
+
+// Profile button: ↩ Move to Family & contacts (only for a client with no current
+// policy). Asks which relationship, pre-set from how they're linked.
+function moveToFamilyPrompt(id){
+  var c=DB.clients.find(function(x){ return String(x.ID)===String(id); });
+  if(!c) return;
+  if(clientHasCurrentPolicy(id)){ toast(c.Name+' holds a current policy, so stays a client','err'); return; }
+  var rel=familyRelationsText(c);
+  var guess='Adult';
+  if(rel.length){ var t=rel[0].split(' of ')[0]; if(['Spouse','Child','Parent'].indexOf(t)>=0) guess=t; else if(t==='Life Partner') guess='Spouse'; }
+  var ov=document.createElement('div');
+  ov.style.cssText='position:fixed;inset:0;background:rgba(10,20,40,.55);z-index:10000;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(2px)';
+  var box=document.createElement('div');
+  box.style.cssText='background:#fff;border-radius:12px;padding:22px 26px;max-width:440px;width:90%;box-shadow:0 12px 48px rgba(0,0,0,.25);font-family:inherit';
+  var choices=[['Spouse','Spouse'],['Child','Child'],['Parent','Parent'],['Adult','Other relative'],['Contact Person','Contact person']];
+  box.innerHTML=
+    '<div style="font-family:Georgia,serif;font-size:17px;color:#0e413a;margin-bottom:6px">Move '+escHtml(c.Name)+' to Family &amp; contacts?</div>'+
+    '<div style="font-size:12px;color:#778;margin-bottom:14px">'+(rel.length?'Linked as: '+escHtml(rel.join('; '))+'. ':'')+'They leave your Clients list. Links and details are kept, and ✅ Convert brings them back any time.</div>'+
+    '<label style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:.5px">Relationship</label>'+
+    '<select id="_mtfRel" style="width:100%;padding:9px 12px;border:1.5px solid #ccc;border-radius:6px;font-size:14px;font-family:inherit;margin:4px 0 16px">'+
+    choices.map(function(o){ return '<option value="'+o[0]+'"'+(o[0]===guess?' selected':'')+'>'+o[1]+'</option>'; }).join('')+'</select>'+
+    '<div style="display:flex;justify-content:flex-end;gap:8px">'+
+      '<button id="_mtfCancel" style="padding:8px 18px;border-radius:7px;border:1.5px solid #ddd;background:#fff;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;color:#555">Cancel</button>'+
+      '<button id="_mtfOK" style="padding:8px 22px;border-radius:7px;border:none;background:#0f766e;color:#fff;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">Move</button>'+
+    '</div>';
+  ov.appendChild(box); document.body.appendChild(ov);
+  function close(){ if(ov.parentNode) ov.parentNode.removeChild(ov); }
+  document.getElementById('_mtfCancel').onclick=close;
+  ov.addEventListener('click',function(e){ if(e.target===ov) close(); });
+  document.getElementById('_mtfOK').onclick=function(){
+    var v=document.getElementById('_mtfRel').value;
+    close();
+    c.FamilyType=v;
+    render();
+    post({action:'saveClient', client:c}, function(res){
+      if(res && res.ok) toast(c.Name+' moved to Family & contacts','ok');
+    });
+  };
+}
 function isdone(t){ return t.Done===true||t.Done==='TRUE'||t.Done===1||t.Done==='true'; }
 function clean(v){ if(v===0||v==='0') return '0'; return (!v||v==='None')?'':String(v); }
 function togglePolicyOwner(val){
@@ -1176,9 +1378,11 @@ function clientIdsHolding(groupKey){
 // Sorted + tab-filtered client list (before search/age). The single source of
 // truth for which tab (Clients / Leads / Inactive / No Will / Unasked) is shown,
 // used by both renderClients() and the live refreshClientList().
+var _tidyHold = {};
 function clientPageFiltered(){
   var base=sortClientsBySurname(DB.clients.slice());
   var f=window.CLIENT_LIST_FILTER||'clients';
+  if(f==='tidy') _tidyHold=clientIdsWithCurrentPolicy();
   return base.filter(function(c){
     if(f==='leads')       return c.IsLead==='Yes';
     // Family & contacts = the live conversion list (active only). Inactive family
@@ -1186,6 +1390,7 @@ function clientPageFiltered(){
     if(f==='family')      return c.IsLead!=='Yes' && isFamilyRecord(c) && c.Status!=='Inactive' && c.Status!=='Cancelled';
     if(f==='inactive')    return c.IsLead!=='Yes' && (c.Status==='Inactive'||c.Status==='Cancelled');
     if(isFamilyRecord(c)) return false;   // every other tab is clients only
+    if(f==='tidy')        return isActiveClient(c) && !_tidyHold[String(c.ID)] && (TIDY_SHOW_KEPT ? isTidyKept(c) : !isTidyKept(c));
     if(f==='nowill')      return c.IsLead!=='Yes' && c.Status!=='Inactive' && c.Status!=='Cancelled' && c.HasWill==='No';
     if(f==='willunasked') return c.IsLead!=='Yes' && c.Status!=='Inactive' && c.Status!=='Cancelled' && c.HasWill!=='Yes' && c.HasWill!=='No';
     return c.IsLead!=='Yes' && c.Status!=='Inactive' && c.Status!=='Cancelled';
@@ -1552,6 +1757,7 @@ function render(){
   // FNA Capture panel lives outside #main and is not an .ov overlay, so every
   // save path's closeAll()+render() leaves it open — re-paint it with fresh data.
   if(window.FNA_CAP && FNA_CAP.active) fnaCapRender();
+  if(PAGE==='clients' && window.CLIENT_LIST_FILTER==='tidy') tidyUpdateBar();
 }
 
 // DASHBOARD
@@ -1965,6 +2171,8 @@ function renderClients(){
   var isNoWill       = window.CLIENT_LIST_FILTER === 'nowill';
   var isWillUnasked  = window.CLIENT_LIST_FILTER === 'willunasked';
   var isFamily       = window.CLIENT_LIST_FILTER === 'family';
+  var isTidy         = window.CLIENT_LIST_FILTER === 'tidy';
+  if(isTidy && TIDY_KEEP===null) loadTidyKeep(function(){ if((window.CLIENT_LIST_FILTER)==='tidy' && PAGE==='clients'){ var _s=captureScrolls(); render(); restoreScrolls(_s); } });
   // Tab filter + text search + age filter now share one code path
   // (clientPageFiltered / applyClientSearchAge) so the full render and the live
   // refreshClientList() can never drift apart.
@@ -1977,19 +2185,21 @@ function renderClients(){
   // the dashboard tile ⚪ bucket: empty/undefined/anything other than explicit Yes or No).
   var noWillCount     = base.filter(function(c){ return c.IsLead!=='Yes' && !isFamilyRecord(c) && c.Status!=='Inactive' && c.Status!=='Cancelled' && c.HasWill==='No'; }).length;
   var willUnaskedCount= base.filter(function(c){ return c.IsLead!=='Yes' && !isFamilyRecord(c) && c.Status!=='Inactive' && c.Status!=='Cancelled' && c.HasWill!=='Yes' && c.HasWill!=='No'; }).length;
-  var pageLabel = isLeads ? 'Leads' : isFamily ? 'Family & contacts — not yet clients' : isInactive ? 'Inactive' : isNoWill ? 'Clients — No Will (sales targets)' : isWillUnasked ? 'Clients — Will Not Yet Asked' : 'Clients';
+  var tidyCount = TIDY_KEEP===null ? null : tidyCandidates(false).length;
+  var pageLabel = isTidy ? (TIDY_SHOW_KEPT?'Tidy-up — kept as clients':'Tidy-up — clients with no current policy') : isLeads ? 'Leads' : isFamily ? 'Family & contacts — not yet clients' : isInactive ? 'Inactive' : isNoWill ? 'Clients — No Will (sales targets)' : isWillUnasked ? 'Clients — Will Not Yet Asked' : 'Clients';
   return '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;flex-shrink:0">'+
     '<h1 style="font-family:\'DM Serif Display\',serif;font-size:22px;color:var(--navy)">'+pageLabel+' (<span id="clientPageCount">'+list.length+'</span>)</h1>'+
     '<div style="display:flex;gap:6px;align-items:center">'+
     '<div style="display:flex;gap:0;border:1.5px solid var(--mist);border-radius:8px;overflow:hidden">'+
-    '<button class="btn xs" data-act="client-list-filter" data-filter="clients" style="border-radius:0;border:none;'+(!isLeads&&!isInactive&&!isNoWill&&!isWillUnasked&&!isFamily?'background:var(--navy);color:#fff':'background:#f5f7fa;color:#889')+';padding:5px 14px;font-weight:700">👥 Clients ('+clientCount+')</button>'+
+    '<button class="btn xs" data-act="client-list-filter" data-filter="clients" style="border-radius:0;border:none;'+(!isLeads&&!isInactive&&!isNoWill&&!isWillUnasked&&!isFamily&&!isTidy?'background:var(--navy);color:#fff':'background:#f5f7fa;color:#889')+';padding:5px 14px;font-weight:700">👥 Clients ('+clientCount+')</button>'+
     '<button class="btn xs" data-act="client-list-filter" data-filter="leads" style="border-radius:0;border:none;border-left:1.5px solid var(--mist);'+(isLeads?'background:var(--navy);color:#fff':'background:#f5f7fa;color:#889')+';padding:5px 14px;font-weight:700">🎯 Leads ('+leadCount+')</button>'+
     (familyCount>0||isFamily?'<button class="btn xs" data-act="client-list-filter" data-filter="family" style="border-radius:0;border:none;border-left:1.5px solid var(--mist);'+(isFamily?'background:#0f766e;color:#fff':'background:#f5f7fa;color:#889')+';padding:5px 14px;font-weight:700" title="Spouses, children and contacts who are not (yet) clients. Your conversion list.">👨‍👩‍👧 Family &amp; contacts ('+familyCount+')</button>':'')+
     (noWillCount>0?'<button class="btn xs" data-act="client-list-filter" data-filter="nowill" style="border-radius:0;border:none;border-left:1.5px solid var(--mist);'+(isNoWill?'background:#9e2a2b;color:#fff':'background:#f5f7fa;color:#889')+';padding:5px 14px;font-weight:700" title="Active clients who explicitly said NO to having a will (sales targets)">📜 No Will ('+noWillCount+')</button>':'')+
     (willUnaskedCount>0?'<button class="btn xs" data-act="client-list-filter" data-filter="willunasked" style="border-radius:0;border:none;border-left:1.5px solid var(--mist);'+(isWillUnasked?'background:#64748b;color:#fff':'background:#f5f7fa;color:#889')+';padding:5px 14px;font-weight:700" title="Active clients where the will question has not yet been asked">❓ Unasked ('+willUnaskedCount+')</button>':'')+
+    '<button class="btn xs" data-act="client-list-filter" data-filter="tidy" style="border-radius:0;border:none;border-left:1.5px solid var(--mist);'+(isTidy?'background:#c2410c;color:#fff':'background:#f5f7fa;color:#889')+';padding:5px 14px;font-weight:700" title="Clients with no current policy: decide keep / family / lead / inactive">🧹 Tidy-up'+(tidyCount===null?'':' ('+tidyCount+')')+'</button>'+
     (inactiveCount>0?'<button class="btn xs" data-act="client-list-filter" data-filter="inactive" style="border-radius:0;border:none;border-left:1.5px solid var(--mist);'+(isInactive?'background:var(--rose);color:#fff':'background:#f5f7fa;color:#889')+';padding:5px 14px;font-weight:700">\u{1F4A4} Inactive ('+inactiveCount+')</button>':'')+
     '</div>'+
-    (isLeads ? btn('btn b-gd','open-new-lead','+ New Lead') : (!isInactive&&!isNoWill&&!isWillUnasked&&!isFamily ? btn('btn b-gh','id-dob-audit','🪪 ID Audit')+' '+btn('btn b-gd','open-new-client','+ New Client') : ''))+
+    (isLeads ? btn('btn b-gd','open-new-lead','+ New Lead') : (!isInactive&&!isNoWill&&!isWillUnasked&&!isFamily&&!isTidy ? btn('btn b-gh','id-dob-audit','🪪 ID Audit')+' '+btn('btn b-gd','open-new-client','+ New Client') : ''))+
     '</div>'+
     '</div>'+
     '<div class="sb" style="flex-shrink:0"><span style="color:#aaa">🔍</span>'+
@@ -2023,8 +2233,9 @@ function renderClients(){
     // list is fully reachable inside #main's fixed-height grid track, instead of
     // being clipped. flex:0 1 auto = size to content for short lists, shrink +
     // scroll for long ones. Table header is sticky (see clientTable).
+    (isTidy ? tidyBarHtml() : '')+
     '<div class="card" id="clientTableWrap" style="overflow:auto;min-height:0;flex:0 1 auto">'+
-    clientTable(list,false,isLeads,isFamily)+
+    (isTidy ? (TIDY_KEEP===null ? '<div class="empty">Loading…</div>' : (list.length ? tidyTable(list) : '<div class="empty">'+(TIDY_SHOW_KEPT?'Nobody kept yet':'Nothing left to review 🎉')+'</div>')) : clientTable(list,false,isLeads,isFamily))+
     '</div>';
 }
 
@@ -2057,9 +2268,10 @@ function refreshClientList(){
   if(!wrap) return;  // not on the clients page
   var isLeads=(window.CLIENT_LIST_FILTER||'clients')==='leads';
   var isFamily=(window.CLIENT_LIST_FILTER||'clients')==='family';
+  var isTidy=(window.CLIENT_LIST_FILTER||'clients')==='tidy';
   var list=clientPageList();
   // #clientTableWrap is the scroll container itself now — just swap the table in.
-  wrap.innerHTML=clientTable(list,false,isLeads,isFamily);
+  wrap.innerHTML = isTidy ? (list.length ? tidyTable(list) : '<div class="empty">No matches</div>') : clientTable(list,false,isLeads,isFamily);
   wrap.scrollTop=0;  // a changed filter starts the list from the top
   var cnt=document.getElementById('clientPageCount'); if(cnt) cnt.textContent=list.length;
   var info=document.getElementById('ageFilterInfo'); if(info) info.textContent=ageFilterInfoText(list.length);
@@ -2262,6 +2474,9 @@ function renderProfile(){
     (isFamilyRecord(c)?'<span style="background:#ccfbf1;color:#0f766e;border-radius:10px;padding:3px 12px;font-size:11px;font-weight:700" title="On the Family &amp; contacts list, not in Clients">👨‍👩‍👧 '+escHtml(String(c.FamilyType))+' · not yet a client</span>'+
       '<button class="btn b-sg sm" data-act="convert-family" data-id="'+c.ID+'">✅ Convert to Client</button>'+
       '<button class="btn b-gd sm" data-act="link-family" data-id="'+c.ID+'" title="Link this person to the client they belong to (e.g. a child to the mother)">🔗 Link to client</button>'
+      :'')+
+    (!isFamilyRecord(c) && c.IsLead!=='Yes' && !clientHasCurrentPolicy(c.ID) ?
+      '<button class="btn b-gh sm" style="color:#fff;border-color:#334466" data-act="move-to-family" data-id="'+c.ID+'" title="Not really a client (e.g. a spouse, child or parent with no policy)? Move them to Family &amp; contacts.">↩ Move to Family &amp; contacts</button>'
       :'')+
     '<button class="btn b-gh sm" style="color:#fff;border-color:#334466" data-act="edit-client" data-id="'+c.ID+'">✏️ Edit</button>'+
     "<a href='"+buildComplianceUrl(c)+"' target='_blank' style='text-decoration:none'><button class='btn b-sk sm' style='background:#0e413a;color:#d4af5a;border-color:#2a3a5e'>📋 Compliance Docs</button></a>"+
@@ -15327,6 +15542,7 @@ document.addEventListener('click', function(e){
         case 'link-existing':       openLinkExistModal(id, 'Spouse'); break;
         case 'confirm-exist-link':  confirmExistLinkRouted(id); break;
         case 'link-family':         openLinkFamilyModal(id); break;
+        case 'move-to-family':      moveToFamilyPrompt(id); break;
         case 'tab':            CTAB=el.getAttribute('data-tab'); window._selectedEvent=null; render(); break;
         case 'fna':
           var fc = SEL ? DB.clients.find(function(x){ return String(x.ID)===String(SEL); }) : null;
