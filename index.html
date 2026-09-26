@@ -988,8 +988,21 @@ function findClientByName(nm){
 function isActiveClient(c){
   if(!c) return false;
   if(c.IsLead==='Yes') return false;
+  if(isFamilyRecord(c)) return false;   // family / contacts are not clients until converted
   if(c.Status==='Inactive'||c.Status==='Cancelled') return false;
   return true;
+}
+// ── Client vs family & contacts ──────────────────────────────────
+// Only a person marked as a client is a client: FamilyType 'Principal' (from the
+// original import) or blank (everyone captured in the CRM), or any Company record.
+// Anyone the import tagged Spouse / Child / Adult / Contact Person / Employer is a
+// family member or contact until converted. ✅ Convert clears the tag, which moves
+// them to Clients permanently.
+function isFamilyRecord(c){
+  if(!c) return false;
+  if(c.ClientType==='Company') return false;
+  var ft=String(c.FamilyType==null?'':c.FamilyType).trim();
+  return ft!=='' && ft!=='Principal';
 }
 function isdone(t){ return t.Done===true||t.Done==='TRUE'||t.Done===1||t.Done==='true'; }
 function clean(v){ if(v===0||v==='0') return '0'; return (!v||v==='None')?'':String(v); }
@@ -1073,8 +1086,26 @@ function clientSurnameKeyRaw(c){
   var name=String(c.Name||'').replace(/\s+/g,' ').trim();
   if(!name) return '';
   if(c.ClientType==='Company') return name;
+  var sn=storedSurnameFor(c);
+  if(sn) return sn;
+  return surnameFromNameRule(name);
+}
+// The stored Surname, but only while the Name still ends with it (guards against
+// a Name edited elsewhere after the Surname was set). Returned in the Name's casing.
+function storedSurnameFor(c){
+  var name=String(c.Name||'').replace(/\s+/g,' ').trim();
   var sn=String(c.Surname||'').replace(/\s+/g,' ').trim();
-  if(sn && name.toLowerCase().slice(-sn.length)===sn.toLowerCase()) return sn;
+  if(!sn || !name) return '';
+  if(name.toLowerCase().slice(-sn.length)!==sn.toLowerCase()) return '';
+  if(name.length>sn.length && name.charAt(name.length-sn.length-1)!==' ') return '';  // whole words only
+  return name.slice(-sn.length);
+}
+// Surname from a full name when none is stored: business-style names → the whole
+// name; one word → the word; else from the first particle (never the first word)
+// → "Van Der Merwe", "Du Plessis", "Janse Van Rensburg"; else the last word.
+function surnameFromNameRule(name){
+  name=String(name||'').replace(/\s+/g,' ').trim();
+  if(!name) return '';
   if(BUSINESS_NAME_RE.test(name)) return name;
   var w=name.split(' ');
   if(w.length<2) return name;
@@ -1084,6 +1115,17 @@ function clientSurnameKeyRaw(c){
     if((lw==='janse'||lw==='jansen') && w[i+1].toLowerCase()==='van') return w.slice(i).join(' ');
   }
   return w[w.length-1];
+}
+// Split a record into the form's First name(s) / Surname boxes.
+function splitNameForForm(c){
+  var name=String(c.Name||'').replace(/\s+/g,' ').trim();
+  if(!name) return {first:'',surname:''};
+  var sn=storedSurnameFor(c);
+  if(!sn){
+    if(name.indexOf(' ')<0) return {first:name,surname:''};   // one word: treat as first name
+    sn=surnameFromNameRule(name);
+  }
+  return {first:name.slice(0,name.length-sn.length).trim(), surname:sn};
 }
 // Initial letter for the A–Z bar: accents folded (É → E), leading stray
 // punctuation skipped ("-Kok" → K); anything not A–Z files under '#'.
@@ -1139,6 +1181,8 @@ function clientPageFiltered(){
   var f=window.CLIENT_LIST_FILTER||'clients';
   return base.filter(function(c){
     if(f==='leads')       return c.IsLead==='Yes';
+    if(f==='family')      return c.IsLead!=='Yes' && isFamilyRecord(c);
+    if(isFamilyRecord(c)) return false;   // every other tab is clients only
     if(f==='inactive')    return c.IsLead!=='Yes' && (c.Status==='Inactive'||c.Status==='Cancelled');
     if(f==='nowill')      return c.IsLead!=='Yes' && c.Status!=='Inactive' && c.Status!=='Cancelled' && c.HasWill==='No';
     if(f==='willunasked') return c.IsLead!=='Yes' && c.Status!=='Inactive' && c.Status!=='Cancelled' && c.HasWill!=='Yes' && c.HasWill!=='No';
@@ -1510,15 +1554,21 @@ function render(){
 
 // DASHBOARD
 function renderDash(){
-  var active=DB.clients.filter(function(c){return c.Status==='Active';});
+  // Active clients = Status Active AND a real client (not a lead, not family/contacts).
+  var active=DB.clients.filter(function(c){return c.Status==='Active' && isActiveClient(c);});
   var open=DB.tasks.filter(function(t){return !isdone(t);});
   var today=new Date(); today.setHours(0,0,0,0);
   var up=[];
 
   // Birthdays and manual review dates — exclude leads, inactive, cancelled.
   // These should only fire for real, current, serviceable clients.
+  // Family & contacts still get BIRTHDAY reminders (a reason to call, and a
+  // conversion opportunity) but not review or wedding-anniversary reminders
+  // (the principal's own record already carries the anniversary).
   DB.clients.forEach(function(c){
-    if(!isActiveClient(c)) return;
+    var _isCli = isActiveClient(c);
+    var _isFam = !_isCli && isFamilyRecord(c) && c.IsLead!=='Yes' && c.Status!=='Inactive' && c.Status!=='Cancelled';
+    if(!_isCli && !_isFam) return;
     if(clean(c.DOB)){
       var d=daysTo(c.DOB);
       if(d!==null&&d<=60){
@@ -1528,9 +1578,10 @@ function renderDash(){
         var _bdayThisYear=new Date(_nextBdayYear, _dob.getMonth(), _dob.getDate());
         if(_bdayThisYear<today) _nextBdayYear++;
         var _turningAge=_nextBdayYear-_dob.getFullYear();
-        up.push({name:c.Name,id:c.ID,cell:c.Cell||'',type:'🎂 Birthday',days:d,col:'var(--gold)',age:_turningAge});
+        up.push({name:c.Name,id:c.ID,cell:c.Cell||'',type:_isFam?('🎂 Birthday · '+c.FamilyType+', not a client yet'):'🎂 Birthday',days:d,col:'var(--gold)',age:_turningAge});
       }
     }
+    if(!_isCli) return;
     if(clean(c.ReviewDate)){
       var d2=daysTo(c.ReviewDate);
       if(d2!==null&&d2<=60)up.push({name:c.Name,id:c.ID,cell:c.Cell||'',type:'📋 Review Due',days:d2,col:'var(--sky)',reviewDate:c.ReviewDate});
@@ -1867,6 +1918,21 @@ function convertLead(id){
   render();
 }
 
+// Family & contacts → Client. Clears the import's family tag, which is the one
+// thing that keeps a record out of the Clients list. Relationship links are kept.
+function convertFamilyToClient(id){
+  var c = DB.clients.find(function(x){ return String(x.ID)===String(id); });
+  if(!c || !isFamilyRecord(c)) return;
+  if(!confirm('Convert '+c.Name+' to a client?\n\nThey will move from Family & contacts to your Clients list.')) return;
+  c.FamilyType = '';
+  var _sc=captureScrolls();
+  render();
+  restoreScrolls(_sc);
+  post({action:'saveClient', client:c}, function(res){
+    if(res && res.ok) toast(c.Name+' is now a client ✅','ok');
+  });
+}
+
 function toggleContacted(id, checked){
   var c = DB.clients.find(function(x){ return String(x.ID)===String(id); });
   if(!c) return;
@@ -1896,29 +1962,32 @@ function renderClients(){
   var isInactive     = window.CLIENT_LIST_FILTER === 'inactive';
   var isNoWill       = window.CLIENT_LIST_FILTER === 'nowill';
   var isWillUnasked  = window.CLIENT_LIST_FILTER === 'willunasked';
+  var isFamily       = window.CLIENT_LIST_FILTER === 'family';
   // Tab filter + text search + age filter now share one code path
   // (clientPageFiltered / applyClientSearchAge) so the full render and the live
   // refreshClientList() can never drift apart.
   var list = clientPageList();
-  var clientCount     = base.filter(function(c){ return c.IsLead!=='Yes' && c.Status!=='Inactive' && c.Status!=='Cancelled'; }).length;
+  var clientCount     = base.filter(function(c){ return c.IsLead!=='Yes' && !isFamilyRecord(c) && c.Status!=='Inactive' && c.Status!=='Cancelled'; }).length;
   var leadCount       = base.filter(function(c){ return c.IsLead==='Yes'; }).length;
-  var inactiveCount   = base.filter(function(c){ return c.IsLead!=='Yes' && (c.Status==='Inactive'||c.Status==='Cancelled'); }).length;
+  var familyCount     = base.filter(function(c){ return c.IsLead!=='Yes' && isFamilyRecord(c); }).length;
+  var inactiveCount   = base.filter(function(c){ return c.IsLead!=='Yes' && !isFamilyRecord(c) && (c.Status==='Inactive'||c.Status==='Cancelled'); }).length;
   // No Will count = explicit No only (sales targets). Unasked = anything else (mirrors
   // the dashboard tile ⚪ bucket: empty/undefined/anything other than explicit Yes or No).
-  var noWillCount     = base.filter(function(c){ return c.IsLead!=='Yes' && c.Status!=='Inactive' && c.Status!=='Cancelled' && c.HasWill==='No'; }).length;
-  var willUnaskedCount= base.filter(function(c){ return c.IsLead!=='Yes' && c.Status!=='Inactive' && c.Status!=='Cancelled' && c.HasWill!=='Yes' && c.HasWill!=='No'; }).length;
-  var pageLabel = isLeads ? 'Leads' : isInactive ? 'Inactive' : isNoWill ? 'Clients — No Will (sales targets)' : isWillUnasked ? 'Clients — Will Not Yet Asked' : 'Clients';
+  var noWillCount     = base.filter(function(c){ return c.IsLead!=='Yes' && !isFamilyRecord(c) && c.Status!=='Inactive' && c.Status!=='Cancelled' && c.HasWill==='No'; }).length;
+  var willUnaskedCount= base.filter(function(c){ return c.IsLead!=='Yes' && !isFamilyRecord(c) && c.Status!=='Inactive' && c.Status!=='Cancelled' && c.HasWill!=='Yes' && c.HasWill!=='No'; }).length;
+  var pageLabel = isLeads ? 'Leads' : isFamily ? 'Family & contacts — not yet clients' : isInactive ? 'Inactive' : isNoWill ? 'Clients — No Will (sales targets)' : isWillUnasked ? 'Clients — Will Not Yet Asked' : 'Clients';
   return '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;flex-shrink:0">'+
     '<h1 style="font-family:\'DM Serif Display\',serif;font-size:22px;color:var(--navy)">'+pageLabel+' (<span id="clientPageCount">'+list.length+'</span>)</h1>'+
     '<div style="display:flex;gap:6px;align-items:center">'+
     '<div style="display:flex;gap:0;border:1.5px solid var(--mist);border-radius:8px;overflow:hidden">'+
-    '<button class="btn xs" data-act="client-list-filter" data-filter="clients" style="border-radius:0;border:none;'+(!isLeads&&!isInactive&&!isNoWill&&!isWillUnasked?'background:var(--navy);color:#fff':'background:#f5f7fa;color:#889')+';padding:5px 14px;font-weight:700">👥 Clients ('+clientCount+')</button>'+
+    '<button class="btn xs" data-act="client-list-filter" data-filter="clients" style="border-radius:0;border:none;'+(!isLeads&&!isInactive&&!isNoWill&&!isWillUnasked&&!isFamily?'background:var(--navy);color:#fff':'background:#f5f7fa;color:#889')+';padding:5px 14px;font-weight:700">👥 Clients ('+clientCount+')</button>'+
     '<button class="btn xs" data-act="client-list-filter" data-filter="leads" style="border-radius:0;border:none;border-left:1.5px solid var(--mist);'+(isLeads?'background:var(--navy);color:#fff':'background:#f5f7fa;color:#889')+';padding:5px 14px;font-weight:700">🎯 Leads ('+leadCount+')</button>'+
+    (familyCount>0||isFamily?'<button class="btn xs" data-act="client-list-filter" data-filter="family" style="border-radius:0;border:none;border-left:1.5px solid var(--mist);'+(isFamily?'background:#0f766e;color:#fff':'background:#f5f7fa;color:#889')+';padding:5px 14px;font-weight:700" title="Spouses, children and contacts who are not (yet) clients. Your conversion list.">👨‍👩‍👧 Family &amp; contacts ('+familyCount+')</button>':'')+
     (noWillCount>0?'<button class="btn xs" data-act="client-list-filter" data-filter="nowill" style="border-radius:0;border:none;border-left:1.5px solid var(--mist);'+(isNoWill?'background:#9e2a2b;color:#fff':'background:#f5f7fa;color:#889')+';padding:5px 14px;font-weight:700" title="Active clients who explicitly said NO to having a will (sales targets)">📜 No Will ('+noWillCount+')</button>':'')+
     (willUnaskedCount>0?'<button class="btn xs" data-act="client-list-filter" data-filter="willunasked" style="border-radius:0;border:none;border-left:1.5px solid var(--mist);'+(isWillUnasked?'background:#64748b;color:#fff':'background:#f5f7fa;color:#889')+';padding:5px 14px;font-weight:700" title="Active clients where the will question has not yet been asked">❓ Unasked ('+willUnaskedCount+')</button>':'')+
     (inactiveCount>0?'<button class="btn xs" data-act="client-list-filter" data-filter="inactive" style="border-radius:0;border:none;border-left:1.5px solid var(--mist);'+(isInactive?'background:var(--rose);color:#fff':'background:#f5f7fa;color:#889')+';padding:5px 14px;font-weight:700">\u{1F4A4} Inactive ('+inactiveCount+')</button>':'')+
     '</div>'+
-    (isLeads ? btn('btn b-gd','open-new-lead','+ New Lead') : (!isInactive&&!isNoWill&&!isWillUnasked ? btn('btn b-gh','id-dob-audit','🪪 ID Audit')+' '+btn('btn b-gd','open-new-client','+ New Client') : ''))+
+    (isLeads ? btn('btn b-gd','open-new-lead','+ New Lead') : (!isInactive&&!isNoWill&&!isWillUnasked&&!isFamily ? btn('btn b-gh','id-dob-audit','🪪 ID Audit')+' '+btn('btn b-gd','open-new-client','+ New Client') : ''))+
     '</div>'+
     '</div>'+
     '<div class="sb" style="flex-shrink:0"><span style="color:#aaa">🔍</span>'+
@@ -1953,7 +2022,7 @@ function renderClients(){
     // being clipped. flex:0 1 auto = size to content for short lists, shrink +
     // scroll for long ones. Table header is sticky (see clientTable).
     '<div class="card" id="clientTableWrap" style="overflow:auto;min-height:0;flex:0 1 auto">'+
-    clientTable(list,false,isLeads)+
+    clientTable(list,false,isLeads,isFamily)+
     '</div>';
 }
 
@@ -1985,9 +2054,10 @@ function refreshClientList(){
   var wrap=document.getElementById('clientTableWrap');
   if(!wrap) return;  // not on the clients page
   var isLeads=(window.CLIENT_LIST_FILTER||'clients')==='leads';
+  var isFamily=(window.CLIENT_LIST_FILTER||'clients')==='family';
   var list=clientPageList();
   // #clientTableWrap is the scroll container itself now — just swap the table in.
-  wrap.innerHTML=clientTable(list,false,isLeads);
+  wrap.innerHTML=clientTable(list,false,isLeads,isFamily);
   wrap.scrollTop=0;  // a changed filter starts the list from the top
   var cnt=document.getElementById('clientPageCount'); if(cnt) cnt.textContent=list.length;
   var info=document.getElementById('ageFilterInfo'); if(info) info.textContent=ageFilterInfoText(list.length);
@@ -2022,8 +2092,36 @@ function setClientLetter(L){
   refreshClientList();
 }
 
-function clientTable(list,mini,isLeads){
-  if(!list.length)return '<div class="empty">'+(isLeads?'No leads yet — add your first lead':'No clients found')+'</div>';
+// Who a family / contact record belongs to. Uses the family links first (both
+// directions); for imported records with no link, falls back to a client whose
+// Spouse Name field is exactly this person's name, shown as a name match.
+function buildFamilyIndex(){
+  var byId={}, links={}, spouse={};
+  DB.clients.forEach(function(c){ byId[String(c.ID)]=c; });
+  (DB.links||[]).forEach(function(l){
+    var a=String(l.PrincipalID||''), b=String(l.ClientID||'');
+    if(!a||!b||a===b) return;
+    (links[b]=links[b]||{})[a]=1;   // b is a relative of principal a
+    (links[a]=links[a]||{})[b]=1;   // and the reverse direction
+  });
+  DB.clients.forEach(function(c){
+    if(isFamilyRecord(c)||!clean(c.SpouseName)) return;
+    var k=normName(c.SpouseName); if(k) (spouse[k]=spouse[k]||[]).push(c);
+  });
+  return function(c){
+    var out=[], seen={};
+    Object.keys(links[String(c.ID)]||{}).forEach(function(pid){
+      var p=byId[pid]; if(p&&!seen[pid]){ seen[pid]=1; out.push({id:p.ID,name:p.Name,byName:false}); }
+    });
+    if(!out.length) (spouse[normName(c.Name)]||[]).forEach(function(p){
+      if(String(p.ID)!==String(c.ID)) out.push({id:p.ID,name:p.Name,byName:true});
+    });
+    return out;
+  };
+}
+function clientTable(list,mini,isLeads,isFamily){
+  if(!list.length)return '<div class="empty">'+(isLeads?'No leads yet — add your first lead':isFamily?'No family members or contacts match':'No clients found')+'</div>';
+  if(isFamily && !mini) return familyTable(list);
   // Sticky header on all full-size tables (the card is the scroll container),
   // so column titles stay visible while scrolling a long list. Skipped for the
   // compact `mini` table embedded in the client card.
@@ -2054,6 +2152,41 @@ function clientTable(list,mini,isLeads){
         '<td>'+(isLeads?bx('bx-gr',nt+' tasks'):bx('bx-gr',np+' pols'))+'</td>'+
         '<td style="display:flex;gap:4px">'+
         (isLeads?'<button class="btn b-sg xs" data-act="convert-lead" data-id="'+c.ID+'">✅ Convert</button>':'')+
+        '<button class="btn b-gh xs" data-act="edit-client" data-id="'+c.ID+'">Edit</button></td>'+
+        '</tr>';
+    }).join('')+'</tbody></table>';
+}
+
+// Family & contacts tab: the conversion list. Relationship + who they belong to,
+// age (in the name), cell, status, and ✅ Convert.
+function familyTable(list){
+  var linkedTo=buildFamilyIndex();
+  var theadStyle=' style="position:sticky;top:0;background:#fff;z-index:2;box-shadow:0 1px 0 var(--mist)"';
+  return '<table class="tbl"><thead'+theadStyle+'><tr>'+
+    '<th>Person</th><th>Relationship</th><th>Linked to</th><th>Cell</th><th>Status</th><th></th>'+
+    '</tr></thead><tbody>'+
+    list.map(function(c){
+      var ag=ageOf(c);
+      var ageChip = ag!==null ? '<span style="font-size:10px;font-weight:700;color:#8a6d1a;background:#f5f0d8;border-radius:10px;padding:1px 7px;white-space:nowrap" title="Current age">'+ag+'y</span>' : '';
+      var em=clean(c.Email);
+      var lk=linkedTo(c);
+      var lkHtml = lk.length ? lk.map(function(x){
+          return '<span data-act="open-client" data-id="'+x.id+'" style="color:var(--navy);font-weight:600;text-decoration:underline;cursor:pointer" title="Open '+escHtml(x.name)+'">'+escHtml(x.name)+'</span>'+
+            (x.byName?' <span style="font-size:10px;color:#889" title="No family link captured. Matched because this client\'s Spouse Name field is exactly this name.">(name match)</span>':'');
+        }).join(', ')
+        : '<span style="font-size:11px;color:#b0b6c2;font-style:italic">Not linked</span>';
+      var inactive = c.Status==='Inactive'||c.Status==='Cancelled';
+      return '<tr class="row" data-act="open-client" data-id="'+c.ID+'">'+
+        '<td><div style="display:flex;align-items:center;gap:10px">'+
+        '<div style="width:32px;height:32px;border-radius:50%;background:#0f766e;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:#fff;flex-shrink:0">'+ini(c.Name)+'</div>'+
+        '<div><div style="font-weight:600;display:flex;align-items:center;gap:6px;flex-wrap:wrap">'+(c.Name||'—')+ageChip+'</div>'+(em?'<div style="font-size:11px;color:#889">'+em+'</div>':'')+'</div>'+
+        '</div></td>'+
+        '<td>'+bx('bx-gr',escHtml(String(c.FamilyType||'')))+'</td>'+
+        '<td style="font-size:12px">'+lkHtml+'</td>'+
+        '<td style="font-size:12px">'+(clean(c.Cell)?c.Cell:'—')+'</td>'+
+        '<td>'+(inactive?bx('bx-rd',c.Status):bx('bx-sg',c.Status||'Active'))+'</td>'+
+        '<td style="display:flex;gap:4px">'+
+        '<button class="btn b-sg xs" data-act="convert-family" data-id="'+c.ID+'" title="Make this person a client in their own right">✅ Convert</button>'+
         '<button class="btn b-gh xs" data-act="edit-client" data-id="'+c.ID+'">Edit</button></td>'+
         '</tr>';
     }).join('')+'</tbody></table>';
@@ -2119,6 +2252,9 @@ function renderProfile(){
     (c.IsLead==='Yes'?'<span style="background:#fef3c7;color:#d97706;border-radius:10px;padding:3px 12px;font-size:11px;font-weight:700">🎯 Lead</span>':'')+
     (c.IsLead==='Yes'?
       '<button class="btn b-sg sm" data-act="convert-lead" data-id="'+c.ID+'">✅ Convert to Client</button>'
+      :'')+
+    (isFamilyRecord(c)?'<span style="background:#ccfbf1;color:#0f766e;border-radius:10px;padding:3px 12px;font-size:11px;font-weight:700" title="On the Family &amp; contacts list, not in Clients">👨‍👩‍👧 '+escHtml(String(c.FamilyType))+' · not yet a client</span>'+
+      '<button class="btn b-sg sm" data-act="convert-family" data-id="'+c.ID+'">✅ Convert to Client</button>'
       :'')+
     '<button class="btn b-gh sm" style="color:#fff;border-color:#334466" data-act="edit-client" data-id="'+c.ID+'">✏️ Edit</button>'+
     "<a href='"+buildComplianceUrl(c)+"' target='_blank' style='text-decoration:none'><button class='btn b-sk sm' style='background:#0e413a;color:#d4af5a;border-color:#2a3a5e'>📋 Compliance Docs</button></a>"+
@@ -2470,10 +2606,15 @@ function upgradeToClient(linkId){
   // Get principal to copy shared details like Anniversary across
   var principal2 = DB.clients.find(function(x){ return String(x.ID)===String(lnk.PrincipalID); });
   var newId = 'new_' + Date.now();
+  // FamilyType blank = a client in their own right (a Spouse/Child tag here would
+  // put the upgraded person straight onto Family & contacts). The relationship
+  // itself stays on the family link.
+  var _upName = String(lnk.Name||'').replace(/\s+/g,' ').trim();
   var c = {
     ID: newId, Name: lnk.Name, IDNumber: lnk.IDNumber, DOB: lnk.DOB,
-    Cell: lnk.Cell, Email: lnk.Email, Status: 'Active',
-    FamilyType: lnk.Type, Adviser: cu(),
+    Cell: lnk.Cell, Email: lnk.Email, Status: 'Active', IsLead: 'No',
+    Surname: (_upName.indexOf(' ')>0 ? surnameFromNameRule(_upName) : ''),
+    FamilyType: '', Adviser: cu(),
     MaritalStatus: principal2 ? (principal2.MaritalStatus||'') : '',
     Occupation:'', Employer:'', Income:0,
     TaxNo:'', Smoker:'', RiskCategory:'Not Started',
@@ -7738,7 +7879,7 @@ function openClientModal(id, isLead){
   document.getElementById('cModB').innerHTML=
     // LEAD / CLIENT TOGGLE
     '<div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;padding:10px 14px;background:'+(c.IsLead==='Yes'?'#fffbeb':'#f0fdf4')+';border-radius:10px;border:1.5px solid '+(c.IsLead==='Yes'?'#d97706':'#16a34a')+'">'+
-    '<span style="font-size:13px;font-weight:700;color:'+(c.IsLead==='Yes'?'#d97706':'#16a34a')+'">'+(c.IsLead==='Yes'?'🎯 This is a Lead':'👤 This is a Client')+'</span>'+
+    '<span style="font-size:13px;font-weight:700;color:'+(c.IsLead==='Yes'?'#d97706':isFamilyRecord(c)?'#0f766e':'#16a34a')+'">'+(c.IsLead==='Yes'?'🎯 This is a Lead':isFamilyRecord(c)?('👨‍👩‍👧 Family &amp; contacts ('+escHtml(String(c.FamilyType))+'), not yet a client'):'👤 This is a Client')+'</span>'+
     (c.IsLead==='Yes'?'<label style="display:flex;align-items:center;gap:6px;margin-left:14px;font-size:12px;font-weight:600;color:#065f46;cursor:pointer" title="'+(c.Contacted==='Yes'&&c.ContactedAt?'Contacted '+c.ContactedAt:'Mark as contacted')+'"><input type="checkbox" id="fcontacted" '+(c.Contacted==='Yes'?'checked':'')+' style="width:16px;height:16px;cursor:pointer;accent-color:#16a34a"> Contacted'+(c.Contacted==='Yes'&&c.ContactedAt?' <span style="color:#6b7280;font-weight:400;font-size:11px">('+c.ContactedAt+')</span>':'')+'</label>':'')+
     '<div style="display:flex;gap:0;border:1.5px solid var(--mist);border-radius:8px;overflow:hidden;margin-left:auto">'+
     '<button type="button" onclick="setIsLead(\'No\')" style="padding:5px 16px;font-size:12px;font-weight:700;border:none;cursor:pointer;font-family:inherit;'+(c.IsLead!=='Yes'?'background:var(--navy);color:#fff':'background:#f5f7fa;color:#889')+'">👤 Client</button>'+
@@ -7760,7 +7901,13 @@ function openClientModal(id, isLead){
     // SECTION: Details — Name + Status are shared by both record types.
     '<div id="detailsHdr" style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:1px;padding:4px 0 8px;border-bottom:2px solid var(--gold);margin-bottom:14px">Personal Details</div>'+
     '<div class="g3">'+
-    '<div class="fld"><label id="fnLabel">Full Name *</label><input type="text" id="fn" value="'+clean(c.Name)+'" autocomplete="off"></div>'+
+    // Individuals: First name(s) + Surname (Name is saved as "First names Surname",
+    // exactly as before, so tasks, schedules and the FNA pack keep matching).
+    // Companies: one registered-name box. setClientType() shows the right one.
+    (function(){ var sp=splitNameForForm(c); return ''+
+    '<div class="fld cmIndiv"><label>First name(s) *</label><input type="text" id="ffirst" value="'+escHtml(sp.first)+'" autocomplete="off"></div>'+
+    '<div class="fld cmIndiv"><label>Surname *</label><input type="text" id="fsurname" value="'+escHtml(sp.surname)+'" autocomplete="off" title="As written, including van / du / de / Janse van"></div>'; })()+
+    '<div class="fld cmCompany" style="display:none"><label id="fnLabel">Company / Registered Name *</label><input type="text" id="fn" value="'+escHtml(clean(c.Name))+'" autocomplete="off"></div>'+
     fs('fst','Status',['Active','Inactive'],c.Status||'Active')+
     '</div>'+
     // Company Details — shown only when record type = Company (toggled by setClientType).
@@ -7997,7 +8144,14 @@ function setClientType(val){
   var h = document.getElementById('fclienttype'); if(h) h.value = val;
   document.querySelectorAll('#cModB .cmIndiv').forEach(function(el){ el.style.display = isCo?'none':''; });
   document.querySelectorAll('#cModB .cmCompany').forEach(function(el){ el.style.display = isCo?'':'none'; });
-  var nl = document.getElementById('fnLabel'); if(nl) nl.textContent = isCo ? 'Company / Registered Name *' : 'Full Name *';
+  // Carry the name across when the record type is switched, so nothing is retyped.
+  var fnEl=document.getElementById('fn'), f1=document.getElementById('ffirst'), f2=document.getElementById('fsurname');
+  if(fnEl && f1 && f2){
+    if(isCo && !fnEl.value.trim()) fnEl.value=(f1.value.trim()+' '+f2.value.trim()).trim();
+    if(!isCo && !f1.value.trim() && !f2.value.trim() && fnEl.value.trim()){
+      var _sp=splitNameForForm({Name:fnEl.value}); f1.value=_sp.first; f2.value=_sp.surname;
+    }
+  }
   var dh = document.getElementById('detailsHdr'); if(dh) dh.textContent = isCo ? 'Company' : 'Personal Details';
   var bi = document.getElementById('btnTypeIndiv'), bc = document.getElementById('btnTypeCompany');
   if(bi && bc){
@@ -9936,11 +10090,19 @@ function renderEditDocs(){
 }
 
 function saveClient(openFNA){
-  var name=g('fn');
-  if(!name){toast('Name is required','err');return;}
   var isLead = g('fisleadst')==='Yes';
   var ctype = g('fclienttype')||'Individual';
   var isCompany = (ctype==='Company');
+  var _first = g('ffirst').replace(/\s+/g,' ');
+  var _sur   = g('fsurname').replace(/\s+/g,' ');
+  var name = isCompany ? g('fn') : (_first+' '+_sur).trim();
+  if(!name){toast(isCompany?'Company name is required':'Name is required','err');return;}
+  // Clients need a Surname; NEW individual clients need First name(s) too. A lead may
+  // be saved with just one box. (Existing imported business records captured as
+  // Individual hold their whole name as the surname, so an edit must not demand a
+  // first name. Better still: switch them to 🏢 Company.)
+  if(!isCompany && !isLead && !_sur){toast('Please fill in the Surname (for a business, switch Record type to 🏢 Company)','err');return;}
+  if(!isCompany && !isLead && !EC && !_first){toast('Please fill in First name(s)','err');return;}
   if(!isLead && !isCompany && !getRadio('fgen')&&!g('fgen')){toast('Please select Gender','err');return;}
   if(!isLead && !isCompany && !getRadio('fsm')&&!g('fsm')){toast('Please select Smoker status','err');return;}
   // Guard against silent date loss: a date picker only stores its value when
@@ -10030,7 +10192,14 @@ function saveClient(openFNA){
   }
   if(_existing){
     c.LastAccessed=_existing.LastAccessed||'';
+    // Keep fields the form doesn't show. The server already keeps them (only the
+    // sent columns are updated), but without this the local copy lost them until
+    // the next sync, so an edited family member popped into Clients for ~30s.
+    if(_existing.FamilyType!==undefined) c.FamilyType=_existing.FamilyType;
   }
+  // Surname: saved from its own box for individuals; left as it was for companies.
+  if(!isCompany) c.Surname=_sur;
+  else if(_existing && _existing.Surname!==undefined) c.Surname=_existing.Surname;
   if(EC){var i=DB.clients.findIndex(function(x){return x.ID===EC;});if(i>=0)DB.clients[i]=c;}
   else DB.clients.push(c);
 
@@ -15063,6 +15232,7 @@ document.addEventListener('click', function(e){
         case 'id-audit-fix':   idAuditFix(el.getAttribute('data-fixkey')); break;
         case 'id-audit-fix-all': idAuditFixAll(); break;
         case 'convert-lead':   convertLead(id); break;
+        case 'convert-family': convertFamilyToClient(id); break;
         case 'toggle-contacted': toggleContacted(id, el.checked); break;
         case 'client-list-filter': window.CLIENT_LIST_FILTER=el.getAttribute('data-filter'); render(); break;
         case 'go-clients':     goPage('clients'); break;
