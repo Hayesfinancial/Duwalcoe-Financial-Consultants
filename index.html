@@ -2525,6 +2525,16 @@ function renderProfile(){
     '<h1 style="font-family:\'DM Serif Display\',serif;font-size:20px;color:var(--navy)">'+c.Name+'</h1>'+
     '</div>'+
     (window.CONCURRENT_EDIT_WARNING?'<div style="background:#fef3c7;border:1.5px solid #f59e0b;border-radius:8px;padding:10px 16px;margin-bottom:10px;font-size:13px;font-weight:600;color:#92400e">'+window.CONCURRENT_EDIT_WARNING+'</div>':'')+
+    // Review reminder: current policies on this client that are not on your record.
+    (function(){
+      if(c.Status==='Inactive'||c.Status==='Cancelled') return '';   // no review for a closed client
+      var nm=polsFor(c.ID).filter(function(p){ return !willIsDeadPolicy(p) && aumState(p)==='notmine'; });
+      if(!nm.length) return '';
+      var provs={}; nm.forEach(function(p){ var l=String(p.Insurer||'provider not captured').replace(/\s+/g,' ').trim(); provs[l]=1; });
+      return '<div style="background:#fff7ed;border:1.5px solid #fdba74;border-radius:8px;padding:9px 14px;margin-bottom:10px;font-size:13px;color:#7c2d12">'+
+        '🎯 <b>'+nm.length+' polic'+(nm.length===1?'y':'ies')+' not on your record</b> ('+escHtml(Object.keys(provs).join(', '))+'). '+
+        'At the review ask for the latest statement, value, restriction or maturity date, penalties and fees.</div>';
+    })()+
     '<div class="phdr">'+
     '<div class="av">'+ini(c.Name)+'</div>'+
     '<div style="flex:1">'+
@@ -5732,6 +5742,55 @@ var AUM_TAB = 'overview';
 var AUM_RISK_TYPES = {'Life / Income Protector':1,'Business Assurance':1,'Medical Aid':1};
 function aumIsRisk(p){ return !!AUM_RISK_TYPES[p.Type]; }
 var AUM_CHOICES = {};   // policyId -> 'mine_aum' | 'mine' | 'notmine', until Apply
+// Providers Clinton has a contract with, shared for everyone in settings key
+// AUM_CONTRACTS_KEY as JSON {providerKey:{label,by,at}}. Keyed on the provider name
+// lower-cased with spaces collapsed ("Sanlam" = "sanlam "). null = not loaded yet.
+var AUM_CONTRACTS_KEY = 'aum_contracts';
+var AUM_CONTRACTS = null;
+var _aumContractsLoading = false;
+function aumProvKey(name){ return String(name||'').replace(/\s+/g,' ').trim().toLowerCase(); }
+function aumHasContract(p){ return !!(AUM_CONTRACTS && AUM_CONTRACTS[aumProvKey(p.Insurer)]); }
+function loadAumContracts(cb){
+  if(_aumContractsLoading) return;
+  _aumContractsLoading = true;
+  sbFetch('GET','/rest/v1/settings?Key=eq.'+AUM_CONTRACTS_KEY+'&select=*',null,function(rows,err){
+    _aumContractsLoading = false;
+    var obj={};
+    try{ obj=JSON.parse((rows&&rows[0]&&rows[0].Value)||'{}')||{}; }catch(e){ obj={}; }
+    if(!err) AUM_CONTRACTS=obj; else if(AUM_CONTRACTS===null) AUM_CONTRACTS={};
+    if(cb) cb(!err);
+  });
+}
+// Tick / untick one provider: read the latest from the server, merge, write back.
+function aumToggleContract(label, on){
+  var k=aumProvKey(label); if(!k) return;
+  sbFetch('GET','/rest/v1/settings?Key=eq.'+AUM_CONTRACTS_KEY+'&select=*',null,function(rows,err){
+    var obj={};
+    try{ obj=JSON.parse((rows&&rows[0]&&rows[0].Value)||'{}')||{}; }catch(e){ obj={}; }
+    if(err && AUM_CONTRACTS) obj=JSON.parse(JSON.stringify(AUM_CONTRACTS));
+    if(on) obj[k]={label:String(label).replace(/\s+/g,' ').trim(),by:cu(),at:new Date().toISOString().slice(0,10)};
+    else delete obj[k];
+    AUM_CONTRACTS=obj;
+    var _sc=captureScrolls(); render(); restoreScrolls(_sc);
+    sbFetch('POST','/rest/v1/settings',[{Key:AUM_CONTRACTS_KEY,Value:JSON.stringify(obj)}],function(r2,e2){
+      if(e2) toast('⚠️ Contract list not saved to the server. Please tick it again.','err');
+    });
+  });
+}
+// Providers on the CRM (current policies of active clients), with policy counts.
+function aumProviderList(){
+  var byClient={}; DB.clients.forEach(function(c){ byClient[String(c.ID)]=c; });
+  var g={}, order=[];
+  (DB.policies||[]).forEach(function(p){
+    if(willIsDeadPolicy(p)) return;
+    var c=byClient[String(p.ClientID)]; if(c && (c.Status==='Inactive'||c.Status==='Cancelled')) return;
+    var k=aumProvKey(p.Insurer); if(!k) return;
+    if(!g[k]){ g[k]={key:k,label:String(p.Insurer).replace(/\s+/g,' ').trim(),n:0,notmine:0}; order.push(k); }
+    g[k].n++; if(aumState(p)==='notmine') g[k].notmine++;
+  });
+  order.sort(function(a,b){ return g[a].label.localeCompare(g[b].label); });
+  return order.map(function(k){ return g[k]; });
+}
 function aumFlag(v){ v=String(v==null?'':v).trim(); return v==='Yes'||v==='No' ? v : ''; }
 function aumState(p){
   var aor=aumFlag(p.AdvisorOfRecord), aum=aumFlag(p.CountsForAUM);
@@ -5766,6 +5825,7 @@ function aumData(){
   d.notsetVal=d.notset.reduce(function(t,r){ return t+(r.risk?0:r.val); },0);
   return d;
 }
+function aumHasContractRow(r){ return aumHasContract(r.p); }
 function aumMoney(v){ return v ? 'R '+Math.round(v).toLocaleString('en-ZA') : '—'; }
 function aumPremTxt(p){
   var v=N(p.Premium); if(!v) return '—';
@@ -5845,6 +5905,7 @@ function aumApply(){
   });
 }
 function renderAumPage(){
+  if(AUM_CONTRACTS===null) loadAumContracts(function(){ if(PAGE==='aum'){ var _s=captureScrolls(); render(); restoreScrolls(_s); } });
   var d=aumData();
   function tile(bg,fg,big,small,sub){
     return '<div style="flex:1;min-width:180px;background:'+bg+';border-radius:12px;padding:14px 16px">'+
@@ -5857,7 +5918,7 @@ function renderAumPage(){
   function tb(k,l){ return '<button class="btn '+(tab===k?'b-nv':'b-gh')+' sm" onclick="AUM_TAB=\''+k+'\';AUM_CHOICES={};render();">'+l+'</button>'; }
   var head='<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;flex-shrink:0">'+
     '<h1 style="font-family:\'DM Serif Display\',serif;font-size:22px;color:var(--navy)">Assets under management</h1>'+
-    '<div style="display:flex;gap:6px">'+tb('overview','📊 AUM by provider')+tb('notmine','🎯 Not mine ('+d.notmine.length+')')+tb('notset','❓ Not set ('+d.notset.length+')')+'</div></div>'+
+    '<div style="display:flex;gap:6px">'+tb('overview','📊 AUM by provider')+tb('notmine','🎯 Not mine ('+d.notmine.length+')')+tb('notset','❓ Not set ('+d.notset.length+')')+tb('contracts','🤝 My contracts'+(AUM_CONTRACTS?' ('+Object.keys(AUM_CONTRACTS).length+')':''))+'</div></div>'+
     '<div style="display:flex;gap:12px;flex-wrap:wrap;flex-shrink:0">'+
       tile('#0e413a','#fff',aumMoney(d.aumTotal),'AUM',d.aum.length+' policies on your record')+
       tile('#fff7ed','#9a3412',aumMoney(d.notmineVal),'On your CRM, not yours',nmFund.length+' investments · '+nmRisk.length+' risk policies')+
@@ -5873,10 +5934,29 @@ function renderAumPage(){
       '<div style="font-size:11px;color:#889;font-style:italic">AUM counts current investment and retirement policies ticked “Advisor / broker of record” and “Counts for AUM”, at the captured fund value. Life &amp; risk, business assurance and medical aid never count as AUM. Policies not yet ticked either way are on the “Not set” tab and are not counted.'+
       (d.hiddenInactive?' Policies of inactive clients are left out everywhere on this page ('+d.hiddenInactive+' at the moment).':'')+'</div>';
   } else if(tab==='notmine'){
-    nmFund.sort(function(a,b){ return b.val-a.val; });
-    nmRisk.sort(function(a,b){ return N(b.p.Premium)-N(a.p.Premium); });
-    body='<div class="card" style="padding:12px 14px"><div style="font-weight:700;color:#9a3412;margin-bottom:6px">Investments &amp; retirement you don\'t control ('+nmFund.length+', '+aumMoney(d.notmineVal)+')</div>'+aumPolicyTable(nmFund,false,'None')+'</div>'+
-      '<div class="card" style="padding:12px 14px"><div style="font-weight:700;color:#9a3412;margin-bottom:6px">Life &amp; risk you are not broker of record on ('+nmRisk.length+')</div>'+aumPolicyTable(nmRisk,false,'None')+'</div>';
+    if(AUM_CONTRACTS===null) return head+'<div class="card"><div class="empty" style="padding:16px">Loading your contracts…</div></div>';
+    // Split by whether you hold a contract with the provider: appoint vs move.
+    function srt(a,b){ return (a.risk-b.risk) || (b.val-a.val) || (N(b.p.Premium)-N(a.p.Premium)); }
+    var appoint=d.notmine.filter(aumHasContractRow).sort(srt), move=d.notmine.filter(function(r){ return !aumHasContractRow(r); }).sort(srt);
+    var aVal=appoint.reduce(function(t,r){ return t+(r.risk?0:r.val); },0), mVal=move.reduce(function(t,r){ return t+(r.risk?0:r.val); },0);
+    body=(Object.keys(AUM_CONTRACTS).length ? '' : '<div style="padding:8px 12px;background:#fff7ed;border:1.5px solid #fdba74;border-radius:8px;font-size:13px;color:#7c2d12"><b>Tick your contracted providers on the 🤝 My contracts tab</b> and these policies sort themselves into “Appoint me” and “Move at the right time”.</div>')+
+      '<div class="card" style="padding:12px 14px"><div style="font-weight:700;color:#166534">✅ Appoint me: providers you have a contract with ('+appoint.length+(aVal?', '+aumMoney(aVal):'')+')</div>'+
+      '<div style="font-size:12px;color:#667;margin:2px 0 8px">A broker appointment is all it takes. No product change.</div>'+aumPolicyTable(appoint,false,'None')+'</div>'+
+      '<div class="card" style="padding:12px 14px"><div style="font-weight:700;color:#9a3412">⏳ Move at the right time: no contract with the provider ('+move.length+(mVal?', '+aumMoney(mVal):'')+')</div>'+
+      '<div style="font-size:12px;color:#667;margin:2px 0 8px">Win these by moving them to a provider you are contracted with when the timing is right: Section 14 transfer (RA, preservation, living annuity), transfer (unit trust, TFSA), after the 5-year restriction (endowment), replacement with full disclosure (risk). <b>At the review ask for:</b> latest statement, current value, restriction or maturity date, early-exit penalties and fees.</div>'+aumPolicyTable(move,false,'None')+'</div>';
+  } else if(tab==='contracts'){
+    if(AUM_CONTRACTS===null) return head+'<div class="card"><div class="empty" style="padding:16px">Loading your contracts…</div></div>';
+    var provs=aumProviderList();
+    body='<div class="card" style="padding:12px 14px"><div style="font-weight:700;color:var(--navy)">Providers on your CRM: tick the ones you have a contract with</div>'+
+      '<div style="font-size:12px;color:#667;margin:2px 0 10px">Shared with everyone. Names are matched as captured, so fix spelling variants on the policies (e.g. “Momemtum Wealth”) to keep one line per provider.</div>'+
+      '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:6px">'+
+      provs.map(function(x){
+        var on=!!AUM_CONTRACTS[x.key];
+        return '<label style="display:flex;align-items:center;gap:8px;padding:7px 10px;border:1.5px solid '+(on?'#86efac':'var(--mist)')+';border-radius:8px;background:'+(on?'#f0fdf4':'#fff')+';cursor:pointer;font-size:13px">'+
+          '<input type="checkbox" '+(on?'checked':'')+' data-aumprov="'+escHtml(x.label)+'" onchange="aumToggleContract(this.getAttribute(\'data-aumprov\'),this.checked)" style="width:16px;height:16px;accent-color:#16a34a">'+
+          '<span style="flex:1;font-weight:600">'+escHtml(x.label)+'</span>'+
+          '<span style="font-size:11px;color:#889">'+x.n+' pol'+(x.notmine?' · '+x.notmine+' not mine':'')+'</span></label>';
+      }).join('')+'</div></div>';
   } else {
     var ns=d.notset.slice().sort(function(a,b){ return (a.risk-b.risk) || (b.val-a.val); });
     body='<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 12px;background:#f1f5f9;border:1.5px solid #cbd5e1;border-radius:8px">'+
