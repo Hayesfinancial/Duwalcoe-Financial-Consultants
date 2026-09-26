@@ -5253,11 +5253,16 @@ function renderReviewsPage(){
 // provider, policy no, premium, commission, submitted / accepted / schedule /
 // invoiced dates, lead source. The Register page lists them; activations are
 // grouped by the month of ACCEPTANCE (Tracy's rule; she invoices on
-// acceptance). Jan to Sep 2026 is brought forward from the spreadsheet.
+// acceptance). Jan to 24 Sep 2026 is brought forward from the spreadsheet (frozen).
 // When a case is first accepted: offer "invoiced today", then offer a BASIC
 // policy on the Policies tab (Clinton completes it) plus a task to Clinton.
 var REG_FROM = '2026-10-01';
-var REG_NET_PCT = 85;                        // "COMM due HFS - less 15%"
+// Activations and Sales count every case ACCEPTED from this date:
+// the brought-forward figure and the monthly history were loaded from Tracy's
+// spreadsheet on 24 Sep and are frozen; from 25 Sep the practice runs fully on
+// the CRM. REG_FROM (1 Oct) still governs the Applications list only.
+var REG_ACTS_FROM = '2026-09-25';
+var REG_NET_PCT = 85;                       // "COMM due HFS - less 15%"
 var REG_BF_KEY = 'register_bf_2026';
 var REG_HIST_KEY = 'register_history';          // monthly after-15% totals before the Register (from Tracy's spreadsheet)
 var REG_COMMON_PROVIDERS = ['Allan Gray','Bidvest Life','BrightRock','Coronation','Discovery','Glacier','Hollard','Liberty','Momentum','Momentum Investo','Ninety One','Old Mutual','Old Mutual Wealth','PPS','SA Asset Management','Sanlam','Stanlib','Sygnia','10X'];
@@ -5370,8 +5375,8 @@ function renderCaseDetails(ev){
     '</div>';
   if(!any){
     if(regIsOld(ev)){
-      return html + '<div style="padding:10px 12px;font-size:12px;color:#667">Opened before '+regDate(REG_FROM)+'. If this policy was accepted before then, it is on Tracy\'s spreadsheet: <b>nothing to fill in</b>. '+
-        'Fill in only if it is still waiting for the insurer, so its commission shows in the Register when it is accepted.</div></div>';
+      return html + '<div style="padding:10px 12px;font-size:12px;color:#667">Opened before '+regDate(REG_FROM)+'. If this policy was accepted before '+regDate(REG_ACTS_FROM)+', it is in the brought-forward figure: <b>nothing to fill in</b>. '+
+        'Fill in if it was accepted on or after '+regDate(REG_ACTS_FROM)+', or is still waiting for the insurer, so its commission shows in the Register.</div></div>';
     }
     return html + '<div style="padding:10px 12px;font-size:12px;color:#889;font-style:italic">No case details yet. Click Fill in to add the provider, policy number, premium, commission and dates.</div></div>';
   }
@@ -5765,11 +5770,11 @@ function regAppsRows(){
     return ka < kb ? 1 : ka > kb ? -1 : 0;
   });
 }
-// Accepted from REG_FROM, not NTU, in the chosen year; grouped by month of acceptance.
+// Accepted from REG_ACTS_FROM, not NTU, in the chosen year; grouped by month of acceptance.
 function regActsGroups(){
   var R = window._reg, y = String(R.f.year);
   var rows = (R.events || []).filter(function(ev){
-    return ev.AcceptedDate && String(ev.AcceptedDate) >= REG_FROM && ev.Status !== 'ntu' && String(ev.AcceptedDate).slice(0,4) === y;
+    return ev.AcceptedDate && String(ev.AcceptedDate) >= REG_ACTS_FROM && ev.Status !== 'ntu' && String(ev.AcceptedDate).slice(0,4) === y;
   }).sort(function(a, b){ return String(a.AcceptedDate) < String(b.AcceptedDate) ? -1 : String(a.AcceptedDate) > String(b.AcceptedDate) ? 1 : 0; });
   var groups = [], byKey = {};
   rows.forEach(function(ev){
@@ -5784,7 +5789,9 @@ function regActsGroups(){
 function regMonthTitle(key){
   var p = key.split('-'), y = +p[0], m = +p[1];
   var last = new Date(y, m, 0).getDate();
-  return '1 TO '+last+' '+REG_MONTHS[m-1].toUpperCase()+' '+y;
+  // The first counted month starts on REG_ACTS_FROM, not the 1st.
+  var first = (key === REG_ACTS_FROM.slice(0,7)) ? +REG_ACTS_FROM.slice(8,10) : 1;
+  return first+' TO '+last+' '+REG_MONTHS[m-1].toUpperCase()+' '+y;
 }
 function regBf(){ var R = window._reg; return (R.bf && String(R.bf.year) === String(R.f.year)) ? R.bf : null; }
 
@@ -6092,7 +6099,7 @@ function regAppsHtml(){
 function regActsHtml(){
   var R = window._reg, groups = regActsGroups(), bf = regBf();
   var years = {}; years[String(new Date().getFullYear())] = 1;
-  (R.events || []).forEach(function(e){ if(e.AcceptedDate && String(e.AcceptedDate) >= REG_FROM) years[String(e.AcceptedDate).slice(0,4)] = 1; });
+  (R.events || []).forEach(function(e){ if(e.AcceptedDate && String(e.AcceptedDate) >= REG_ACTS_FROM) years[String(e.AcceptedDate).slice(0,4)] = 1; });
   var sel = 'border:1.5px solid var(--mist);border-radius:7px;padding:5px 8px;font-size:12px;font-family:inherit';
   var all = [].concat.apply([], groups.map(function(g){ return g.rows; }));
   var notInv = all.filter(regNotInvoiced);
@@ -6102,7 +6109,7 @@ function regActsHtml(){
   var html = '<div class="card" style="padding:0">'+
     '<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;padding:10px 14px;border-bottom:1px solid var(--smoke)">'+
       '<select onchange="regSet(\'year\',this.value)" style="'+sel+'">'+Object.keys(years).sort().map(function(y){ return '<option'+(String(R.f.year) === y ? ' selected' : '')+'>'+y+'</option>'; }).join('')+'</select>'+
-      '<span style="font-size:12px;color:#667">Grouped by the month the policy was accepted · from '+regDate(REG_FROM)+'</span>'+
+      '<span style="font-size:12px;color:#667">Grouped by the month the policy was accepted · from '+regDate(REG_ACTS_FROM)+'</span>'+
       (notInv.length ? '<span style="margin-left:auto;background:#fdf2e6;color:#b95900;border-radius:5px;padding:3px 9px;font-size:11px;font-weight:700">⚠ '+notInv.length+' accepted but not invoiced</span>' : '')+
     '</div>';
   var th = 'style="font-size:10px;text-transform:uppercase;letter-spacing:.6px;color:#889;text-align:left;padding:6px 8px;border-bottom:1px solid var(--smoke);white-space:nowrap"';
@@ -6112,7 +6119,7 @@ function regActsHtml(){
   // One table for the whole year so the columns line up month to month.
   html += '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr>'+cols.map(function(h, i){ return '<th '+th.replace('text-align:left', (i >= 7 && i <= 9) ? 'text-align:right' : 'text-align:left')+'>'+h+'</th>'; }).join('')+'</tr></thead><tbody>';
   if(!groups.length){
-    html += '<tr><td colspan="14" class="empty" style="padding:18px">No policies accepted from '+regDate(REG_FROM)+' in '+escHtml(R.f.year)+' yet.</td></tr>';
+    html += '<tr><td colspan="14" class="empty" style="padding:18px">No policies accepted from '+regDate(REG_ACTS_FROM)+' in '+escHtml(R.f.year)+' yet.</td></tr>';
   }
   groups.forEach(function(g){
     html += '<tr><td colspan="14" style="padding:14px 8px 4px;font-family:\'DM Serif Display\',serif;font-size:15px;color:var(--navy)">'+regMonthTitle(g.key)+'</td></tr>';
@@ -6245,29 +6252,31 @@ function regTrailHtml(){
 
 // ── Sales views (Register > 📈 Sales) ─────────────────────────────────────
 // All money here is AFTER 15% (HFS's share, excl VAT). Months before 1 Oct 2026 come from
-// the loaded history (Tracy's activations spreadsheet, client rows added up); from 1 Oct the
-// Register itself. Chart colours: validated pair (colour-blind separation + contrast).
+// the loaded history (Tracy's activations spreadsheet, client rows added up, frozen at 24 Sep)
+// plus any CRM acceptance from REG_ACTS_FROM (25 Sep); from 1 Oct the Register itself.
+// Chart colours: validated pair (colour-blind separation + contrast).
 var REG_SALES_THIS = '#2a78d6', REG_SALES_LAST = '#eb6834';
 function regFromKey(){ return REG_FROM.slice(0,7); }
 function regMonthNet(key){
-  if(key >= regFromKey()){
-    var t = 0;
-    (window._reg.events || []).forEach(function(ev){
-      if(ev.Status === 'ntu' || !ev.AcceptedDate || String(ev.AcceptedDate).slice(0,7) !== key) return;
-      t += regNum(ev.CommissionNet) || 0;
-    });
-    return regRound(t);
-  }
+  // CRM acceptances in this month, counted from REG_ACTS_FROM.
+  var t = 0, n = 0;
+  (window._reg.events || []).forEach(function(ev){
+    if(ev.Status === 'ntu' || !ev.AcceptedDate || String(ev.AcceptedDate) < REG_ACTS_FROM || String(ev.AcceptedDate).slice(0,7) !== key) return;
+    t += regNum(ev.CommissionNet) || 0; n++;
+  });
+  if(key >= regFromKey()) return regRound(t);
+  // Before the Register month: spreadsheet history (frozen at 24 Sep) plus the CRM acceptances above.
   var h = window._reg.hist && window._reg.hist.months;
-  if(!h || h[key] === undefined || h[key] === null || h[key] === '') return null;
-  return regNum(h[key]);
+  var hv = (!h || h[key] === undefined || h[key] === null || h[key] === '') ? null : regNum(h[key]);
+  if(hv === null) return n ? regRound(t) : null;
+  return regRound(hv + t);
 }
 function regMonthsDone(y){ var n = new Date(); return +y < n.getFullYear() ? 12 : +y > n.getFullYear() ? 0 : n.getMonth() + 1; }
 function regSalesYears(){
   var ys = {}; ys[String(new Date().getFullYear())] = 1;
   var h = window._reg.hist && window._reg.hist.months;
   if(h) Object.keys(h).forEach(function(k){ ys[k.slice(0,4)] = 1; });
-  (window._reg.events || []).forEach(function(ev){ if(ev.AcceptedDate && String(ev.AcceptedDate) >= REG_FROM) ys[String(ev.AcceptedDate).slice(0,4)] = 1; });
+  (window._reg.events || []).forEach(function(ev){ if(ev.AcceptedDate && String(ev.AcceptedDate) >= REG_ACTS_FROM) ys[String(ev.AcceptedDate).slice(0,4)] = 1; });
   return Object.keys(ys).sort();
 }
 function regYearSum(y, upTo){
@@ -6371,7 +6380,7 @@ function regSalesHtml(){
   var html = '<div class="card" style="padding:0">'+
     '<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;padding:10px 14px;border-bottom:1px solid var(--smoke)">'+
       '<select onchange="regSet(\'syear\',this.value)" style="'+sel+'">'+years.map(function(v){ return '<option'+(v === y ? ' selected' : '')+'>'+v+'</option>'; }).join('')+'</select>'+
-      '<span style="font-size:12px;color:#667">New business commission after 15% (HFS\'s share, excl VAT) · before '+regDate(REG_FROM)+' from Tracy\'s activations spreadsheet (renewals and lapse clawbacks left out), from then on from the Register.</span>'+
+      '<span style="font-size:12px;color:#667">New business commission after 15% (HFS\'s share, excl VAT) · up to 24 Sep 2026 from Tracy\'s activations spreadsheet (renewals and lapse clawbacks left out), from '+regDate(REG_ACTS_FROM)+' from the Register.</span>'+
       '<button class="btn b-gh xs" data-act="reg-hist-edit" style="margin-left:auto;font-size:11px;padding:3px 10px">Edit history</button>'+
     '</div>';
   if(!hasHist) html += '<div style="margin:10px 14px;padding:8px 12px;background:#fdf2e6;border-left:3px solid #b95900;border-radius:4px;font-size:12px;color:#8a4a00">The history from Tracy\'s spreadsheet has not been loaded yet (run Register_History.sql), so months before '+regDate(REG_FROM)+' are empty.</div>';
@@ -6438,10 +6447,10 @@ function regSalesHtml(){
     }
   }
   // lead source
-  var ls = {}, lsRows = (R.events || []).filter(function(e){ return e.AcceptedDate && String(e.AcceptedDate) >= REG_FROM && e.Status !== 'ntu' && String(e.AcceptedDate).slice(0,4) === y; });
+  var ls = {}, lsRows = (R.events || []).filter(function(e){ return e.AcceptedDate && String(e.AcceptedDate) >= REG_ACTS_FROM && e.Status !== 'ntu' && String(e.AcceptedDate).slice(0,4) === y; });
   lsRows.forEach(function(e){ var k = e.LeadSource || '(not recorded)'; ls[k] = ls[k] || {n:0, net:0}; ls[k].n++; ls[k].net += regNum(e.CommissionNet) || 0; });
-  html += '<div style="padding:16px 14px 4px;font-weight:700;color:var(--navy);font-size:13px">Commission by lead source, '+y+' <span style="font-weight:400;color:#889;font-size:12px">· accepted from '+regDate(REG_FROM)+'</span></div>';
-  if(!lsRows.length) html += '<div style="padding:4px 14px 14px;font-size:12px;color:#889">Nothing accepted from '+regDate(REG_FROM)+' in '+y+' yet. Lead source is filled in on each case\'s Case details.</div>';
+  html += '<div style="padding:16px 14px 4px;font-weight:700;color:var(--navy);font-size:13px">Commission by lead source, '+y+' <span style="font-weight:400;color:#889;font-size:12px">· accepted from '+regDate(REG_ACTS_FROM)+'</span></div>';
+  if(!lsRows.length) html += '<div style="padding:4px 14px 14px;font-size:12px;color:#889">Nothing accepted from '+regDate(REG_ACTS_FROM)+' in '+y+' yet. Lead source is filled in on each case\'s Case details.</div>';
   else {
     html += '<div style="overflow-x:auto;padding:0 6px 12px"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr><th '+th.replace('text-align:right','text-align:left')+'>Lead source</th><th '+th+'>Policies</th><th '+th+'>After 15%</th></tr></thead><tbody>';
     Object.keys(ls).sort(function(a2, b2){ return ls[b2].net - ls[a2].net; }).forEach(function(k){
@@ -6468,7 +6477,7 @@ function regEditHistory(){
     var rows = '';
     for(var m = 1; m <= 12; m++){
       var k = yy+'-'+String(m).padStart(2,'0'), locked = k >= regFromKey();
-      rows += '<div style="display:grid;grid-template-columns:90px 1fr;gap:5px 8px;align-items:center;margin-bottom:4px"><span style="font-size:13px">'+REG_MONTHS[m-1]+'</span>'+
+      rows += '<div style="display:grid;grid-template-columns:90px 1fr;gap:5px 8px;align-items:center;margin-bottom:4px"><span style="font-size:13px">'+REG_MONTHS[m-1]+(k === REG_ACTS_FROM.slice(0,7) ? '<div style="font-size:10px;color:#b95900">to 24 Sep only; the Register adds 25 Sep on</div>' : '')+'</span>'+
         (locked ? '<span style="font-size:12px;color:#889">from the Register</span>'
                 : SERIES.map(function(x){ var v = hist[x[0]][k]; return '<input data-s="'+x[0]+'" data-k="'+k+'" type="number" step="0.01" value="'+(v === undefined || v === null ? '' : v)+'" style="'+inp+'">'; }).join(''))+'</div>';
     }
@@ -6501,10 +6510,10 @@ function regEditHistory(){
 }
 
 function regEditBf(){
-  var R = window._reg, bf = R.bf || {year:2026, label:'Brought forward Jan to Sep 2026 (spreadsheet)', full:0, net:0};
-  var full = prompt('Brought forward, FULL commission (excl VAT), Jan to Sep '+bf.year+':', String(bf.full));
+  var R = window._reg, bf = R.bf || {year:2026, label:'Brought forward Jan to 24 Sep 2026 (spreadsheet)', full:0, net:0};
+  var full = prompt('Brought forward, FULL commission (excl VAT), Jan to 24 Sep '+bf.year+':', String(bf.full));
   if(full === null) return;
-  var net = prompt('Brought forward, AFTER 15%, Jan to Sep '+bf.year+':', String(bf.net));
+  var net = prompt('Brought forward, AFTER 15%, Jan to 24 Sep '+bf.year+':', String(bf.net));
   if(net === null) return;
   var nf = regNum(full), nn = regNum(net);
   if(nf === null || nn === null){ alert('Please enter numbers only, e.g. 867956.02'); return; }
@@ -6542,7 +6551,7 @@ function regExcel(){
     if(R.tab === 'sales'){
       var ys = regSalesYears(), cols = 'BCDEFGHIJK';
       aoa.push(['NEW BUSINESS BY MONTH OF ACCEPTANCE · commission after 15% (HFS share, excl VAT) · Duwalcoe Financial Consultants · as of '+regDate(today)]);
-      aoa.push(['Before '+regDate(REG_FROM)+': Tracy\'s activations spreadsheet (client rows added up, renewals and lapse clawbacks left out). From '+regDate(REG_FROM)+': the CRM Register.']);
+      aoa.push(['Up to 24 Sep 2026: Tracy\'s activations spreadsheet (client rows added up, renewals and lapse clawbacks left out). From '+regDate(REG_ACTS_FROM)+': the CRM Register (September 2026 = both added together).']);
       aoa.push(['MONTH'].concat(ys));
       for(var mm = 1; mm <= 12; mm++){
         aoa.push([REG_MONTHS[mm-1]].concat(ys.map(function(yv){
