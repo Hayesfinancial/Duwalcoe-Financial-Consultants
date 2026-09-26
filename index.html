@@ -3943,7 +3943,8 @@ var BROKER_AUTH_EXPIRY_DAYS = 365;
 var BROKER_AUTH_WARN_DAYS = 10;
 var CLIENT_DOC_CATALOGUE = [
   // Identity (permanent, changes only if new ID issued)
-  {key:'ID',            label:'ID Document',               group:'Identity',   required:'Mandatory'},
+  // ID: several files (SA ID card front and back; a new ID never removes the old one). 26 Sep 2026
+  {key:'ID',            label:'ID Document',               group:'Identity',   required:'Mandatory', multiple:true},
   // Agreements (once per relationship)
   // LOI: every version kept, each with its signed date; see loiVersions() (26 Sep 2026)
   {key:'LOI',           label:'Letter of Introduction (LOI)', group:'Agreements', required:'Mandatory', versions:true, signedDate:true},
@@ -4117,9 +4118,12 @@ function renderDocs(c){
         if(expiryInfo){
           rowBg = expiryInfo.expired ? '#fdecea' : '#eaf5ec';
         }
+        // Mandatory multi-file heading (ID): green when there is a file, amber when missing, like a single slot.
+        var mandMulti = !expiryInfo && item.required === 'Mandatory';
+        if(mandMulti) rowBg = matching.length ? '#eaf5ec' : '#fdf2e6';
 
         html += '<div'+docDropAttrs('client', clientId, item.key, 'Drop to add to: '+item.label, false)+' style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:'+rowBg+';border-radius:6px">';
-        html += '<div style="width:20px;font-size:16px">'+(expiryInfo?(expiryInfo.expired?'❌':'✅'):'📂')+'</div>';
+        html += '<div style="width:20px;font-size:16px">'+(expiryInfo?(expiryInfo.expired?'❌':'✅'):mandMulti?(matching.length?'✅':'❌'):'📂')+'</div>';
         html += '<div style="flex:1">';
         html += '<div style="font-size:13px;font-weight:600;color:var(--ink)">'+escHtml(item.label)+
           (expiryInfo && expiryInfo.expired ? ' <span style="background:#c92a2a;color:#fff;border-radius:10px;padding:1px 8px;font-size:10px;font-weight:700;margin-left:6px">EXPIRED</span>':'')+
@@ -4242,7 +4246,7 @@ function openDocUpload(clientId, docKey, isReplace){
   // Create a hidden file input, trigger it
   var input = document.createElement('input');
   input.type = 'file';
-  input.accept = '.pdf,.jpg,.jpeg,.png,.docx,.xlsx,.tiff,.tif';
+  input.accept = DOC_ACCEPT;   // same list as drag and drop (26 Sep 2026: emails and older Office files added)
   input.style.display = 'none';
   // Multi-file rows: allow selecting several files at once (24 Sep 2026).
   // These go through the same batch path as drag-and-drop.
@@ -7828,7 +7832,7 @@ function openEventDocUpload(eventId, docKey, isReplace){
 
   var input = document.createElement('input');
   input.type = 'file';
-  input.accept = '.pdf,.jpg,.jpeg,.png,.docx,.xlsx,.tiff,.tif';
+  input.accept = DOC_ACCEPT;   // same list as drag and drop (26 Sep 2026: emails and older Office files added)
   input.style.display = 'none';
   // Multi-file rows: allow selecting several files at once (24 Sep 2026).
   if(cat.multiple) input.multiple = true;
@@ -7921,7 +7925,11 @@ function uploadEventDoc(eventId, clientId, docKey, docLabel, file, isReplace, op
 // No schema change: Notes already exists on client_documents and
 // work_event_documents, and the authenticated RLS policy allows UPDATE.
 
-var DOC_ALLOWED_EXT = ['pdf','jpg','jpeg','png','docx','xlsx','tiff','tif'];
+// 26 Sep 2026: emails (.eml, .msg) and the other types the task uploader takes
+// (.doc, .xls, .txt, .csv, .gif) added. They had been left off when drag and drop
+// arrived, which blocked compliance emails. The file picker uses the same list.
+var DOC_ALLOWED_EXT = ['pdf','jpg','jpeg','png','gif','docx','doc','xlsx','xls','tiff','tif','eml','msg','txt','csv'];
+var DOC_ACCEPT = DOC_ALLOWED_EXT.map(function(x){ return '.'+x; }).join(',');
 var DOC_MAX_BYTES = 50*1024*1024;
 
 // Attributes that make a document row a drop target. Rendered by renderDocs()
@@ -7951,7 +7959,7 @@ function docValidateFiles(files){
     if(['gdoc','gsheet','gslides','gform','gdraw'].indexOf(ext) >= 0){
       bad.push(name+' (Google Docs/Sheets shortcut, not a real file: open it in Drive and download it as PDF first)');
     } else if(DOC_ALLOWED_EXT.indexOf(ext) < 0){
-      bad.push(name+' (file type not allowed: PDF, JPG, PNG, DOCX, XLSX or TIFF only)');
+      bad.push(name+' (file type not allowed: PDF, JPG, PNG, GIF, TIFF, Word, Excel, emails (EML, MSG), TXT or CSV only)');
     } else if(f.size > DOC_MAX_BYTES){
       bad.push(name+' (too large: '+Math.round(f.size/1024/1024)+' MB, maximum is 50 MB)');
     } else if(f.size === 0){
