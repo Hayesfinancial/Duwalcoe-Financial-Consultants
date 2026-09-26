@@ -430,7 +430,8 @@ var SRCH = '';
 var AGE_MIN = '';  // clients-page age filter, lower bound (inclusive); '' = unset
 var AGE_MAX = '';  // clients-page age filter, upper bound (inclusive); '' = unset
 var CL_LETTER = '';  // clients-page A–Z bar: surname initial ('A'..'Z' or '#'); '' = all
-var CL_HOLDS  = '';  // clients-page "Holds" filter: policy group key (see CL_HOLDS_GROUPS); '' = any
+var CL_HOLDS  = '';  // clients-page "Holds" filter: policy group key (see CL_HOLDS_GROUPS); '' = all
+var CL_NOT    = '';  // clients-page "But not" filter: group key, 'other' (holds nothing else), or '' = all
 var EC = null; // edit client id
 var EPC = null; // edit policy client id
 var EPI = null; // edit policy index
@@ -1375,6 +1376,59 @@ function clientIdsHolding(groupKey){
   return ids;
 }
 
+// Group keys each client currently holds: {clientId: {risk:1, invest:1, …}}.
+function clientGroupsHeld(){
+  var byType={}; CL_HOLDS_GROUPS.forEach(function(g){ g[2].forEach(function(t){ byType[t]=g[0]; }); });
+  var out={};
+  (DB.policies||[]).forEach(function(p){
+    var g=byType[p.Type]; if(!g || willIsDeadPolicy(p)) return;
+    (out[String(p.ClientID)]=out[String(p.ClientID)]||{})[g]=1;
+  });
+  return out;
+}
+// Does this client pass the Holds / But-not pair?
+function makeHoldsTest(holdsKey, notKey){
+  if(!holdsKey && !notKey) return null;
+  var held=clientGroupsHeld();
+  return function(c){
+    var h=held[String(c.ID)]||{};
+    if(holdsKey && !h[holdsKey]) return false;
+    if(notKey==='other'){
+      for(var k in h){ if(k!==holdsKey) return false; }   // holds nothing but the Holds group
+    } else if(notKey && h[notKey]) return false;
+    return true;
+  };
+}
+// One-click cross-sell gaps: [label, holds, but-not, tooltip]
+var XSELL_PICKS = [
+  ['Risk, no investment', 'risk',    'invest', 'Life & risk clients with no current investment'],
+  ['Risk, no retirement', 'risk',    'retire', 'Life & risk clients with no retirement fund'],
+  ['Risk only',           'risk',    'other',  'Life & risk clients holding nothing else with you'],
+  ['Investment, no risk', 'invest',  'risk',   'Investment clients with no life & risk cover'],
+  ['Annuity, no risk',    'annuity', 'risk',   'Living / life annuity clients with no life & risk cover']
+];
+function xsellHtml(){
+  var f=window.CLIENT_LIST_FILTER||'clients';
+  if(f==='family'||f==='tidy'||f==='leads') return '';
+  var base=clientPageFiltered();
+  var saveH=CL_HOLDS, saveN=CL_NOT;
+  var chips=XSELL_PICKS.map(function(x){
+    CL_HOLDS=x[1]; CL_NOT=x[2];
+    var n=applyClientLetter(applyClientSearchAge(base)).length;
+    var on=(saveH===x[1] && saveN===x[2]);
+    return '<button type="button" onclick="setXsell(\''+x[1]+'\',\''+x[2]+'\')" title="'+escHtml(x[3])+'" style="padding:3px 10px;font-size:12px;font-weight:700;border-radius:14px;font-family:inherit;cursor:pointer;'+
+      (on?'background:#0e413a;color:#fff;border:1.5px solid #0e413a':'background:#fff;color:#0e413a;border:1.5px solid #cfe3dc')+'">'+x[0]+' <span style="opacity:.75">('+n+')</span></button>';
+  }).join('');
+  CL_HOLDS=saveH; CL_NOT=saveN;
+  return '<span style="font-size:12px;font-weight:700;color:#0e413a">💡 Cross-sell:</span>'+chips;
+}
+function setXsell(h,n){
+  if(CL_HOLDS===h && CL_NOT===n){ CL_HOLDS=''; CL_NOT=''; } else { CL_HOLDS=h; CL_NOT=n; }
+  var a=document.getElementById('clHolds'); if(a) a.value=CL_HOLDS;
+  var b=document.getElementById('clNot'); if(b) b.value=CL_NOT;
+  refreshClientList();
+}
+
 // Sorted + tab-filtered client list (before search/age). The single source of
 // truth for which tab (Clients / Leads / Inactive / No Will / Unasked) is shown,
 // used by both renderClients() and the live refreshClientList().
@@ -1401,14 +1455,14 @@ function clientPageFiltered(){
 // letter bar can show which letters have matches.)
 function applyClientSearchAge(arr){
   var q=SRCH?SRCH.toLowerCase().trim():'';
-  var holds=CL_HOLDS?clientIdsHolding(CL_HOLDS):null;
+  var holdsTest=makeHoldsTest(CL_HOLDS, CL_NOT);
   return arr.filter(function(c){
     if(q && !((c.Name||'').toLowerCase().indexOf(q)>=0 ||
               (c.CallingName||'').toLowerCase().indexOf(q)>=0 ||
               String(c.IDNumber||'').indexOf(q)>=0 ||
               (c.Email||'').toLowerCase().indexOf(q)>=0 ||
               String(c.Cell||'').indexOf(q)>=0)) return false;
-    if(holds && !holds[String(c.ID)]) return false;
+    if(holdsTest && !holdsTest(c)) return false;
     return clientMatchesAge(c);
   });
 }
@@ -2220,10 +2274,17 @@ function renderClients(){
     '<span style="margin-left:auto;display:flex;align-items:center;gap:8px">'+
     '<span style="font-size:13px;font-weight:700;color:var(--navy)">📂 Holds</span>'+
     '<select id="clHolds" onchange="CL_HOLDS=this.value;refreshClientList();" title="Show only clients with a current policy of this kind (Replaced, Lapsed and Cancelled excluded; Paid Up counts)" style="border:1.5px solid var(--mist);border-radius:7px;padding:6px 8px;font-size:13px;font-family:inherit;background:#fff">'+
-    '<option value="">Any</option>'+
+    '<option value="">All</option>'+
     CL_HOLDS_GROUPS.map(function(g){ return '<option value="'+g[0]+'"'+(CL_HOLDS===g[0]?' selected':'')+'>'+g[1]+'</option>'; }).join('')+
     '</select>'+
+    '<span style="font-size:13px;font-weight:700;color:var(--navy)">But not</span>'+
+    '<select id="clNot" onchange="CL_NOT=this.value;refreshClientList();" title="Leave out clients who hold this (current policies only). Anything else = they hold nothing but the Holds group." style="border:1.5px solid var(--mist);border-radius:7px;padding:6px 8px;font-size:13px;font-family:inherit;background:#fff">'+
+    '<option value="">All</option>'+
+    CL_HOLDS_GROUPS.map(function(g){ return '<option value="'+g[0]+'"'+(CL_NOT===g[0]?' selected':'')+'>'+g[1]+'</option>'; }).join('')+
+    '<option value="other"'+(CL_NOT==='other'?' selected':'')+'>Anything else</option>'+
+    '</select>'+
     '</span>'+
+    '<div id="clXsell" style="flex-basis:100%;display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:2px">'+xsellHtml()+'</div>'+
     '</div>'+
     // ── A–Z surname bar ──
     '<div id="clLetterBar" style="display:flex;flex-wrap:wrap;gap:3px;margin:0;flex-shrink:0">'+
@@ -2276,6 +2337,7 @@ function refreshClientList(){
   var cnt=document.getElementById('clientPageCount'); if(cnt) cnt.textContent=list.length;
   var info=document.getElementById('ageFilterInfo'); if(info) info.textContent=ageFilterInfoText(list.length);
   var bar=document.getElementById('clLetterBar'); if(bar) bar.innerHTML=clientLetterBarHtml();
+  var xs=document.getElementById('clXsell'); if(xs) xs.innerHTML=xsellHtml();
 }
 // A–Z bar buttons. Each letter shows how many clients in the current tab +
 // search + age + Holds selection file under it; letters with none are greyed.
