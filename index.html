@@ -3945,7 +3945,8 @@ var CLIENT_DOC_CATALOGUE = [
   // Identity (permanent, changes only if new ID issued)
   {key:'ID',            label:'ID Document',               group:'Identity',   required:'Mandatory'},
   // Agreements (once per relationship)
-  {key:'LOI',           label:'Letter of Introduction (LOI)', group:'Agreements', required:'Mandatory'},
+  // LOI: every version kept, each with its signed date; see loiVersions() (26 Sep 2026)
+  {key:'LOI',           label:'Letter of Introduction (LOI)', group:'Agreements', required:'Mandatory', versions:true, signedDate:true},
   {key:'WILL',          label:'Will',                      group:'Agreements', required:'Optional'},
   // ASTUTE broker authority — multi-file archive, 12-month expiry on most recent
   {key:'BROKER_AUTH',   label:'Broker Authority Form (ASTUTE)', group:'ASTUTE', required:'Optional', multiple:true, expiryDays:BROKER_AUTH_EXPIRY_DAYS, note:'Valid for 12 months. Refresh before pulling new ASTUTE data.'},
@@ -3994,6 +3995,53 @@ function brokerAuthStatus(clientId){
 function eventNeedsAstute(eventType){
   return eventType === 'NB_RISK' || eventType === 'NB_INVEST' ||
          eventType === 'SVC_RISK' || eventType === 'SVC_INVEST';
+}
+
+// ── LOI versions (26 Sep 2026) ────────────────────────────────────────────
+// The LOI is re-signed only when the licence or company details change. Every
+// version is now kept: a new one no longer deletes the old one. Each version
+// covers cases from its signed date (SignedDate on client_documents). LOIs
+// uploaded before this change have no signed date and count from the start.
+// A New Business case shows the version in force on its case date, worked out
+// here, so no file is copied and nobody has to attach anything to a case.
+var LOI_KEY = 'LOI';
+function loiSigned(d){ return String((d && d.SignedDate) || '').slice(0,10); }
+// Newest first: by signed date (no signed date = oldest), then by upload time.
+function loiVersions(clientId){
+  return (window._clientDocs[clientId] || []).filter(function(d){ return d.DocType === LOI_KEY; }).sort(function(a, b){
+    var ka = loiSigned(a), kb = loiSigned(b);
+    if(ka !== kb) return ka < kb ? 1 : -1;
+    var ua = String(a.UploadedAt || ''), ub = String(b.UploadedAt || '');
+    return ua < ub ? 1 : ua > ub ? -1 : 0;
+  });
+}
+// The version in force on a date (YYYY-MM-DD): the newest signed on or before it.
+function loiForDate(clientId, date){
+  var v = loiVersions(clientId), d = String(date || '').slice(0,10);
+  for(var i = 0; i < v.length; i++){ var sd = loiSigned(v[i]); if(!sd || !d || sd <= d) return v[i]; }
+  return null;
+}
+// The LOI line at the top of a New Business case.
+function renderEventLoi(ev, c){
+  if(!isNbType(ev.EventType) || !c) return '';
+  var box = function(bg, bd, inner){ return '<div style="margin-bottom:14px;padding:8px 12px;background:'+bg+';border-left:3px solid '+bd+';border-radius:4px;font-size:12px;display:flex;align-items:center;gap:10px">'+inner+'</div>'; };
+  if(!window._clientDocs[c.ID]){ loadClientDocs(c.ID); return box('#fafaf5', '#ccd', '<span style="color:#889">📜 Checking the Letter of Introduction…</span>'); }
+  var all = loiVersions(c.ID);
+  var caseDate = String(ev.EventDate || '').slice(0,10);
+  if(!all.length){
+    return box('#fdf2e6', '#b95900', '<span style="flex:1;color:#8a4a00"><b>📜 No LOI on the Documents tab.</b> Upload the signed Letter of Introduction on the client\'s Documents tab; it then shows here.</span>');
+  }
+  var d = loiForDate(c.ID, caseDate);
+  if(!d){
+    var first = all[all.length - 1];
+    return box('#fdf2e6', '#b95900', '<span style="flex:1;color:#8a4a00"><b>📜 No LOI signed by this case date</b> ('+fdate(caseDate)+'). The first LOI on file was signed '+fdate(loiSigned(first))+'.</span>'+
+      '<button class="btn b-gh sm" data-act="doc-view" data-did="'+escHtml(first.ID)+'" style="padding:3px 10px;font-size:11px">View</button>');
+  }
+  var newer = all[0] !== d;
+  return box('#eaf5ec', '#2d7a3e', '<span style="flex:1;color:#1f5a2c"><b>📜 Letter of Introduction</b> in force on the case date: '+escHtml(d.FileName || 'file')+
+      ' <span style="color:#556">· '+(loiSigned(d) ? 'signed '+fdate(loiSigned(d)) : 'on file, no signed date (covers all cases to date)')+'</span>'+
+      (newer ? '<span style="display:block;font-size:11px;color:#556">A newer LOI was signed '+fdate(loiSigned(all[0]))+'. This case keeps the one above.</span>' : '')+'</span>'+
+    '<button class="btn b-gh sm" data-act="doc-view" data-did="'+escHtml(d.ID)+'" style="padding:3px 10px;font-size:11px">View</button>');
 }
 
 // Render the Documents tab for a client
@@ -4116,12 +4164,13 @@ function renderDocs(c){
           });
         }
       } else {
-        // Single-slot row
-        var d = matching[0];
+        // Single-slot row (LOI: the current version, with earlier versions listed below)
+        var loiAll = item.versions ? loiVersions(clientId) : null;
+        var d = item.versions ? loiAll[0] : matching[0];
         var hasDoc = !!d;
         var dot = hasDoc ? '✅' : (item.required==='Mandatory' ? '❌' : '⬜');
         var bg  = hasDoc ? '#eaf5ec' : (item.required==='Mandatory' ? '#fdf2e6' : '#fafaf5');
-        html += '<div'+docDropAttrs('client', clientId, item.key, (hasDoc?'Drop to replace: ':'Drop to add to: ')+item.label, false)+' style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:'+bg+';border-radius:6px">';
+        html += '<div'+docDropAttrs('client', clientId, item.key, (hasDoc?(item.versions?'Drop to add a new version: ':'Drop to replace: '):'Drop to add to: ')+item.label, false)+' style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:'+bg+';border-radius:6px">';
         html += '<div style="width:20px;font-size:16px">'+dot+'</div>';
         html += '<div style="flex:1">';
         html += '<div style="font-size:13px;font-weight:600;color:var(--ink)">'+escHtml(item.label)+
@@ -4129,7 +4178,9 @@ function renderDocs(c){
           (item.required==='Conditional'?' <span style="color:#889;font-weight:400;font-size:11px">(conditional)</span>':'')+
           '</div>';
         if(hasDoc){
-          html += '<div style="font-size:11px;color:#778">'+escHtml(d.FileName||'')+' · uploaded '+fdate(d.UploadedAt||'')+
+          html += '<div style="font-size:11px;color:#778">'+escHtml(d.FileName||'')+
+            (item.versions ? ' · '+(loiSigned(d) ? '<b style="color:#556">signed '+fdate(loiSigned(d))+'</b>' : 'no signed date (covers all cases to date)') : '')+
+            ' · uploaded '+fdate(d.UploadedAt||'')+
             (d.UploadedBy?' by '+escHtml(userLabel(d.UploadedBy)):'')+docMoveNoteHtml(d)+'</div>';
         } else if(item.note){
           html += '<div style="font-size:11px;color:#889;font-style:italic">'+escHtml(item.note)+'</div>';
@@ -4139,13 +4190,25 @@ function renderDocs(c){
         html += '</div>';
         if(hasDoc){
           html += '<button class="btn b-gh sm" data-act="doc-view" data-did="'+d.ID+'" style="padding:4px 12px">View</button>';
-          html += '<button class="btn b-gh sm" data-act="doc-upload" data-cid="'+clientId+'" data-dk="'+item.key+'" data-replace="1" style="padding:4px 12px">Replace</button>';
+          html += '<button class="btn b-gh sm" data-act="doc-upload" data-cid="'+clientId+'" data-dk="'+item.key+'" data-replace="1" style="padding:4px 12px"'+
+            (item.versions ? ' title="Newly signed LOI: the current one is kept for the cases it covers">New version' : '>Replace')+'</button>';
           html += '<button class="btn b-gh sm" data-act="doc-move" data-did="'+d.ID+'" data-cid="'+clientId+'" style="padding:4px 12px" title="Move this file to a different heading">Move</button>';
           html += '<button class="btn b-gh sm" data-act="doc-delete" data-did="'+d.ID+'" data-cid="'+clientId+'" style="padding:4px 12px;color:#b23">Delete</button>';
         } else {
           html += '<button class="btn b-nv sm" data-act="doc-upload" data-cid="'+clientId+'" data-dk="'+item.key+'">Upload</button>';
         }
         html += '</div>';
+        // Previous LOI versions: kept for the older cases they cover. View only.
+        if(item.versions && loiAll.length > 1){
+          html += '<div style="margin-left:30px;font-size:10px;font-weight:700;color:#889;text-transform:uppercase;letter-spacing:.5px;padding:2px 10px 0">Previous versions (kept for older cases)</div>';
+          loiAll.slice(1).forEach(function(pv){
+            html += '<div style="margin-left:30px;padding:4px 10px;font-size:12px;display:flex;align-items:center;gap:8px;color:#556">'+
+              '<span>📄</span><span style="flex:1">'+escHtml(pv.FileName||'file')+'</span>'+
+              '<span style="color:#556;font-size:10px;font-weight:600">'+(loiSigned(pv) ? 'Signed '+fdate(loiSigned(pv)) : 'no signed date')+'</span>'+
+              '<span style="color:#889;font-size:10px">uploaded '+fdate(pv.UploadedAt||'')+'</span>'+
+              '<button class="btn b-gh sm" data-act="doc-view" data-did="'+pv.ID+'" style="padding:4px 10px;font-size:11px">View</button></div>';
+          });
+        }
       }
     });
 
@@ -4165,8 +4228,8 @@ function loadClientDocs(clientId){
     } else {
       window._clientDocs[clientId] = rows || [];
     }
-    // Re-render if we're currently viewing this client's Docs tab
-    if(SEL && String(SEL)===String(clientId) && CTAB==='docs'){
+    // Re-render if we're currently viewing this client's Docs tab (or a case, which shows the LOI)
+    if(SEL && String(SEL)===String(clientId) && (CTAB==='docs' || CTAB==='events')){
       render();
     }
   });
@@ -4206,6 +4269,11 @@ function openDocUpload(clientId, docKey, isReplace){
         if(!signedDate) return; // user cancelled
         uploadClientDoc(clientId, docKey, cat.label, file, isReplace, signedDate);
       });
+    } else if(cat.signedDate){
+      promptSignedDate(cat.label, function(signedDate){
+        if(!signedDate) return;
+        uploadClientDoc(clientId, docKey, cat.label, file, isReplace, signedDate);
+      }, LOI_DATE_PROMPT);
     } else {
       uploadClientDoc(clientId, docKey, cat.label, file, isReplace, null);
     }
@@ -4218,7 +4286,11 @@ function openDocUpload(clientId, docKey, isReplace){
 // an expiryDays rule (e.g. BROKER_AUTH) so the expiry clock runs from the
 // signed date, not the upload date. Calls back with ISO date string
 // (YYYY-MM-DD) or null if the user cancels.
-function promptSignedDate(docLabel, callback){
+// opts (26 Sep 2026): {intro} replaces the explanation line and switches off the
+// Broker Authority expiry warnings (used for the LOI).
+var LOI_DATE_PROMPT = {intro:'The date the client signed this Letter of Introduction. Cases from this date show it; earlier cases keep the LOI that applied then.'};
+function promptSignedDate(docLabel, callback, opts){
+  opts = opts || {};
   var ov = document.createElement('div');
   ov.style.cssText = 'position:fixed;inset:0;background:rgba(10,20,40,.55);z-index:10000;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(2px)';
   var box = document.createElement('div');
@@ -4226,7 +4298,7 @@ function promptSignedDate(docLabel, callback){
   var todayIso = new Date().toISOString().slice(0,10);
   box.innerHTML =
     '<div style="font-family:Georgia,serif;font-size:17px;color:#0e413a;margin-bottom:6px">When was this document signed?</div>'+
-    '<div style="font-size:12px;color:#778;margin-bottom:14px">'+escHtml(docLabel)+' — drives the expiry calculation. Enter the date the client signed the form (not the date you\'re uploading it).</div>'+
+    '<div style="font-size:12px;color:#778;margin-bottom:14px">'+escHtml(docLabel)+(opts.intro ? '. '+escHtml(opts.intro)+' Not the date you are uploading it.' : ' — drives the expiry calculation. Enter the date the client signed the form (not the date you\'re uploading it).')+'</div>'+
     '<input id="_signedDateInput" type="date" max="'+todayIso+'" value="'+todayIso+'" style="width:100%;padding:9px 12px;border:1.5px solid #ccc;border-radius:6px;font-size:14px;font-family:inherit;margin-bottom:8px">'+
     '<div id="_signedDateWarn" style="font-size:11px;color:#b95900;margin-bottom:12px;min-height:14px"></div>'+
     '<div style="display:flex;justify-content:flex-end;gap:8px">'+
@@ -4241,7 +4313,7 @@ function promptSignedDate(docLabel, callback){
 
   function checkWarning(){
     var v = inputEl.value;
-    if(!v){ warnEl.textContent = ''; return; }
+    if(!v || opts.intro){ warnEl.textContent = ''; return; }
     var picked = new Date(v);
     var today = new Date(todayIso);
     var ageDays = Math.floor((today - picked)/(1000*60*60*24));
@@ -4298,7 +4370,9 @@ function uploadClientDoc(clientId, docKey, docLabel, file, isReplace, signedDate
 
   // If this is a replace, we need to find and delete the existing record (and storage file) first
   var deletePromise = Promise.resolve();
-  if(isReplace){
+  var _cat = CLIENT_DOC_CATALOGUE.find(function(x){ return x.key === docKey; });
+  // LOI: a new version never deletes the old one (older cases still rely on it).
+  if(isReplace && !(_cat && _cat.versions)){
     var existing = (window._clientDocs[clientId]||[]).filter(function(d){return d.DocType===docKey;});
     if(existing.length){
       deletePromise = new Promise(function(res){
@@ -4390,10 +4464,12 @@ function viewClientDoc(docId){
 
 // Delete a document (storage file + DB record)
 function deleteClientDoc(docId, clientId){
-  if(!confirm('Delete this document permanently? This cannot be undone.')) return;
   var doc = null;
   (window._clientDocs[clientId]||[]).forEach(function(d){ if(String(d.ID)===String(docId)) doc = d; });
   if(!doc){ toast('Document not found','err'); return; }
+  if(!confirm(doc.DocType === LOI_KEY
+      ? 'Delete this LOI permanently? This cannot be undone.\n\nIt also disappears from every case it covers. Use this only for a wrong file. For a newly signed LOI, use "New version" instead: that keeps this one for the older cases.'
+      : 'Delete this document permanently? This cannot be undone.')) return;
   deleteDocRecord(doc, function(ok){
     if(ok){
       toast('Document deleted','ok');
@@ -7237,6 +7313,9 @@ function renderEventDetail(ev, c, pols){
   }
   html += '</div>';
 
+  // Letter of Introduction in force on the case date (New Business)
+  html += renderEventLoi(ev, c);
+
   // Case details for the Register (NB + Servicing)
   html += renderCaseDetails(ev);
 
@@ -7923,7 +8002,9 @@ function handleClientDocFiles(clientId, docKey, files){
     if(v.ok.length > 1){ toast(cat.label+' takes one file only. Drop one file at a time.', 'err'); return; }
     var existing = window._clientDocs[clientId].filter(function(d){ return d.DocType === docKey; });
     if(existing.length){
-      if(!confirm('Replace the existing '+cat.label+' ('+(existing[0].FileName || 'file')+') with '+v.ok[0].name+'?')) return;
+      if(!confirm(cat.versions
+          ? 'Add '+v.ok[0].name+' as a new version of the '+cat.label+'?\n\nThe current one is kept under Previous versions and stays on the cases it covers.'
+          : 'Replace the existing '+cat.label+' ('+(existing[0].FileName || 'file')+') with '+v.ok[0].name+'?')) return;
       isReplace = true;
     }
   }
@@ -7935,6 +8016,8 @@ function handleClientDocFiles(clientId, docKey, files){
   // Broker Authority: one signed-date prompt per drop, applied to every file in it.
   if(cat.expiryDays){
     promptSignedDate(cat.label + (v.ok.length > 1 ? ' ('+v.ok.length+' files, one date for all)' : ''), function(sd){ if(sd) go(sd); });
+  } else if(cat.signedDate){
+    promptSignedDate(cat.label, function(sd){ if(sd) go(sd); }, LOI_DATE_PROMPT);
   } else {
     go(null);
   }
