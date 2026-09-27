@@ -11524,11 +11524,27 @@ function crmFmtCur(value, ccy){
   ccy=String(ccy||'').toUpperCase();
   return (!ccy||ccy==='ZAR') ? ('R '+s) : (ccy+' '+s);
 }
+// Extended 27 Sep 2026 (Baichan build: USD Discovery Dollar Life printed its
+// dollar cover as rands). Extra optional segments, all backward compatible:
+//   "initial 93952.88"            native first premium with NO rand rate (client
+//                                 funded in foreign currency: no rand cost exists)
+//   "invested 175615.44"          native total invested
+//   "withdrawn 94019.46"          native total withdrawn
+//   "cover @ 16.2928 (date)"      rate used to convert RISK benefit amounts; its
+//                                 presence also marks a risk policy whose benefit
+//                                 rows were converted to rand on import
+// For risk policies the "initial" segment is the (recurring) premium in native
+// currency and its rate is the rate the client actually pays at (e.g. a
+// Discovery Exchange Rate Protector locked-in rate).
 function crmFXLine(o){
   if(!o || !o.ccy || String(o.ccy).toUpperCase()==='ZAR') return '';
   var parts=['FX: '+String(o.ccy).toUpperCase()];
   if(N(o.curNat)&&N(o.curRate)) parts.push('current '+o.curNat+' @ '+o.curRate+(o.curDate?' ('+o.curDate+')':''));
   if(N(o.initNat)&&N(o.initRate)) parts.push('initial '+o.initNat+' @ '+o.initRate+(o.initDate?' ('+o.initDate+')':''));
+  else if(N(o.initNat)) parts.push('initial '+o.initNat);
+  if(N(o.invNat)) parts.push('invested '+o.invNat);
+  if(N(o.wdNat)) parts.push('withdrawn '+o.wdNat);
+  if(N(o.coverRate)) parts.push('cover @ '+o.coverRate+(o.coverDate?' ('+o.coverDate+')':''));
   return parts.length>1 ? parts.join(' | ') : '';
 }
 function crmParseFX(p){
@@ -11538,8 +11554,16 @@ function crmParseFX(p){
   var ccyM=line.match(/FX:\s*([A-Za-z]{3})/); if(!ccyM) return null;
   var out={ccy:ccyM[1].toUpperCase()};
   var cur=line.match(/current\s*([\d.]+)\s*@\s*([\d.]+)(?:\s*\(([\d\/-]+)\))?/); if(cur){ out.curNat=cur[1]; out.curRate=cur[2]; out.curDate=cur[3]||''; }
-  var ini=line.match(/initial\s*([\d.]+)\s*@\s*([\d.]+)(?:\s*\(([\d\/-]+)\))?/); if(ini){ out.initNat=ini[1]; out.initRate=ini[2]; out.initDate=ini[3]||''; }
+  var ini=line.match(/initial\s*([\d.]+)(?:\s*@\s*([\d.]+)(?:\s*\(([\d\/-]+)\))?)?/); if(ini){ out.initNat=ini[1]; out.initRate=ini[2]||''; out.initDate=ini[3]||''; }
+  var inv=line.match(/invested\s*([\d.]+)/); if(inv) out.invNat=inv[1];
+  var wd=line.match(/withdrawn\s*([\d.]+)/); if(wd) out.wdNat=wd[1];
+  var cov=line.match(/cover\s*@\s*([\d.]+)(?:\s*\(([\d\/-]+)\))?/); if(cov){ out.coverRate=cov[1]; out.coverDate=cov[2]||''; }
   return out;
+}
+// True when the policy's IRR was calculated by the adviser from provider
+// figures rather than stated by the provider (Notes line "IRR source: calculated").
+function crmIRRCalculated(p){
+  return /(^|\n)\s*IRR source:\s*calculated/i.test(String((p&&p.Notes)||''));
 }
 function crmStripFXLine(notes){
   return String(notes||'').split('\n').filter(function(l){ return l.trim().indexOf('FX:')!==0; }).join('\n').replace(/\n{2,}/g,'\n').trim();
@@ -11889,7 +11913,7 @@ function buildPolicyForm(p){
     // Stated IRR badge for both RA and Investment when manually captured.
     (function(){
       if((isInv||isRA) && p.IllustrativeRate && parseFloat(p.IllustrativeRate)>0){
-        html += irrBadge(parseFloat(p.IllustrativeRate));
+        html += irrBadge(parseFloat(p.IllustrativeRate), crmIRRCalculated(p));
       }
     })();
     if(isRA){
@@ -12107,7 +12131,7 @@ function buildPolicyForm(p){
     // Show IRR badge if stated IRR is available
     if(p.IllustrativeRate){
       var _statedIRR = parseFloat(p.IllustrativeRate)||0;
-      if(_statedIRR > 0) html += irrBadge(_statedIRR);
+      if(_statedIRR > 0) html += irrBadge(_statedIRR, crmIRRCalculated(p));
     }
 
     // Taxable / non-taxable
@@ -12891,11 +12915,11 @@ function incomeMax(p){
   return 0;
 }
 
-function irrBadge(irr){
+function irrBadge(irr, calculated){
   if(irr === null || irr === undefined) return '';
   var col = irr >= 10 ? '#166534' : irr >= 6 ? '#1e40af' : irr >= 0 ? '#92400e' : '#991b1b';
   var bg  = irr >= 10 ? '#f0fdf4' : irr >= 6 ? '#eff6ff' : irr >= 0 ? '#fffbeb' : '#fef2f2';
-  return '<div style="margin-top:6px;padding:6px 10px;background:'+bg+';border-radius:6px;font-size:12px;color:'+col+';font-weight:700">📈 Stated IRR (from insurer statement): '+irr+'% p.a.</div>';
+  return '<div style="margin-top:6px;padding:6px 10px;background:'+bg+';border-radius:6px;font-size:12px;color:'+col+';font-weight:700">📈 '+(calculated?'Calculated IRR (by Duwalcoe from provider figures)':'Stated IRR (from insurer statement)')+': '+irr+'% p.a.</div>';
 }
 
 // ── Investment maturity value auto-calculation
@@ -13217,7 +13241,21 @@ function collectPolicyForm(){
       var r=document.getElementById('pprem_pct');
       if(r) return r.value.trim();
       // Risk policy — use first lump row premEsc
-      return POL_LUMP_ROWS.length?String(POL_LUMP_ROWS[0].premEsc||''):'';
+      // 27 Sep 2026: take the first benefit row that carries one (was row 1 only).
+      var _rowEsc = function(rows){ var hit=''; (rows||[]).some(function(x){ var e=x?String(x.premEsc||'').trim():''; if(e){ hit=e; return true; } return false; }); return hit; };
+      var v = _rowEsc(POL_LUMP_ROWS) || _rowEsc(POL_INCOME_ROWS);
+      // Imported risk policies used to carry the escalation only at policy level,
+      // so opening and saving one (no edits) wiped it. When no row carries one now
+      // AND none did on the saved policy either (so nothing was cleared by the
+      // user), keep the policy's existing value.
+      if(!v){
+        var _old = (EPC!==null && EPI!==null) ? polsFor(EPC)[EPI] : null;
+        if(_old){
+          var _pj = function(t){ try{ var a=JSON.parse(t||'[]'); return Array.isArray(a)?a:[]; }catch(e){ return []; } };
+          if(!_rowEsc(_pj(_old.LumpBenefits)) && !_rowEsc(_pj(_old.IncomeBenefits))) v = String(_old.PremEscalation||'');
+        }
+      }
+      return v;
     })(),
     // ── BenEscalation: single source of truth, priority chain ──
     // 1. pb_eac (Living Annuity EAC field) — only present on Living Annuity cards
@@ -15177,7 +15215,51 @@ function famEdit1(a,b){        // true when a and b differ by at most one letter
 // typo in a word of 4+ letters. At least one full word must be identical, so a
 // shared first letter alone ("Mia" / "Michelle") never matches.
 // Returns 'exact' | 'initials' | 'typo' | ''.
+// 27 Sep 2026 (Baichan: "Mr AS Chandermun" was not matched to the spouse
+// "Adil Suresh Chandermun" and printed as a second beneficiary). Grade the names
+// as written AND after (a) removing titles and (b) splitting run-together
+// capital initials ("AS" -> "A S", only when the name is not written all in
+// capitals, so surnames like "DU" or "NEL" in an all-caps name are untouched).
+// The better grade wins, so no existing match can get worse.
+// Safeguards (independent review, 27 Sep 2026):
+//  • A title is removed only when written as a title ("Mr", "Mrs", "Dr"), never
+//    in capitals: "MS Botha" / "DR NEL" are initials or names, not titles.
+//  • Capitals are split into initials only BEFORE the last word (initials come
+//    before a surname): "Anna NG" keeps the surname NG.
+//  • The normalised comparison must still have a given name or initial AND a
+//    surname on both sides (2+ words), so a surname alone ("Mrs Chandermun")
+//    never matches, and it can only ever grade 'initials', never 'exact'.
+function famNameNormalise(s){
+  s = String(s||'');
+  var hasLower = /[a-z]/.test(s);
+  s = s.replace(/\b(Mr|Mrs|Ms|Miss|Mnr|Mev|Dr|Prof|Adv|Rev|Ds|mr|mrs|ms|miss|mnr|mev|dr|prof|adv|rev|ds)\b\.?/g, ' ');
+  if(hasLower){
+    var w = s.trim().split(/\s+/);
+    w = w.map(function(x, i){
+      // 2 capitals ("AS"), or 3 capitals with no vowel ("JPM"); never a
+      // capitalised 3-letter name such as "JAN" or "BEN".
+      var m = x.match(/^([A-Z]{2}|[B-DF-HJ-NP-TV-Z]{3})(,?)$/);
+      return (m && i < w.length-1) ? m[1].split('').join(' ')+m[2] : x;
+    });
+    s = w.join(' ');
+  }
+  return s.replace(/\s+/g,' ').trim();
+}
 function famNameGrade(a, b){
+  var g0 = famNameGrade0(a, b);
+  if(g0==='exact') return g0;
+  var na = famNameNormalise(a), nb = famNameNormalise(b);
+  if(famTokens(na).length < 2 || famTokens(nb).length < 2) return g0;
+  // A side that normalising changed must still carry an initial, so a title plus
+  // a surname ("Mrs van der Merwe") never matches on the surname alone.
+  var _hasInit = function(x){ return famTokens(x).some(function(t){ return t.length===1; }); };
+  if((na!==String(a||'').replace(/\s+/g,' ').trim() && !_hasInit(na)) || (nb!==String(b||'').replace(/\s+/g,' ').trim() && !_hasInit(nb))) return g0;
+  var g1 = famNameGrade0(na, nb);
+  if(g1==='exact') g1 = 'initials';
+  var rank = {'exact':3,'initials':2,'typo':1,'':0};
+  return (rank[g1]||0) > (rank[g0]||0) ? g1 : g0;
+}
+function famNameGrade0(a, b){
   var ta = famTokens(a), tb = famTokens(b);
   if(!ta.length || !tb.length) return '';
   function pair(small, big){
@@ -15848,6 +15930,8 @@ function parseAstutePasteJSON(txt){
       fundValue: (o.fundValue!=null && String(o.fundValue)!=='') ? String(o.fundValue) : (fundSum?String(fundSum):''),
       surrValue: clean(o.surrValue),
       totalInvested: clean(o.totalInvested),
+      totalWithdrawn: clean(o.totalWithdrawn),   // added 27 Sep 2026 (was never imported; typed by hand)
+      irrSource: clean(o.irrSource),             // "calculated" when the IRR is the adviser's own calculation
       savingsPot: clean(o.savingsPot), retirementPot: clean(o.retirementPot), vestedPot: clean(o.vestedPot),
       retireAge: clean(o.retireAge),
       ownerIsClient: ownerIsClient,
@@ -15860,7 +15944,7 @@ function parseAstutePasteJSON(txt){
       growthRate: clean(o.growthRate),     // forward growth assumption → GrowthRate/PremGrowthRate (drives projection)
       eac: clean(o.eac),                   // effective annual cost → BenEscalation on Living Annuities, else a note
       extraNotes: clean(o.notes),          // free-text catch-all for anything without a field (boosts, TER, etc.)
-      ccy: (clean(o.currency)||'').toUpperCase(),  // offshore: native currency (USD/GBP/EUR); blank/ZAR = rand
+      ccy: (function(){ var c=(clean(o.currency)||'').toUpperCase().trim(); return /^(R|ZAR|RAND|RANDS)$/.test(c)?'':c; })(),  // offshore: native currency (USD/GBP/EUR); blank/ZAR/R = rand
       fxRate: clean(o.fxRate),             // rand per 1 unit of ccy, as at the value date
       fxDate: clean(o.fxDate),             // date of fxRate
       initFxRate: clean(o.premiumFxRate),  // rand per 1 unit at inception (for the initial premium's rand cost)
@@ -15914,19 +15998,71 @@ function mergeNoteLines(a, b){
   });
   return out.join('\n');
 }
+// Foreign-currency policies refreshed by an import that carries NO currency
+// (every Astute XML pull, or a paste without "currency") — polNos collected
+// here so runAstuteImport can tell the adviser their amounts were kept.
+var ASTUTE_FX_KEPT = [];
+var ASTUTE_MONEY_KEYS = ['Premium','PolicyFee','BenFundValue','BenSurrenderValue','BenMaturityValue','BenDeath','BenDisability','BenDreadDisease',
+                         'LumpBenefits','IncomeBenefits','TotalInvested','TotalWithdrawn','LoanAmount','VestedValue','NonVestedValue',
+                         'RetirementComponent','SavingsComponent'];
+// Merge two FX markers segment by segment: a fresh segment wins, a segment the
+// fresh import doesn't carry is kept (27 Sep 2026 — replacing the whole line
+// lost the inception rate and totals on a value-only refresh).
+function crmMergeFX(ex, fr){
+  if(!fr) return ex; if(!ex || ex.ccy!==fr.ccy) return fr;
+  var o = {ccy:fr.ccy};
+  if(N(fr.curRate)){ o.curNat=fr.curNat; o.curRate=fr.curRate; o.curDate=fr.curDate; } else { o.curNat=ex.curNat; o.curRate=ex.curRate; o.curDate=ex.curDate; }
+  if(N(fr.initNat)){
+    o.initNat=fr.initNat; o.initRate=fr.initRate; o.initDate=fr.initDate;
+    // Same first premium, fresh import simply didn't restate its inception rate → keep it.
+    if(!N(fr.initRate) && N(ex.initRate) && Math.abs(N(ex.initNat)-N(fr.initNat))<0.005){ o.initRate=ex.initRate; o.initDate=ex.initDate; o._keptInitRate=true; }
+  } else { o.initNat=ex.initNat; o.initRate=ex.initRate; o.initDate=ex.initDate; }
+  o.invNat = N(fr.invNat) ? fr.invNat : ex.invNat;
+  o.wdNat  = N(fr.wdNat)  ? fr.wdNat  : ex.wdNat;
+  if(N(fr.coverRate)){ o.coverRate=fr.coverRate; o.coverDate=fr.coverDate; } else { o.coverRate=ex.coverRate; o.coverDate=ex.coverDate; }
+  return o;
+}
 function astuteMergePolicy(existing, fresh){
   var out = JSON.parse(JSON.stringify(existing));
   var preserve = {ID:1,ClientID:1,CapturedDate:1,ReviewHistory:1,ReplacedBy:1,ReplacedDate:1,ReplacedPolicyNo:1,Payer:1,Notes:1};
+  var _exFX = crmParseFX(existing.Notes||''), _frFX = crmParseFX(fresh.Notes||'');
+  // Existing policy is foreign-currency but this import carries no currency: its
+  // amounts are of unknown basis (Astute XML ignores currency). Keep the existing
+  // rand amounts rather than overwrite them with foreign numbers (27 Sep 2026).
+  var _keepMoney = !!(_exFX && !_frFX);
+  if(_keepMoney) ASTUTE_FX_KEPT.push(existing.PolicyNo||existing.Product||'');
+  var _mfx = crmMergeFX(_exFX, _frFX);
+  // Inception/premium rate kept from the existing marker: the fresh premium-side
+  // rand figures were converted at the fresh rate, so restate them at the kept
+  // rate (second review, 27 Sep 2026) and keep the existing rand Premium.
+  if(_mfx && _mfx._keptInitRate){
+    var _frRate = N(_frFX.curRate) || N(_frFX.coverRate);
+    fresh = JSON.parse(JSON.stringify(fresh));
+    if(clean(existing.Premium)) fresh.Premium = existing.Premium;
+    if(_frRate){
+      var _k = N(_mfx.initRate)/_frRate;
+      var _rs = function(v){ return N(v) ? String(Math.round(N(v)*_k*100)/100) : v; };
+      ['LumpBenefits','IncomeBenefits'].forEach(function(key){
+        try{ var a=JSON.parse(fresh[key]||'[]'); if(Array.isArray(a) && a.length){ a.forEach(function(x){ if(x) x.prem=_rs(x.prem); }); fresh[key]=JSON.stringify(a); } }catch(e){}
+      });
+      if(N(fresh.PolicyFee)) fresh.PolicyFee = _rs(fresh.PolicyFee);
+    }
+  }
   Object.keys(fresh).forEach(function(k){
     if(preserve[k]) return;
+    if(_keepMoney && ASTUTE_MONEY_KEYS.indexOf(k)>=0) return;
     var v = fresh[k];
     if(!(v===''||v===null||v===undefined||v==='[]')) out[k]=v;   // meaningful new value wins
   });
-  var base = mergeNoteLines(crmStripFXLine(crmStripFundBlock(existing.Notes||'')), crmStripFXLine(crmStripFundBlock(fresh.Notes||'')));
-  // FX marker: fresh rate wins (else keep existing) — replaced, never duplicated.
-  var freshFX = crmFXLine(crmParseFX(fresh.Notes||'')||{});
-  var fxLine = freshFX || crmFXLine(crmParseFX(existing.Notes||'')||{});
-  var freshFunds = crmParseFunds(fresh.Notes||'');
+
+  // A fresh IRR brings its own source: drop an old "IRR source: calculated" line
+  // so a later provider-stated IRR is never labelled as calculated (27 Sep 2026).
+  var _exNotes = crmStripFXLine(crmStripFundBlock(existing.Notes||''));
+  if(clean(fresh.IllustrativeRate)) _exNotes = _exNotes.split('\n').filter(function(l){ return !/^\s*IRR source:/i.test(l); }).join('\n');
+  var base = mergeNoteLines(_exNotes, crmStripFXLine(crmStripFundBlock(fresh.Notes||'')));
+  // FX marker: merged segment by segment (fresh wins, missing segments kept) — never duplicated.
+  var fxLine = crmFXLine(_mfx||{});
+  var freshFunds = _keepMoney ? [] : crmParseFunds(fresh.Notes||'');   // fund values of unknown currency are not taken
   var fundBlock = freshFunds.length ? crmFundsToNotesBlock(freshFunds) : crmFundsToNotesBlock(crmParseFunds(existing.Notes||''));
   out.Notes = [base, fxLine, fundBlock].filter(Boolean).join('\n');
   out.LastUpdated = fresh.LastUpdated || out.LastUpdated;
@@ -15934,8 +16070,14 @@ function astuteMergePolicy(existing, fresh){
 }
 
 function runAstuteImport(){
-  var rows = ASTUTE_ROWS.filter(function(r){return r.include;});
-  if(!rows.length){ toast('Nothing selected to import','err'); return; }
+  // A foreign-currency policy with no exchange rate cannot be converted, and
+  // importing it would put foreign numbers into rand fields. Hold it back and
+  // say so (27 Sep 2026).
+  var _noRate = ASTUTE_ROWS.filter(function(r){ return r.include && r.ccy && r.ccy!=='ZAR' && !N(r.fxRate); });
+  var _noRateMsg = _noRate.length ? (_noRate.length+' polic'+(_noRate.length===1?'y':'ies')+' NOT imported: in '+_noRate.map(function(r){return r.ccy;}).filter(function(v,i,a){return a.indexOf(v)===i;}).join('/')+' with no exchange rate ('+_noRate.map(function(r){return r.polNo||r.product;}).join(', ')+'). Add fxRate and paste again.') : '';
+  var rows = ASTUTE_ROWS.filter(function(r){return r.include && _noRate.indexOf(r)<0;});
+  ASTUTE_FX_KEPT = [];
+  if(!rows.length){ toast(_noRateMsg || 'Nothing selected to import','err'); return; }
   var now = new Date().toISOString().slice(0,10);
   var c = DB.clients.find(function(x){return String(x.ID)===String(ASTUTE_CID);});
 
@@ -15973,7 +16115,9 @@ function runAstuteImport(){
     var parts=[]; if(saved) parts.push(saved+' new'); if(updated) parts.push(updated+' updated');
     var head = 'Policies: '+(parts.length?parts.join(' · '):'0 of '+total);
     if(linksCreated) head += ' · '+linksCreated+' family link'+(linksCreated>1?'s':'')+' created';
-    if(failed) toast('⚠️ '+head+' — '+failed+' failed to reach server (kept locally, will retry on sync)','err');
+    if(ASTUTE_FX_KEPT.length) _noRateMsg = (_noRateMsg?_noRateMsg+' · ':'')+'Foreign-currency polic'+(ASTUTE_FX_KEPT.length===1?'y':'ies')+' '+ASTUTE_FX_KEPT.join(', ')+': amounts NOT refreshed (this import has no currency/exchange rate). Paste the statement with currency and rates to update them.';
+    if(failed) toast('⚠️ '+head+' — '+failed+' failed to reach server (kept locally, will retry on sync)'+(_noRateMsg?' · '+_noRateMsg:''),'err');
+    else if(_noRateMsg) toast(head+' · ⚠️ '+_noRateMsg,'err');
     else toast(head+' ✓','ok');
   }
   closeAll();
@@ -15990,6 +16134,13 @@ function runAstuteImport(){
     if(r.type==='Life / Income Protector' || r.type==='Business Assurance'){
       cls = astuteClassifyCovers(r.covers);
       lumps = cls.lumps; incomes = cls.incomes; coverFee = cls.fee;
+      // The statement's premium escalation applies to every benefit premium. Put it
+      // on the rows too: the policy card reads escalation from the rows, so a
+      // policy-level-only value was wiped the first time the policy was saved (27 Sep 2026).
+      if(clean(r.premEsc)){
+        lumps.forEach(function(x){ if(N(x.prem)>0 && !clean(x.premEsc)) x.premEsc = String(r.premEsc); });
+        incomes.forEach(function(x){ if(N(x.prem)>0 && !clean(x.premEsc)) x.premEsc = String(r.premEsc); });
+      }
     }
     // Policy fee: PolFee tag on the policy + any fee riders found above
     var policyFee = N(r.polFee) + coverFee;
@@ -16007,12 +16158,36 @@ function runAstuteImport(){
     var isFX = r.ccy && r.ccy!=='ZAR' && N(r.fxRate);
     var benFundValue = r.fundValue;                 // ZAR policies: value is already in rand
     var premiumVal   = r.premium;
+    var totalInvVal  = r.totalInvested;
+    var totalWdVal   = r.totalWithdrawn || '';
+    var surrVal      = r.surrValue;
     var fxMarker = '';
     if(isFX){
       benFundValue = N(r.fundValue) ? String(Math.round(N(r.fundValue)*N(r.fxRate))) : '';
       var initRate = N(r.initFxRate) ? N(r.initFxRate) : N(r.fxRate);   // fall back to current rate if no inception rate given
       premiumVal   = N(r.premium)   ? String(Math.round(N(r.premium)*initRate)) : '';
-      fxMarker = crmFXLine({ccy:r.ccy, curNat:r.fundValue, curRate:r.fxRate, curDate:r.fxDate, initNat:r.premium, initRate:(N(r.initFxRate)?r.initFxRate:''), initDate:r.initFxDate});
+      // 27 Sep 2026: EVERY money field must hold rand, not only value and premium.
+      // Before this, benefit covers/premiums, the policy fee and total invested
+      // were stored as raw foreign numbers in rand fields (Baichan: USD 268,308
+      // of Dollar Life cover printed as R 268 308). Benefit AMOUNTS convert at
+      // the current rate; benefit PREMIUMS and the policy fee at the rate the
+      // premium is actually paid at (premiumFxRate, else the current rate).
+      var _cur = N(r.fxRate), _prm = initRate;
+      var _cv = function(v, rate){ return N(v) ? String(Math.round(N(v)*rate*100)/100) : v; };
+      lumps.forEach(function(x){ x.cover = _cv(x.cover, _cur); x.prem = _cv(x.prem, _prm); });
+      incomes.forEach(function(x){ x.amount = _cv(x.amount, _cur); x.prem = _cv(x.prem, _prm); });
+      if(policyFee>0) policyFee = Math.round(policyFee*_prm*100)/100;
+      totalInvVal = _cv(r.totalInvested, _cur);
+      totalWdVal  = _cv(r.totalWithdrawn||'', _cur);
+      surrVal     = _cv(r.surrValue, _cur);
+      // Fund values too: the notes fund block and the fund editor label them "R".
+      if(r.funds && r.funds.length){
+        r = Object.assign({}, r, {funds: r.funds.map(function(f){ return Object.assign({}, f, {value:_cv(f.value, _cur)}); })});
+      }
+      fxMarker = crmFXLine({ccy:r.ccy, curNat:r.fundValue, curRate:r.fxRate, curDate:r.fxDate,
+                            initNat:r.premium, initRate:(N(r.initFxRate)?r.initFxRate:''), initDate:r.initFxDate,
+                            invNat:r.totalInvested, wdNat:r.totalWithdrawn,
+                            coverRate:((lumps.length||incomes.length)?r.fxRate:''), coverDate:r.fxDate});
     }
 
     var pol = {
@@ -16029,12 +16204,12 @@ function runAstuteImport(){
       DreadDiseaseType:'Lump Sum',
       DreadDiseaseNotes:(function(){ var ls=lumps.filter(function(x){return x.type==='Dread Disease / Severe Illness'&&x.label;}).map(function(x){return x.label;}); var all=ls.concat((cls&&cls.ddNotes)||[]); return all.join(' · '); })(),
       LumpBenefits:JSON.stringify(lumps),
-      BenSurrenderValue:r.surrValue, BenFundValue:benFundValue, BenMaturityValue:'',
+      BenSurrenderValue:surrVal, BenFundValue:benFundValue, BenMaturityValue:'',
       MaturityDate:r.maturityDate, MaturityAge:'', maturityAge:'', RetirementAge:r.retireAge||'',
       VestedValue:r.vestedPot||'', NonVestedValue:'',
       RetirementComponent:r.retirementPot||'', SavingsComponent:r.savingsPot||'',
       IllustrativeRate:(r.irr||''), PremGrowthRate:(r.growthRate||''), GrowthRate:(r.growthRate||''),
-      TotalInvested:r.totalInvested, TotalWithdrawn:'',
+      TotalInvested:totalInvVal, TotalWithdrawn:totalWdVal,
       WithdrawSavingsPot:'', IncludeInRetirement:'', ContinuePastMaturity:'',
       PaysIncome:'',
       MedPlan:'', MedLives:'',
@@ -16049,6 +16224,7 @@ function runAstuteImport(){
         var base=astuteFundsToNotes(r); var extra=[];
         if(fxMarker) extra.push(fxMarker);                                       // offshore currency marker (native + dated rates)
         if(r.eac && r.type!=='Living Annuity') extra.push('EAC: '+r.eac+'%');   // no EAC field on non-LA policies → note
+        if(r.irr && /calc/i.test(r.irrSource||'')) extra.push('IRR source: calculated by Duwalcoe from provider figures.');
         if(r.extraNotes) extra.push(r.extraNotes);
         return [base, extra.join('\n')].filter(Boolean).join('\n');
       })(),
@@ -17471,9 +17647,11 @@ function openPolicySchedule(cid){
   // Uses GrowthRate, falling back to PremGrowthRate, then IllustrativeRate.
   // For RAs without a MaturityDate, derives it from RetirementAge + client DOB.
   // Skips Living Annuity and Life Annuity (these have their own income mechanics).
-  function projectPolicy(p){
+  // fvOverride / premOverride (optional, 27 Sep 2026): project a foreign policy in
+  // its own currency. When omitted the behaviour is exactly as before.
+  function projectPolicy(p, fvOverride, premOverride){
     if(p.Type==='Living Annuity' || p.Type==='Life Annuity') return {value:0, targetDate:''};
-    var fv = N(p.BenFundValue);
+    var fv = (fvOverride!=null) ? (+fvOverride||0) : N(p.BenFundValue);
     if(fv <= 0) return {value:0, targetDate:''};
     // Project ONLY from an explicit growth assumption — NOT from a stated IRR
     // (Clinton, 3 Sep 2026: a stated IRR shows as a badge but must not silently
@@ -17503,7 +17681,7 @@ function openPolicySchedule(cid){
     if(yrs <= 0) return {value:0, targetDate:''};
     // Same maths as the policy card (crmProjectValue): future premiums and their
     // escalation included. A paid-up or once-off policy has no further premiums.
-    var _prem = (isLumpFreq(p) || p.Status==='Paid Up') ? 0 : N(p.Premium);
+    var _prem = (premOverride!=null) ? (+premOverride||0) : ((isLumpFreq(p) || p.Status==='Paid Up') ? 0 : N(p.Premium));
     var projected = crmProjectValue(fv, _prem, p.Frequency||'Monthly', rate, escNum(p.PremEscalation), yrs);
     var mn=['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
     var tgtStr = mn[tgt.getMonth()+1]+' '+tgt.getFullYear();
@@ -17734,6 +17912,9 @@ function openPolicySchedule(cid){
         var entry = benMap[key];
         // Track types seen for this beneficiary (for the mode/conflict check)
         var typ = b.type||'Other';
+        // A spouse nominated only on retirement funds gets no "4(q) exempt" tag
+        // (those benefits are not estate property). 27 Sep 2026.
+        if(isRaP && (typ==='Spouse'||typ==='Life Partner')) typ = typ+' (retirement)';
         if(entry.types.indexOf(typ)<0) entry.types.push(typ);
         if(isRiskP) entry.death += polDeath * pct;
         if(isInvP)  entry.inv   += polFV    * pct;
@@ -17865,12 +18046,15 @@ function openPolicySchedule(cid){
   // Beneficiary display — SINGLE ink colour on the client page. The red/amber
   // estate-duty traffic light stays in the CRM, not on the client's schedule.
   // Spouse / Life Partner keep a subtle 4(q) marker (useful, not alarming).
-  function benDisplay(bens){
+  // notEstate (27 Sep 2026): retirement-fund and annuity death benefits are not
+  // estate property, so the s4(q) marker means nothing there — show the plain
+  // relationship instead.
+  function benDisplay(bens, notEstate){
     if(!bens.length) return '&mdash;';
     return bens.map(function(b){
       var t=b.type||'Other';
       var tag;
-      if(t==='Spouse'||t==='Life Partner') tag='4(q)';
+      if(t==='Spouse'||t==='Life Partner') tag=notEstate?t:'4(q)';
       else if(t==='Estate') tag='Estate';
       else if(t==='Trust') tag='Trust';
       else if(t==='Trustees') tag='\u00a737C trustees';
@@ -18001,7 +18185,30 @@ function openPolicySchedule(cid){
   // benefits add waiting period, term and in-claim escalation; the policy fee
   // gets its own row. Returns {html, anyPremEsc, anyCoverEsc} so the card can
   // show policy-level escalations only when the rows carry none.
+  // ── Foreign-currency display helpers (27 Sep 2026, Baichan build) ──
+  // Money fields always hold RAND. For a foreign policy the schedule shows the
+  // native amount first (rand ÷ the rate it was converted at) with the rand
+  // equivalent and its rate beneath, the same pattern as the fund value cell.
+  function fxNat(v, ccy, dp){
+    dp=dp||0; var n=+v||0;
+    return escHtml(String(ccy||'').toUpperCase())+' '+n.toLocaleString('en-ZA',{minimumFractionDigits:dp,maximumFractionDigits:dp});
+  }
+  function fxSub(txt){ return '<div style="font-size:10px;color:'+MUT+';font-weight:400">'+txt+'</div>'; }
+  function fxDual(randV, rate, ccy, dp, suffix){
+    if(!N(randV) || !N(rate)) return R(randV);
+    return fxNat(N(randV)/N(rate), ccy, dp)+(suffix||'')+fxSub('&asymp; '+R(randV)+' @ '+escHtml(String(rate)));
+  }
+  // Risk policy imported with converted benefit rows (FX marker carries "cover @").
+  // Older foreign risk records without it are shown exactly as before.
+  function riskFX(p){
+    var fx=crmParseFX(p);
+    if(!fx || !N(fx.coverRate)) return null;
+    return {ccy:fx.ccy, coverRate:fx.coverRate, coverDate:fx.coverDate,
+            premRate:(N(fx.initRate)?fx.initRate:fx.coverRate), premNat:fx.initNat};
+  }
+
   function riskBenefitRows(p){
+    var rfx=riskFX(p);
     function arr(v){ try{ var a=JSON.parse(v||'[]'); return Array.isArray(a)?a:[]; }catch(e){ return []; } }
     var typeName={'Life Cover':'Life cover','Capital Disability':'Disability','Dread Disease / Severe Illness':'Dread disease','Other Lump Sum':'Other benefit'};
     var lumps=arr(p.LumpBenefits).filter(function(r){ return r && (N(r.cover)>0 || N(r.prem)>0); });
@@ -18018,8 +18225,8 @@ function openPolicySchedule(cid){
       var ce=escTxt(r.benEsc), pe=escTxt(r.premEsc);
       if(ce) out.anyCoverEsc=true; if(pe) out.anyPremEsc=true;
       rows+='<tr>'+nameCell(r.label, r.type)+
-        '<td>'+(N(r.cover)>0?R(r.cover):dash)+'</td>'+
-        '<td>'+(N(r.prem)>0?R(r.prem):dash)+'</td>'+
+        '<td>'+(N(r.cover)>0?(rfx?fxDual(r.cover,rfx.coverRate,rfx.ccy,0):R(r.cover)):dash)+'</td>'+
+        '<td>'+(N(r.prem)>0?(rfx?fxDual(r.prem,rfx.premRate,rfx.ccy,2):R(r.prem)):dash)+'</td>'+
         '<td>'+(ce||dash)+'</td><td>'+(pe||dash)+'</td></tr>';
     });
     incs.forEach(function(r){
@@ -18031,11 +18238,11 @@ function openPolicySchedule(cid){
       if(clean(r.term)) sub.push(escHtml(r.term));
       if(escTxt(r.claimEsc)) sub.push('in-claim escalation '+escTxt(r.claimEsc));
       rows+='<tr>'+nameCell(r.label, r.type).replace('</td>', (sub.length?'<div style="font-size:10px;color:'+MUT+';margin-top:1px">'+sub.join(' &middot; ')+'</div>':'')+'</td>')+
-        '<td>'+(N(r.amount)>0?R(r.amount)+'<span style="font-size:10px;color:'+MUT+'"> /pm</span>':dash)+'</td>'+
-        '<td>'+(N(r.prem)>0?R(r.prem):dash)+'</td>'+
+        '<td>'+(N(r.amount)>0?(rfx?fxDual(r.amount,rfx.coverRate,rfx.ccy,0,'<span style="font-size:10px;color:'+MUT+'"> /pm</span>'):R(r.amount)+'<span style="font-size:10px;color:'+MUT+'"> /pm</span>'):dash)+'</td>'+
+        '<td>'+(N(r.prem)>0?(rfx?fxDual(r.prem,rfx.premRate,rfx.ccy,2):R(r.prem)):dash)+'</td>'+
         '<td>'+(ce||dash)+'</td><td>'+(pe||dash)+'</td></tr>';
     });
-    if(N(p.PolicyFee)>0) rows+='<tr><td><span style="color:'+INK+';font-weight:600">Policy fee</span></td><td>'+dash+'</td><td>'+R(p.PolicyFee)+'</td><td>'+dash+'</td><td>'+dash+'</td></tr>';
+    if(N(p.PolicyFee)>0) rows+='<tr><td><span style="color:'+INK+';font-weight:600">Policy fee</span></td><td>'+dash+'</td><td>'+(rfx?fxDual(p.PolicyFee,rfx.premRate,rfx.ccy,2):R(p.PolicyFee))+'</td><td>'+dash+'</td><td>'+dash+'</td></tr>';
     out.html='<div style="padding:0 18px 12px"><table class="btbl"><thead><tr><th>Benefit</th><th>Cover</th><th>Premium</th><th>Cover escalation</th><th>Premium escalation</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
     return out;
   }
@@ -18079,15 +18286,22 @@ function openPolicySchedule(cid){
     // "Owner" only when someone other than the client owns the policy.
     var ownerTxt=(p.ClientIsOwner==='No' && clean(p.Owner) && p.Owner!==c.Name) ? escHtml(p.Owner) : '';
     if(isRiskP||isBizP){
+      var _rfx=riskFX(p);   // foreign-currency risk policy → native first, rand beneath
+      var _cov=function(v){ return _rfx ? fxDual(v,_rfx.coverRate,_rfx.ccy,0) : R(v); };
       var _death=lumpSum(p,'Life Cover','BenDeath');
       // Older business policies hold the cover in LoanAmount (the policy card migrates it on edit).
       if(!_death && N(p.LoanAmount)>0) _death=N(p.LoanAmount);
-      fields.push({label:'Death benefit', value:R(_death)});
-      fields.push({label:'Disability',    value:R(lumpSum(p,'Capital Disability','BenDisability'))});
-      fields.push({label:'Dread disease', value:R(lumpSum(p,'Dread Disease / Severe Illness','BenDreadDisease'))});
+      fields.push({label:'Death benefit', value:_cov(_death)});
+      fields.push({label:'Disability',    value:_cov(lumpSum(p,'Capital Disability','BenDisability'))});
+      fields.push({label:'Dread disease', value:_cov(lumpSum(p,'Dread Disease / Severe Illness','BenDreadDisease'))});
       var ipm=incomeMax(p);
-      if(ipm>0) fields.push({label:'Income protection', value:R(ipm)+'<span style="font-size:10px;font-weight:400;color:'+MUT+'"> /pm</span>'});
-      if(N(p.Premium)>0) fields.push({label:'Premium', value:R(p.Premium)+freqSuffix(p)});
+      if(ipm>0) fields.push({label:'Income protection', value:(_rfx ? fxDual(ipm,_rfx.coverRate,_rfx.ccy,0,'<span style="font-size:10px;font-weight:400;color:'+MUT+'"> /pm</span>') : R(ipm)+'<span style="font-size:10px;font-weight:400;color:'+MUT+'"> /pm</span>')});
+      if(N(p.Premium)>0){
+        if(_rfx){
+          var _pn = N(_rfx.premNat) ? N(_rfx.premNat) : N(p.Premium)/N(_rfx.premRate);
+          fields.push({label:'Premium', value:fxNat(_pn,_rfx.ccy,2)+freqSuffix(p)+fxSub('&asymp; '+R(p.Premium)+' @ '+escHtml(String(_rfx.premRate)))});
+        } else fields.push({label:'Premium', value:R(p.Premium)+freqSuffix(p)});
+      }
       // Policy-level escalations print here only when the benefit rows below do
       // not carry their own (Clinton, 25 Sep 2026: escalations were missing).
       var _bt=riskBenefitRows(p);
@@ -18117,27 +18331,57 @@ function openPolicySchedule(cid){
           if(p.PaysIncome==='Yes' && N(p.BenLAIncome)>0) fields.push({label:'Income', value:R(p.BenLAIncome)+'<span style="font-size:10px;font-weight:400;color:'+MUT+'"> /pm</span>'});
         } else {
           var proj=projectPolicy(p);
+          // Foreign policy: project the NATIVE value and show it native-first; the
+          // rand figure beneath is at today's rate (27 Sep 2026 — it used to be
+          // printed as a plain rand projection, silently assuming a fixed rand).
+          // Recurring premiums need the native premium ("initial" segment); without
+          // it the projection stays in rand exactly as before (review, 27 Sep 2026).
+          var _pfx=(fx && N(fx.curNat) && N(fx.curRate) && (isLumpFreq(p) || p.Status==='Paid Up' || N(fx.initNat))) ? fx : null;
+          if(_pfx){
+            var _pn=projectPolicy(p, N(_pfx.curNat), (isLumpFreq(p)||p.Status==='Paid Up') ? 0 : N(_pfx.initNat));
+            if(_pn.value>0) proj={value:_pn.value, targetDate:_pn.targetDate, rate:_pn.rate, native:true};
+          }
           // The growth rate is shown with the figure: a projection is only as good as its assumption.
-          if(proj.value>0) fields.push({label:'Projected'+(proj.targetDate?' ('+proj.targetDate+(proj.rate?', '+proj.rate+'% p.a.':'')+')':''), value:R(proj.value)});
+          if(proj.value>0) fields.push({label:'Projected'+(proj.targetDate?' ('+proj.targetDate+(proj.rate?', '+proj.rate+'% p.a.':'')+')':''),
+            value:(proj.native ? fxNat(proj.value,_pfx.ccy,0)+fxSub('&asymp; '+R(proj.value*N(_pfx.curRate))+' at today&rsquo;s rate') : R(proj.value))});
         }
         if(N(p.BenSurrenderValue)>0 && Math.abs(N(p.BenSurrenderValue)-N(p.BenFundValue))>=1) fields.push({label:'Surrender value', value:R(p.BenSurrenderValue)});
       }
       // Premium / contribution
+      // Foreign policy money-in / money-out are shown in the policy's own currency.
+      // A rand figure appears ONLY beside a first investment that has a stated,
+      // dated inception rate — a client who funded in foreign currency never had a
+      // rand cost, so none is invented (27 Sep 2026, Baichan: R 1 540 827 printed
+      // for a USD 93,953 investment made from dirhams).
+      var _ifx=(fx && fx.ccy && fx.ccy!=='ZAR') ? fx : null;
+      var _invNat=(_ifx && N(_ifx.invNat)) ? N(_ifx.invNat) : 0;
       if(N(p.Premium)>0){
         if(isLumpFreq(p)){
-          var initv=N(p.TotalInvested)>N(p.Premium)?N(p.TotalInvested):N(p.Premium);
           fields.push({label:'Contribution', value:(p.Frequency||'Once-off')});
-          fields.push({label:'Initial investment', value:R(initv)});
+          // Native only when the native first investment was recorded — never
+          // reconstructed from rand (that gave wrong dollars on older records).
+          if(_ifx && N(_ifx.initNat)){
+            var _in = N(_ifx.initNat);
+            fields.push({label:'Initial investment', value:fxNat(_in,_ifx.ccy,0)+(N(_ifx.initRate)?fxSub('&asymp; '+R(_in*N(_ifx.initRate))+' @ '+escHtml(String(_ifx.initRate))+(_ifx.initDate?' ('+escHtml(FD(_ifx.initDate))+')':'')):'')});
+            if(_invNat > _in+0.5) fields.push({label:'Total invested', value:fxNat(_invNat,_ifx.ccy,0)});
+          } else {
+            var initv=N(p.TotalInvested)>N(p.Premium)?N(p.TotalInvested):N(p.Premium);
+            fields.push({label:'Initial investment', value:R(initv)});
+          }
         } else {
           fields.push({label:'Premium', value:((fx&&fx.initNat)?crmFmtCur(fx.initNat,fx.ccy):R(p.Premium))+freqSuffix(p)});
           // Recurring premium: what has gone in so far, beside what it is worth.
-          if(N(p.TotalInvested)>0) fields.push({label:'Total contributions', value:R(p.TotalInvested)});
+          if(_invNat) fields.push({label:'Total contributions', value:fxNat(_invNat,_ifx.ccy,0)});
+          else if(N(p.TotalInvested)>0) fields.push({label:'Total contributions', value:R(p.TotalInvested)});
         }
+      } else if(_invNat){
+        fields.push({label:'Total contributions', value:fxNat(_invNat,_ifx.ccy,0)});
       } else if(N(p.TotalInvested)>0){
         fields.push({label:'Total contributions', value:R(p.TotalInvested)});
       }
       if(escNonZero(p.PremEscalation)) fields.push({label:'Premium escalation', value:escTxt(p.PremEscalation)});
-      if(N(p.TotalWithdrawn)>0) fields.push({label:'Withdrawn to date', value:R(p.TotalWithdrawn)});
+      if(_ifx && N(_ifx.wdNat)) fields.push({label:'Withdrawn to date', value:fxNat(N(_ifx.wdNat),_ifx.ccy,0)});
+      else if(N(p.TotalWithdrawn)>0) fields.push({label:'Withdrawn to date', value:R(p.TotalWithdrawn)});
       // Retirement funds: retirement age and the two-pot components as captured.
       if(isRAP && p.Type!=='Living Annuity' && p.Type!=='Life Annuity'){
         if(N(p.RetirementAge)>0) fields.push({label:'Retirement age', value:String(N(p.RetirementAge))});
@@ -18160,7 +18404,11 @@ function openPolicySchedule(cid){
       // Return (IRR) + Cost (EAC)
       if(p.IllustrativeRate && N(p.IllustrativeRate)!==0){
         var irrv=N(p.IllustrativeRate);
-        fields.push({label:'Return (IRR)', value:(irrv>0?'':'')+String(p.IllustrativeRate).replace(',','.')+'% <span style="font-size:10px;font-weight:400;color:'+MUT+'">p.a.</span>', accent:(irrv<0?NEGR:GRN)});
+        // Offshore IRRs are in the policy's currency; adviser-calculated IRRs say so.
+        var _irrTag=[];
+        if(_ifx) _irrTag.push(escHtml(_ifx.ccy));
+        if(crmIRRCalculated(p)) _irrTag.push('calculated');
+        fields.push({label:'Return (IRR)', value:(irrv>0?'':'')+String(p.IllustrativeRate).replace(',','.')+'% <span style="font-size:10px;font-weight:400;color:'+MUT+'">p.a.'+(_irrTag.length?' ('+_irrTag.join(', ')+')':'')+'</span>', accent:(irrv<0?NEGR:GRN)});
       }
       var eac=crmParseEAC(p);
       if(eac) fields.push({label:'Cost (EAC)', value:eac.display+' <span style="font-size:10px;font-weight:400;color:'+MUT+'">p.a.</span>', accent:GOLD});
@@ -18182,7 +18430,7 @@ function openPolicySchedule(cid){
     var bens=[]; try{bens=p.Beneficiaries?JSON.parse(p.Beneficiaries):[];}catch(e){}
     bens=bens.filter(function(b){return b.name&&String(b.name).trim();});
     var strip=[];
-    if(bens.length) strip.push('<span style="color:'+MUT+';text-transform:uppercase;letter-spacing:.4px;font-size:9px">Beneficiaries</span> '+benDisplay(bens));
+    if(bens.length) strip.push('<span style="color:'+MUT+';text-transform:uppercase;letter-spacing:.4px;font-size:9px">Beneficiaries</span> '+benDisplay(bens, isRAP));
     var rp=resolvedPayer(p);
     if(rp&&rp.name&&rp.name!=='(unallocated)') strip.push('<span style="color:'+MUT+';text-transform:uppercase;letter-spacing:.4px;font-size:9px">Payer</span> <span style="color:'+TXT+'">'+escHtml(rp.name)+'</span>');
     if(strip.length) card+='<div style="padding:9px 18px;border-top:1px solid '+LINE+';font-size:11.5px;line-height:1.7">'+strip.join('&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;')+'</div>';
@@ -18279,14 +18527,19 @@ function openPolicySchedule(cid){
   if(covDeath>0){
     var riskPols=groups.personal.pols.filter(function(p){return lumpSum(p,'Life Cover','BenDeath')>0;});
     var csub = riskPols.length===1 ? (escHtml(riskPols[0].Insurer||'')+(riskPols[0].Product?' '+escHtml(riskPols[0].Product):'')) : (riskPols.length+' life policies');
+    // Foreign cover inside the rand total is named, with its rate (27 Sep 2026).
+    var _fxCov={};
+    riskPols.forEach(function(p){ var f=riskFX(p); if(!f) return; var k=f.ccy+'|'+f.coverRate; _fxCov[k]=(_fxCov[k]||0)+lumpSum(p,'Life Cover','BenDeath')/N(f.coverRate); });
+    Object.keys(_fxCov).forEach(function(k){ var kk=k.split('|'); csub+='<br>incl. '+fxNat(_fxCov[k],kk[0],0)+' @ R'+escHtml(kk[1]); });
     tiles.push(tile('Life cover','R\u00a0'+Math.round(covDeath).toLocaleString('en-ZA'),csub));
   }
   if(provNames.length){
     if(provNames.length===1){
       tiles.push(tile('Product provider',escHtml(provNames[0]),'All '+allPols.length+' polic'+(allPols.length===1?'y':'ies')+' held with one provider'));
     } else {
-      var top=provNames.slice().sort(function(a,b){return provCount[b]-provCount[a];}).slice(0,3).map(function(n){return escHtml(n)+' ('+provCount[n]+')';}).join(' &middot; ');
-      tiles.push(tile('Product providers',provNames.length+'','<span style="font-size:10px">'+top+(provNames.length>3?' &middot; &hellip;':'')+'</span>'));
+      // Up to five providers named (was three, which hid the fourth behind "…").
+      var top=provNames.slice().sort(function(a,b){return provCount[b]-provCount[a];}).slice(0,5).map(function(n){return escHtml(n)+' ('+provCount[n]+')';}).join(' &middot; ');
+      tiles.push(tile('Product providers',provNames.length+'','<span style="font-size:10px">'+top+(provNames.length>5?' &middot; &hellip;':'')+'</span>'));
     }
   }
   if(tiles.length) doc+='<div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:8px;align-items:stretch">'+tiles.join('')+'</div>';
@@ -18295,7 +18548,8 @@ function openPolicySchedule(cid){
   var glancePols=[];
   glanceOrder.forEach(function(g){ sortPols(g.pols).forEach(function(p){ glancePols.push(p); }); });
   if(glancePols.length){
-    doc+='<div class="sect">At a Glance &mdash; Cost &amp; Return</div>';
+    doc+='<div class="sect">At a Glance: Cost &amp; Return</div>';
+    var _gAnyCalc=false, _gFxCcy=[];
     doc+='<table class="gtbl"><thead><tr><th>Policy</th><th>Type</th><th>Value</th><th>Monthly</th><th>Return (IRR&nbsp;p.a.)</th><th>Cost (EAC&nbsp;p.a.)</th></tr></thead><tbody>';
     var gValTot=0, gMonTot=0;
     glancePols.forEach(function(p){
@@ -18310,6 +18564,10 @@ function openPolicySchedule(cid){
       if(!isRiskP && p.IllustrativeRate && N(p.IllustrativeRate)!==0){
         var iv=N(p.IllustrativeRate);
         irrCell='<span style="color:'+(iv<0?NEGR:GRN)+';font-weight:700">'+String(p.IllustrativeRate).replace(',','.')+'%</span>';
+        // Offshore return is in the policy currency; "c" marks an adviser-calculated IRR.
+        var _gfx=crmParseFX(p);
+        if(_gfx && _gfx.ccy && _gfx.ccy!=='ZAR'){ irrCell+='<span style="color:'+MUT+';font-size:10px"> '+escHtml(_gfx.ccy)+'</span>'; if(_gFxCcy.indexOf(_gfx.ccy)<0) _gFxCcy.push(_gfx.ccy); }
+        if(crmIRRCalculated(p)){ irrCell+='<sup style="color:'+MUT+';font-weight:700"> c</sup>'; _gAnyCalc=true; }
       }
       // EAC
       var eacCell='<span style="color:'+MUT+'">n/a</span>';
@@ -18330,7 +18588,10 @@ function openPolicySchedule(cid){
       '<td style="color:'+INK+'">'+(gMonTot>0?('R\u00a0'+Math.round(gMonTot).toLocaleString('en-ZA')):'')+'</td><td></td><td></td></tr>';
     doc+='</tbody></table>';
     // Footnotes
-    var fn='<div style="font-size:10px;color:'+MUT+';line-height:1.6;margin:8px 2px 4px"><strong>IRR</strong> is the money-weighted return since inception, as quoted on the latest provider statement. <strong>EAC</strong> (Effective Annual Cost) is the ASISA cost measure &mdash; the total annual fee drag, quoted per the latest provider disclosure.';
+    var fn='<div style="font-size:10px;color:'+MUT+';line-height:1.6;margin:8px 2px 4px"><strong>IRR</strong> is the money-weighted return since inception, as quoted on the latest provider statement'+
+      (_gAnyCalc?' (<strong>c</strong>: calculated by Duwalcoe from the provider&rsquo;s figures)':'')+'.'+
+      (_gFxCcy.length?' Returns on offshore policies are measured in the policy&rsquo;s own currency ('+_gFxCcy.map(escHtml).join(', ')+').':'')+
+      ' <strong>EAC</strong> (Effective Annual Cost) is the ASISA cost measure, the total annual fee drag, quoted per the latest provider disclosure.';
     if(eacNotes.length){
       fn+=' ';
       eacNotes.forEach(function(n,i){ fn+='<sup style="color:'+GOLD+';font-weight:700">'+(i+1)+'</sup>&nbsp;'+escHtml(n)+'. '; });
@@ -18360,7 +18621,7 @@ function openPolicySchedule(cid){
 
   // ── BENEFICIARIES — ON DEATH ──
   if(benList.length>0){
-    doc+='<div class="sect">Beneficiaries &mdash; On Death</div>';
+    doc+='<div class="sect">Beneficiaries on Death</div>';
     doc+='<table class="gtbl"><thead><tr><th>Beneficiary</th><th>Death cover</th><th>Investment value</th><th>Retirement value</th><th>Policies</th></tr></thead><tbody>';
     benList.forEach(function(e){
       // One meaningful marker per beneficiary \u2014 never a joined list of the
@@ -18372,7 +18633,7 @@ function openPolicySchedule(cid){
       var _has=function(x){return _ty.indexOf(x)>=0;};
       var subTag='';
       if(_has('Spouse')||_has('Life Partner')) subTag='4(q) exempt';
-      else if(_has('Trustees')) subTag='\u00a737C trustees &mdash; no nomination captured';
+      else if(_has('Trustees')) subTag='\u00a737C trustees, no nomination captured';
       else if(_ty.length && _ty.every(function(t){return t==='Estate';})) subTag='Estate';
       else if(_ty.length && _ty.every(function(t){return t==='Trust';})) subTag='Trust';
       else subTag='';
@@ -18391,7 +18652,7 @@ function openPolicySchedule(cid){
     // what the client has, so the note appears only when such a fund is held.
     var _has37C=personalGroups.some(function(g){ return g.pols.some(function(p){ return ['Retirement Annuity','Pension Fund','Provident Fund','Pension Preservation','Provident Preservation'].indexOf(p.Type)>=0; }); });
     doc+='<div style="font-size:10px;color:'+MUT+';line-height:1.6;margin:8px 2px 4px">'+
-      (_has37C?'<strong>&sect;37C</strong> &mdash; Retirement annuity, pension, provident and preservation fund proceeds are distributed by the fund trustees in terms of Section 37C of the Pension Funds Act; nominations are a guide for the trustees. ':'')+
+      (_has37C?'<strong>&sect;37C:</strong> Retirement annuity, pension, provident and preservation fund proceeds are distributed by the fund trustees in terms of Section 37C of the Pension Funds Act; nominations are a guide for the trustees. ':'')+
       'Disability, Dread Disease and Income Protection benefits pay to the life insured, not to beneficiaries, and are not shown here.</div>';
   }
 
