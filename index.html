@@ -402,11 +402,25 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--cream);c
     <button id="notepad-close" title="Close" style="background:none;border:none;color:#8899bb;font-size:16px;cursor:pointer;padding:0 4px;line-height:1">✕</button>
   </div>
   <div id="notepad-body" style="display:flex;flex-direction:column">
-    <textarea id="notepad-text" placeholder="Type notes here… switching tabs auto-inserts a section label." style="width:100%;height:220px;border:none;outline:none;padding:12px 14px;font-size:13px;font-family:'DM Sans',sans-serif;color:var(--ink);resize:vertical;min-height:100px;line-height:1.7;background:#fffef8"></textarea>
-    <div id="notepad-btnrow" style="padding:8px 10px;border-top:1px solid var(--smoke);display:flex;gap:6px;background:#fafaf6">
-      <button id="notepad-task-btn" class="btn b-nv xs" style="flex:1">+ Create Task</button>
-      <button id="notepad-save-btn" class="btn b-sg xs" style="flex:1" title="Append to client's permanent notes with timestamp">💾 Save to Notes</button>
-      <button id="notepad-clear-btn" class="btn b-gh xs">Clear</button>
+    <input id="notepad-head" type="text" autocomplete="off" placeholder="Heading (becomes the task title)" style="width:100%;box-sizing:border-box;border:none;border-bottom:1px solid var(--smoke);outline:none;padding:10px 14px;font-size:13px;font-weight:700;font-family:'DM Sans',sans-serif;color:var(--navy);background:#fffef8">
+    <textarea id="notepad-text" placeholder="Type the note here…" style="width:100%;height:200px;border:none;outline:none;padding:10px 14px;font-size:13px;font-family:'DM Sans',sans-serif;color:var(--ink);resize:vertical;min-height:100px;line-height:1.7;background:#fffef8"></textarea>
+    <!-- 📎 Add to Task: this client's open tasks (28 Sep 2026) -->
+    <div id="notepad-tasklist" style="display:none;border-top:1px solid var(--smoke);background:#fff">
+      <div style="display:flex;align-items:center;padding:7px 12px;background:#f5f7fa;border-bottom:1px solid var(--smoke)">
+        <span style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:.5px;flex:1">Add to which task?</span>
+        <button id="notepad-tasklist-close" title="Close" style="background:none;border:none;color:#889;font-size:14px;cursor:pointer;padding:0 2px;line-height:1">✕</button>
+      </div>
+      <div id="notepad-tasklist-items" style="max-height:180px;overflow-y:auto"></div>
+    </div>
+    <div id="notepad-btnrow" style="padding:8px 10px;border-top:1px solid var(--smoke);display:flex;flex-direction:column;gap:6px;background:#fafaf6">
+      <div style="display:flex;gap:6px">
+        <button id="notepad-task-btn" class="btn b-nv xs" style="flex:1" title="New task: heading becomes the title, the note goes into the task">+ Create Task</button>
+        <button id="notepad-addtask-btn" class="btn b-nv xs" style="flex:1" title="Add this note to one of this client's open tasks">📎 Add to Task</button>
+      </div>
+      <div style="display:flex;gap:6px">
+        <button id="notepad-save-btn" class="btn b-sg xs" style="flex:1" title="Append to client's permanent notes with timestamp">💾 Save to Notes</button>
+        <button id="notepad-clear-btn" class="btn b-gh xs">Clear</button>
+      </div>
     </div>
     <div id="notepad-capture-hint" style="display:none;padding:8px 12px;border-top:1px solid var(--smoke);background:#fffbeb;font-size:11px;color:#92610a;line-height:1.5">📎 These notes attach to the new client automatically when you tap <b>Save to CRM</b>.</div>
   </div>
@@ -18901,9 +18915,31 @@ if(checkAuth()) bootApp();
   var pad = document.getElementById('notepad');
   var pill = document.getElementById('notepad-pill');
   var textarea = document.getElementById('notepad-text');
+  var headInput = document.getElementById('notepad-head');
   var tooltip = document.getElementById('notepad-sel-tooltip');
   var minimised = true;
   var padNotes = {};
+  // ── Heading + body (28 Sep 2026) ──
+  // No schema change: the heading is stored in the same notes record as a first
+  // line starting "## ". Notes saved before this change load as body only.
+  function padCombine(head, body){
+    head = String(head||'').replace(/\s+/g,' ').trim();
+    return head ? '## '+head+'\n'+(body||'') : (body||'');
+  }
+  function padSplit(text){
+    text = String(text||'');
+    if(text.indexOf('## ')===0){
+      var nl = text.indexOf('\n');
+      return nl<0 ? {head:text.slice(3).trim(), body:''} : {head:text.slice(3,nl).trim(), body:text.slice(nl+1)};
+    }
+    return {head:'', body:text};
+  }
+  function padShow(text){
+    var s = padSplit(text);
+    headInput.value = s.head;
+    textarea.value = s.body;
+  }
+  function padCurrent(){ return padCombine(headInput.value, textarea.value); }
   // Load notes from server sync (window._sharedNotes) + localStorage fallback
   function loadAllNotes(){
     try{
@@ -18932,9 +18968,8 @@ if(checkAuth()) bootApp();
           if(n && n.text) padNotes[String(k)] = n.text;
         });
         // Refresh displayed note if on a client page
-        if(PAGE==='client' && SEL){
-          var ta = document.getElementById('notepad-text');
-          if(ta) ta.value = padNotes[String(SEL)] || '';
+        if(PAGE==='client' && SEL && !PAD_CAPTURE){
+          padShow(padNotes[String(SEL)] || '');
         }
       }
     }, 2000);
@@ -18986,8 +19021,9 @@ if(checkAuth()) bootApp();
       // Only reload scratchpad when switching to a DIFFERENT client
       if(String(SEL) !== String(_currentSEL)){
         _currentSEL = SEL;
-        textarea.value = padNotes[String(SEL)] || '';
+        padShow(padNotes[String(SEL)] || '');
         textarea.scrollTop = textarea.scrollHeight;
+        padHideTaskList();
       }
     } else {
       pad.style.display = 'none';
@@ -19000,7 +19036,11 @@ if(checkAuth()) bootApp();
 
   textarea.addEventListener('input', function(){
     if(PAD_CAPTURE){ setScratch(textarea.value); return; }
-    if(SEL) saveNote(SEL, textarea.value);
+    if(SEL) saveNote(SEL, padCurrent());
+  });
+  headInput.addEventListener('input', function(){
+    if(PAD_CAPTURE) return;
+    if(SEL) saveNote(SEL, padCurrent());
   });
 
   document.getElementById('notepad-min').addEventListener('click', function(){
@@ -19024,21 +19064,23 @@ if(checkAuth()) bootApp();
 
   document.getElementById('notepad-clear-btn').addEventListener('click', function(){
     if(!confirm('Clear notes for this client?')) return;
-    textarea.value = '';
+    textarea.value = ''; headInput.value = '';
+    padHideTaskList();
     if(SEL) clearNote(SEL);
   });
 
   document.getElementById('notepad-save-btn').addEventListener('click', function(){
     if(!SEL){ toast('No client open','err'); return; }
-    var text = textarea.value.trim();
-    if(!text){ toast('Nothing to save','err'); return; }
+    var head = headInput.value.replace(/\s+/g,' ').trim();
+    var body = textarea.value.trim();
+    if(!head && !body){ toast('Nothing to save','err'); return; }
     var c = DB.clients.find(function(x){ return String(x.ID)===String(SEL); });
     if(!c){ toast('Client not found','err'); return; }
     // Build timestamped entry
     var now = new Date();
     var dateStr = now.toLocaleDateString('en-ZA',{day:'numeric',month:'long',year:'numeric'});
     var timeStr = now.toLocaleTimeString('en-ZA',{hour:'2-digit',minute:'2-digit'});
-    var entry = '[' + dateStr + ' ' + timeStr + ' — ' + cu() + ']\n' + text;
+    var entry = '[' + dateStr + ' ' + timeStr + ' — ' + cu() + ']' + (head ? ' ' + head : '') + (body ? '\n' + body : '');
     // Append to existing notes — never overwrite
     var existing = (c.Notes || '').trim();
     c.Notes = existing ? existing + '\n\n' + entry : entry;
@@ -19052,7 +19094,7 @@ if(checkAuth()) bootApp();
     // Commit-and-clear: the pad text is now safely stored as a timestamped
     // entry in the permanent Notes, so empty the scratchpad (and its persisted
     // copy) so the same text cannot be re-appended on the next save.
-    textarea.value = '';
+    textarea.value = ''; headInput.value = '';
     clearNote(SEL);
     // Just show a visual confirmation on the button briefly
     var btn = document.getElementById('notepad-save-btn');
@@ -19096,30 +19138,134 @@ if(checkAuth()) bootApp();
   });
   tooltip.addEventListener('click', function(){
     tooltip.style.display = 'none';
-    launchNotepadTask(selText);
+    launchNotepadTask(padSelection() || selText);
     selText = '';
   });
 
   document.getElementById('notepad-task-btn').addEventListener('click', function(){
-    var text = selText || getLastMeaningfulLine();
-    launchNotepadTask(text);
+    launchNotepadTask(padSelection());
   });
 
-  function getLastMeaningfulLine(){
-    var lines = (textarea.value||'').split('\n').map(function(l){return l.trim();}).filter(Boolean);
-    for(var i=lines.length-1;i>=0;i--){
-      if(!lines[i].startsWith('[')) return lines[i];
-    }
-    return '';
+  // Text currently selected in the note box ('' if none). Read at click time so a
+  // selection made earlier and since typed over is never used.
+  function padSelection(){
+    var a = textarea.selectionStart, b = textarea.selectionEnd;
+    if(typeof a!=='number' || a===b) return '';
+    return textarea.value.substring(a, b).trim();
   }
 
-  function launchNotepadTask(prefill){
+  // Task title when there is no heading: first line of the text, cut at about
+  // 80 characters on a whole word.
+  function padTitleFrom(text){
+    var first = String(text||'').split('\n').map(function(l){ return l.trim(); }).filter(Boolean)[0] || '';
+    if(first.length <= 80) return first;
+    var cut = first.slice(0, 80), sp = cut.lastIndexOf(' ');
+    return (sp > 40 ? cut.slice(0, sp) : cut) + '…';
+  }
+
+  // + Create Task: heading → title, body (or the selected part of it) → Initial Note.
+  // The pad clears once the task is saved; Cancel leaves it untouched. A task made
+  // from a selection keeps the pad, as the rest of the note hasn't gone anywhere.
+  var PAD_TASK_PENDING = null;   // {cid, fromSelection} while a pad-launched New Task is open
+  function launchNotepadTask(selection){
+    padHideTaskList();
     var c = SEL ? DB.clients.find(function(x){ return String(x.ID)===String(SEL); }) : null;
+    var head = headInput.value.replace(/\s+/g,' ').trim();
+    var note = selection ? selection : textarea.value.trim();
+    var title = head || padTitleFrom(note);
+    if(!head && note.replace(/\s+/g,' ') === title) note = '';   // one short line: title only, no repeat
     openTaskModal(c ? c.Name : '');
+    PAD_TASK_PENDING = SEL ? {cid:String(SEL), fromSelection:!!selection} : null;
     setTimeout(function(){
       var tt = document.getElementById('tt');
-      if(tt && prefill) tt.value = prefill.slice(0,120);
+      if(tt && title) tt.value = title.slice(0,120);
+      var tn = document.getElementById('tn');
+      if(tn && note) tn.value = note;
     }, 80);
+  }
+  var _origSaveTask = saveTask;
+  saveTask = function(){
+    var pend = PAD_TASK_PENDING, before = DB.tasks.length;
+    _origSaveTask.apply(this, arguments);
+    if(pend && DB.tasks.length > before){      // a task was actually created
+      PAD_TASK_PENDING = null;
+      if(!pend.fromSelection) padClearFor(pend.cid);
+    }
+  };
+  function padClearFor(cid){
+    clearNote(cid);
+    if(!PAD_CAPTURE && String(SEL)===String(cid)){ textarea.value=''; headInput.value=''; }
+  }
+
+  // 📎 Add to Task: append the note to one of this client's open tasks as a new
+  // task-log entry (same shape as typing it in the task pop-up). The pad clears
+  // once the server confirms; Undo puts the task and the pad back.
+  var taskList = document.getElementById('notepad-tasklist');
+  var taskItems = document.getElementById('notepad-tasklist-items');
+  function padHideTaskList(){ if(taskList) taskList.style.display='none'; }
+  document.getElementById('notepad-tasklist-close').addEventListener('click', padHideTaskList);
+  document.getElementById('notepad-addtask-btn').addEventListener('click', function(){
+    if(taskList.style.display==='block'){ padHideTaskList(); return; }
+    if(!SEL){ toast('No client open','err'); return; }
+    if(!headInput.value.trim() && !textarea.value.trim()){ toast('Nothing to add','err'); return; }
+    var c = DB.clients.find(function(x){ return String(x.ID)===String(SEL); });
+    var list = c ? tasksFor(c.Name).slice().sort(function(a,b){
+      var da=a.DueDate?new Date(a.DueDate):new Date('9999-12-31');
+      var db=b.DueDate?new Date(b.DueDate):new Date('9999-12-31');
+      return da-db;
+    }) : [];
+    if(!list.length){
+      taskItems.innerHTML = '<div style="padding:12px;font-size:12px;color:#889">No open tasks for this client. Use + Create Task instead.</div>';
+    } else {
+      taskItems.innerHTML = list.map(function(t){
+        var meta = [userLabel(t.Assignee||'Clinton')];
+        if(clean(t.DueDate)) meta.push('due '+fdate(t.DueDate));
+        return '<div data-padtask="'+escHtml(String(t.ID))+'" style="padding:8px 12px;border-bottom:1px solid var(--smoke);cursor:pointer" onmouseover="this.style.background=\'#f5f7fa\'" onmouseout="this.style.background=\'#fff\'">'+
+          '<div style="font-size:12.5px;font-weight:600;color:var(--ink)">'+(t.Priority==='Urgent'?'🔴 ':'')+escHtml(t.Title||'(no title)')+'</div>'+
+          '<div style="font-size:11px;color:#889;margin-top:1px">'+escHtml(meta.join(' · '))+'</div></div>';
+      }).join('');
+    }
+    taskList.style.display = 'block';
+  });
+  taskItems.addEventListener('click', function(e){
+    var el = e.target.closest ? e.target.closest('[data-padtask]') : null;
+    if(el) padAddToTask(el.getAttribute('data-padtask'));
+  });
+  function padAddToTask(taskId){
+    var t = DB.tasks.find(function(x){ return String(x.ID)===String(taskId); });
+    if(!t){ toast('Task not found. Press Sync and try again.','err'); return; }
+    var cid = String(SEL);
+    var padText = padCurrent();
+    var head = headInput.value.replace(/\s+/g,' ').trim(), body = textarea.value.trim();
+    var snapNotes = t.Notes;
+    var log = [];
+    try{ log = JSON.parse(t.Notes||'[]'); }catch(e){ if(t.Notes) log=[{date:t.Timestamp||'',text:t.Notes,user:t.Assignee||''}]; }
+    if(!Array.isArray(log)) log = [];
+    log.push({date:new Date().toISOString(), text:(head && body ? head+'\n'+body : (head||body)), user:cu()});
+    t.Notes = JSON.stringify(log);
+    padHideTaskList();
+    post({action:'updateTaskNotes', id:t.ID, notes:t.Notes}, function(res){
+      if(!(res && res.ok)){
+        // Not saved: put the task back as it was and keep the note in the pad.
+        t.Notes = snapNotes; delete t._pendingSave;
+        try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
+        toast('⚠️ Note NOT added to the task (server not reached). It is still in the pad. Try again.','err');
+        return;
+      }
+      padClearFor(cid);
+      render();
+      var added = t.Notes;
+      undoToast('Note added to task: '+String(t.Title||'').slice(0,40), '↩ Undo', function(){
+        if(t.Notes !== added){ toast('Task has changed since, so it was not undone. Remove the entry in the task.','err'); return; }
+        t.Notes = snapNotes;
+        render();
+        post({action:'updateTaskNotes', id:t.ID, notes:t.Notes}, function(r2){
+          if(r2 && r2.ok) toast('Undone: note back in the pad','ok');
+        });
+        saveNote(cid, padText);
+        if(!PAD_CAPTURE && String(SEL)===cid) padShow(padText);
+      });
+    });
   }
 
   // ── Capture-mode scratch ──────────────────────────────────────────────
@@ -19150,6 +19296,7 @@ if(checkAuth()) bootApp();
       pill.style.right='auto'; pill.style.left='24px';
       var br=document.getElementById('notepad-btnrow'); if(br) br.style.display='none';
       var hint=document.getElementById('notepad-capture-hint'); if(hint) hint.style.display='block';
+      headInput.style.display='none'; padHideTaskList();
     }
     if(minimised){ pad.style.display='none'; pill.style.display='flex'; }
     else { pad.style.display='flex'; pill.style.display='none'; }
@@ -19162,6 +19309,7 @@ if(checkAuth()) bootApp();
     pill.style.left='auto'; pill.style.right='24px';
     var br=document.getElementById('notepad-btnrow'); if(br) br.style.display='flex';
     var hint=document.getElementById('notepad-capture-hint'); if(hint) hint.style.display='none';
+    headInput.style.display='';
     document.getElementById('notepad-title').textContent = 'Notes';
     pad.style.display='none'; pill.style.display='none';
   }
@@ -19174,7 +19322,7 @@ if(checkAuth()) bootApp();
   // Re-evaluate notepad state whenever any overlay closes (a capture modal may
   // have just been dismissed). Mirrors the existing render/goPage wrappers.
   var _origCloseAll = closeAll;
-  closeAll = function(){ _origCloseAll.apply(this, arguments); window._captureActive = false; updateNotepadVisibility(); };
+  closeAll = function(){ _origCloseAll.apply(this, arguments); window._captureActive = false; PAD_TASK_PENDING = null; updateNotepadVisibility(); };
 })();
 </script>
 </body>
