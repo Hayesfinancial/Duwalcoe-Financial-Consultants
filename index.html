@@ -1883,6 +1883,62 @@ function render(){
 }
 
 // DASHBOARD
+// ── Off-site backup status line (28 Sep 2026) ─────────────────────────────────
+// The nightly GitHub backup (private repo duwalcoe-crm-backup) writes the
+// settings row "backup_status" as JSON: last_run_at, last_run_ok, failed_stage,
+// last_success_at, documents, run_url. The dashboard shows one line under the
+// heading. Fetched at most every 10 minutes; the line is swapped in place, so
+// no full re-render. Red when last night failed or nothing good for 36 hours.
+var BACKUP_STATUS_KEY = 'backup_status';
+window._backupStatus = window._backupStatus || {loaded:false, loading:false, at:0, data:null};
+function loadBackupStatus(){
+  var st = window._backupStatus;
+  if(st.loading) return;
+  if(st.loaded && Date.now()-st.at < 600000) return;
+  if(!SB_AUTH.token) return;   // not signed in yet: RLS would return nothing and look like "not set up"
+  st.loading = true;
+  sbFetch('GET','/rest/v1/settings?Key=eq.'+BACKUP_STATUS_KEY+'&select=*',null,function(rows,err){
+    st.loading = false;
+    if(err || !Array.isArray(rows)) return;          // keep whatever was shown before
+    var d = null;
+    if(rows.length){ try{ d = JSON.parse(rows[0].Value); }catch(e){ d = null; } }
+    st.loaded = true; st.at = Date.now(); st.data = d;
+    var el = document.getElementById('dash-backup');
+    if(el) el.outerHTML = backupLineHtml();
+  });
+}
+function backupWhen(iso){
+  var dt = new Date(iso); if(!iso || isNaN(dt)) return 'never';
+  var t = String(dt.getHours()).padStart(2,'0')+':'+String(dt.getMinutes()).padStart(2,'0');
+  var d0 = new Date(); d0.setHours(0,0,0,0);
+  var d1 = new Date(dt); d1.setHours(0,0,0,0);
+  var days = Math.round((d0-d1)/86400000);
+  if(days===0) return 'today '+t;
+  if(days===1) return 'yesterday '+t;
+  return fdate(iso)+' '+t;
+}
+function backupLineHtml(){
+  loadBackupStatus();
+  var st = window._backupStatus, d = st.data;
+  var css = 'font-size:11px;margin-top:3px;line-height:1.3;';
+  if(!st.loaded) return '<div id="dash-backup" style="'+css+'color:#99a">Checking backup…</div>';
+  if(!d) return '<div id="dash-backup" style="'+css+'color:#b45309;font-weight:600" title="The nightly off-site backup has not reported in yet.">⚠ Off-site backup not set up yet</div>';
+  var goodMs = d.last_success_at ? new Date(d.last_success_at).getTime() : NaN;
+  var hrs = isNaN(goodMs) ? Infinity : (Date.now()-goodMs)/3600000;
+  var link = (typeof d.run_url==='string' && d.run_url.indexOf('https://github.com/')===0)
+    ? ' <a href="'+escHtml(d.run_url)+'" target="_blank" rel="noopener" style="color:inherit">details</a>' : '';
+  var tell = cu()==='Clinton' ? link : ' Please tell Clinton.';
+  var red = css+'color:#b91c1c;font-weight:700';
+  if(d.last_run_ok===false)
+    return '<div id="dash-backup" style="'+red+'">⛔ Last backup FAILED ('+escHtml(d.failed_stage||'unknown step')+'). Last good backup: '+backupWhen(d.last_success_at)+'.'+tell+'</div>';
+  if(hrs>36){
+    var ago = hrs===Infinity ? '' : ' for '+Math.floor(hrs/24)+' day'+(Math.floor(hrs/24)===1?'':'s');
+    return '<div id="dash-backup" style="'+red+'">⛔ No off-site backup'+ago+'. Last good backup: '+backupWhen(d.last_success_at)+'.'+tell+'</div>';
+  }
+  var docs = (typeof d.documents==='number') ? ' · '+d.documents.toLocaleString('en-ZA')+' documents' : '';
+  return '<div id="dash-backup" style="'+css+'color:#4d7c5a" title="Nightly copy of the whole CRM (database and documents) to Google Drive">✓ Backed up '+backupWhen(d.last_success_at)+docs+'</div>';
+}
+
 function renderDash(){
   // Active clients = Status Active AND a real client (not a lead, not family/contacts).
   var active=DB.clients.filter(function(c){return c.Status==='Active' && isActiveClient(c);});
@@ -2014,7 +2070,7 @@ function renderDash(){
   });
 
   return '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">'+
-  '<h1 style="font-family:\'DM Serif Display\',serif;font-size:22px;color:var(--navy)">Dashboard</h1>'+
+  '<div><h1 style="font-family:\'DM Serif Display\',serif;font-size:22px;color:var(--navy)">Dashboard</h1>'+backupLineHtml()+'</div>'+
   '<div style="display:flex;align-items:center;gap:10px">'+
   '<button class="btn b-gd sm" data-act="open-factfind" title="Capture a whole new lead/client in one form — personal, family, assets, liabilities, income, expenses and needs — straight into the CRM">📋 New Fact Find</button>'+
   '<button class="btn b-gh sm" data-act="open-new-client">+ Client</button>'+
