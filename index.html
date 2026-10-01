@@ -1940,6 +1940,9 @@ function backupLineHtml(){
 }
 
 function renderDash(){
+  // Contract list for the "Not your policy" reminder labels (Appoint me / Move).
+  // Loaded once after sign-in; the dashboard redraws when it arrives.
+  if(AUM_CONTRACTS===null && SB_AUTH.token) loadAumContracts(function(){ if(PAGE==='dash'){ var _s=captureScrolls(); render(); restoreScrolls(_s); } });
   // Active clients = Status Active AND a real client (not a lead, not family/contacts).
   var active=DB.clients.filter(function(c){return c.Status==='Active' && isActiveClient(c);});
   var open=DB.tasks.filter(function(t){return !isdone(t);});
@@ -1994,9 +1997,11 @@ function renderDash(){
     // Skip dead policies (Replaced, Lapsed, Cancelled): same rule as the Will
     // tab and the schedule. Paid Up still reminds: it still has a value.
     if(willIsDeadPolicy(p)) return;
-    // Only policies ticked "Advisor / broker of record" = Yes remind (1 Oct 2026).
-    // Not mine (No) and never-ticked policies stay quiet; set them on AUM > Not set.
-    if(aumFlag(p.AdvisorOfRecord)!=='Yes') return;
+    // Only policies ticked "Advisor / broker of record" remind (1 Oct 2026).
+    // Yes = yours. No = not yours, still shown but labelled: the anniversary is a
+    // reason to ask for the appointment. Never ticked = quiet (set on AUM > Not set).
+    var _aor = aumFlag(p.AdvisorOfRecord);
+    if(_aor==='') return;
     var client = DB.clients.find(function(x){ return String(x.ID)===String(p.ClientID); });
     if(!client) return;
     if(!isActiveClient(client)) return;
@@ -2011,7 +2016,8 @@ function renderDash(){
     if(diff <= 60){
       var label = p.Insurer ? p.Insurer+(p.Type?' — '+p.Type:'') : (p.Type||'Policy');
       var _polYears = ann.getFullYear() - start.getFullYear();
-      up.push({name:client.Name,id:client.ID,cell:client.Cell||'',type:'📄 '+label+' anniversary',days:diff,col:'var(--sage)',policyNo:p.PolicyNo||'',years:_polYears});
+      // Type text stays the same for yours and not yours, so a reminder ticked done stays ticked.
+      up.push({name:client.Name,id:client.ID,cell:client.Cell||'',type:'📄 '+label+' anniversary',days:diff,col:_aor==='No'?'#ea580c':'var(--sage)',policyNo:p.PolicyNo||'',years:_polYears,notMine:_aor==='No',pol:p});
     }
   });
 
@@ -2181,6 +2187,15 @@ function renderDash(){
         '<div style="flex:1;cursor:pointer;'+(done?'text-decoration:line-through;color:#aaa;':'')+'" data-act="open-client" data-id="'+u.id+'">'+
         '<div style="font-weight:600;font-size:12px">'+u.name+'</div>'+
         '<div style="font-size:11px;color:#666">'+u.type+'</div>'+
+        (u.notMine ? (function(){
+          // Not your policy: say so, and what to do (same split as AUM > Not mine).
+          var _how = '', _c = '#9a3412';
+          if(AUM_CONTRACTS && Object.keys(AUM_CONTRACTS).length){
+            if(aumHasContract(u.pol)){ _how = ' · Appoint me'; _c = '#166534'; }
+            else _how = ' · Move at the right time';
+          }
+          return '<div style="font-size:11px;font-weight:700;color:'+(done?'#aaa':_c)+'">🎯 Not your policy'+_how+'</div>';
+        })() : '')+
         (function(){
           var detail='';
           if(u.age!==undefined){
