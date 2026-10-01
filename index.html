@@ -15953,6 +15953,10 @@ function astuteFundsToNotes(r){
 //   { insurer, product, polNo, type, status, startDate, maturityDate,
 //     premium, frequency, premEsc, polFee, fundValue, surrValue, totalInvested,
 //     savingsPot, retirementPot, vestedPot, retireAge, owner, insured, jointLife,
+//     benEsc,   ← policy-level benefit (cover) increase, added 1 Oct 2026: a number
+//                ("5") or a basis word ("CPI"). Copied onto every benefit row that
+//                has an amount and no benEsc of its own; on a Life Annuity it is
+//                the annual income escalation. Alias accepted: coverEsc.
 //     funds:[{name,value,alloc,units,price,asOf}],
 //     covers:[{plan,code,amt,prem,mode,monthlyAmt,period,elim,benEsc}],
 //     bens:[{name,pct,benType,linkType,dob}] }
@@ -16014,6 +16018,7 @@ function parseAstutePasteJSON(txt){
       premium: (o.premium!=null && String(o.premium)!=='') ? String(o.premium) : '',
       frequency: clean(o.frequency) || (N(o.premium)?'Monthly':''),
       premEsc: (o.premEsc!=null?String(o.premEsc):''),
+      benEsc: clean(o.benEsc) || clean(o.coverEsc),   // policy-level benefit increase (1 Oct 2026)
       polFee: (o.polFee!=null?String(o.polFee):''),
       fundValue: (o.fundValue!=null && String(o.fundValue)!=='') ? String(o.fundValue) : (fundSum?String(fundSum):''),
       surrValue: clean(o.surrValue),
@@ -16110,6 +16115,36 @@ function crmMergeFX(ex, fr){
   if(N(fr.coverRate)){ o.coverRate=fr.coverRate; o.coverDate=fr.coverDate; } else { o.coverRate=ex.coverRate; o.coverDate=ex.coverDate; }
   return o;
 }
+// Match fresh benefit rows to existing ones (same type + label first, then same
+// type in the same order) and fill blank premEsc / benEsc from the existing row.
+function astuteCarryRowEsc(existing, fresh){
+  var out = fresh;
+  ['LumpBenefits','IncomeBenefits'].forEach(function(key){
+    var ex, fr, changed = false;
+    try{ ex = JSON.parse(existing[key]||'[]'); fr = JSON.parse(fresh[key]||'[]'); }catch(e){ return; }
+    if(!Array.isArray(ex) || !Array.isArray(fr) || !ex.length || !fr.length) return;
+    var norm = function(v){ return String(v==null?'':v).toLowerCase().replace(/[^a-z0-9]/g,''); };
+    var used = [];
+    var take = function(x, sameLabel){
+      for(var i=0;i<ex.length;i++){
+        var e = ex[i]; if(!e || used[i] || e.type!==x.type) continue;
+        if(sameLabel && norm(e.label)!==norm(x.label)) continue;
+        used[i] = true; return e;
+      }
+      return null;
+    };
+    var pairs = fr.map(function(x){ return x ? take(x, true) : null; });
+    fr.forEach(function(x, j){ if(x && !pairs[j]) pairs[j] = take(x, false); });
+    fr.forEach(function(x, j){
+      var e = pairs[j]; if(!x || !e) return;
+      ['premEsc','benEsc'].forEach(function(f){
+        if(!clean(x[f]) && clean(e[f])){ x[f] = e[f]; changed = true; }
+      });
+    });
+    if(changed){ if(out===fresh) out = JSON.parse(JSON.stringify(fresh)); out[key] = JSON.stringify(fr); }
+  });
+  return out;
+}
 function astuteMergePolicy(existing, fresh){
   var out = JSON.parse(JSON.stringify(existing));
   var preserve = {ID:1,ClientID:1,CapturedDate:1,ReviewHistory:1,ReplacedBy:1,ReplacedDate:1,ReplacedPolicyNo:1,Payer:1,Notes:1};
@@ -16136,6 +16171,11 @@ function astuteMergePolicy(existing, fresh){
       if(N(fresh.PolicyFee)) fresh.PolicyFee = _rs(fresh.PolicyFee);
     }
   }
+  // Benefit rows are replaced wholesale on refresh. Carry over any premium or
+  // benefit increase the adviser captured on an existing row when the matching
+  // fresh row has none, so an Astute pull (which rarely states CPI increases)
+  // never wipes a hand-entered escalation (1 Oct 2026). A fresh value always wins.
+  if(!_keepMoney) fresh = astuteCarryRowEsc(existing, fresh);
   Object.keys(fresh).forEach(function(k){
     if(preserve[k]) return;
     if(_keepMoney && ASTUTE_MONEY_KEYS.indexOf(k)>=0) return;
@@ -16229,6 +16269,13 @@ function runAstuteImport(){
         lumps.forEach(function(x){ if(N(x.prem)>0 && !clean(x.premEsc)) x.premEsc = String(r.premEsc); });
         incomes.forEach(function(x){ if(N(x.prem)>0 && !clean(x.premEsc)) x.premEsc = String(r.premEsc); });
       }
+      // Same for the policy-level benefit increase (paste key benEsc, 1 Oct 2026):
+      // onto every row that carries a benefit amount and has no increase of its own.
+      // Premium-only rows (fee riders, Buy-Up funds, waivers) have no cover to increase.
+      if(clean(r.benEsc)){
+        lumps.forEach(function(x){ if(N(x.cover)>0 && !clean(x.benEsc)) x.benEsc = String(r.benEsc); });
+        incomes.forEach(function(x){ if(N(x.amount)>0 && !clean(x.benEsc)) x.benEsc = String(r.benEsc); });
+      }
     }
     // Policy fee: PolFee tag on the policy + any fee riders found above
     var policyFee = N(r.polFee) + coverFee;
@@ -16287,7 +16334,12 @@ function runAstuteImport(){
       BizType:(r.bizType||''), LifeAssuredType:'', LifeAssured:'', LoanAmount:'', KeyPosition:(r.keyPosition||''),
       Premium:premiumVal, Frequency:r.frequency,
       PolicyFee:(policyFee>0?String(Math.round(policyFee*100)/100):''),
-      PremEscalation:r.premEsc, BenEscalation:(r.type==='Living Annuity' ? (r.eac||'') : ''),
+      PremEscalation:r.premEsc,
+      // Living Annuity: this field holds the EAC. Risk / Business Assurance: the
+      // policy-level benefit increase (the rows carry it too). Life Annuity: the
+      // annual income escalation. Other types: left blank as before.
+      BenEscalation:(r.type==='Living Annuity' ? (r.eac||'')
+                    : (['Life / Income Protector','Business Assurance','Life Annuity'].indexOf(r.type)>=0 ? (r.benEsc||'') : '')),
       BenDeath:lumpSum('Life Cover'), BenDisability:lumpSum('Capital Disability'), BenDreadDisease:lumpSum('Dread Disease / Severe Illness'),
       DreadDiseaseType:'Lump Sum',
       DreadDiseaseNotes:(function(){ var ls=lumps.filter(function(x){return x.type==='Dread Disease / Severe Illness'&&x.label;}).map(function(x){return x.label;}); var all=ls.concat((cls&&cls.ddNotes)||[]); return all.join(' · '); })(),
@@ -16328,6 +16380,14 @@ function runAstuteImport(){
     var isUpdate = !!existingPol;
     var finalPol = isUpdate ? astuteMergePolicy(existingPol, pol) : pol;
     if(isUpdate) finalPol.ID = existingPol.ID;
+    // Retirement funds with no retirement age AND no maturity date: default to 65
+    // (1 Oct 2026, Clinton's rule; matches the edit screen's own default). Applied
+    // after the merge so it only ever fills a blank: a hand-entered or stated age
+    // is never overwritten, and a stated maturity date is left to drive the term.
+    if(['Retirement Annuity','Pension Fund','Provident Fund','Pension Preservation','Provident Preservation'].indexOf(finalPol.Type)>=0
+       && !clean(finalPol.RetirementAge) && !clean(finalPol.MaturityDate)){
+      finalPol.RetirementAge = '65';
+    }
     finalPol._pendingSave = true;
     if(isUpdate){ var ei = DB.policies.indexOf(existingPol); if(ei>=0) DB.policies[ei]=finalPol; else DB.policies.push(finalPol); }
     else DB.policies.push(finalPol);
