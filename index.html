@@ -175,7 +175,7 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--cream);c
     <div class="ni" data-nav="clients">👥 Clients</div>
     <div class="ni" data-nav="tasks">✅ Tasks <span id="tbadge" style="margin-left:auto;background:var(--rose);color:#fff;border-radius:10px;padding:1px 7px;font-size:10px;display:none"></span></div>
     <div class="ni" data-nav="cases">📂 Open Cases <span id="cbadge" style="margin-left:auto;background:var(--gold);color:#fff;border-radius:10px;padding:1px 7px;font-size:10px;display:none"></span></div>
-    <div class="ni" data-nav="reviews">🔄 Annual Reviews</div>
+    <div class="ni" data-nav="reviews">📞 Reviews</div>
     <div class="ni" data-nav="register">📊 Register</div>
     <div class="ni" data-nav="aum">💰 AUM</div>
     <div class="ni" data-nav="suppliers">🏢 Suppliers</div>
@@ -683,8 +683,10 @@ function syncNow(quiet) {
   }
 
   needed.forEach(function(table){
-    sbFetch('GET', '/rest/v1/'+table+'?select=*&limit=10000', null, function(data){
+    sbFetch('GET', '/rest/v1/'+table+'?select=*&limit=10000', null, function(data, err){
       loaded[table] = data||[];
+      // Reviews: the one-off carry-over of old reminder ticks waits for a real load.
+      if(table==='financial_position' && !err && Array.isArray(data)) window._revSyncOk = true;
       checkDone();
     });
   });
@@ -692,7 +694,7 @@ function syncNow(quiet) {
 
 // Scroll containers whose position must survive a background re-render.
 // #main = the page itself; the rest are inner boxes that scroll on their own.
-var SCROLL_KEEP_IDS = ['main','clientTableWrap','dashTaskScroll','dashRemScroll'];
+var SCROLL_KEEP_IDS = ['main','clientTableWrap','dashTaskScroll','dashRemScroll','revScroll'];
 function captureScrolls(){
   var s={};
   SCROLL_KEEP_IDS.forEach(function(id){
@@ -1980,10 +1982,8 @@ function renderDash(){
       }
     }
     if(!_isCli) return;
-    if(clean(c.ReviewDate)){
-      var d2=daysTo(c.ReviewDate);
-      if(d2!==null&&d2<=60)up.push({name:c.Name,id:c.ID,cell:c.Cell||'',type:'📋 Review Due',days:d2,col:'var(--sky)',reviewDate:c.ReviewDate});
-    }
+    // Review months and policy anniversaries moved to the Reviews list (2 Oct 2026),
+    // which keeps a missed one until it is ticked. Birthdays and weddings stay here.
     if(clean(c.Anniversary) && c.MaritalStatus==='Engaged'){
       // Engaged: the date is the planned wedding — count to that exact day, not a yearly anniversary.
       var _wP=String(c.Anniversary).split(/[T ]/)[0].split(/[-\/]/);
@@ -2004,38 +2004,6 @@ function renderDash(){
         var _annYears=_annYear-_ann.getFullYear();
         up.push({name:c.Name,id:c.ID,cell:c.Cell||'',type:'💍 Wedding Anniversary',days:d3,col:'var(--rose)',age:_annYears});
       }
-    }
-  });
-
-  // Policy anniversaries — add to reminders.
-  // Skip if the client is inactive/cancelled/lead — even though the policy
-  // itself may be on the books, we don't service the relationship anymore.
-  DB.policies.forEach(function(p){
-    if(!clean(p.StartDate)) return;
-    // Skip dead policies (Replaced, Lapsed, Cancelled): same rule as the Will
-    // tab and the schedule. Paid Up still reminds: it still has a value.
-    if(willIsDeadPolicy(p)) return;
-    // Only policies ticked "Advisor / broker of record" remind (1 Oct 2026).
-    // Yes = yours. No = not yours, still shown but labelled: the anniversary is a
-    // reason to ask for the appointment. Never ticked = quiet (set on AUM > Not set).
-    var _aor = aumFlag(p.AdvisorOfRecord);
-    if(_aor==='') return;
-    var client = DB.clients.find(function(x){ return String(x.ID)===String(p.ClientID); });
-    if(!client) return;
-    if(!isActiveClient(client)) return;
-    // Find next anniversary of start date — parse safely to avoid UTC timezone shift
-    var _sp = String(p.StartDate).split(/[T ]/)[0].split(/[-\/]/);
-    if(_sp.length < 3) return;
-    var start = new Date(+_sp[0], +_sp[1]-1, +_sp[2]);
-    if(isNaN(start)) return;
-    var ann = new Date(today.getFullYear(), start.getMonth(), start.getDate());
-    if(ann < today) ann.setFullYear(today.getFullYear()+1);
-    var diff = Math.round((ann - today)/86400000);
-    if(diff <= 60){
-      var label = p.Insurer ? p.Insurer+(p.Type?' — '+p.Type:'') : (p.Type||'Policy');
-      var _polYears = ann.getFullYear() - start.getFullYear();
-      // Type text stays the same for yours and not yours, so a reminder ticked done stays ticked.
-      up.push({name:client.Name,id:client.ID,cell:client.Cell||'',type:'📄 '+label+' anniversary',days:diff,col:_aor==='No'?'#ea580c':'var(--sage)',policyNo:p.PolicyNo||'',years:_polYears,notMine:_aor==='No',pol:p});
     }
   });
 
@@ -2062,11 +2030,12 @@ function renderDash(){
   });
   var dashFilter = window.DASH_TASK_FILTER||'today';
   if(!window.DASH_USER_FILTER) window.DASH_USER_FILTER=cu();
-  var reviewsDue=DB.clients.filter(function(c){
-    if(!isActiveClient(c)) return false;
-    var d=reviewDaysTo(c.ReviewDate);
-    return d!==null&&d<=30;
-  }).length;
+  // Reviews list (2 Oct 2026): feed size and last Annual Review events load once after sign-in.
+  if(REV_FEED_N===null && SB_AUTH.token) loadRevFeedN(function(){ if(PAGE==='dash'){ var _s=captureScrolls(); render(); restoreScrolls(_s); } });
+  if(SB_AUTH.token && window._revEvents && !window._revEvents.loading && Date.now()-window._revEvents.loadedAt > BOARD_REFRESH_MS) loadReviewEvents();
+  if(SB_AUTH.token) revMigrateOldTicks();
+  var _rev = revBuild();
+  var reviewsDue = _rev.rows.length;
 
   // Recent clients — sorted by LastAccessed, only those actually opened
   var recentClients = DB.clients.filter(function(c){ return c.LastAccessed; })
@@ -2111,7 +2080,7 @@ function renderDash(){
     '<div class="stat s-gd" style="cursor:pointer;padding:10px" data-act="go-clients"><div class="v" style="font-size:18px">'+active.length+'</div><div class="l" style="font-size:10px">Active Clients</div></div>'+
     '<div class="stat s-sg" style="padding:10px"><div class="v" style="font-size:18px">'+up.filter(function(u){return u.days<=30;}).length+'</div><div class="l" style="font-size:10px">Reminders (30d)</div></div>'+
     '<div class="stat s-sk" style="padding:10px"><div class="v" style="font-size:18px">'+open.length+'</div><div class="l" style="font-size:10px">Open Tasks</div></div>'+
-    '<div class="stat s-rd" style="cursor:pointer;padding:10px" data-nav="reviews" title="Open the Annual Reviews list"><div class="v" style="font-size:18px">'+reviewsDue+'</div><div class="l" style="font-size:10px">Reviews Due</div></div>'+
+    '<div class="stat s-rd" style="cursor:pointer;padding:10px" data-nav="reviews" title="Open the Reviews list: policy anniversaries, review months and clients not spoken to"><div class="v" style="font-size:18px">'+reviewsDue+'</div><div class="l" style="font-size:10px">Reviews Due</div></div>'+
     '<div class="stat s-gd" style="cursor:pointer;padding:10px" data-act="go-clients-no-will" title="Click to see active clients who explicitly said No to having a will. Headline shows wills-with-me / active clients.">'+
       '<div class="v" style="font-size:18px">📜 '+willsThroughMe+'<span style="font-size:11px;color:#889;font-weight:400"> / '+active.length+'</span></div>'+
       '<div style="font-size:10px;font-weight:600;color:#667;margin-top:4px;display:flex;gap:8px;flex-wrap:wrap">'+
@@ -2183,11 +2152,14 @@ function renderDash(){
 
   '</div>'+
 
+  // Reviews list (2 Oct 2026): this month's anniversaries, carried over, not spoken to.
+  revCardHtml(false, _rev)+
+
   // Bottom row: Reminders + Recent Clients
   '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">'+
 
     '<div class="card" style="padding:0">'+
-    '<div class="ch" style="padding:8px 14px"><h2 style="font-size:13px">📅 Reminders (60 days)</h2></div>'+
+    '<div class="ch" style="padding:8px 14px"><h2 style="font-size:13px">📅 Birthdays &amp; weddings (60 days)</h2></div>'+
     '<div id="dashRemScroll" style="max-height:180px;overflow-y:auto">'+
     (up.length===0?'<div class="empty" style="padding:12px">Nothing coming up 🎉</div>':
     up.map(function(u){
@@ -2754,7 +2726,7 @@ function renderProfile(){
     '<div class="tabs">'+
     '<div class="tab'+(CTAB==='overview'?' on':'')+'" data-act="tab" data-tab="overview">Overview</div>'+
     '<div class="tab'+(CTAB==='policies'?' on':'')+'" data-act="tab" data-tab="policies">Policies ('+pols.filter(function(p){return p.Status!=='Replaced';}).length+')</div>'+
-    (function(){var fp=finposFor(c.ID).filter(function(r){return r.Kind!=='need'&&r.Kind!=='need_notes'&&r.Kind!=='fna_meta';});return '<div class="tab'+(CTAB==='finpos'?' on':'')+'" data-act="tab" data-tab="finpos">Financial Position'+(fp.length?' ('+fp.length+')':'')+'</div>';})()+
+    (function(){var fp=finposFor(c.ID).filter(function(r){return FP_NOT_ITEM_KINDS.indexOf(r.Kind)<0;});return '<div class="tab'+(CTAB==='finpos'?' on':'')+'" data-act="tab" data-tab="finpos">Financial Position'+(fp.length?' ('+fp.length+')':'')+'</div>';})()+
     (function(){var nd=finposFor(c.ID).filter(function(r){return r.Kind==='need';});return '<div class="tab'+(CTAB==='needs'?' on':'')+'" data-act="tab" data-tab="needs">Needs'+(nd.length?' ('+nd.length+')':'')+'</div>';})()+
     (function(){var bks=[];try{bks=c.BankDetails?JSON.parse(c.BankDetails):[];}catch(e){}return '<div class="tab'+(CTAB==='banking'?' on':'')+'" data-act="tab" data-tab="banking">Banking'+(bks.length?' ('+bks.length+')':'')+'</div>';})()+
     '<div class="tab'+(CTAB==='docs'?' on':'')+'" data-act="tab" data-tab="docs">Documents</div>'+
@@ -3162,18 +3134,26 @@ function upgradeToClient(linkId, opts){
   function finish(ok){
     _upgradeBusy = false;
     if(ok) toast(lnk.Name + ' is now a '+(c.IsLead==='Yes'?'lead':'client')+(rev?' and linked both ways to '+principal2.Name:''),'ok');
-    else toast('⚠️ '+lnk.Name+' was created on this computer, but the server did not confirm every save. It is kept here and will retry on the next sync — do not create them again.','err');
     if(opts.done) opts.done(newId, ok);
+    if(!ok){
+      // Saves are not re-sent automatically: offer to try again now. The records stay
+      // on this computer (flagged "not saved") either way, so nothing is lost.
+      if(confirm(lnk.Name+' was created on this computer, but the server did not confirm every save.\n\nOK = try again now.\nCancel = leave it for now (do NOT create them again; open their card later and press Save).')) saveAll();
+    }
   }
-  post({action:'saveClient', client:c}, function(res){
-    if(!(res && res.ok)){ finish(false); return; }
-    var pending = rev ? 2 : 1, allOk = true;
-    function one(r){ if(!(r && r.ok)) allOk = false; if(--pending===0) finish(allOk); }
-    // The principal's row: a full upsert covers both a row that was only virtual a
-    // moment ago and an existing row (merge-duplicates updates it in place).
-    post({action:'saveFamMember', member:lnk}, one);
-    if(rev) post({action:'saveFamMember', member:rev}, one);
-  });
+  function saveAll(){
+    _upgradeBusy = true;
+    post({action:'saveClient', client:c}, function(res){
+      if(!(res && res.ok)){ finish(false); return; }
+      var pending = rev ? 2 : 1, allOk = true;
+      function one(r){ if(!(r && r.ok)) allOk = false; if(--pending===0) finish(allOk); }
+      // The principal's row: a full upsert covers both a row that was only virtual a
+      // moment ago and an existing row (merge-duplicates updates it in place).
+      post({action:'saveFamMember', member:lnk}, one);
+      if(rev) post({action:'saveFamMember', member:rev}, one);
+    });
+  }
+  saveAll();
   if(!opts.stay) openClient(newId);
 }
 
@@ -3836,7 +3816,7 @@ function fpPassesToLabel(d){
 }
 
 function renderFinPos(c){
-  var rows = finposFor(c.ID).filter(function(r){ return r.Kind!=='need' && r.Kind!=='need_notes' && r.Kind!=='fna_meta'; });
+  var rows = finposFor(c.ID).filter(function(r){ return FP_NOT_ITEM_KINDS.indexOf(r.Kind)<0; });
   var byKind = {};
   FP_KINDS.forEach(function(k){ byKind[k.kind]=[]; });
   rows.forEach(function(r){ if(byKind[r.Kind]) byKind[r.Kind].push(r); });
@@ -5481,7 +5461,7 @@ function loadReviewEvents(){
       R.err = false; R.byClient = {};
       (rows || []).forEach(function(r){ if(!R.byClient[r.ClientID]) R.byClient[r.ClientID] = r; }); // newest first
     }
-    if(PAGE === 'reviews') render();
+    if(PAGE === 'reviews' || PAGE === 'dash'){ var _s=captureScrolls(); render(); restoreScrolls(_s); }
   });
 }
 // Month numbers (0-11) a client's review falls in: from a real date or month words.
@@ -5497,62 +5477,502 @@ function clientReviewMonths(c){
 }
 var MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 
+// ══ REVIEWS WORKLIST (2 Oct 2026) ═══════════════════════════════════════════
+// One list for "phone this client": every policy anniversary of the month, any
+// client whose review month it is, and a steady feed of clients nobody has
+// spoken to in a year. One row per client. Nothing disappears until it is ticked
+// Done (or put off with Not now): a missed month carries over in red.
+// Nothing to type: anniversaries come from the policies, contact dates from the
+// ticks. Ticks are stored in financial_position, Kind 'review_log', one row per
+// client (ID fprev_<clientId>), Data {months:{'YYYY-MM':{s,by,at,note}}, snooze, last}.
+var REV_FROM = '2026-10';                 // first month on the list (Clinton, 1 Oct 2026)
+var REV_FEED_KEY = 'review_feed_per_month';
+var REV_FEED_DEFAULT = 15;
+var REV_FEED_N = null;                    // loaded from settings once after sign-in
+var _revFeedLoading = false;
+var FP_NOT_ITEM_KINDS = ['need','need_notes','fna_meta','review_log'];   // finpos rows that are not assets/liabilities
+function revPad(n){ return ('0'+n).slice(-2); }
+function revYM(d){ return d.getFullYear()+'-'+revPad(d.getMonth()+1); }
+function revYmDate(ym){ var p=String(ym).split('-'); return new Date(+p[0], +p[1]-1, 1); }
+function revYmLabel(ym, short){ var d=revYmDate(ym); return (short?MONTH_NAMES[d.getMonth()].slice(0,3):MONTH_NAMES[d.getMonth()])+(short?'':' '+d.getFullYear()); }
+function revNextYm(ym){ var d=revYmDate(ym); return revYM(new Date(d.getFullYear(), d.getMonth()+1, 1)); }
+function revNowStamp(){ var d=new Date(); return localDateStr(d)+' '+revPad(d.getHours())+':'+revPad(d.getMinutes()); }
+function revMonthList(){
+  var out=[], cur=revYM(new Date()), ym=REV_FROM, guard=0;
+  while(ym<=cur && guard++<240){ out.push(ym); ym=revNextYm(ym); }
+  return out;
+}
+function revHash(s){ var h=0; s=String(s); for(var i=0;i<s.length;i++){ h=((h<<5)-h+s.charCodeAt(i))|0; } return h>>>0; }
+function loadRevFeedN(cb){
+  if(_revFeedLoading) return;
+  _revFeedLoading = true;
+  sbFetch('GET','/rest/v1/settings?Key=eq.'+REV_FEED_KEY+'&select=*',null,function(rows,err){
+    _revFeedLoading = false;
+    var n = REV_FEED_DEFAULT;
+    if(!err && rows && rows[0]){ var v=parseInt(rows[0].Value,10); if(isFinite(v) && v>=0) n=v; }
+    REV_FEED_N = n;
+    if(cb) cb();
+  });
+}
+function revSetFeedN(){
+  var cur = REV_FEED_N===null ? REV_FEED_DEFAULT : REV_FEED_N;
+  var v = prompt('How many clients you have not spoken to in a year should come up each month?\n(0 switches it off)', String(cur));
+  if(v===null) return;
+  var n = parseInt(String(v).trim(),10);
+  if(!isFinite(n) || n<0 || n>200){ toast('Please enter a number from 0 to 200','err'); return; }
+  sbFetch('POST','/rest/v1/settings',[{Key:REV_FEED_KEY, Value:String(n)}],function(r,e){
+    if(e){ toast('⚠️ Not saved to the server. Please try again.','err'); return; }
+    REV_FEED_N = n; toast('Saved: '+n+' a month','ok');
+    var _s=captureScrolls(); render(); restoreScrolls(_s);
+  });
+}
+// ── The tick log ──
+function revLogRow(cid){ return DB.finpos.find(function(r){ return String(r.ClientID)===String(cid) && r.Kind==='review_log'; }); }
+function revLog(cid){
+  var r = revLogRow(cid);
+  var d = r ? fpData(r) : {};
+  if(!d.months || typeof d.months!=='object') d.months = {};
+  return d;
+}
+function revSaveLog(cid, data, cb){
+  var existing = revLogRow(cid);
+  var row = { ID: existing ? existing.ID : ('fprev_'+cid), ClientID: cid, Kind:'review_log', Data: JSON.stringify(data), UpdatedAt: revNowStamp() };
+  row._pendingSave = true;
+  if(existing){ var gi=DB.finpos.indexOf(existing); if(gi>=0) DB.finpos[gi]=row; }
+  else DB.finpos.push(row);
+  try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
+  var send = JSON.parse(JSON.stringify(row)); delete send._pendingSave;
+  post({action:'saveFinPos', item:send}, function(res){
+    var ok = !!(res && res.ok===1);
+    if(ok){
+      var i = DB.finpos.findIndex(function(x){ return x.ID===row.ID; });
+      if(i>=0 && DB.finpos[i]===row) DB.finpos[i] = send;
+      try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
+    } else {
+      console.error('Review tick NOT saved to server. Kept on this computer with _pendingSave. ID:', row.ID);
+      toast('⚠️ Not saved to the server. The row shows "not saved": tap it to try again.','err');
+    }
+    if(cb) cb(ok);
+    var _s=captureScrolls(); render(); restoreScrolls(_s);
+  });
+}
+// Every change reads the client's latest row from the server first and applies the
+// change to that (same pattern as the contract list), so a tick made by Tracy on
+// another computer a moment ago is never overwritten. Offline: this computer's copy.
+function revUpdate(cid, fn, cb){
+  var id = (revLogRow(cid)||{}).ID || ('fprev_'+cid);
+  sbFetch('GET','/rest/v1/financial_position?ID=eq.'+encodeURIComponent(id)+'&select=*',null,function(rows,err){
+    var base;
+    if(!err && Array.isArray(rows)) base = rows[0] ? fpData(rows[0]) : {};
+    else base = revLog(cid);
+    if(!base || typeof base!=='object') base = {};
+    if(!base.months || typeof base.months!=='object') base.months = {};
+    // A tick on this computer that never reached the server is kept, not lost.
+    var lr = revLogRow(cid);
+    if(lr && lr._pendingSave){
+      var mine = revLog(cid);
+      Object.keys(mine.months).forEach(function(k){ var m=mine.months[k], o=base.months[k]; if(m && (!o || String(m.at||'') > String(o.at||''))) base.months[k] = m; });
+      if(String(mine.last||'') > String(base.last||'')) base.last = mine.last;
+    }
+    fn(base);
+    revSaveLog(cid, base, cb);
+  });
+}
+// Retry a save that failed: merge this computer's ticks into the server's row.
+function revRetry(cid){
+  var mine = revLog(cid);
+  revUpdate(cid, function(b){
+    Object.keys(mine.months).forEach(function(k){
+      var m = mine.months[k], o = b.months[k];
+      if(m && (!o || String(m.at||'') > String(o.at||''))) b.months[k] = m;
+    });
+    if(String(mine.last||'') > String(b.last||'')) b.last = mine.last;
+    if(mine.snooze && (!b.snooze || String(mine.snooze.at||'') > String(b.snooze.at||''))) b.snooze = mine.snooze;
+  }, function(ok){ if(ok) toast('Saved ✓','ok'); });
+}
+// Last contact as 'YYYY-MM-DD' (optionally only before a date): latest Done tick or Annual Review work event.
+function revLastContact(cid, before){
+  var best = '';
+  var lg = revLog(cid);
+  Object.keys(lg.months).forEach(function(k){
+    var e = lg.months[k]; if(!e || e.s!=='done' || !e.at) return;
+    var d = String(e.at).slice(0,10);
+    if(before && d >= before) return;
+    if(d > best) best = d;
+  });
+  var ev = (window._revEvents && window._revEvents.byClient) ? window._revEvents.byClient[cid] : null;
+  if(ev && ev.EventDate){ var d2=String(ev.EventDate).slice(0,10); if((!before || d2 < before) && d2 > best) best = d2; }
+  return best;
+}
+// ── What makes a client due ──
+// Policies that remind: current (not Replaced / Lapsed / Cancelled), a start date,
+// and "Advisor / broker of record" ticked Yes or No (never-ticked stays quiet).
+function revPolicyIndex(){
+  var by = {};
+  (DB.policies||[]).forEach(function(p){
+    if(willIsDeadPolicy(p)) return;
+    if(aumFlag(p.AdvisorOfRecord)==='') return;
+    var sp = String(p.StartDate||'').split(/[T ]/)[0].split(/[-\/]/);
+    if(sp.length<3 || sp[0].length!==4) return;
+    var y=+sp[0], m=+sp[1]-1, d=+sp[2];
+    if(!(y>1900) || !(m>=0 && m<12) || !(d>=1 && d<=31)) return;
+    var k = String(p.ClientID);
+    (by[k] = by[k] || []).push({pol:p, y:y, m:m, d:d});
+  });
+  return by;
+}
+function revAnnItems(polIdx, cid, ym){
+  var t = revYmDate(ym), out = [];
+  (polIdx[String(cid)]||[]).forEach(function(x){
+    if(x.m!==t.getMonth()) return;
+    var yrs = t.getFullYear() - x.y;
+    if(yrs < 1) return;                  // first anniversary is a year after the start
+    var last = new Date(t.getFullYear(), x.m+1, 0).getDate();
+    out.push({pol:x.pol, day:Math.min(x.d, last), years:yrs, notMine:aumFlag(x.pol.AdvisorOfRecord)==='No'});
+  });
+  out.sort(function(a,b){ return a.day-b.day; });
+  return out;
+}
+function revHasReviewMonth(c, ym){ return clientReviewMonths(c).indexOf(revYmDate(ym).getMonth()) >= 0; }
+// Clients with no trigger of their own (no reminding policy, no review month) can come up in the feed.
+function revHasTrigger(polIdx, c){ return !!(polIdx[String(c.ID)]||[]).length || clientReviewMonths(c).length>0; }
+// The feed batch for a month: clients with no trigger and no contact in the 12 months
+// before the month started, longest-silent first (never contacted first, then a fixed
+// order), N of them. Ticks during the month do not change the batch; an unticked
+// client stays at the front, so they carry into next month.
+function revFeedBatch(polIdx, ym, n, active){
+  if(!n) return [];
+  var start = revYmDate(ym), startStr = localDateStr(start);
+  var cut = localDateStr(new Date(start.getFullYear()-1, start.getMonth(), start.getDate()));
+  var today = localDateStr(new Date());
+  var list = [];
+  active.forEach(function(c){
+    if(revHasTrigger(polIdx, c)) return;
+    var lc = revLastContact(c.ID, startStr);
+    if(lc && lc > cut) return;
+    var sz = revLog(c.ID).snooze;
+    if(ym===revYM(new Date()) && sz && sz.until && sz.until > today) return;  // put off: someone else fills the slot
+    list.push({c:c, lc:lc});
+  });
+  list.sort(function(a,b){
+    if(a.lc!==b.lc) return a.lc < b.lc ? -1 : 1;
+    return revHash(a.c.ID) - revHash(b.c.ID);
+  });
+  return list.slice(0, n).map(function(x){ return x.c; });
+}
+// ── Build the list ──
+function revBuild(){
+  var today = new Date(); today.setHours(0,0,0,0);
+  var todayStr = localDateStr(today);
+  var cur = revYM(today);
+  var months = revMonthList();
+  var polIdx = revPolicyIndex();
+  var active = DB.clients.filter(isActiveClient);
+  var n = REV_FEED_N===null ? REV_FEED_DEFAULT : REV_FEED_N;
+  var out = {cur:cur, rows:[], done:[], snoozed:[], feedN:n, months:months, polIdx:polIdx, active:active};
+  if(cur < REV_FROM) return out;
+  var batchMemo = {};
+  function batchIds(ym){
+    if(!batchMemo[ym]){ var m = {}; revFeedBatch(polIdx, ym, n, active).forEach(function(c){ m[String(c.ID)] = 1; }); batchMemo[ym] = m; }
+    return batchMemo[ym];
+  }
+  var feedIds = batchIds(cur);
+  active.forEach(function(c){
+    var lg = revLog(c.ID);
+    var open = [];
+    months.forEach(function(ym){
+      var ann = revAnnItems(polIdx, c.ID, ym);
+      var rev = revHasReviewMonth(c, ym);
+      if(!ann.length && !rev) return;
+      var e = lg.months[ym];
+      if(e && e.s==='done') return;
+      open.push({ym:ym, ann:ann, rev:rev});
+    });
+    var inFeed = !!feedIds[String(c.ID)];
+    var doneNow = lg.months[cur] && lg.months[cur].s==='done' ? lg.months[cur] : null;
+    var pending = !!((revLogRow(c.ID)||{})._pendingSave);
+    if(doneNow){ out.done.push({c:c, e:doneNow, pending:pending}); }
+    var sz = lg.snooze;
+    var snoozing = !!(sz && sz.until && sz.until > todayStr);
+    // A client put off from the feed is no longer in the batch, but still belongs under Not now.
+    if(snoozing && !open.length && !doneNow && !revHasTrigger(polIdx, c)){
+      out.snoozed.push({c:c, open:[], feed:true, pending:pending, since:cur, last:revLastContact(c.ID), snooze:sz});
+      return;
+    }
+    if(!open.length && !(inFeed && !doneNow)) return;
+    var row = {c:c, open:open, feed:inFeed && !open.length && !doneNow, pending:pending,
+      since: open.length ? open[0].ym : cur, last: revLastContact(c.ID)};
+    if(row.feed){
+      // How long this client has been waiting in the feed (consecutive months back).
+      var since = cur, mi = months.indexOf(cur);
+      while(mi>0 && batchIds(months[mi-1])[String(c.ID)]){ since = months[mi-1]; mi--; }
+      row.since = since;
+    }
+    if(snoozing){ row.snooze = sz; out.snoozed.push(row); return; }
+    out.rows.push(row);
+  });
+  // Order: carried over first (oldest first), then this month by first anniversary day, then the feed.
+  function firstDay(r){ var o=r.open.filter(function(x){ return x.ym===cur; })[0]; return o && o.ann.length ? o.ann[0].day : 32; }   // review month only: after the dated anniversaries
+  out.rows.sort(function(a,b){
+    var ga = a.feed ? 2 : (a.since<cur ? 0 : 1), gb = b.feed ? 2 : (b.since<cur ? 0 : 1);
+    if(ga!==gb) return ga-gb;
+    if(ga===0 && a.since!==b.since) return a.since < b.since ? -1 : 1;
+    if(ga===1){ var da=firstDay(a), db=firstDay(b); if(da!==db) return da-db; }
+    return String(a.c.Name||'').localeCompare(String(b.c.Name||''));
+  });
+  out.done.sort(function(a,b){ return String(b.e.at||'').localeCompare(String(a.e.at||'')); });
+  out.snoozed.sort(function(a,b){ return String(a.snooze.until).localeCompare(String(b.snooze.until)); });
+  return out;
+}
+// Open (not done, not put off) rows: the "Reviews Due" count.
+function revOpenCount(){ try{ return revBuild().rows.length; }catch(e){ return 0; } }
+// ── Rendering ──
+function revAnnLine(a, ym, isCur){
+  var p = a.pol;
+  var label = p.Insurer ? p.Insurer+(p.Type?' · '+p.Type:'') : (p.Type||'Policy');
+  var dayTxt = a.day+' '+revYmLabel(ym, true);
+  var todayD = new Date().getDate();
+  var future = isCur && a.day > todayD;
+  var bits = [dayTxt, 'year '+a.years]; if(clean(p.PolicyNo)) bits.push(p.PolicyNo);
+  var h = '<div style="font-size:11.5px;color:'+(future?'#889':'#445')+'">📄 '+escHtml(label)+' <span style="color:#889">· '+escHtml(bits.join(' · '))+'</span></div>';
+  if(a.notMine){
+    var how = '', col = '#9a3412';
+    if(AUM_CONTRACTS && Object.keys(AUM_CONTRACTS).length){ if(aumHasContract(p)){ how=' · Appoint me'; col='#166534'; } else how=' · Move at the right time'; }
+    h += '<div style="font-size:11px;font-weight:700;color:'+col+';margin-left:16px">🎯 Not your policy'+how+'</div>';
+  }
+  return h;
+}
+function revRowHtml(r, cur){
+  var c = r.c, carried = !r.feed && r.since < cur;
+  var id = escHtml(String(c.ID));
+  var bar = r.feed ? '#7c3aed' : carried ? 'var(--rose)' : 'var(--sage)';
+  var lines = '';
+  if(r.feed){
+    lines += '<div style="font-size:11.5px;color:#5b21b6">👋 '+(r.last ? 'Last contact '+fdate(r.last) : 'No contact logged')+' · no policy or review month to bring them up</div>';
+  } else {
+    r.open.forEach(function(o){
+      o.ann.forEach(function(a){ lines += revAnnLine(a, o.ym, o.ym===cur); });
+      if(o.rev) lines += '<div style="font-size:11.5px;color:#445">🗓 Annual review month · '+escHtml(revYmLabel(o.ym, true))+'</div>';
+    });
+  }
+  var tag = r.feed ? (r.since<cur ? '<span style="font-size:10px;font-weight:700;color:#5b21b6;background:#ede9fe;border-radius:8px;padding:1px 7px">since '+escHtml(revYmLabel(r.since,true))+'</span>' : '')
+                   : (carried ? '<span style="font-size:10px;font-weight:700;color:#b23;background:#fdecea;border-radius:8px;padding:1px 7px">since '+escHtml(revYmLabel(r.since,true))+'</span>' : '');
+  var last = (!r.feed) ? '<div style="font-size:10.5px;color:#889;margin-top:2px">'+(r.last ? 'Last contact '+fdate(r.last) : 'No contact logged yet')+'</div>' : '';
+  var warn = r.pending ? '<div style="font-size:10.5px;font-weight:700;color:var(--rose);cursor:pointer" onclick="event.stopPropagation();revRetry(\''+id+'\')">⚠️ Last tick not saved to the server · tap to retry</div>' : '';
+  var btn = function(lbl, fn, cls, title){ return '<button class="btn '+cls+' xs" style="font-size:10.5px;padding:3px 8px" title="'+title+'" onclick="event.stopPropagation();'+fn+'(\''+id+'\')">'+lbl+'</button>'; };
+  return '<div class="ri" style="padding:8px 12px;border-left:3px solid '+bar+';display:flex;gap:8px;align-items:flex-start;cursor:pointer" data-act="open-client" data-id="'+id+'">'+
+    '<div style="flex:1;min-width:0">'+
+      '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap"><span style="font-weight:700;font-size:12.5px">'+escHtml(c.Name||'')+'</span>'+tag+
+      (clean(c.Cell)?'<span style="font-size:11px;color:#667">'+escHtml(c.Cell)+'</span>':'')+'</div>'+
+      lines+last+warn+
+    '</div>'+
+    '<div style="display:flex;gap:4px;flex-shrink:0;align-items:flex-start">'+
+      btn('✓ Done','revOpenDone','b-sg','Spoke to them / reviewed: closes this client for the month')+
+      btn('⏸ Not now','revOpenSnooze','b-gh','Hide until a date you pick')+
+      btn('📅 Task','revMakeTask','b-gh','Make a follow-up task')+
+    '</div></div>';
+}
+function revCardHtml(full, prebuilt){
+  var R = prebuilt || revBuild(), cur = R.cur;
+  var due = R.rows.filter(function(r){ return !r.feed; });
+  var feed = R.rows.filter(function(r){ return r.feed; });
+  var carried = due.filter(function(r){ return r.since < cur; });
+  var thisM = due.filter(function(r){ return r.since >= cur; });
+  var total = R.rows.length + R.done.length + R.snoozed.length;
+  var sec = function(title, list, col){
+    if(!list.length) return '';
+    return '<div style="padding:5px 12px;background:#f7f8fa;font-size:10.5px;font-weight:700;color:'+col+';text-transform:uppercase;letter-spacing:.4px;border-top:1px solid var(--smoke)">'+title+' ('+list.length+')</div>'+
+      list.map(function(r){ return revRowHtml(r, cur); }).join('');
+  };
+  var doneHtml = R.done.length ? '<details style="border-top:1px solid var(--smoke)" ontoggle="window._revDoneOpen=this.open"'+(window._revDoneOpen?' open':'')+'><summary style="padding:6px 12px;font-size:11px;font-weight:700;color:#2d7a3e;cursor:pointer">✓ Done this month ('+R.done.length+')</summary>'+
+    R.done.map(function(d){
+      var id = escHtml(String(d.c.ID));
+      return '<div class="ri" style="padding:5px 12px;font-size:11.5px;display:flex;gap:8px;align-items:center;cursor:pointer" data-act="open-client" data-id="'+id+'">'+
+        '<span style="flex:1"><b>'+escHtml(d.c.Name||'')+'</b> <span style="color:#889">· '+escHtml(fdate(String(d.e.at||'').slice(0,10)))+(d.e.by?' · '+escHtml(userLabel(d.e.by)):'')+(d.e.note?' · '+escHtml(d.e.note):'')+'</span>'+
+        (d.pending?' <span style="color:var(--rose);font-weight:700" onclick="event.stopPropagation();revRetry(\''+id+'\')">⚠️ not saved · retry</span>':'')+'</span>'+
+        '<button class="btn b-gh xs" style="font-size:10px;padding:2px 7px" onclick="event.stopPropagation();revUndoDone(\''+id+'\')">undo</button></div>';
+    }).join('')+'</details>' : '';
+  var snzHtml = R.snoozed.length ? '<details style="border-top:1px solid var(--smoke)" ontoggle="window._revSnzOpen=this.open"'+(window._revSnzOpen?' open':'')+'><summary style="padding:6px 12px;font-size:11px;font-weight:700;color:#667;cursor:pointer">⏸ Not now ('+R.snoozed.length+')</summary>'+
+    R.snoozed.map(function(r){
+      var id = escHtml(String(r.c.ID));
+      return '<div class="ri" style="padding:5px 12px;font-size:11.5px;display:flex;gap:8px;align-items:center;cursor:pointer" data-act="open-client" data-id="'+id+'">'+
+        '<span style="flex:1"><b>'+escHtml(r.c.Name||'')+'</b> <span style="color:#889">· back on '+escHtml(fdate(r.snooze.until))+(r.snooze.note?' · '+escHtml(r.snooze.note):'')+'</span></span>'+
+        '<button class="btn b-gh xs" style="font-size:10px;padding:2px 7px" onclick="event.stopPropagation();revUnsnooze(\''+id+'\')">bring back</button></div>';
+    }).join('')+'</details>' : '';
+  var feedN = R.feedN;
+  var head = '<div class="ch" style="padding:10px 16px;flex-wrap:wrap;gap:6px"><h2>📞 Reviews · '+escHtml(revYmLabel(cur))+'</h2>'+
+    '<div style="display:flex;gap:10px;align-items:center;font-size:11.5px;color:#667">'+
+      '<span><b style="color:#2d7a3e">'+R.done.length+'</b> of '+total+' done</span>'+
+      '<span style="cursor:pointer;text-decoration:underline dotted" onclick="revSetFeedN()" title="Change how many clients you have not spoken to in a year come up each month">👋 '+feedN+' a month</span>'+
+      (full ? '' : '<button class="btn b-gh xs" style="font-size:10px;padding:3px 8px" data-nav="reviews">Full list →</button>')+
+    '</div></div>';
+  var body = (R.rows.length ? '' : '<div class="empty" style="padding:14px">Nothing waiting this month ✅</div>')+
+    sec('⏰ Carried over', carried, '#b23')+
+    sec('📄 This month', thisM, '#2d7a3e')+
+    sec('👋 Not spoken to in a year', feed, '#5b21b6')+
+    doneHtml+snzHtml;
+  var progress = total ? '<div style="height:4px;background:#eef1f4"><div style="height:4px;width:'+Math.round(R.done.length*100/total)+'%;background:var(--sage)"></div></div>' : '';
+  return '<div class="card" style="padding:0;margin-bottom:12px">'+head+progress+
+    '<div id="revScroll" style="'+(full?'':'max-height:420px;overflow-y:auto')+'">'+body+'</div></div>';
+}
+// Next month preview (Reviews page): who comes up by anniversary or review month.
+function revNextMonthHtml(){
+  var R = revBuild(); var nx = revNextYm(R.cur); var list = [];
+  R.active.forEach(function(c){
+    var ann = revAnnItems(R.polIdx, c.ID, nx), rv = revHasReviewMonth(c, nx);
+    if(ann.length || rv) list.push({c:c, ann:ann, rv:rv});
+  });
+  list.sort(function(a,b){ var da=a.ann.length?a.ann[0].day:0, db=b.ann.length?b.ann[0].day:0; return da!==db ? da-db : String(a.c.Name||'').localeCompare(String(b.c.Name||'')); });
+  return '<div class="card" style="padding:0;margin-bottom:14px"><div class="ch" style="padding:10px 16px"><h2>🗓 Coming up in '+escHtml(revYmLabel(nx))+' <span style="font-size:12px;color:#889;font-weight:400">('+list.length+' clients, plus the '+R.feedN+' a month feed)</span></h2></div>'+
+    (list.length ? list.map(function(x){
+      return '<div class="ri" style="padding:6px 14px;cursor:pointer" data-act="open-client" data-id="'+escHtml(String(x.c.ID))+'"><div style="flex:1"><b style="font-size:12.5px">'+escHtml(x.c.Name||'')+'</b>'+
+        x.ann.map(function(a){ return revAnnLine(a, nx, false); }).join('')+(x.rv?'<div style="font-size:11.5px;color:#445">🗓 Annual review month</div>':'')+'</div></div>';
+    }).join('') : '<div class="empty" style="padding:14px">Nobody yet</div>')+'</div>';
+}
+// ── Actions ──
+function revModalEl(){
+  var el = document.getElementById('revMod');
+  if(!el){
+    el = document.createElement('div'); el.className='ov'; el.id='revMod';
+    el.innerHTML = '<div class="modal" style="max-width:460px"><div class="mh"><h3 id="revModT">Review</h3><button class="xb" data-close="1">✕</button></div><div class="mb" id="revModB"></div><div class="mf" id="revModF"></div></div>';
+    document.body.appendChild(el);
+  }
+  return el;
+}
+function revClient(cid){ return DB.clients.find(function(x){ return String(x.ID)===String(cid); }); }
+function revOpenDone(cid){
+  var c = revClient(cid); if(!c) return;
+  var el = revModalEl();
+  var last = revLastContact(cid);
+  document.getElementById('revModT').textContent = '✓ Done · '+(c.Name||'');
+  document.getElementById('revModB').innerHTML =
+    '<div style="font-size:12.5px;color:#556;margin-bottom:8px">Ticks this client off for '+escHtml(revYmLabel(revYM(new Date())))+', and anything carried over. Saved for everyone.</div>'+
+    '<div class="fld"><label>Note (optional)</label><textarea id="revNote" style="min-height:70px" placeholder="What came out of it, in a few words"></textarea></div>'+
+    (last ? '<div style="font-size:11.5px;color:#889">Last contact before this: '+escHtml(fdate(last))+'</div>' : '');
+  document.getElementById('revModF').innerHTML =
+    '<button class="btn b-gh sm" data-close="1">Cancel</button>'+
+    (last ? '<button class="btn b-gh sm" onclick="revConfirmDone(\''+escHtml(String(cid))+'\',\'Covered on the call of '+escHtml(fdate(last))+'\')">Covered on last call</button>' : '')+
+    '<button class="btn b-gd sm" onclick="revConfirmDone(\''+escHtml(String(cid))+'\')">✓ Done</button>';
+  el.classList.add('open');
+  setTimeout(function(){ var t=document.getElementById('revNote'); if(t) t.focus(); }, 50);
+}
+function revConfirmDone(cid, presetNote){
+  var t = document.getElementById('revNote');
+  var note = presetNote || (t ? String(t.value||'').trim() : '');
+  var c = revClient(cid); if(!c) return;
+  var at = revNowStamp(), cur = revYM(new Date());
+  var entry = {s:'done', by:cu(), at:at, note:note};
+  var polIdx = revPolicyIndex();
+  closeAll();
+  revUpdate(cid, function(lg){
+    // Close this month and every month still open for this client.
+    revMonthList().forEach(function(ym){
+      if(ym===cur){ lg.months[ym] = entry; return; }
+      var e = lg.months[ym]; if(e && e.s==='done') return;
+      if(revAnnItems(polIdx, cid, ym).length || revHasReviewMonth(c, ym)) lg.months[ym] = entry;
+    });
+    lg.last = at; lg.snooze = null;
+  }, function(ok){ if(ok) toast((c.Name||'Client')+' ticked off ✓','ok'); });
+}
+function revUndoDone(cid){
+  var cur = revYM(new Date());
+  var mine = revLog(cid).months[cur]; if(!mine) return;
+  revUpdate(cid, function(lg){
+    var e = lg.months[cur] || mine;
+    Object.keys(lg.months).forEach(function(k){ if(lg.months[k] && lg.months[k].at===e.at) delete lg.months[k]; });
+    delete lg.months[cur];
+    lg.last = '';
+    Object.keys(lg.months).forEach(function(k){ var x=lg.months[k]; if(x && x.s==='done' && String(x.at) > String(lg.last)) lg.last = x.at; });
+  });
+}
+function revOpenSnooze(cid){
+  var c = revClient(cid); if(!c) return;
+  var el = revModalEl();
+  var d = new Date(); d.setDate(d.getDate()+7);
+  var chip = function(lbl, days){ return '<button type="button" class="btn b-gh xs" onclick="var x=new Date();x.setDate(x.getDate()+'+days+');document.getElementById(\'revUntil\').value=localDateStr(x)">'+lbl+'</button>'; };
+  document.getElementById('revModT').textContent = '⏸ Not now · '+(c.Name||'');
+  document.getElementById('revModB').innerHTML =
+    '<div style="font-size:12.5px;color:#556;margin-bottom:8px">Hides this client until the date below, then they come back on the list.</div>'+
+    '<div class="fld"><label>Bring back on</label><input type="date" id="revUntil" value="'+localDateStr(d)+'"></div>'+
+    '<div style="display:flex;gap:6px;margin:-4px 0 10px">'+chip('1 week',7)+chip('2 weeks',14)+chip('1 month',30)+chip('3 months',91)+'</div>'+
+    '<div class="fld"><label>Why (optional)</label><input type="text" id="revSnzNote" placeholder="e.g. overseas until November"></div>';
+  document.getElementById('revModF').innerHTML =
+    '<button class="btn b-gh sm" data-close="1">Cancel</button>'+
+    '<button class="btn b-gd sm" onclick="revConfirmSnooze(\''+escHtml(String(cid))+'\')">⏸ Not now</button>';
+  el.classList.add('open');
+}
+function revConfirmSnooze(cid){
+  var u = (document.getElementById('revUntil')||{}).value || '';
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(u) || u <= localDateStr(new Date())){ toast('Pick a date after today','err'); return; }
+  var sz = {until:u, by:cu(), at:revNowStamp(), note:String((document.getElementById('revSnzNote')||{}).value||'').trim()};
+  closeAll();
+  revUpdate(cid, function(lg){ lg.snooze = sz; }, function(ok){ if(ok) toast('Back on the list on '+fdate(u),'ok'); });
+}
+function revUnsnooze(cid){ revUpdate(cid, function(lg){ lg.snooze = null; }); }
+function revMakeTask(cid){
+  var c = revClient(cid); if(!c) return;
+  var R = revBuild();
+  var r = R.rows.concat(R.snoozed).filter(function(x){ return String(x.c.ID)===String(cid); })[0];
+  var items = [];
+  if(r && !r.feed) r.open.forEach(function(o){
+    o.ann.forEach(function(a){ var p=a.pol; items.push((p.Insurer||'Policy')+(p.Type?' '+p.Type:'')+' anniversary '+a.day+' '+revYmLabel(o.ym,true)+(p.PolicyNo?' ('+p.PolicyNo+')':'')); });
+    if(o.rev) items.push('Annual review month '+revYmLabel(o.ym,true));
+  });
+  openTaskModal(c.Name);
+  var tt = document.getElementById('tt'); if(tt) tt.value = 'Review follow-up: '+(c.Name||'');
+  var tn = document.getElementById('tn'); if(tn) tn.value = items.length ? items.join('\n') : 'Not spoken to in a year: phone to reconnect.';
+  document.getElementById('tMod').classList.add('open');
+}
+// One-off (per computer): ticks made on the old day-by-day reminders for policy
+// anniversaries from REV_FROM up to today become Done ticks, so nothing ticked is asked again.
+function revMigrateOldTicks(){
+  var FLAG = 'du_rev_migrated_v1';
+  try{ if(localStorage.getItem(FLAG)) return; }catch(e){ return; }
+  if(!DB.clients.length || !DB.policies.length || !window._revSyncOk) return;
+  var polIdx = revPolicyIndex(), today = new Date(), months = revMonthList(), n = 0;
+  DB.clients.filter(isActiveClient).forEach(function(c){
+    var add = {};
+    months.forEach(function(ym){
+      revAnnItems(polIdx, c.ID, ym).forEach(function(a){
+        var p = a.pol;
+        var label = p.Insurer ? p.Insurer+(p.Type?' — '+p.Type:'') : (p.Type||'Policy');
+        var type = '📄 '+label+' anniversary';
+        var key = 'du_rem_'+revYmDate(ym).getFullYear()+'_'+String(c.Name||'').replace(/\s+/g,'_')+'_'+type.replace(/[^a-z0-9]/gi,'_');
+        var ticked = false; try{ ticked = localStorage.getItem(key)==='1'; }catch(e){}
+        if(ticked) add[ym] = 1;
+      });
+    });
+    var yms = Object.keys(add);
+    if(!yms.length) return;
+    n++;
+    revUpdate(c.ID, function(lg){
+      yms.forEach(function(ym){
+        if(lg.months[ym] && lg.months[ym].s==='done') return;
+        lg.months[ym] = {s:'done', by:cu(), at:revNowStamp(), note:'Ticked on the old reminder list'};
+        if(String(lg.months[ym].at) > String(lg.last||'')) lg.last = lg.months[ym].at;
+      });
+    });
+  });
+  try{ localStorage.setItem(FLAG, '1'); }catch(e){}
+  if(n) toast(n+' client'+(n===1?'':'s')+' you had ticked on the old reminders carried across ✓','ok');
+}
+
 function renderReviewsPage(){
   var R = window._revEvents;
   if(!R.loading && Date.now() - R.loadedAt > BOARD_REFRESH_MS) loadReviewEvents();
-  var today = new Date(); today.setHours(0,0,0,0);
-  var thisM = today.getMonth(), nextM = (thisM + 1) % 12;
-  var active = DB.clients.filter(isActiveClient);
-  var noMonth = 0, dueThis = [], dueNext = [];
-  active.forEach(function(c){
-    var ms = clientReviewMonths(c);
-    if(!ms.length){ noMonth++; return; }
-    if(ms.indexOf(thisM) >= 0) dueThis.push(c);
-    if(ms.indexOf(nextM) >= 0) dueNext.push(c);
-  });
-  var byName = function(a, b){ return String(a.Name || '').localeCompare(String(b.Name || '')); };
-  dueThis.sort(byName); dueNext.sort(byName);
-
-  function row(c){
-    var last = R.byClient[c.ID];
-    var lastTxt, lastClr = '#889';
-    if(!R.loadedAt){ lastTxt = 'Checking last review…'; }
-    else if(R.err){ lastTxt = 'Last review could not be loaded'; }
-    else if(!last){ lastTxt = 'No Annual Review recorded yet'; }
-    else {
-      var p = String(last.EventDate || '').split('-');
-      var ld = p.length === 3 ? new Date(+p[0], +p[1]-1, +p[2]) : null;
-      var ago = ld ? Math.round((today - ld) / 86400000) : null;
-      var recent = ago !== null && ago <= 90;
-      lastTxt = (recent ? '✓ ' : '')+'Last review '+fdate(last.EventDate)+(last.Status === 'complete' ? '' : ' (in progress)');
-      if(recent) lastClr = '#2d7a3e';
-    }
-    return '<div class="ri" style="cursor:pointer;padding:9px 14px;border-bottom:1px solid var(--smoke)" data-act="open-client" data-id="'+escHtml(c.ID)+'">'+
-      '<div style="width:30px;height:30px;border-radius:50%;background:var(--navy);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:var(--gold);flex-shrink:0">'+ini(c.Name)+'</div>'+
-      '<div style="flex:1;min-width:0">'+
-        '<div style="font-weight:700;font-size:13px">'+escHtml(c.Name || '')+'</div>'+
-        '<div style="font-size:11px;color:#889">'+escHtml(c.Cell || c.Email || '')+(clean(c.Cell) || clean(c.Email) ? ' · ' : '')+'Review: '+escHtml(clean(c.ReviewDate))+'</div>'+
-      '</div>'+
-      '<div style="font-size:11px;color:'+lastClr+';font-weight:'+(lastClr === '#889' ? '400' : '700')+';text-align:right;white-space:nowrap">'+escHtml(lastTxt)+'</div>'+
-    '</div>';
-  }
-  function section(title, list){
-    return '<div class="card" style="padding:0;margin-bottom:14px">'+
-      '<div class="ch" style="padding:10px 16px"><h2>'+title+' <span style="font-size:12px;color:#889;font-weight:400">('+list.length+')</span></h2></div>'+
-      (list.length ? list.map(row).join('') : '<div class="empty" style="padding:14px">No clients due</div>')+
-    '</div>';
-  }
-
+  if(REV_FEED_N===null && SB_AUTH.token) loadRevFeedN(function(){ if(PAGE==='reviews'){ var _s=captureScrolls(); render(); restoreScrolls(_s); } });
+  var B = revBuild();
+  var pool = B.active.filter(function(c){ return !revHasTrigger(B.polIdx, c); }).length;
   return '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">'+
-      '<h1 style="font-family:\'DM Serif Display\',serif;font-size:22px;color:var(--navy)">Annual Reviews</h1>'+
-      '<div style="display:flex;gap:10px;align-items:center"><span style="font-size:12px;color:#889">Active clients by review month · click a client to open them</span>'+
+      '<h1 style="font-family:\'DM Serif Display\',serif;font-size:22px;color:var(--navy)">Reviews</h1>'+
+      '<div style="display:flex;gap:10px;align-items:center"><span style="font-size:12px;color:#889">Policy anniversaries, review months and clients not spoken to · click a client to open them</span>'+
       '<button class="btn b-gh xs" data-act="reviews-refresh" title="Refresh last reviews">↻</button></div>'+
     '</div>'+
-    section('📅 Due this month · '+MONTH_NAMES[thisM], dueThis)+
-    section('🗓 Due next month · '+MONTH_NAMES[nextM], dueNext)+
-    '<div style="padding:12px 16px;background:#fdf2e6;border-left:3px solid #b95900;border-radius:6px;font-size:12px;color:#8a4a00">'+
-      '<b>'+noMonth+' of '+active.length+' active clients have no review month set.</b> '+
-      'To add one: open the client, click Edit, and set <b>Review Date</b> to any day in the month their annual review is due. It repeats every year.'+
+    revCardHtml(true)+
+    revNextMonthHtml()+
+    '<div style="padding:12px 16px;background:#f5f3ff;border-left:3px solid #7c3aed;border-radius:6px;font-size:12px;color:#4c1d95">'+
+      '<b>'+pool+' of '+B.active.length+' active clients have no reminding policy and no review month.</b> '+
+      'They come up '+B.feedN+' a month under "Not spoken to in a year", longest silent first. As you capture their policies (with a start date and the broker-of-record tick), they move to their policy anniversaries instead.'+
     '</div>';
 }
 
@@ -9818,7 +10238,7 @@ function buildFnaDataPack(cid, includeSpouse){
 
   // ── Financial Position (reusable for the linked spouse appendix) ──
   function packFinpos(forCid, prefix){
-    var fpRows = finposFor(forCid).filter(function(r){ return r.Kind!=='need' && r.Kind!=='need_notes' && r.Kind!=='fna_meta'; });
+    var fpRows = finposFor(forCid).filter(function(r){ return FP_NOT_ITEM_KINDS.indexOf(r.Kind)<0; });
     line('── '+prefix+'FINANCIAL POSITION ('+fpRows.length+' items) ──');
     if(!fpRows.length) line('  (none captured)');
     var totA=0, totL=0, totIncPM=0, totExpPM=0;
@@ -10449,7 +10869,7 @@ function fnaCapRender(){
   }
 
   else if(step.key==='finish'){
-    var rows = finposFor(cid).filter(function(r){ return r.Kind!=='need_notes' && r.Kind!=='fna_meta'; });
+    var rows = finposFor(cid).filter(function(r){ return r.Kind!=='need_notes' && r.Kind!=='fna_meta' && r.Kind!=='review_log'; });
     var famF = fnaCapFamily(c);
     var cnt = function(list, isFresh){ var f=list.filter(isFresh).length; return {t:list.length, f:f, s:list.length-f}; };
     var secs = [
