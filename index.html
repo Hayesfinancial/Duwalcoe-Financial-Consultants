@@ -262,9 +262,18 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--cream);c
     <div class="mb">
       <div style="font-size:12px;color:#667;margin-bottom:4px">Review what will be shared, then copy and paste it to Claude for the FNA. Banking details are deliberately excluded.</div>
       <div id="fnaPackSpouseWrap" style="display:none;margin:4px 0 8px;padding:7px 10px;background:#f7f9f2;border:1.5px solid var(--mist);border-radius:7px">
+        <div id="fnaPackSpouseLbl" style="font-size:11px;font-weight:700;color:#556;text-transform:uppercase;letter-spacing:.3px;margin-bottom:4px">Partner</div>
+        <label style="display:flex;align-items:flex-start;gap:8px;font-size:12px;color:var(--ink);cursor:pointer;margin:0 0 3px">
+          <input type="radio" name="fnaPackSp" value="none" checked onchange="refreshFnaPack()" style="margin-top:2px">
+          <span>This client only</span>
+        </label>
+        <label style="display:flex;align-items:flex-start;gap:8px;font-size:12px;color:var(--ink);cursor:pointer;margin:0 0 3px">
+          <input type="radio" name="fnaPackSp" value="bg" onchange="refreshFnaPack()" style="margin-top:2px">
+          <span id="fnaPackSpBgLbl">Add the partner as background: assets, policies &amp; will, for the estate (their needs left out)</span>
+        </label>
         <label style="display:flex;align-items:flex-start;gap:8px;font-size:12px;color:var(--ink);cursor:pointer;margin:0">
-          <input type="checkbox" id="fnaPackSpouse" onchange="refreshFnaPack()" style="margin-top:2px">
-          <span id="fnaPackSpouseLbl">Include linked spouse&rsquo;s assets &amp; policies (context for accrual/estate only — their needs are excluded)</span>
+          <input type="radio" name="fnaPackSp" value="joint" onchange="refreshFnaPack()" style="margin-top:2px">
+          <span id="fnaPackSpJointLbl">Joint FNA: add the partner&rsquo;s full data pack, needs included</span>
         </label>
       </div>
       <textarea id="fnaPackTxt" readonly style="width:100%;min-height:420px;border:1.5px solid var(--mist);border-radius:7px;padding:10px 12px;font-size:12px;font-family:monospace;line-height:1.5;color:var(--ink);outline:none;resize:vertical;white-space:pre"></textarea>
@@ -1975,7 +1984,16 @@ function renderDash(){
       var d2=daysTo(c.ReviewDate);
       if(d2!==null&&d2<=60)up.push({name:c.Name,id:c.ID,cell:c.Cell||'',type:'📋 Review Due',days:d2,col:'var(--sky)',reviewDate:c.ReviewDate});
     }
-    if(clean(c.Anniversary)){
+    if(clean(c.Anniversary) && c.MaritalStatus==='Engaged'){
+      // Engaged: the date is the planned wedding — count to that exact day, not a yearly anniversary.
+      var _wP=String(c.Anniversary).split(/[T ]/)[0].split(/[-\/]/);
+      var _wd=_wP.length>=3?new Date(+_wP[0],+_wP[1]-1,+_wP[2]):new Date(c.Anniversary);
+      if(!isNaN(_wd)){
+        var _t0=new Date(); _t0.setHours(0,0,0,0);
+        var dw=Math.round((_wd-_t0)/86400000);
+        if(dw>=0&&dw<=60) up.push({name:c.Name,id:c.ID,cell:c.Cell||'',type:'💍 Wedding day',days:dw,col:'var(--rose)'});
+      }
+    } else if(clean(c.Anniversary)){
       var d3=daysTo(c.Anniversary);
       if(d3!==null&&d3<=60){
         var _annP=String(c.Anniversary).split(/[T ]/)[0].split(/[-\/]/);
@@ -2759,6 +2777,22 @@ function dr(lbl,val){ return '<div class="dr"><span class="dl">'+lbl+'</span><sp
 // ══ FAMILY / DEPENDANTS ══════════════════════════════════════
 var FAM_CLIENT = null;
 var FAM_TYPE = 'Spouse';
+// A Life Partner is treated like a Spouse for the partner details, the data pack
+// and the card mirroring (1 Oct 2026). Estate treatment still differs (s.4(q)
+// needs a permanent union) and is handled where the estate rules are applied.
+function isPartnerType(t){ return t==='Spouse' || t==='Life Partner'; }
+// The client's partner row. A Spouse row wins over a Life Partner row, so a client
+// with both (separated, now cohabiting) keeps the spouse in the Spouse fields.
+function partnerLinkFor(cid, clientOnly){
+  var mine = DB.links.filter(function(l){
+    return String(l.PrincipalID)===String(cid) && isPartnerType(l.Type) &&
+      (!clientOnly || (l.IsClient==='Yes' && clean(l.ClientID)));
+  });
+  return mine.filter(function(l){ return l.Type==='Spouse'; })[0] || mine[0] || null;
+}
+// Statuses a couple share. Engaged and married regimes belong to both of them;
+// Single / Divorced / Widowed are each person's own and are never copied across.
+function maritalIsShared(m){ return m==='Engaged' || m==='Life partner' || /^Married/.test(m||''); }
 var FAM_EDIT_ID = null; // set when editing one specific link row (e.g. a child) — null means add/spouse mode
 
 function famFor(cid){
@@ -2807,12 +2841,10 @@ function openFamModal(cid, type, linkId){
     if(!existing) FAM_EDIT_ID = null; // stale id — fall through to add/spouse mode
   }
   if(!existing && FAM_TYPE === 'Spouse'){
-    existing = DB.links.find(function(l){
-      return String(l.PrincipalID)===String(cid) && l.Type==='Spouse';
-    });
+    existing = partnerLinkFor(cid);
   }
   var titleVerb = existing ? 'Edit' : 'Add';
-  document.getElementById('famModT').textContent = titleVerb + ' ' + FAM_TYPE + ' for ' + (c?c.Name:'');
+  document.getElementById('famModT').textContent = titleVerb + ' ' + ((existing&&existing.Type)||FAM_TYPE) + ' for ' + (c?c.Name:'');
   // Pre-fill spouse fields
   var preN='', preId='', preDob='', preCell='', preEmail='';
   if(existing){
@@ -2872,9 +2904,7 @@ function saveFamMember(){
     existing = DB.links.find(function(l){ return String(l.ID)===String(FAM_EDIT_ID); });
   }
   if(!existing && FAM_TYPE === 'Spouse'){
-    existing = DB.links.find(function(l){
-      return String(l.PrincipalID) === String(FAM_CLIENT) && l.Type === 'Spouse';
-    });
+    existing = partnerLinkFor(FAM_CLIENT);
   }
 
   // Spouse is one-per-client (the Edit-Spouse button, the virtual-spouse fallback
@@ -2929,7 +2959,7 @@ function saveFamMember(){
   var _principal = DB.clients.find(function(x){ return String(x.ID)===String(FAM_CLIENT); });
   if(_principal){
     var _isClientSpouse = (link.IsClient==='Yes' && clean(link.ClientID));
-    if(relType==='Spouse' && !_isClientSpouse){
+    if(isPartnerType(relType) && !_isClientSpouse && partnerLinkFor(FAM_CLIENT)===link){
       // Non-client spouse: the family-link row is the master; copy it onto the
       // client record so every other screen reads the same details.
       _principal.SpouseName     = name;
@@ -2941,13 +2971,11 @@ function saveFamMember(){
       post({action:'saveClient', client:_principal}, function(res){
         if(!(res && res.ok)) toast('⚠️ Spouse saved to the family card, but the client record could not be updated — press Sync so the FNA printout stays correct.','err');
       });
-    } else if(_prevType==='Spouse' && relType!=='Spouse'){
+    } else if(isPartnerType(_prevType) && !isPartnerType(relType)){
       // This row was the spouse and has just been reclassified (e.g. Spouse →
       // Child). If no other spouse link remains, clear the client record's legacy
       // spouse fields so a stale "virtual spouse" doesn't reappear on the card.
-      var _stillSpouse = DB.links.some(function(l){
-        return String(l.PrincipalID)===String(FAM_CLIENT) && l.Type==='Spouse';
-      });
+      var _stillSpouse = !!partnerLinkFor(FAM_CLIENT);
       if(!_stillSpouse && clean(_principal.SpouseName)){
         _principal.SpouseName=''; _principal.SpouseIDNumber=''; _principal.SpouseDOB='';
         _principal.SpouseCell=''; _principal.SpouseEmail='';
@@ -3006,10 +3034,8 @@ function removeFamMember(linkId){
   // virtual entry from SpouseName on the client record and the removal appears
   // not to have worked. (Removing one of two duplicate Spouse links leaves the
   // other in place, so this branch is skipped in the duplicate-cleanup case.)
-  if(link.Type==='Spouse' && principal && clean(principal.SpouseName)){
-    var stillHasSpouse = DB.links.some(function(l){
-      return String(l.PrincipalID)===String(link.PrincipalID) && l.Type==='Spouse';
-    });
+  if(isPartnerType(link.Type) && principal && clean(principal.SpouseName)){
+    var stillHasSpouse = !!partnerLinkFor(link.PrincipalID);
     if(!stillHasSpouse){
       principal.SpouseName=''; principal.SpouseIDNumber=''; principal.SpouseDOB='';
       principal.SpouseCell=''; principal.SpouseEmail='';
@@ -3036,7 +3062,19 @@ function removeFamMember(linkId){
   });
 }
 
-function upgradeToClient(linkId){
+// Make Client (rewritten 1 Oct 2026). Creates the person's own client record AND the
+// link back to the principal, so the couple is linked both ways in one step (before,
+// only the principal's row was updated and the link had to be redone by hand).
+// For a Spouse / Life Partner it also carries across what the principal's card
+// already knows about them: occupation, income, address, cohabiting, and a shared
+// marital status / wedding date. Gender comes from the SA ID. A lead's partner
+// becomes a lead too.
+// opts.stay = true → don't open the new card (used from the FNA capture).
+// opts.done(newId, ok) → called once the saves have answered.
+var _upgradeBusy = false;
+function upgradeToClient(linkId, opts){
+  opts = opts || {};
+  if(_upgradeBusy) return;
   var lnk = DB.links.find(function(l){ return String(l.ID)===String(linkId); });
   // Handle virtual spouse entry (from client record, not yet in DB.links)
   if(!lnk && String(linkId).indexOf('virtual_sp_')===0){
@@ -3047,41 +3085,96 @@ function upgradeToClient(linkId){
     lnk = {ID:'fam_sp_'+Date.now(), PrincipalID:principalId,
       Name:principal.SpouseName, IDNumber:principal.SpouseIDNumber||'',
       DOB:principal.SpouseDOB||'', Cell:principal.SpouseCell||'',
-      Email:principal.SpouseEmail||'', Type:'Spouse', IsClient:'No', ClientID:''};
+      Email:principal.SpouseEmail||'', Type:(principal.MaritalStatus==='Life partner'||principal.MaritalStatus==='Engaged')?'Life Partner':'Spouse', IsClient:'No', ClientID:''};
+    lnk._pendingSave = true;
     DB.links.push(lnk);
-    post({action:'saveFamMember', member:lnk});
+    linkId = lnk.ID;
   }
   if(!lnk) return;
-  // Get principal to copy shared details like Anniversary across
+  // Already a client — just open (or stay on) their record, never create a second one.
+  if(lnk.IsClient==='Yes' && clean(lnk.ClientID) && DB.clients.some(function(x){ return String(x.ID)===String(lnk.ClientID); })){
+    if(opts.done) opts.done(String(lnk.ClientID), true);
+    else if(!opts.stay) openClient(lnk.ClientID);
+    return;
+  }
+  _upgradeBusy = true;
   var principal2 = DB.clients.find(function(x){ return String(x.ID)===String(lnk.PrincipalID); });
+  var isPartner = isPartnerType(lnk.Type);
+  var shareMar = !!principal2 && (lnk.Type==='Spouse' || (isPartner && maritalIsShared(principal2.MaritalStatus)));
   var newId = 'new_' + Date.now();
+  var _upName = String(lnk.Name||'').replace(/\s+/g,' ').trim();
+  var _digits = String(lnk.IDNumber||'').replace(/\D/g,'');
+  var _gender = (_digits.length===13 && saIdValid(_digits)) ? ((+_digits.charAt(6) >= 5) ? 'Male' : 'Female') : '';
+  var _dob = lnk.DOB || '';
+  if(saIdValid(_digits)) _dob = dobFromID(_digits) || _dob;
   // FamilyType blank = a client in their own right (a Spouse/Child tag here would
   // put the upgraded person straight onto Family & contacts). The relationship
   // itself stays on the family link.
-  var _upName = String(lnk.Name||'').replace(/\s+/g,' ').trim();
   var c = {
-    ID: newId, Name: lnk.Name, IDNumber: lnk.IDNumber, DOB: lnk.DOB,
-    Cell: lnk.Cell, Email: lnk.Email, Status: 'Active', IsLead: 'No',
+    ID: newId, Name: lnk.Name, IDNumber: lnk.IDNumber, DOB: _dob,
+    Cell: lnk.Cell, Email: lnk.Email, Status: 'Active',
+    IsLead: (principal2 && principal2.IsLead==='Yes') ? 'Yes' : 'No',
     Surname: (_upName.indexOf(' ')>0 ? surnameFromNameRule(_upName) : ''),
     FamilyType: '', Adviser: cu(),
-    MaritalStatus: principal2 ? (principal2.MaritalStatus||'') : '',
-    Occupation:'', Employer:'', Income:0,
+    MaritalStatus: shareMar ? (principal2.MaritalStatus||'') : '',
+    Anniversary:   shareMar ? (principal2.Anniversary||'') : '',
+    Cohabiting: (isPartner && principal2 && principal2.Cohabiting==='Yes') ? 'Yes' : 'No',
+    Occupation: (isPartner && principal2) ? (principal2.SpouseOccupation||'') : '',
+    Employer:'',
+    Income: (isPartner && principal2 && clean(principal2.SpouseIncome)) ? principal2.SpouseIncome : 0,
     TaxNo:'', Smoker:'', RiskCategory:'Not Started',
-    Gender:'', TelHome:'', TelWork:'', Address:'', POBox:'', DriveUrl:'', Notes:'', BankDetails:'', Doctors:'',
-    ReviewDate:'',
-    Anniversary: principal2 ? (principal2.Anniversary||'') : ''
+    Gender:_gender, TelHome:'', TelWork:'',
+    Address: (isPartner && principal2) ? (principal2.Address||'') : '',
+    POBox:   (isPartner && principal2) ? (principal2.POBox||'') : '',
+    DriveUrl:'', Notes:'', BankDetails:'', Doctors:'',
+    ReviewDate:''
   };
+  if(c.IsLead==='Yes' && principal2 && clean(principal2.LeadSource)) c.LeadSource = principal2.LeadSource;
+  // The new client's own Spouse* fields point back at the principal.
+  if(isPartner && principal2) applySpouseFieldsFrom(c, principal2);
+
+  // The link back from the new client to the principal (Child ↔ Parent invert).
+  var invRel = {'Child':'Parent','Parent':'Child'}[lnk.Type] || lnk.Type || 'Other';
+  var rev = null;
+  var revExists = principal2 && DB.links.some(function(l){
+    return String(l.PrincipalID)===newId && String(l.ClientID)===String(principal2.ID);
+  });
+  if(principal2 && !revExists){
+    rev = {
+      ID: 'fam_' + (Date.now()+1), PrincipalID: newId,
+      Name: principal2.Name||'', IDNumber: principal2.IDNumber||'', DOB: principal2.DOB||'',
+      Cell: principal2.Cell||'', Email: principal2.Email||'',
+      Type: invRel, IsClient: 'Yes', ClientID: String(principal2.ID)
+    };
+  }
+
+  // Local first, flagged pending, so a failed save is kept and retried on sync.
+  c._pendingSave = true;
   DB.clients.push(c);
   lnk.IsClient = 'Yes';
   lnk.ClientID = newId;
-  closeAll();
+  lnk._pendingSave = true;
+  if(rev){ rev._pendingSave = true; DB.links.push(rev); }
+  try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
+  if(!opts.stay) closeAll();
   render();
-  post({action:'saveClient', client:c}, function(){
-    post({action:'upgradeFamMember', id:linkId, clientId:newId}, function(){
-      toast(lnk.Name + ' upgraded to client','ok');
-    });
+
+  function finish(ok){
+    _upgradeBusy = false;
+    if(ok) toast(lnk.Name + ' is now a '+(c.IsLead==='Yes'?'lead':'client')+(rev?' and linked both ways to '+principal2.Name:''),'ok');
+    else toast('⚠️ '+lnk.Name+' was created on this computer, but the server did not confirm every save. It is kept here and will retry on the next sync — do not create them again.','err');
+    if(opts.done) opts.done(newId, ok);
+  }
+  post({action:'saveClient', client:c}, function(res){
+    if(!(res && res.ok)){ finish(false); return; }
+    var pending = rev ? 2 : 1, allOk = true;
+    function one(r){ if(!(r && r.ok)) allOk = false; if(--pending===0) finish(allOk); }
+    // The principal's row: a full upsert covers both a row that was only virtual a
+    // moment ago and an existing row (merge-duplicates updates it in place).
+    post({action:'saveFamMember', member:lnk}, one);
+    if(rev) post({action:'saveFamMember', member:rev}, one);
   });
-  openClient(newId);
+  if(!opts.stay) openClient(newId);
 }
 
 var LINK_EXIST_CLIENT = null;
@@ -3243,7 +3336,7 @@ function confirmExistLink(linkedClientId) {
     // fields (both directions) so the spouse pulls through to the FNA, the
     // client-details card and the ID audit — not just the family-link row.
     function syncSpouseFields(){
-      if(rel!=='Spouse') return false;
+      if(!isPartnerType(rel)) return false;
       var any=false;
       if(applySpouseFieldsFrom(principal, linked)){
         any=true; principal._pendingSave=true;
@@ -3353,7 +3446,7 @@ function renderOverview(c,pols,roas,ctasks){
   var tBizCover=activePols.filter(function(p){return p.Type==='Business Assurance';}).reduce(function(s,p){return s+lumpSum(p,'Life Cover','BenDeath')+lumpSum(p,'Capital Disability','BenDisability')+lumpSum(p,'Dread Disease / Severe Illness','BenDreadDisease');},0);
   var famMembers=famFor(c.ID);
   // If SpouseName on client record but not yet in DB.links, show them as a virtual entry
-  if(clean(c.SpouseName) && !famMembers.find(function(m){return m.Type==='Spouse';})){
+  if(clean(c.SpouseName) && !famMembers.find(function(m){return isPartnerType(m.Type);})){
     famMembers = [{
       ID:'virtual_sp_'+c.ID,
       PrincipalID:c.ID,
@@ -3376,11 +3469,12 @@ function renderOverview(c,pols,roas,ctasks){
     var rb=_famRank[b.Type]!==undefined?_famRank[b.Type]:9;
     return ra-rb;
   });
-  var hasSpouse = famMembers.some(function(m){ return m.Type==='Spouse'; });
+  var hasSpouse = famMembers.some(function(m){ return isPartnerType(m.Type); });
+  var _partnerWord = famMembers.some(function(m){ return m.Type==='Spouse'; }) ? 'Spouse' : (hasSpouse ? 'Partner' : 'Spouse');
   var familyHtml='<div class="card" style="margin-bottom:16px">'+
     '<div class="ch"><h2>👨‍👩‍👧 Family</h2>'+
     '<div style="display:flex;gap:8px">'+
-    '<button class="btn b-gd xs" data-act="add-spouse" data-id="'+c.ID+'">'+(hasSpouse?'✎ Edit Spouse':'+ Spouse')+'</button>'+
+    '<button class="btn b-gd xs" data-act="add-spouse" data-id="'+c.ID+'">'+(hasSpouse?'✎ Edit '+_partnerWord:'+ Spouse')+'</button>'+
     '<button class="btn b-sk xs" data-act="add-child" data-id="'+c.ID+'">+ Child</button>'+
     '<button class="btn b-gh xs" data-act="link-existing" data-id="'+c.ID+'">🔗 Link Existing</button>'+
     '</div></div>'+
@@ -3465,7 +3559,7 @@ function renderOverview(c,pols,roas,ctasks){
     dr('Tax Number', clean(c.TaxNo)||'—')+
     dr('Maiden Name', clean(c.MaidenName)||'—')+
     dr('Marital Status', clean(c.MaritalStatus)||'—')+
-    dr('Anniversary', clean(c.Anniversary)?fdate(c.Anniversary):'—')+
+    dr(c.MaritalStatus==='Engaged'?'Planned wedding':'Anniversary', clean(c.Anniversary)?fdate(c.Anniversary):'—')+
     dr('Employer', clean(c.Employer)||'—')+
     dr('Occupation', clean(c.Occupation)||'—')+
     dr('Education', clean(c.Education)?(c.Education+(clean(c.Qualification)?' — '+c.Qualification:'')):'—')+
@@ -3883,6 +3977,24 @@ function renderFinPos(c){
 // ID 'fpnn_<clientId>' so saves upsert the same row). Pure capture — every
 // amount is the client's stated need, not an analysis result.
 var NEED_SCENARIOS = ['Death','Disability','Dread Disease','Retirement','Other'];
+// "For whom" only applies to a Death (or Other) need. Retirement, Disability and
+// Dread Disease needs are always the client's own (1 Oct 2026).
+function needAsksForWhom(scenario){ return !scenario || scenario==='Death' || scenario==='Other'; }
+// Engaged (1 Oct 2026): legally single until the wedding. The Anniversary field then
+// holds the PLANNED wedding date, so its label and reminder change with the status.
+function annLabel(marital){ return marital==='Engaged' ? 'Planned wedding date' : 'Marriage / Anniversary date'; }
+function annLabelSync(selId, dateId){
+  var sel=document.getElementById(selId), inp=document.getElementById(dateId);
+  if(!sel||!inp) return;
+  var box=inp.closest('.fld'); var lb=box?box.querySelector('label'):null;
+  if(lb) lb.textContent=annLabel(sel.value);
+}
+// One delegated listener covers the client card (fmar/fann) and the fact find (ffmarital/ffanniv).
+document.addEventListener('change', function(e){
+  var t=e.target; if(!t||!t.id) return;
+  if(t.id==='fmar') annLabelSync('fmar','fann');
+  else if(t.id==='ffmarital') annLabelSync('ffmarital','ffanniv');
+});
 var NEED_SCEN_STYLE = {
   'Death':        'background:var(--navy);color:#fff',
   'Disability':   'background:var(--sky);color:#fff',
@@ -3938,7 +4050,7 @@ function renderNeeds(c){
       function cell(lbl,val){ return '<div><div style="font-size:10px;color:#999;text-transform:uppercase;letter-spacing:.3px">'+lbl+'</div><div style="font-weight:600;font-size:13px">'+(val||'—')+'</div></div>'; }
       var cells = cell(isIncome?'Income Need':'Capital Need', amtTxt);
       if(isIncome) cells += cell('Escalation', d.esc?d.esc+'% p.a.':'Not specified — CPI assumed');
-      cells += cell('For Whom', fpPassesToLabel({passesTo:d.benTo, passesToName:d.benName}));
+      if(needAsksForWhom(scen)) cells += cell('For Whom', fpPassesToLabel({passesTo:d.benTo, passesToName:d.benName}));
       var typeBadge = '<span style="background:'+(isIncome?'#e8f0fe;color:#1a4f9c':'#e8f5e9;color:#2e7d5a')+';border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700">'+(isIncome?'Income /pm':'Once-off capital')+'</span>';
       var scenBadge = '<span style="'+(NEED_SCEN_STYLE[scen]||NEED_SCEN_STYLE.Other)+';border-radius:10px;padding:2px 10px;font-size:11px;font-weight:600">'+scen+'</span>';
       return '<div class="card" style="margin-bottom:10px">'+
@@ -8991,7 +9103,7 @@ function applyIdFix(r, done){
     // Keep the familylinks spouse row in step when correcting SpouseDOB,
     // so the two spouse storage locations cannot disagree afterwards.
     if(f.type==='spouse'){
-      var sl = DB.links.find(function(l){ return String(l.PrincipalID)===String(c.ID) && l.Type==='Spouse'; });
+      var sl = partnerLinkFor(c.ID);
       if(sl && String(sl.IDNumber||'').replace(/\D/g,'')===String(r.id).replace(/\D/g,'')){
         sl.DOB = r.derived;
         post({action:'updateFamMember', member:sl});
@@ -9170,9 +9282,9 @@ function openClientModal(id, isLead){
     radioGroup('fsm','Smoker *',['Yes','No'],c.Smoker)+
     '</div>'+
     '<div class="g3" style="margin-top:10px">'+
-    fs('fmar','Marital Status',['','Single','Married - ANC with accrual','Married - ANC without accrual','Married in COP','Life partner','Divorced','Widowed'],c.MaritalStatus)+
+    fs('fmar','Marital Status',['','Single','Engaged','Married - ANC with accrual','Married - ANC without accrual','Married in COP','Life partner','Divorced','Widowed'],c.MaritalStatus)+
     '<div style="display:flex;align-items:flex-end;padding-bottom:6px"><label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;color:#445" title="Tick for a client who is cohabiting with a life partner — independent of their legal marital status (e.g. Divorced AND cohabiting)."><input type="checkbox" id="fcohab"'+(c.Cohabiting==='Yes'?' checked':'')+' style="width:16px;height:16px;accent-color:var(--sage)">Cohabiting / life partner</label></div>'+
-    fdp('fann','Marriage / Anniversary Date',c.Anniversary||'')+
+    fdp('fann',annLabel(c.MaritalStatus),c.Anniversary||'')+
     fld('fancc','ANC Commencement Value — Client (R)',c.ANCCommClient||'')+
     fld('fancsp','ANC Commencement Value — Spouse (R)',c.ANCCommSpouse||'')+
     '<div style="grid-column:1/-1;font-size:10.5px;color:#889;margin-top:-6px">Commencement values as declared in the antenuptial contract, un-adjusted. Blank = not declared = deemed nil (s.6(4)(b), Matrimonial Property Act). CPI adjustment is applied at analysis time.</div>'+
@@ -9311,7 +9423,7 @@ function openClientModal(id, isLead){
     // Pre-fill spouse section from DB.links if client record spouse fields are blank
     var fspnameEl = document.getElementById('fspname');
     if(fspnameEl && !fspnameEl.value && EC){
-      var spLink = DB.links.find(function(l){ return String(l.PrincipalID)===String(EC) && l.Type==='Spouse'; });
+      var spLink = partnerLinkFor(EC);
       if(spLink){
         var fspnEl  = document.getElementById('fspname');
         var fspidEl = document.getElementById('fspid');
@@ -9494,6 +9606,7 @@ function buildFnaUrl(c){
       if(m==='Married - ANC with accrual')    return 'Married — ANC with accrual';
       if(m==='Married - ANC without accrual') return 'Married — ANC no accrual';
       if(m==='Married in COP')                return 'Married — COP';
+      if(m==='Engaged')                       return 'Single';
       return m;
     })()) +
     '&domdate='   + encodeURIComponent(c.Anniversary||'') +
@@ -9547,11 +9660,13 @@ function buildFormsUrl(c){
 // whether this client is the principal or the upgraded spouse). Returns null
 // when the spouse is not a client in their own right.
 function linkedSpouseClientId(cid){
-  var l = DB.links.find(function(x){
-    return x.Type==='Spouse' && x.IsClient==='Yes' && clean(x.ClientID) && (
+  // Spouse or Life Partner (a Spouse link wins if both exist).
+  var _cands = DB.links.filter(function(x){
+    return isPartnerType(x.Type) && x.IsClient==='Yes' && clean(x.ClientID) && (
       String(x.PrincipalID)===String(cid) || String(x.ClientID)===String(cid)
     );
   });
+  var l = _cands.filter(function(x){ return x.Type==='Spouse'; })[0] || _cands[0];
   if(!l) return null;
   var sid = String(l.PrincipalID)===String(cid) ? String(l.ClientID) : String(l.PrincipalID);
   return (sid && sid!==String(cid)) ? sid : null;
@@ -9595,8 +9710,12 @@ function buildFnaDataPack(cid, includeSpouse){
   kv('ID Number', c.IDNumber);
   kv('Gender', c.Gender);
   kv('Smoker', c.Smoker);
-  kv('Marital Status', maritalReadable(c.MaritalStatus));
-  kv('Marriage / Anniversary Date', c.Anniversary);
+  if(c.MaritalStatus==='Engaged'){
+    line('  Marital Status: Engaged, single for estate and tax purposes until the wedding'+(clean(c.Anniversary)?', planned wedding date '+c.Anniversary:'')+'. Regime (COP / ANC) not yet decided.');
+  } else {
+    kv('Marital Status', maritalReadable(c.MaritalStatus));
+    kv('Marriage / Anniversary Date', c.Anniversary);
+  }
   if((c.MaritalStatus||'').indexOf('with accrual')>-1){
     line('  ANC Commencement Value — Client (R): '+(clean(c.ANCCommClient)||'not captured — deemed nil if not declared in the ANC (s.6(4)(b) MPA)'));
     line('  ANC Commencement Value — Spouse (R): '+(clean(c.ANCCommSpouse)||'not captured — deemed nil if not declared in the ANC (s.6(4)(b) MPA)'));
@@ -9616,15 +9735,25 @@ function buildFnaDataPack(cid, includeSpouse){
 
   // ── Spouse ──
   if(clean(c.SpouseName)){
-    line('── SPOUSE ──');
+    // Heading follows the relationship (1 Oct 2026): a life partner or fiancé(e) is
+    // not a spouse for accrual purposes, so the pack says so plainly.
+    var _spRow = partnerLinkFor(cid);
+    var _spHdr = (_spRow && _spRow.Type==='Life Partner') || c.MaritalStatus==='Life partner' ? 'LIFE PARTNER'
+               : (c.MaritalStatus==='Engaged' ? 'PARTNER (ENGAGED)' : 'SPOUSE');
+    line('── '+_spHdr+' ──');
     kv('Name', c.SpouseName);
     kv('ID Number', c.SpouseIDNumber);
     kv('Date of Birth', c.SpouseDOB);
     var sAge = calcAge(c.SpouseDOB);
     if(sAge!==null) kv('Current Age', sAge);
+    // When the partner is a client too, their own record holds gender and smoker status.
+    var _spCid = linkedSpouseClientId(cid);
+    var _spC = _spCid ? DB.clients.find(function(x){ return String(x.ID)===String(_spCid); }) : null;
+    if(_spC){ kv('Gender', _spC.Gender); kv('Smoker', _spC.Smoker); }
     kv('Working', c.SpouseWorks);
     kv('Occupation', c.SpouseOccupation);
     kv('Gross Income per Month (R)', c.SpouseIncome);
+    if(_spC) line('  (Also a client in their own right — own record and data pack.)');
     line('');
   }
 
@@ -9751,7 +9880,8 @@ function buildFnaDataPack(cid, includeSpouse){
     // Marital regime — flag if the will capture disagrees with the client record
     var WMAP = {'Single / never married':'Single','Married in community of property (COP)':'Married in COP','Married out of community of property (ANC) with accrual':'Married - ANC with accrual','Married out of community of property (ANC) without accrual':'Married - ANC without accrual','Divorced':'Divorced','Widowed':'Widowed','Life partner / cohabiting':'Life partner'};
     wk('Marital status / regime (per will capture)', W.t_marital);
-    if(W.t_marital && clean(wc.MaritalStatus) && WMAP[W.t_marital] && WMAP[W.t_marital]!==wc.MaritalStatus){
+    var _wcm = wc.MaritalStatus==='Engaged' && (WMAP[W.t_marital]==='Single'||WMAP[W.t_marital]==='Life partner') ? WMAP[W.t_marital] : wc.MaritalStatus;
+    if(W.t_marital && clean(wc.MaritalStatus) && WMAP[W.t_marital] && WMAP[W.t_marital]!==_wcm){
       line('  ⚠ Regime differs from the client record ('+maritalReadable(wc.MaritalStatus)+'). Confirm which is correct before any estate calculation.');
     }
     wk('Date of divorce / spouse passing', W.t_marital_date);
@@ -9834,7 +9964,7 @@ function buildFnaDataPack(cid, includeSpouse){
       var spec = isInc
         ? ('Income: '+(amt?('R '+amt+' /pm'):'(amount not set)')+(d.years?' for '+d.years+' years':'')+(d.esc?', escalating '+d.esc+'% p.a.':', escalation not specified (assume CPI)'))
         : ('Capital: '+(amt?('R '+amt):'(amount not set)'));
-      line('  • '+(d.desc||'(no description)')+' — '+spec+(d.benTo?'  · for: '+(d.benTo==='Named person'?(d.benName||'named person'):d.benTo):'')+fnaStampTxt(r.UpdatedAt, fm));
+      line('  • '+(d.desc||'(no description)')+' — '+spec+(d.benTo&&needAsksForWhom(d.scenario||'Other')?'  · for: '+(d.benTo==='Named person'?(d.benName||'named person'):d.benTo):'')+fnaStampTxt(r.UpdatedAt, fm));
       if(d.notes) line('      notes: '+d.notes);
     });
   });
@@ -9851,26 +9981,53 @@ function buildFnaDataPack(cid, includeSpouse){
     line('');
   }
 
-  // ── Linked spouse appendix (opt-in) — context only, never an FNA subject ──
-  if(includeSpouse){
-    var spId = linkedSpouseClientId(cid);
+  // Partner option (1 Oct 2026): false = this client only; true = partner as
+  // background (appendix below); 'joint' = the partner's full pack appended.
+  var _packMode = includeSpouse==='joint' ? 'joint' : (includeSpouse ? 'bg' : 'none');
+  var _pId = linkedSpouseClientId(cid);
+  var _pLink = _pId ? DB.links.find(function(l){ return isPartnerType(l.Type) && (
+      (String(l.PrincipalID)===String(cid) && String(l.ClientID)===String(_pId)) ||
+      (String(l.PrincipalID)===String(_pId) && String(l.ClientID)===String(cid))); }) : null;
+  var _pIsLP = !!_pLink && _pLink.Type==='Life Partner';
+
+  // ── Linked partner appendix (opt-in) — context only, never an FNA subject ──
+  if(_packMode==='bg'){
+    var spId = _pId;
     var sp = spId ? DB.clients.find(function(x){ return String(x.ID)===String(spId); }) : null;
     if(sp){
-      line('═══ LINKED SPOUSE — '+(sp.Name||'')+' (own client record) ═══');
-      line('Context for accrual & estate purposes ONLY — not an FNA subject. Captured needs deliberately excluded.');
+      line('═══ LINKED '+(_pIsLP?'LIFE PARTNER':'SPOUSE')+' — '+(sp.Name||'')+' (own client record) ═══');
+      line(_pIsLP
+        ? 'Context for estate purposes ONLY (not married, so no accrual) — not an FNA subject. Captured needs deliberately excluded.'
+        : 'Context for accrual & estate purposes ONLY — not an FNA subject. Captured needs deliberately excluded.');
       kv('Date of Birth', sp.DOB);
       var spAge2 = calcAge(sp.DOB);
       if(spAge2!==null) kv('Current Age', spAge2);
       kv('ID Number', sp.IDNumber);
       kv('Gross Income per Month (R)', sp.Income);
       line('');
-      packPolicies(spId, 'SPOUSE ');
-      packFinpos(spId, 'SPOUSE ');
-      packWill(spId, 'SPOUSE ');
+      var _pfx = _pIsLP ? 'PARTNER ' : 'SPOUSE ';
+      packPolicies(spId, _pfx);
+      packFinpos(spId, _pfx);
+      packWill(spId, _pfx);
     }
   }
 
   line('═══ END OF DATA PACK ═══');
+  if(_packMode==='joint' && _pId){
+    var jc = DB.clients.find(function(x){ return String(x.ID)===String(_pId); });
+    if(jc){
+      var head = [];
+      head.push('████ JOINT FNA — '+(c.Name||'')+' & '+(jc.Name||'')+' ████');
+      head.push('Two clients, two full data packs below: first '+(c.Name||'')+', then '+(jc.Name||'')+'. Each has their own figures, needs and capture confirmations.');
+      var rel = 'Relationship: '+(_pLink?_pLink.Type:'Partner');
+      if(clean(c.MaritalStatus)) rel += ' · Marital status: '+(c.MaritalStatus==='Engaged' ? 'Engaged'+(clean(c.Anniversary)?' (planned wedding date '+c.Anniversary+')':'') : maritalReadable(c.MaritalStatus));
+      if(c.Cohabiting==='Yes' || jc.Cohabiting==='Yes') rel += ' · Cohabiting';
+      head.push(rel);
+      head.push('One joint FNA covering both of them. Keep each person\'s needs and cover separate, and one ROA per client.');
+      head.push('');
+      return head.join('\n')+'\n'+L.join('\n')+'\n\n'+buildFnaDataPack(_pId, false);
+    }
+  }
   return L.join('\n');
 }
 
@@ -9881,14 +10038,18 @@ function copyFnaDataPack(cid){
   window.FNA_PACK_CID = cid;
   var spId = linkedSpouseClientId(cid);
   var spWrap = document.getElementById('fnaPackSpouseWrap');
-  var spCb = document.getElementById('fnaPackSpouse');
-  if(spCb) spCb.checked = false;
+  document.querySelectorAll('input[name="fnaPackSp"]').forEach(function(r){ r.checked = (r.value==='none'); });
   if(spWrap){
     spWrap.style.display = spId ? 'block' : 'none';
     if(spId){
       var sp = DB.clients.find(function(x){ return String(x.ID)===String(spId); });
+      var spNm = (sp&&sp.Name)||'the partner';
       var lblEl = document.getElementById('fnaPackSpouseLbl');
-      if(lblEl) lblEl.textContent = 'Include '+((sp&&sp.Name)||'linked spouse')+'\u2019s assets, policies & will instructions (context for accrual/estate only — their needs are excluded)';
+      if(lblEl) lblEl.textContent = 'Partner: '+spNm;
+      var bgEl = document.getElementById('fnaPackSpBgLbl');
+      if(bgEl) bgEl.textContent = 'Add '+spNm+' as background: assets, policies & will instructions, for the accrual / estate (their needs left out)';
+      var jEl = document.getElementById('fnaPackSpJointLbl');
+      if(jEl) jEl.textContent = 'Joint FNA: add '+spNm+'\u2019s full data pack, needs included (one FNA for both, separate ROAs)';
     }
   }
   var txt = buildFnaDataPack(cid, false);
@@ -9995,7 +10156,7 @@ function fnaCapConfirmKey(key){
   fnaSaveMeta(cid, meta, function(res){ if(res && res.ok===1) toast('Confirmed ✓','ok'); fnaCapRender(); });
   fnaCapRender();
 }
-function fnaCapOpen(cid){
+function fnaCapOpen(cid, keepStep){
   var c = cid ? DB.clients.find(function(x){ return String(x.ID)===String(cid); }) : null;
   if(!c){ toast('Open a client first','err'); return; }
   var meta = fnaMeta(cid);
@@ -10012,7 +10173,32 @@ function fnaCapOpen(cid){
       fnaSaveMeta(cid, meta);
     }
   }
-  FNA_CAP.active = true; FNA_CAP.cid = cid; FNA_CAP.step = 0; FNA_CAP.notesDraft = null;
+  FNA_CAP.active = true; FNA_CAP.cid = cid; FNA_CAP.notesDraft = null;
+  FNA_CAP.step = (typeof keepStep==='number') ? Math.max(0, Math.min(FNA_CAP_STEPS.length-1, keepStep)) : 0;
+  fnaCapRender();
+}
+// Couple switch (1 Oct 2026). When the client's spouse / life partner is a client
+// too, the capture header shows both names. Switching keeps the same step and moves
+// to the partner's OWN capture session (their own confirmations and capture date),
+// so a joint meeting can be captured without leaving the panel.
+function fnaCapSwitch(cid){
+  if(!cid || String(cid)===String(FNA_CAP.cid)) return;
+  // Never carry one person's unsaved needs notes over to the other: save them first.
+  if(FNA_CAP.notesDraft!==null) fnaCapSaveNeedNotes();
+  var step = FNA_CAP.step;
+  if(PAGE==='client') openClient(cid);   // the card behind the panel follows
+  fnaCapOpen(cid, step);
+}
+// "Make client & capture" on a partner who is not a client yet. Creates their own
+// card (linked both ways) and stays on the same step of this capture.
+function fnaCapMakePartner(linkId){
+  var c = DB.clients.find(function(x){ return String(x.ID)===String(FNA_CAP.cid); });
+  var lnk = DB.links.find(function(l){ return String(l.ID)===String(linkId); });
+  var nm = lnk ? lnk.Name : (c ? c.SpouseName : '');
+  if(!nm) return;
+  var asLead = c && c.IsLead==='Yes';
+  if(!confirm('Make '+nm+' a '+(asLead?'lead':'client')+' in their own right?\n\nTheir own card is created and linked both ways to '+(c?c.Name:'this client')+'. You stay on this step. Use the name buttons at the top of the capture to switch between the two of them.')) return;
+  upgradeToClient(linkId, {stay:true, done:function(){ fnaCapRender(); }});
   fnaCapRender();
 }
 function fnaCapClose(){
@@ -10042,9 +10228,11 @@ function fnaCapFinish(){
 // same hardened pattern as saveNeedNotes() (which reads the Needs tab textarea).
 function fnaCapSaveNeedNotes(){
   var cid = FNA_CAP.cid; if(!cid) return;
-  var txtEl = document.getElementById('fnaCapNeedNotes'); if(!txtEl) return;
+  var txtEl = document.getElementById('fnaCapNeedNotes');
+  var txt = txtEl ? txtEl.value : FNA_CAP.notesDraft;
+  if(txt===null || txt===undefined) return;
   var existing = needNotesRowFor(cid);
-  var row = { ID: existing ? existing.ID : ('fpnn_'+cid), ClientID: cid, Kind:'need_notes', Data: JSON.stringify({text: txtEl.value}), UpdatedAt: fnaNow() };
+  var row = { ID: existing ? existing.ID : ('fpnn_'+cid), ClientID: cid, Kind:'need_notes', Data: JSON.stringify({text: txt}), UpdatedAt: fnaNow() };
   row._pendingSave = true;
   if(existing){ var gi=DB.finpos.indexOf(existing); if(gi>=0) DB.finpos[gi]=row; }
   else DB.finpos.push(row);
@@ -10067,7 +10255,7 @@ function fnaCapSaveNeedNotes(){
 // Family list for the panel — same virtual-spouse rule as the Overview card.
 function fnaCapFamily(c){
   var fam = famFor(c.ID).slice();
-  if(clean(c.SpouseName) && !fam.find(function(m){ return m.Type==='Spouse'; })){
+  if(clean(c.SpouseName) && !fam.find(function(m){ return isPartnerType(m.Type); })){
     fam.unshift({ ID:'virtual_sp_'+c.ID, PrincipalID:c.ID, Name:c.SpouseName, IDNumber:c.SpouseIDNumber||'', DOB:c.SpouseDOB||'', Type:'Spouse', IsClient:'No', ClientID:'', _virtual:true });
   }
   var rank = {'Spouse':0,'Life Partner':1,'Child':2,'Parent':3,'Sibling':4,'Other':5};
@@ -10121,7 +10309,7 @@ function fnaCapItem(r, meta){
     var isInc = d.needType==='Monthly income';
     bits.push(d.scenario||'Other');
     bits.push(isInc ? (money(d.amount)+' /pm'+(d.years?' × '+d.years+' yrs':'')+(d.esc?' @ '+d.esc+'%':' (CPI)')) : ('Capital '+money(d.amount)));
-    bits.push('for: '+fpPassesToLabel({passesTo:d.benTo, passesToName:d.benName}));
+    if(d.benTo && needAsksForWhom(d.scenario||'Other')) bits.push('for: '+fpPassesToLabel({passesTo:d.benTo, passesToName:d.benName}));
   }
   if(d.owner && r.Kind!=='need') bits.unshift(d.owner);
   var pending = r._pendingSave ? '<span class="fc-stamp stale">⚠ not saved to server yet</span>' : '';
@@ -10175,7 +10363,7 @@ function fnaCapRender(){
       kv('ID number', c.IDNumber)+
       kv('Gender / smoker', (clean(c.Gender)?c.Gender:'—')+' / '+(clean(c.Smoker)?c.Smoker:'—'))+
       kv('Marital status', c.MaritalStatus)+
-      kv('Marriage date', clean(c.Anniversary)?fdate(c.Anniversary):'')+
+      kv(c.MaritalStatus==='Engaged'?'Planned wedding date':'Marriage date', clean(c.Anniversary)?fdate(c.Anniversary):'')+
       (accrual?kv('ANC commencement — client', clean(c.ANCCommClient)?fpR(fpN(c.ANCCommClient)):'not captured (deemed nil)')+kv('ANC commencement — spouse', clean(c.ANCCommSpouse)?fpR(fpN(c.ANCCommSpouse)):'not captured (deemed nil)'):'')+
       kv('Occupation', c.Occupation)+
       kv('Employer', c.Employer)+
@@ -10191,7 +10379,7 @@ function fnaCapRender(){
 
   else if(step.key==='family'){
     var fam = fnaCapFamily(c);
-    var hasSpouse = fam.some(function(m){ return m.Type==='Spouse'; });
+    var hasSpouse = fam.some(function(m){ return isPartnerType(m.Type); });
     body +=
       '<div class="fc-ask">Ask: Spouse still working, same income? Any new children or dependants (including parents supported)? Anyone no longer dependent? Ages drive the education and income-need periods.</div>'+
       '<div class="fc-sec"><h4>👨‍👩‍👧 Family & dependants'+(fam.length?' ('+fam.length+')':'')+'</h4><div style="display:flex;gap:6px">'+
@@ -10204,17 +10392,24 @@ function fnaCapRender(){
       var key = 'fam_'+m.ID, st = meta.confirmed[key];
       var isClient = m.IsClient==='Yes' && m.ClientID;
       var live = m;
-      if(isClient){ var lc = DB.clients.find(function(x){ return String(x.ID)===String(m.ClientID); }); if(lc) live = { Name:m.Name, IDNumber:clean(lc.IDNumber)?lc.IDNumber:m.IDNumber, DOB:clean(lc.DOB)?lc.DOB:m.DOB, Income:lc.Income }; }
+      if(isClient){ var lc = DB.clients.find(function(x){ return String(x.ID)===String(m.ClientID); }); if(lc) live = { Name:m.Name, IDNumber:clean(lc.IDNumber)?lc.IDNumber:m.IDNumber, DOB:clean(lc.DOB)?lc.DOB:m.DOB, Income:lc.Income, Smoker:lc.Smoker }; }
       var dob = live.DOB; if(!clean(dob) && saIdValid(live.IDNumber)) dob = dobFromID(String(live.IDNumber).replace(/\D/g,''));
       var a = calcAge(dob);
       var bits = [m.Type];
       if(clean(dob)) bits.push('Born '+fdate(dob)+(a!==null?' · age '+a:''));
       if(clean(live.IDNumber)) bits.push('ID '+live.IDNumber);
+      if(isClient && isPartnerType(m.Type) && clean(live.Smoker)) bits.push('Smoker: '+live.Smoker);
       if(m.Type==='Spouse'||m.Type==='Life Partner'){ if(clean(c.SpouseWorks)) bits.push('Working: '+c.SpouseWorks); if(clean(c.SpouseIncome)) bits.push('Income '+fpR(fpN(c.SpouseIncome))+' /pm'); else if(clean(live.Income)) bits.push('Income '+fpR(fpN(live.Income))+' /pm'); }
+      var _isPart = isPartnerType(m.Type);
+      var _first = fnaEsc(String(m.Name||'').trim().split(/\s+/)[0]||'partner');
       var editBtn = m._virtual
         ? '<button class="btn b-gh xs" onclick="openFamModal(\''+cid+'\',\'Spouse\')">✏️ Edit</button>'
-        : (isClient ? '<button class="btn b-gh xs" onclick="fnaCapClose();openClient(\''+m.ClientID+'\')">View profile →</button>'
+        : (isClient ? (_isPart && String(m.ClientID)===String(linkedSpouseClientId(cid))
+                        ? '<button class="btn b-nv xs" onclick="fnaCapSwitch(\''+m.ClientID+'\')" title="Capture '+_first+' — same step, their own confirmations">⇄ Capture '+_first+'</button>'
+                        : '<button class="btn b-gh xs" onclick="fnaCapClose();openClient(\''+m.ClientID+'\')">View profile →</button>')
                     : '<button class="btn b-gh xs" onclick="openFamModal(\''+cid+'\',\''+fnaEsc(m.Type)+'\',\''+m.ID+'\')">✏️ Edit</button>');
+      // A partner who is not a client yet: make them one without leaving the capture.
+      if(_isPart && !isClient) editBtn += '<button class="btn b-sg xs" onclick="fnaCapMakePartner(\''+m.ID+'\')" title="Create '+_first+'\'s own card, linked both ways, and capture their needs too">👤 Make client &amp; capture</button>';
       body += '<div class="fc-item '+(fnaFresh(st,meta)?'fresh':'stale')+'">'+
         '<div style="flex:1;min-width:0"><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span class="fc-t">'+fnaEsc(m.Name)+'</span>'+fnaCapStamp(st, meta)+'</div>'+
         '<div class="fc-d">'+bits.map(function(b){ return '<span>'+fnaEsc(b)+'</span>'; }).join('')+'</div></div>'+
@@ -10280,9 +10475,23 @@ function fnaCapRender(){
   var stepsHtml = FNA_CAP_STEPS.map(function(s,i){
     return '<div class="fc-step'+(i===FNA_CAP.step?' on':'')+(i<FNA_CAP.step?' done':'')+'" onclick="fnaCapGo('+i+')">'+s.icon+' '+s.label+'</div>';
   }).join('');
+  // Couple switch: both partners' names when the partner is a client too.
+  var coupleHtml = '';
+  var _pid = linkedSpouseClientId(cid);
+  var _pc = _pid ? DB.clients.find(function(x){ return String(x.ID)===String(_pid); }) : null;
+  if(_pc){
+    var pill = function(p, on){
+      var pm = fnaMeta(p.ID);
+      var prog = !!pm.startedAt && !(pm.captureDate && pm.captureDate >= pm.startedAt);
+      var stTxt = prog ? 'in progress' : (pm.captureDate ? 'captured '+String(pm.captureDate).slice(0,10) : 'not started');
+      var first = String(p.Name||'').trim().split(/\s+/)[0] || 'Client';
+      return '<button type="button" '+(on?'disabled':'onclick="fnaCapSwitch(\''+p.ID+'\')"')+' title="'+fnaEsc(p.Name||'')+' — '+stTxt+'" style="border-radius:20px;padding:3px 12px;font-size:11.5px;font-weight:700;font-family:inherit;cursor:'+(on?'default':'pointer')+';border:1px solid '+(on?'var(--gold)':'#556a88')+';background:'+(on?'var(--gold)':'transparent')+';color:'+(on?'#0e1a2e':'#fff')+'">'+fnaEsc(first)+' <span style="font-weight:500;opacity:.8">· '+stTxt+'</span></button>';
+    };
+    coupleHtml = '<div style="display:flex;gap:6px;align-items:center;margin-top:6px;flex-wrap:wrap"><span style="font-size:10.5px;color:#c9d1e0">Couple:</span>'+pill(c,true)+pill(_pc,false)+'</div>';
+  }
   var el = fnaCapEl();
   el.innerHTML =
-    '<div class="fc-h"><div><h3>📋 FNA Capture — '+fnaEsc(c.Name||'')+'</h3><div style="font-size:11px;color:#c9d1e0;margin-top:2px">Step '+(FNA_CAP.step+1)+' of '+FNA_CAP_STEPS.length+' · '+fnaEsc(step.label)+' · session started '+fnaEsc(meta.startedAt||'—')+'</div></div>'+
+    '<div class="fc-h"><div><h3>📋 FNA Capture — '+fnaEsc(c.Name||'')+'</h3><div style="font-size:11px;color:#c9d1e0;margin-top:2px">Step '+(FNA_CAP.step+1)+' of '+FNA_CAP_STEPS.length+' · '+fnaEsc(step.label)+' · session started '+fnaEsc(meta.startedAt||'—')+'</div>'+coupleHtml+'</div>'+
     '<button class="btn b-gh sm" style="color:#fff;border:1px solid #334466" onclick="fnaCapClose()" title="Close — progress is saved, reopen any time">✕ Close</button></div>'+
     '<div class="fc-steps">'+stepsHtml+'</div>'+
     '<div class="fc-b" id="fnaCapBody">'+body+'</div>'+
@@ -10310,10 +10519,11 @@ function fnaCapBadge(c){
 function refreshFnaPack(){
   var cid = window.FNA_PACK_CID;
   if(!cid) return;
-  var spCb = document.getElementById('fnaPackSpouse');
-  var txt = buildFnaDataPack(cid, !!(spCb && spCb.checked));
+  var sel = document.querySelector('input[name="fnaPackSp"]:checked');
+  var mode = sel ? sel.value : 'none';
+  var txt = buildFnaDataPack(cid, mode==='joint' ? 'joint' : (mode==='bg'));
   document.getElementById('fnaPackTxt').value = txt;
-  toast(spCb && spCb.checked ? 'Spouse data added — copy again to include it' : 'Spouse data removed','ok');
+  toast(mode==='joint' ? 'Joint pack built — copy again to include the partner' : mode==='bg' ? 'Partner background added — copy again to include it' : 'Partner data removed','ok');
 }
 
 function copyFnaPackToClipboard(){
@@ -10408,7 +10618,7 @@ function willIsDeadPolicy(p){ return p.Status==='Replaced' || p.Status==='Cancel
 function willNameOptions(c){
   var out=[], seen={};
   function add(n, rel){ n=String(n||'').trim(); if(!n) return; var k=n.toLowerCase(); if(seen[k]) return; seen[k]=1; out.push(rel?n+' ('+rel+')':n); }
-  if(c && clean(c.SpouseName)) add(c.SpouseName, (c.MaritalStatus==='Life partner')?'Life Partner':'Spouse');
+  if(c && clean(c.SpouseName)) add(c.SpouseName, (c.MaritalStatus==='Life partner')?'Life Partner':(c.MaritalStatus==='Engaged'?'Fiancé(e)':'Spouse'));
   var fam = (typeof famFor==='function') ? (famFor(c.ID)||[]) : [];
   fam.forEach(function(m){ add(m.Name, m.Type||''); });
   return out;
@@ -11330,7 +11540,7 @@ function saveClient(openFNA){
   // day, month AND year are all chosen (fdpSync blanks it otherwise). Warn on a
   // half-filled date rather than dropping it — this is what lost the Magalie
   // marriage date twice. 'na' fields (not on the form) are skipped safely.
-  var _dateFlds=[['fann','Marriage / Anniversary date'],['fd','Date of birth'],['fspdob','Spouse date of birth'],['fwilldate','Will date']];
+  var _dateFlds=[['fann',annLabel(g('fmar'))],['fd','Date of birth'],['fspdob','Spouse date of birth'],['fwilldate','Will date']];
   for(var _dgi=0;_dgi<_dateFlds.length;_dgi++){
     if(fdpState(_dateFlds[_dgi][0])==='partial'){
       toast(_dateFlds[_dgi][1]+' is incomplete — choose day, month AND year (or clear all three) before saving.','err');
@@ -11450,7 +11660,7 @@ function saveClient(openFNA){
 
   // Save spouse as family member if name entered
   if(!isCompany && g('fspname')){
-    var existing = DB.links.find(function(l){ return String(l.PrincipalID)===String(id) && l.Type==='Spouse'; });
+    var existing = partnerLinkFor(id);
     if(!existing){
       var spLink = {ID:'fam_sp_'+Date.now(), PrincipalID:id,
         Name:g('fspname'), IDNumber:g('fspid')||'', DOB:c.SpouseDOB,
@@ -11471,12 +11681,13 @@ function saveClient(openFNA){
   // Sync Anniversary, MaritalStatus, Address to linked spouse client
   if(EC){
     // Find the linked spouse in either direction
-    var _spLink = DB.links.find(function(l){
-      return l.Type==='Spouse' && l.IsClient==='Yes' && l.ClientID && (
+    var _spCands = DB.links.filter(function(l){
+      return isPartnerType(l.Type) && l.IsClient==='Yes' && l.ClientID && (
         (String(l.PrincipalID)===String(c.ID)) ||  // This client is the principal
         (String(l.ClientID)===String(c.ID))          // This client is the linked spouse
       );
     });
+    var _spLink = _spCands.filter(function(l){ return l.Type==='Spouse'; })[0] || _spCands[0];
     var linkedId = null;
     if(_spLink){
       // If this client is the principal, linked ID is ClientID; otherwise it's PrincipalID
@@ -11486,10 +11697,21 @@ function saveClient(openFNA){
       var linked = DB.clients.find(function(x){ return String(x.ID)===linkedId; });
       if(linked){
         var changed = false;
-        if(c.Anniversary && c.Anniversary !== linked.Anniversary){ linked.Anniversary = c.Anniversary; changed=true; }
-        if(c.MaritalStatus && c.MaritalStatus !== linked.MaritalStatus){ linked.MaritalStatus = c.MaritalStatus; changed=true; }
+        // Married couples share the status and date. Life partners only share an
+        // Engaged / married status (each keeps their own Single / Divorced / Widowed).
+        var _shareMar = _spLink.Type==='Spouse' || maritalIsShared(c.MaritalStatus);
+        if(_shareMar && c.Anniversary && c.Anniversary !== linked.Anniversary){ linked.Anniversary = c.Anniversary; changed=true; }
+        if(_shareMar && c.MaritalStatus && c.MaritalStatus !== linked.MaritalStatus){ linked.MaritalStatus = c.MaritalStatus; changed=true; }
         if(c.Address && c.Address !== linked.Address){ linked.Address = c.Address; changed=true; }
-        if(changed){ post({action:'saveClient', client:linked}); }
+        if(_spLink.Type==='Life Partner' && c.Cohabiting==='Yes' && linked.Cohabiting!=='Yes'){ linked.Cohabiting = 'Yes'; changed=true; }
+        // Keep the partner's Spouse* fields (name, ID, occupation, income) in step with this record.
+        if(applySpouseFieldsFrom(linked, c)) changed = true;
+        if(changed){
+          linked._pendingSave = true;
+          post({action:'saveClient', client:linked}, function(res){
+            if(!(res && res.ok)) toast('⚠️ Saved, but '+(clean(linked.Name)||'the partner')+"'s record didn't update on the server — press Sync.",'err');
+          });
+        }
       }
     }
   }
@@ -13521,6 +13743,7 @@ function openFinPosModal(cid, kind, fpid){
   var html = '';
   if(FP_KIND==='need'){
     var isIncomeNow = (d.needType||'Monthly income')==='Monthly income';
+    var askWhom = needAsksForWhom(d.scenario||'Death');
     html =
       fld('fpdesc','Description (e.g. Spouse living expenses, Education fund)',d.desc||'')+
       '<div class="g2">'+
@@ -13539,10 +13762,12 @@ function openFinPosModal(cid, kind, fpid){
       '<label>Escalation % p.a. (blank = CPI assumed in the FNA)</label>'+
       '<input type="text" id="fpesc" value="'+clean(d.esc||'')+'" autocomplete="off">'+
       '</div>'+
+      '<div id="fpBenToWrap" style="display:'+(askWhom?'block':'none')+'">'+
       fs('fpbenTo','For Whom',['','Spouse','Estate','Named person'],d.benTo||'')+
       '</div>'+
+      '</div>'+
       '<div class="g2">'+
-      '<div class="fld" id="fpNameWrap" style="display:'+(d.benTo==='Named person'?'flex':'none')+'">'+
+      '<div class="fld" id="fpNameWrap" style="display:'+(askWhom&&d.benTo==='Named person'?'flex':'none')+'">'+
       '<label>Named Person</label>'+
       '<input type="text" id="fpbenName" list="fpNameList" value="'+clean(d.benName||'')+'" autocomplete="off" placeholder="Choose from family or type a name">'+
       '</div>'+
@@ -13700,6 +13925,18 @@ function openFinPosModal(cid, kind, fpid){
       if(w) w.style.display = btSel.value==='Named person' ? 'flex' : 'none';
     });
   }
+  // Retirement, Disability and Dread Disease needs are always the client's own:
+  // the "For Whom" question is only asked for Death and Other (1 Oct 2026).
+  var scSel = document.getElementById('fpscenario');
+  if(scSel && btSel){
+    scSel.addEventListener('change', function(){
+      var ask = needAsksForWhom(scSel.value);
+      var bw = document.getElementById('fpBenToWrap');
+      var nw = document.getElementById('fpNameWrap');
+      if(bw) bw.style.display = ask ? 'block' : 'none';
+      if(nw) nw.style.display = (ask && btSel.value==='Named person') ? 'flex' : 'none';
+    });
+  }
   document.getElementById('fpMod').classList.add('open');
 }
 
@@ -13713,7 +13950,7 @@ function collectFinPosForm(){
     var isInc = d.needType==='Monthly income';
     d.years = isInc ? g('fpyears') : '';
     d.esc   = isInc ? g('fpesc') : '';
-    d.benTo = g('fpbenTo');
+    d.benTo = needAsksForWhom(d.scenario) ? g('fpbenTo') : '';
     d.benName = d.benTo==='Named person' ? g('fpbenName') : '';
     return d;
   }
@@ -13768,6 +14005,15 @@ function collectFinPosForm(){
 
 function saveFinPos(){
   if(!g('fpdesc')){ toast('Description required','err'); return; }
+  // Typing guard (1 Oct 2026): an income need escalating more than 15% a year is
+  // almost always a slip (43 for 4). Ask before saving rather than store it.
+  if(FP_KIND==='need' && g('fpneedType')==='Monthly income' && g('fpesc')!==''){
+    var _esc = fpN(g('fpesc'));
+    if(_esc > 15 && !confirm('Escalation of '+g('fpesc')+'% a year looks too high (inflation is usually around 4% to 6%). Is it a typing slip?\n\nOK = save '+g('fpesc')+'% anyway.\nCancel = go back and fix it.')){
+      var _e = document.getElementById('fpesc'); if(_e){ _e.focus(); _e.select(); }
+      return;
+    }
+  }
   var now = new Date().toISOString().slice(0,16).replace('T',' ');
   var oldRow = FP_EDIT_ID ? DB.finpos.find(function(r){return String(r.ID)===String(FP_EDIT_ID);}) : null;
   var row = {
@@ -14325,6 +14571,7 @@ function pcDeriveDefaults(c){
     else if(m.indexOf('without accrual')>=0 || m.indexOf('no accrual')>=0 || m.indexOf('excluding accrual')>=0) c.MaritalStatus='Married - ANC without accrual';
     else if(m.indexOf('with accrual')>=0 || (m.indexOf('anc')>=0 && m.indexOf('accrual')>=0)) c.MaritalStatus='Married - ANC with accrual';
     else if(m.indexOf('life partner')>=0 || m.indexOf('partner')>=0) c.MaritalStatus='Life partner';
+    else if(m.indexOf('engag')>=0 || m.indexOf('fianc')>=0) c.MaritalStatus='Engaged';
     else if(m==='single') c.MaritalStatus='Single';
     else if(m==='divorced') c.MaritalStatus='Divorced';
     else if(m.indexOf('widow')>=0) c.MaritalStatus='Widowed';
@@ -14515,9 +14762,11 @@ function pcFinposRows(payload){
   (payload.needs||[]).forEach(function(n){
     if(typeof n==='string'){ rows.push({Kind:'need',Data:{desc:n,scenario:'Death',needType:'Monthly income',amount:'',years:'',esc:'',benTo:'',benName:'',notes:''}}); return; }
     var nt=pcNeedType(n); var bt=pcBenTo(n.beneficiary||n.who);
+    var ns=pcScenario(n.scenario)||'Death';
+    if(!needAsksForWhom(ns)) bt={benTo:'',benName:''};   // retirement / disability / dread: the client's own
     rows.push({Kind:'need',Data:{
       desc:S(n.need||n.description||((n.beneficiary?n.beneficiary+' — ':'')+'need')),
-      scenario:pcScenario(n.scenario)||'Death',
+      scenario:ns,
       needType:nt,
       amount:S(n.amount||n.monthly),
       years: nt==='Monthly income' ? S(n.years||n.term) : '',
@@ -14616,7 +14865,7 @@ function runPasteClaudeImport(){
 
   // Spouse family link (mirror saveClient)
   if(c.SpouseName){
-    var spEx=DB.links.find(function(l){return String(l.PrincipalID)===String(c.ID)&&l.Type==='Spouse';});
+    var spEx=partnerLinkFor(c.ID);
     if(!spEx){
       var spLink={ID:'fam_sp_'+Date.now(),PrincipalID:c.ID,Name:c.SpouseName,IDNumber:c.SpouseIDNumber||'',DOB:c.SpouseDOB||'',Cell:c.SpouseCell||'',Email:c.SpouseEmail||'',Type:'Spouse',IsClient:'No',ClientID:''};
       DB.links.push(spLink); post({action:'saveFamMember',member:spLink});
@@ -14811,7 +15060,7 @@ function ffTryDob(idField, dobField){
 function openFactFind(){
   FF_SEQ=0;
   var titleOpts=['','Mr.','Mrs.','Ms.','Miss','Dr.','Prof.','Rev.','Adv.'];
-  var maritalOpts=['','Single','Married - ANC with accrual','Married - ANC without accrual','Married in COP','Life partner','Divorced','Widowed'];
+  var maritalOpts=['','Single','Engaged','Married - ANC with accrual','Married - ANC without accrual','Married in COP','Life partner','Divorced','Widowed'];
   var eduOpts=['','School - no matric','Matric','Diploma / Certificate','Degree','Post Graduate','Other'];
 
   var body='';
@@ -14843,7 +15092,7 @@ function openFactFind(){
   body+='<div class="g3" style="margin-top:10px">'
     +fs('ffmarital','Marital status',maritalOpts,'')
     +'<div class="fld"><label>Cohabiting?</label><div style="display:flex;align-items:center;padding-top:8px"><label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer"><input type="checkbox" id="ffcohab" style="width:16px;height:16px">Life partner / cohabiting</label></div></div>'
-    +fld('ffanniv','Marriage / anniversary date','','date')
+    +fld('ffanniv','Marriage / Anniversary date','','date')
     +fld('fftelh','Tel (home)','')
     +fld('fftelw','Tel (work)','')
     +fld('ffreview','Review date','','date')
@@ -15041,7 +15290,7 @@ function printFactFind(filled){
   doc+=two('Cell', cl.Cell, 'Email', cl.Email);
   doc+=two('Occupation', cl.Occupation, 'Employer', cl.Employer);
   doc+=two('Gross income /pm (R)', cl.Income, 'Tax number', cl.TaxNo);
-  doc+=two('Marital status', cl.MaritalStatus, 'Anniversary', cl.Anniversary);
+  doc+=two('Marital status', cl.MaritalStatus, annLabel(cl.MaritalStatus), cl.Anniversary);
   doc+=line('Physical address (FICA)', cl.Address);
 
   doc+=sh('2. Spouse / partner');
