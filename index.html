@@ -16705,6 +16705,13 @@ function parseAstutePasteJSON(txt){
       irr: clean(o.irr),                   // stated IRR from statement → IllustrativeRate (shows as IRR badge)
       growthRate: clean(o.growthRate),     // forward growth assumption → GrowthRate/PremGrowthRate (drives projection)
       eac: clean(o.eac),                   // effective annual cost → BenEscalation on Living Annuities, else a note
+      // Living Annuity income (4 Oct 2026): these were never read, so LA income
+      // landed in notes. Mapped to the LA card's own fields in runAstuteImport.
+      laIncome: clean(o.laIncome),                                       // gross monthly income → BenLAIncome (Living Annuity) / BenLifeAnnuityIncome (Life Annuity)
+      guarYears: clean(o.guarYears),                                     // Life Annuity guaranteed term in years → LifeAnnuityGuarYrs
+      drawdownRate: clean(o.drawdownRate).replace(/%/g,'').trim(),        // elected annual drawdown % → DrawdownRate
+      laBonus: clean(o.laBonus),                                         // insurer income boost per month → LABonus
+      laTaxable: (function(){ var t=clean(o.laTaxable).trim(); return /^y/i.test(t)?'Yes':(/^n/i.test(t)?'No':''); })(),  // → LAIncomeTaxable
       extraNotes: clean(o.notes),          // free-text catch-all for anything without a field (boosts, TER, etc.)
       ccy: (function(){ var c=(clean(o.currency)||'').toUpperCase().trim(); return /^(R|ZAR|RAND|RANDS)$/.test(c)?'':c; })(),  // offshore: native currency (USD/GBP/EUR); blank/ZAR/R = rand
       fxRate: clean(o.fxRate),             // rand per 1 unit of ccy, as at the value date
@@ -17022,9 +17029,9 @@ function runAstuteImport(){
       WithdrawSavingsPot:'', IncludeInRetirement:'', ContinuePastMaturity:'',
       PaysIncome:'',
       MedPlan:'', MedLives:'',
-      BenLAIncome:'', DrawdownRate:'', LABonus:'',
-      BenLifeAnnuityIncome:'', LifeAnnuityGuarYrs:'',
-      LAIncomeTaxable:'Yes',
+      BenLAIncome:(r.type!=='Life Annuity' ? (r.laIncome||'') : ''), DrawdownRate:(r.drawdownRate||''), LABonus:(r.laBonus||''),
+      BenLifeAnnuityIncome:(r.type==='Life Annuity' ? (r.laIncome||'') : ''), LifeAnnuityGuarYrs:(r.guarYears||''),
+      LAIncomeTaxable:(r.laTaxable||''),   // blank here so a refresh never resets a hand-set 'No'; new policies default to 'Yes' below
       Insured:r.insuredName||'',
       PayerType:'', PayerName:'',
       PensionableSalary:'', MemberContribPct:'', EmployerContribPct:'', AnnualAdminFees:'',
@@ -17057,6 +17064,9 @@ function runAstuteImport(){
        && !clean(finalPol.RetirementAge) && !clean(finalPol.MaturityDate)){
       finalPol.RetirementAge = '65';
     }
+    // LA tax treatment: new policies default to fully taxable (the edit screen's
+    // own default); on a refresh a blank import keeps whatever is already held.
+    if(!isUpdate && !clean(finalPol.LAIncomeTaxable)) finalPol.LAIncomeTaxable = 'Yes';
     finalPol._pendingSave = true;
     if(isUpdate){ var ei = DB.policies.indexOf(existingPol); if(ei>=0) DB.policies[ei]=finalPol; else DB.policies.push(finalPol); }
     else DB.policies.push(finalPol);
