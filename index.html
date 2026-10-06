@@ -5491,10 +5491,13 @@ function loadReviewEvents(){
   var R = window._revEvents;
   if(R.loading) return;
   R.loading = true;
-  sbFetch('GET','/rest/v1/work_events?EventType=in.(REV_LIFE,REV_INVEST)&select=ID,ClientID,EventDate,EventType,Status,Outcome,ResponsibleUser,CreatedBy&order=EventDate.desc', null, function(rows, err){
+  // select=* (not a column list) so this keeps working before and after the
+  // ReviewMonth column is added; whether it is there is read from the rows.
+  sbFetch('GET','/rest/v1/work_events?EventType=in.(REV_LIFE,REV_INVEST)&select=*&order=EventDate.desc', null, function(rows, err){
     R.loading = false; R.loadedAt = Date.now();
     if(err){ R.err = true; }
     else {
+      if(rows && rows.length) window._revMonthReady = ('ReviewMonth' in rows[0]);
       R.err = false; R.byClient = {}; R.allByClient = {};
       (rows || []).forEach(function(r){
         if(!R.byClient[r.ClientID]) R.byClient[r.ClientID] = r; // newest first
@@ -5683,13 +5686,25 @@ function revHasReviewMonth(c, ym, polIdx){
 function revHasOwnPolicy(polIdx, c){
   return (polIdx[String(c.ID)]||[]).some(function(x){ return aumFlag(x.pol.AdvisorOfRecord)==='Yes'; });
 }
-// The first Annual Review work event dated on or after the 1st of month ym (e.g. '2026-10').
-// Opening one closes the client's review reminder for that month and any carried over.
+// The Annual Review work event that closes a client's reminder for month ym (e.g. '2026-10').
+//  · A review started for a month (work_events.ReviewMonth, set by 📋 Start review)
+//    closes that month. Started EARLY (for a later month than it was opened in, e.g. a
+//    January letter filed in October) it closes only that month, not October's.
+//  · Otherwise (older events, + New Event): one dated on or after the 1st of ym
+//    closes ym and any month carried over before it.
+function revEventCloses(e, ym){
+  var d = String(e.EventDate||'').slice(0,10), dYm = d.slice(0,7), rm = clean(e.ReviewMonth);
+  if(rm){
+    if(rm === ym) return true;
+    if(rm > dYm) return false;              // an early review covers only its own month
+  }
+  return d >= ym+'-01';
+}
 function revEventSince(cid, ym){
   var R = window._revEvents;
   var list = (R && R.allByClient) ? (R.allByClient[cid] || R.allByClient[String(cid)] || []) : [];
-  var from = ym+'-01', hit = null;
-  list.forEach(function(e){ var d = String(e.EventDate||'').slice(0,10); if(d >= from && (!hit || d < String(hit.EventDate))) hit = e; });
+  var hit = null;
+  list.forEach(function(e){ if(revEventCloses(e, ym) && (!hit || String(e.EventDate) < String(hit.EventDate))) hit = e; });
   return hit;
 }
 // Clients with no trigger of their own (no reminding policy, no review month) can come up in the feed.
@@ -5844,6 +5859,8 @@ function revRowHasOwnAnn(r){
 }
 function revCardHtml(full, prebuilt){
   var R = prebuilt || revBuild(), cur = R.cur;
+  var view = revViewYm(cur);
+  if(view !== cur) return revOtherMonthCardHtml(R, view, full);   // month chooser (6 Oct 2026)
   var due = R.rows.filter(function(r){ return !r.feed; });
   var feed = R.rows.filter(function(r){ return r.feed; });
   var carried = due.filter(function(r){ return r.since < cur; });
@@ -5872,7 +5889,7 @@ function revCardHtml(full, prebuilt){
         '<button class="btn b-gh xs" style="font-size:10px;padding:2px 7px" onclick="event.stopPropagation();revUnsnooze(\''+id+'\')">bring back</button></div>';
     }).join('')+'</details>' : '';
   var feedN = R.feedN;
-  var head = '<div class="ch" style="padding:10px 16px;flex-wrap:wrap;gap:6px"><h2>📞 Reviews · '+escHtml(revYmLabel(cur))+'</h2>'+
+  var head = '<div class="ch" style="padding:10px 16px;flex-wrap:wrap;gap:6px"><h2 style="display:flex;align-items:center;gap:6px">📞 Reviews · '+revMonthNavHtml(cur, cur)+'</h2>'+
     '<div style="display:flex;gap:10px;align-items:center;font-size:11.5px;color:#667">'+
       '<span><b style="color:#2d7a3e">'+R.done.length+'</b> of '+total+' done</span>'+
       '<span style="cursor:pointer;text-decoration:underline dotted" onclick="revSetFeedN()" title="Change how many clients you have not spoken to in a year come up each month">👋 '+feedN+' a month</span>'+
@@ -5887,6 +5904,88 @@ function revCardHtml(full, prebuilt){
   return '<div class="card" style="padding:0;margin-bottom:12px">'+head+progress+
     '<div id="revScroll" style="'+(full?'':'max-height:420px;overflow-y:auto')+'">'+body+'</div></div>';
 }
+// ── Month chooser (6 Oct 2026) ──
+// The Reviews card shows this month by default; ‹ › and the list go back to the
+// first month (REV_FROM) and up to 12 months ahead. Kept for the session only.
+var REV_AHEAD = 12;
+function revViewYm(cur){
+  var v = window.REV_VIEW_YM || cur, last = cur;
+  for(var i = 0; i < REV_AHEAD; i++) last = revNextYm(last);
+  if(v < REV_FROM) v = REV_FROM;
+  if(v > last) v = last;
+  return v;
+}
+function revPrevYm(ym){ var d = revYmDate(ym); return revYM(new Date(d.getFullYear(), d.getMonth()-1, 1)); }
+function revSetView(ym){ window.REV_VIEW_YM = ym; var _s = captureScrolls(); render(); restoreScrolls(_s); }
+function revMonthNavHtml(cur, view){
+  var opts = [], ym = REV_FROM, guard = 0, last = cur;
+  for(var i = 0; i < REV_AHEAD; i++) last = revNextYm(last);
+  while(ym <= last && guard++ < 60){ opts.push(ym); ym = revNextYm(ym); }
+  var prev = view > REV_FROM ? revPrevYm(view) : '', next = view < last ? revNextYm(view) : '';
+  var b = function(lbl, to, title){ return '<button type="button" class="btn b-gh xs" style="font-size:12px;padding:1px 8px;line-height:1.3'+(to ? '' : ';opacity:.35')+'"'+(to ? ' onclick="event.stopPropagation();revSetView(\''+to+'\')"' : ' disabled')+' title="'+title+'">'+lbl+'</button>'; };
+  return b('‹', prev, 'Previous month')+
+    '<select onchange="revSetView(this.value)" onclick="event.stopPropagation()" title="Choose a month" style="font-family:\'DM Serif Display\',serif;font-size:17px;color:var(--navy);border:1px solid var(--mist);border-radius:6px;padding:1px 6px;background:#fff;cursor:pointer">'+
+      opts.map(function(o){ return '<option value="'+o+'"'+(o === view ? ' selected' : '')+'>'+escHtml(revYmLabel(o))+(o === cur ? ' (this month)' : '')+'</option>'; }).join('')+
+    '</select>'+b('›', next, 'Next month')+
+    (view !== cur ? '<button type="button" class="btn b-nv xs" style="font-size:10px;padding:3px 8px;margin-left:4px" onclick="event.stopPropagation();revSetView(\''+cur+'\')">This month</button>' : '');
+}
+// Another month: who comes up then, and whether their review is already started
+// (e.g. Tracy filing a January renewal letter in October with 📋 Start review).
+function revOtherMonthCardHtml(R, ym, full){
+  var cur = R.cur, future = ym > cur, list = [];
+  R.active.forEach(function(c){
+    var ann = revAnnItems(R.polIdx, c.ID, ym), rv = revHasReviewMonth(c, ym, R.polIdx);
+    if(!ann.length && !rv) return;
+    var ev = revEventSince(c.ID, ym);
+    var tick = !future ? (revLog(c.ID).months[ym] || null) : null;
+    list.push({c:c, ann:ann, rv:rv, ev:ev, tick:(tick && tick.s === 'done') ? tick : null});
+  });
+  list.sort(function(a,b){ var da=a.ann.length?a.ann[0].day:32, db=b.ann.length?b.ann[0].day:32; return da!==db ? da-db : String(a.c.Name||'').localeCompare(String(b.c.Name||'')); });
+  var started = list.filter(function(x){ return x.ev || x.tick; }).length;
+  var head = '<div class="ch" style="padding:10px 16px;flex-wrap:wrap;gap:6px"><h2 style="display:flex;align-items:center;gap:6px">📞 Reviews · '+revMonthNavHtml(cur, ym)+'</h2>'+
+    '<div style="display:flex;gap:10px;align-items:center;font-size:11.5px;color:#667">'+
+      '<span><b style="color:#2d7a3e">'+started+'</b> of '+list.length+' '+(future ? 'started' : 'done')+'</span>'+
+      (full ? '' : '<button class="btn b-gh xs" style="font-size:10px;padding:3px 8px" data-nav="reviews">Full list →</button>')+
+    '</div></div>';
+  var note = '<div style="padding:6px 12px;background:#f7f8fa;font-size:11px;color:#556;border-top:1px solid var(--smoke)">'+
+    (future ? 'Insurer letter in early? 📋 Start review here: the review is opened now, the letter goes into it, and the task is due on 1 '+escHtml(revYmLabel(ym))+'. The "not spoken to in a year" list is picked at the start of each month.'
+            : 'What was due in '+escHtml(revYmLabel(ym))+'. Anything not done there is carried over to this month.')+'</div>';
+  var rows = list.map(function(x){
+    var c = x.c, id = escHtml(String(c.ID));
+    var lines = x.ann.map(function(a){ return revAnnLine(a, ym, false); }).join('')+(x.rv ? '<div style="font-size:11.5px;color:#445">🗓 Annual review month · '+escHtml(revYmLabel(ym, true))+'</div>' : '');
+    var st, bar;
+    if(x.ev){
+      bar = 'var(--sage)';
+      st = '<span style="font-size:11px;color:#2d7a3e;font-weight:700">🔄 Review started '+escHtml(fdate(x.ev.EventDate))+(x.ev.ResponsibleUser ? ' · '+escHtml(userLabel(x.ev.ResponsibleUser)) : '')+(x.ev.Status === 'complete' ? ' · complete' : '')+'</span>'+
+        '<button class="btn b-gh xs" style="font-size:10.5px;padding:3px 8px" onclick="event.stopPropagation();revOpenExistingReview(\''+escHtml(String(x.ev.ID))+'\',\''+id+'\')">Open</button>';
+    } else if(x.tick){
+      bar = 'var(--sage)';
+      st = '<span style="font-size:11px;color:#2d7a3e;font-weight:700">✓ Done '+escHtml(fdate(String(x.tick.at||'').slice(0,10)))+(x.tick.by ? ' · '+escHtml(userLabel(x.tick.by)) : '')+'</span>';
+    } else if(future){
+      bar = '#c9cfd6';
+      st = '<button class="btn b-nv xs" style="font-size:10.5px;padding:3px 8px" title="Open the review now (task and work event), e.g. when the insurer letter comes in early" onclick="event.stopPropagation();revStartReview(\''+id+'\',\''+ym+'\')">📋 Start review</button>';
+    } else {
+      bar = 'var(--rose)';
+      st = '<span style="font-size:11px;color:#b23;font-weight:700">Not done: carried over to this month</span>';
+    }
+    return '<div class="ri" style="padding:8px 12px;border-left:3px solid '+bar+';display:flex;gap:8px;align-items:flex-start;cursor:pointer" data-act="open-client" data-id="'+id+'">'+
+      '<div style="flex:1;min-width:0"><div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap"><span style="font-weight:700;font-size:12.5px">'+escHtml(c.Name||'')+'</span>'+
+        (clean(c.Cell) ? '<span style="font-size:11px;color:#667">'+escHtml(c.Cell)+'</span>' : '')+'</div>'+lines+'</div>'+
+      '<div style="display:flex;gap:6px;flex-shrink:0;align-items:center">'+st+'</div></div>';
+  }).join('');
+  return '<div class="card" style="padding:0;margin-bottom:12px">'+head+note+
+    '<div id="revScroll" style="'+(full?'':'max-height:420px;overflow-y:auto')+'">'+(rows || '<div class="empty" style="padding:14px">Nobody comes up in '+escHtml(revYmLabel(ym))+' yet</div>')+'</div></div>';
+}
+// Is work_events.ReviewMonth there? (read from the loaded reviews; asked once if none were loaded)
+function revMonthEnsure(cb){
+  if(window._revMonthReady === true || window._revMonthReady === false){ cb(window._revMonthReady); return; }
+  sbFetch('GET','/rest/v1/work_events?select=ID,ReviewMonth&limit=1', null, function(res, err){
+    if(err && /ReviewMonth|column/i.test(String(err))) window._revMonthReady = false;
+    else if(!err) window._revMonthReady = true;
+    cb(window._revMonthReady);
+  });
+}
+
 // Next month preview (Reviews page): who comes up by anniversary or review month.
 function revNextMonthHtml(){
   var R = revBuild(); var nx = revNextYm(R.cur); var list = [];
@@ -7977,6 +8076,8 @@ function renderEventDetail(ev, c, pols){
   } else {
     html += '<div style="font-size:12px;color:#889;font-style:italic;margin:2px 0 4px">No case name yet. Use Edit Event to add one.</div>';
   }
+  // The month an Annual Review is for (set by 📋 Start review, 6 Oct 2026).
+  if(clean(ev.ReviewMonth)) html += '<div style="font-size:12px;font-weight:700;color:#2d7a3e;margin:0 0 4px">🗓 Review for '+escHtml(revYmLabel(ev.ReviewMonth))+'</div>';
   // Notes in a clear yellow box (was faint italic text that staff missed).
   if(ev.Notes && String(ev.Notes).trim()){
     html += '<div style="margin:8px 0 4px;padding:8px 12px;background:#fff8dc;border-left:3px solid #e0b800;border-radius:4px">'+
@@ -9471,7 +9572,7 @@ function caseLinkCreate(o, cb){
 // Make a new Annual Review show at once on the Reviews list (before the next reload).
 function revEventAddLocal(ev){
   var R = window._revEvents; if(!R) return;
-  var row = {ID:ev.ID, ClientID:ev.ClientID, EventDate:ev.EventDate, EventType:ev.EventType, Status:ev.Status||'in_progress', Outcome:ev.Outcome||'', ResponsibleUser:ev.ResponsibleUser||'', CreatedBy:ev.CreatedBy||''};
+  var row = {ID:ev.ID, ClientID:ev.ClientID, EventDate:ev.EventDate, EventType:ev.EventType, Status:ev.Status||'in_progress', Outcome:ev.Outcome||'', ResponsibleUser:ev.ResponsibleUser||'', CreatedBy:ev.CreatedBy||'', ReviewMonth:ev.ReviewMonth||null};
   R.allByClient = R.allByClient || {};
   var list = (R.allByClient[ev.ClientID] = R.allByClient[ev.ClientID] || []);
   if(!list.some(function(x){ return String(x.ID) === String(ev.ID); })) list.unshift(row);
@@ -9773,6 +9874,7 @@ function tevRender(tid){
       '<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:.6px">📋 Work event</div>'+
       '<span style="font-size:12.5px;font-weight:700;color:#0e413a">'+escHtml(eventTypeLabel(ev))+'</span>'+
       (ev.Outcome ? '<span style="font-size:12px;color:#445">· '+escHtml(ev.Outcome)+'</span>' : '')+
+      (clean(ev.ReviewMonth) ? '<span style="font-size:11px;font-weight:700;color:#2d7a3e">🗓 for '+escHtml(revYmLabel(ev.ReviewMonth))+'</span>' : '')+
       '<span style="background:'+st.bg+';color:'+st.clr+';padding:1px 7px;border-radius:4px;font-size:10px;font-weight:700;text-transform:uppercase">'+escHtml(st.txt)+'</span>'+
       '<button class="btn b-gh xs" style="margin-left:auto;font-size:11px" data-act="tev-open" data-cid="'+escHtml(String(ev.ClientID))+'" data-eid="'+escHtml(String(ev.ID))+'" title="Open the work event on the client\'s Work Events tab">Open work event ↗</button>'+
     '</div>'+
@@ -9855,13 +9957,28 @@ function evTaskAddNote(tid){
 }
 
 // ── Reviews list: 📋 Start review (task + Annual Review work event, together) ──
-function revStartReview(cid){
+// forYm (6 Oct 2026): the month the review is for. Blank = this month (and anything
+// carried over). A later month = an early review (e.g. the insurer's letter came in):
+// only that month's anniversaries, task due on the 1st of that month, and the work
+// event records the month (ReviewMonth) so it closes that month's reminder only.
+function revStartReview(cid, forYm){
   var c = revClient(cid); if(!c) return;
   if(window._taskLinkReady === false){ alert(TASK_LINK_SQL_MSG); return; }
   if(TASK_BUSY['sr_'+cid]){ toast('Still starting the review for '+(c.Name||'this client')+'…','err'); return; }
+  if(window._revMonthReady !== true && window._revMonthReady !== false){ revMonthEnsure(function(){ revStartReview(cid, forYm); }); return; }
   var R = revBuild(), cur = R.cur;
-  var r = R.rows.concat(R.snoozed).filter(function(x){ return String(x.c.ID) === String(cid); })[0];
+  var target = forYm && forYm > cur ? forYm : cur;
+  var early = target !== cur;
+  if(early && window._revMonthReady === false){ alert(TASK_LINK_SQL_MSG); return; }
+  var r = early ? null : R.rows.concat(R.snoozed).filter(function(x){ return String(x.c.ID) === String(cid); })[0];
   var items = [], seen = {}, monthsSeen = [];
+  if(early){
+    revAnnItems(R.polIdx, cid, target).forEach(function(a){
+      if(seen[a.pol.ID]) return; seen[a.pol.ID] = 1;
+      items.push({pol:a.pol, ym:target, day:a.day, years:a.years, notMine:a.notMine});
+    });
+    monthsSeen = [target];
+  }
   if(r && !r.feed) r.open.forEach(function(o){
     o.ann.forEach(function(a){
       if(seen[a.pol.ID]) return; seen[a.pol.ID] = 1;
@@ -9875,7 +9992,8 @@ function revStartReview(cid){
   var defName = items.length
     ? items.map(function(x){ return (x.pol.Insurer||x.pol.Type||'Policy')+(clean(x.pol.PolicyNo) ? ' '+x.pol.PolicyNo : ''); }).join(' + ')+' anniversary '+monthTxt
     : (r && r.feed ? 'Reconnect: not spoken to in a year' : 'Annual review '+monthTxt);
-  var openRevs = ((window._revEvents && window._revEvents.allByClient && window._revEvents.allByClient[cid]) || []).filter(function(e){ return e.Status === 'in_progress'; });
+  // Open reviews for the same month (or with no month recorded) are worth a warning.
+  var openRevs = ((window._revEvents && window._revEvents.allByClient && window._revEvents.allByClient[cid]) || []).filter(function(e){ return e.Status === 'in_progress' && (!clean(e.ReviewMonth) || e.ReviewMonth === target); });
   var warn = openRevs.length ? '<div style="background:#fff8dc;border-left:3px solid #e0b800;border-radius:4px;padding:8px 10px;font-size:12px;color:#3d3300;margin-bottom:10px">'+
       '<b>An Annual Review is already open for this client:</b>'+
       openRevs.map(function(e){ return '<div style="display:flex;gap:8px;align-items:center;margin-top:4px"><span style="flex:1">'+escHtml(e.Outcome||eventTypeLabel(e))+' · opened '+escHtml(fdate(e.EventDate))+'</span>'+
@@ -9890,14 +10008,16 @@ function revStartReview(cid){
       }).join('')+'</div>' : '';
   miniDialog('📋 Start review · '+escHtml(c.Name||''),
     warn+
-    '<div style="font-size:12.5px;color:#556;margin-bottom:10px">Creates a task and its Annual Review work event together. The reminder closes. Documents you upload in the task are filed in the work event.</div>'+
+    '<div style="font-size:12.5px;color:#556;margin-bottom:10px">'+(early
+      ? 'An early review for <b>'+escHtml(revYmLabel(target))+'</b>: the task and its Annual Review work event are made now (file the insurer\'s letter in it), the task is due on 1 '+escHtml(revYmLabel(target))+', and that month\'s reminder closes. This month\'s reminders are not touched.'
+      : 'Creates a task and its Annual Review work event together. The reminder closes. Documents you upload in the task are filed in the work event.')+'</div>'+
     polHtml+
     '<div class="g2"><div class="fld"><label>Review type</label><select id="srType">'+
       '<option value="REV_LIFE"'+(defType==='REV_LIFE'?' selected':'')+'>🔄 Annual Review — Life</option>'+
       '<option value="REV_INVEST"'+(defType==='REV_INVEST'?' selected':'')+'>🔄 Annual Review — Invest</option></select></div>'+
     '<div class="fld"><label>Task for</label><select id="srWho">'+userOptions('Clinton')+'</select></div></div>'+
     '<div class="fld"><label>Case name</label><input type="text" id="srName" maxlength="200" value="'+escHtml(defName)+'" autocomplete="off"></div>'+
-    '<div class="fld"><label>Due date</label><input type="date" id="srDue" value="'+localDateStr()+'"></div>'+
+    '<div class="fld"><label>Due date</label><input type="date" id="srDue" value="'+(early ? target+'-01' : localDateStr())+'"></div>'+
     '<div class="fld"><label>Note (optional)</label><textarea id="srNote" style="min-height:56px" placeholder="Anything to remember for this review"></textarea></div>',
     '📋 Start review',
     function(box, close){
@@ -9908,11 +10028,12 @@ function revStartReview(cid){
       var note = String((box.querySelector('#srNote')||{}).value||'').trim();
       var pids = Array.prototype.map.call(box.querySelectorAll('input[data-pol]:checked'), function(i){ return i.getAttribute('data-pol'); });
       var ev = evRowNew(c.ID, type, '', name, who, '');
+      if(window._revMonthReady === true) ev.ReviewMonth = target;   // which month's reminder this review closes
       var now = new Date().toISOString();
       var lines = items.filter(function(x){ return pids.indexOf(String(x.pol.ID)) >= 0; }).map(function(x){
         var p = x.pol; return '• '+(p.Insurer||'Policy')+(p.Type?' '+p.Type:'')+(clean(p.PolicyNo)?' ('+p.PolicyNo+')':'')+': anniversary '+x.day+' '+revYmLabel(x.ym,true)+', year '+x.years+(x.notMine?' (not your policy)':'');
       });
-      var text = 'Review started from the Reviews list by '+userLabel(cu())+'.'+(lines.length ? '\n'+lines.join('\n') : (r && r.feed ? '\nNot spoken to in a year: phone to reconnect.' : ''))+(note ? '\n'+note : '');
+      var text = (early ? 'Early review for '+revYmLabel(target)+', started' : 'Review started')+' from the Reviews list by '+userLabel(cu())+'.'+(lines.length ? '\n'+lines.join('\n') : (r && r.feed ? '\nNot spoken to in a year: phone to reconnect.' : ''))+(note ? '\n'+note : '');
       var task = {ID:'t_'+Date.now(), Title:taskTitleForEvent(ev), Assignee:who, DueDate:due, Priority:'Normal', CCWife:'', ClientName:c.Name||'',
         Notes:JSON.stringify([{date:now, text:text, user:cu()}]), Done:false, Timestamp:now, OpenedBy:cu(), OpenedDate:now,
         WorkEventID:ev.ID, NewForAssignee: who !== cu() ? 'Yes' : ''};
