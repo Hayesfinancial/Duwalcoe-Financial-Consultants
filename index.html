@@ -1403,8 +1403,11 @@ var CL_HOLDS_GROUPS = [
   // Not captured policies: ticks on the client record (Tracy updates them from the
   // Duwalcoe commission statement). No policy types, so type lists are empty.
   ['st',       'Short-term (Duwalcoe)',   []],
-  ['health',   'Health (Duwalcoe)',       []]
+  ['health',   'Health (Duwalcoe)',       []],
+  // A will with you (Will tab: has a will, done through you). 6 Oct 2026.
+  ['will',     'Will (with you)',         []]
 ];
+function hasWillWithYou(c){ return c && c.HasWill==='Yes' && c.WillThroughMe==='Yes'; }
 // Duwalcoe referral ticks: [group key, clients column, short label, long label]
 var DUW_TICKS = [
   ['st',     'ShortTermDuwalcoe', 'ST',     'Short-term through Duwalcoe'],
@@ -1447,6 +1450,7 @@ function clientGroupsHeld(){
   });
   DB.clients.forEach(function(c){
     DUW_TICKS.forEach(function(t){ if(hasDuwTick(c,t[1])) (out[String(c.ID)]=out[String(c.ID)]||{})[t[0]]=1; });
+    if(hasWillWithYou(c)) (out[String(c.ID)]=out[String(c.ID)]||{}).will=1;
   });
   return out;
 }
@@ -1456,9 +1460,10 @@ function makeHoldsTest(holdsKey, notKey){
   var held=clientGroupsHeld();
   return function(c){
     var h=held[String(c.ID)]||{};
+    if((holdsKey==='will' || notKey==='will') && c.ClientType==='Company') return false;   // companies don't have wills
     if(holdsKey && !h[holdsKey]) return false;
     if(notKey==='other'){
-      for(var k in h){ if(k!==holdsKey) return false; }   // holds nothing but the Holds group
+      for(var k in h){ if(k!==holdsKey && k!=='will') return false; }   // holds nothing but the Holds group (a will doesn't count here)
     } else if(notKey && h[notKey]) return false;
     return true;
   };
@@ -1471,8 +1476,17 @@ var XSELL_PICKS = [
   ['Investment, no risk', 'invest',  'risk',   'Investment clients with no life & risk cover'],
   ['Annuity, no risk',    'annuity', 'risk',   'Living / life annuity clients with no life & risk cover'],
   ['No short-term',       '',        'st',     'Clients not ticked for Duwalcoe short-term: refer them'],
-  ['No health',           '',        'health', 'Clients not ticked for Duwalcoe health: refer them']
+  ['No health',           '',        'health', 'Clients not ticked for Duwalcoe health: refer them'],
+  ['No will with you',    '',        'will',   'Clients whose will is not with you (no will, not asked, or a will elsewhere): offer the free will'],
+  ['Risk, no will',       'risk',    'will',   'Life & risk clients with no will with you: the cost-of-dying conversation']
 ];
+// On a will cross-sell list, each client shows where they stand (6 Oct 2026).
+function willStatusPill(c){
+  if(c.HasWill==='Yes' && c.WillThroughMe!=='Yes') return '<span title="Has a will, not done through you: offer a free update" style="font-size:10px;font-weight:700;color:#8a5a00;background:#fdf2d6;border-radius:10px;padding:1px 7px;white-space:nowrap">📜 Will elsewhere</span>';
+  if(c.HasWill==='No') return '<span title="Said they have no will" style="font-size:10px;font-weight:700;color:#9e2a2b;background:#fdecea;border-radius:10px;padding:1px 7px;white-space:nowrap">📜 No will</span>';
+  if(c.HasWill!=='Yes') return '<span title="The will question has not been asked yet" style="font-size:10px;font-weight:700;color:#475569;background:#eef1f4;border-radius:10px;padding:1px 7px;white-space:nowrap">❓ Will not asked</span>';
+  return '';
+}
 function xsellHtml(){
   var f=window.CLIENT_LIST_FILTER||'clients';
   if(f==='family'||f==='tidy'||f==='leads') return '';
@@ -2582,6 +2596,7 @@ function clientTable(list,mini,isLeads,isFamily){
         '<td><div style="display:flex;align-items:center;gap:10px">'+
         '<div style="width:32px;height:32px;border-radius:50%;background:'+(isLeads?(isContacted?'#16a34a':'#d97706'):'var(--navy)')+';display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:#fff;flex-shrink:0">'+ini(c.Name)+'</div>'+
         '<div><div style="font-weight:600;display:flex;align-items:center;gap:6px;flex-wrap:wrap">'+(c.Name||'—')+ageChip+
+        (!isLeads && !mini && (CL_NOT==='will' || CL_HOLDS==='will') ? willStatusPill(c) : '')+   // will cross-sell lists (6 Oct 2026)
         (isFamilyRecord(c)?'<span style="font-size:10px;font-weight:700;color:#0f766e;background:#ccfbf1;border-radius:10px;padding:1px 7px;white-space:nowrap" title="Family / contact record, not a client">👨‍👩‍👧 '+escHtml(String(c.FamilyType))+'</span>':'')+
         '</div>'+(em&&!mini?'<div style="font-size:11px;color:#889">'+em+'</div>':'')+'</div>'+
         '</div></td>'+
