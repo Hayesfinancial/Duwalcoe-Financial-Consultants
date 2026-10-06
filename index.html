@@ -3789,7 +3789,6 @@ var FP_KINDS = [
   {kind:'other',     label:'Other Assets',     icon:'💼', add:'+ Add Asset'},
   {kind:'business',  label:'Business Interests', icon:'🏢', add:'+ Add Business Interest'},
   {kind:'liability', label:'Liabilities',      icon:'💳', add:'+ Add Liability'},
-  {kind:'benefit',   label:'Corporate Benefits', icon:'🏛', add:'+ Add Corporate Benefit'},
   {kind:'income',    label:'Income Sources',   icon:'💰', add:'+ Add Income Source'},
   {kind:'expense',   label:'Monthly Expenses', icon:'📊', add:'+ Add Expense Category'}
 ];
@@ -3816,101 +3815,6 @@ function fpPassesToLabel(d){
   return d.passesTo;
 }
 
-// ══ CORPORATE BENEFITS (Kind 'benefit', 6 Oct 2026) ═════════════════════
-// Employer benefits not captured on the Policies tab (Pension / Provident policies
-// you are on record for keep their Group Risk Benefits there — Clinton, option A).
-// NOT assets: never in Total Assets / Net; no value / passesTo / soldDeath fields.
-// Only the selected type's fields are saved (FP_BEN_FIELDS), so a type change never
-// leaves stale keys printing in the FNA Data Pack.
-var FP_BEN_TYPES = ['Retirement fund','Approved group life (inside the fund)','Unapproved group life','Lump sum disability','Income disability / PHI','Severe illness','Funeral / Group personal accident','Medical aid / Gap cover (employer)'];
-var FP_BEN_FIELDS = {
-  'Retirement fund':                        ['fundType','value','vested','savings','retirement','nominationHeld','nominee'],
-  'Approved group life (inside the fund)':  ['cover','salaryMultiple','salaryBasisPM','nominationHeld','nominee'],
-  'Unapproved group life':                  ['cover','salaryMultiple','salaryBasisPM','nominee'],
-  'Lump sum disability':                    ['cover','salaryMultiple','salaryBasisPM'],
-  'Income disability / PHI':                ['pctSalary','salaryBasisPM','waitingPeriod','payToAge'],
-  'Severe illness':                         ['cover'],
-  'Funeral / Group personal accident':      ['cover'],
-  'Medical aid / Gap cover (employer)':     ['scheme','plan','dependants','postRetirementSubsidy']
-};
-function fpBenHas(d, key){ return (FP_BEN_FIELDS[d.benefitType]||[]).indexOf(key)>=0; }
-// Display test: with a type set, only that type's fields; with no type (an import the
-// importer could not classify), whatever was captured, so nothing is hidden or lost.
-function fpBenShows(d, key){ return d.benefitType ? fpBenHas(d,key) : !fpBenBlank(d[key]); }
-function fpBenBlank(v){ return String(v===undefined||v===null?'':v).trim()===''; }
-// Default description: "<fund/insurer> <benefitType>" (medical: scheme when no insurer given).
-// Also the importer's dedupe key.
-function fpBenDesc(d){ return [fpBenBlank(d.fundOrInsurer)?d.scheme:d.fundOrInsurer, d.benefitType].filter(function(x){ return !fpBenBlank(x); }).join(' ').trim(); }
-// Estate / s.37C lines for the FNA Data Pack — ONLY the three types Clinton defined.
-// Every other type returns [] (never default anything estate-related).
-function fpBenEstateLines(d){
-  var t = d.benefitType||'';
-  function creditTo(){
-    if(d.nominationHeld==='Yes') return fpBenBlank(d.nominee) ? 'nomination held, nominee NOT CAPTURED' : d.nominee+' (fund nomination)';
-    if(d.nominationHeld==='No') return 'no nomination — fund trustees decide (s.37C)';
-    return 'NOT CAPTURED (nomination unknown)';
-  }
-  if(t==='Retirement fund') return [
-    {key:'estate', val:'s.37C — paid by fund trustees; not estate property, not dutiable'},
-    {key:'credit_to', val:creditTo()} ];
-  if(t==='Approved group life (inside the fund)') return [
-    {key:'estate', val:'inside the fund (s.37C) — NOT counted for estate duty'},
-    {key:'credit_to', val:creditTo()} ];
-  if(t==='Unapproved group life') return [
-    {key:'estate', val:'outside the fund — COUNTED for estate duty (deemed property)'},
-    {key:'paid_to_nominee', val:fpBenBlank(d.nominee)?'NOT CAPTURED':d.nominee} ];
-  return [];
-}
-// Option A guard: a benefit whose member no. matches a live Pension / Provident policy
-// number on this client's Policies tab is probably captured twice — count once.
-function fpBenPolicyDup(cid, d){
-  var norm = function(s){ return String(s||'').replace(/[^a-z0-9]/gi,'').toLowerCase(); };
-  var m = norm(d.memberNo);
-  if(!m) return null;
-  return polsFor(cid).find(function(p){
-    return (p.Type==='Pension Fund'||p.Type==='Provident Fund') &&
-      p.Status!=='Replaced' && p.Status!=='Cancelled' && p.Status!=='Lapsed' &&
-      norm(p.PolicyNo)===m;
-  }) || null;
-}
-function fpBenDupText(p){ return 'also on Policies tab ('+(p.Insurer||'policy')+(p.PolicyNo?' #'+p.PolicyNo:'')+') — count once'; }
-// Group cover subtotal = death cover only (approved + unapproved group life).
-// Display arithmetic: captured cover amounts only; salary-multiple-only rows are counted, not multiplied.
-function fpBenTotals(rows){
-  var t = {ret:0, retN:0, apr:0, unapr:0, multN:0, n:0};
-  rows.forEach(function(r){
-    if(r.Kind!=='benefit') return;
-    var d = fpData(r); t.n++;
-    if(d.benefitType==='Retirement fund'){ t.ret += fpN(d.value); t.retN++; }
-    else if(d.benefitType==='Approved group life (inside the fund)' || d.benefitType==='Unapproved group life'){
-      if(!fpBenBlank(d.cover)){ if(d.benefitType==='Unapproved group life') t.unapr += fpN(d.cover); else t.apr += fpN(d.cover); }
-      else if(!fpBenBlank(d.salaryMultiple)) t.multN++;
-    }
-  });
-  t.cover = t.apr + t.unapr;
-  return t;
-}
-// One-line summary bits for a benefit (FNA capture card and the row detail).
-function fpBenBits(d){
-  function money(v){ return fpBenBlank(v)?'':fpR(fpN(v)); }
-  function sh(k){ return fpBenShows(d,k) && !fpBenBlank(d[k]); }
-  var b = [];
-  b.push(d.benefitType || '⚠ benefit type not set');
-  if(d.fundOrInsurer) b.push(d.fundOrInsurer);
-  if(sh('fundType')) b.push(d.fundType);
-  if(sh('value')) b.push('Value '+money(d.value));
-  if(sh('cover')) b.push('Cover '+money(d.cover));
-  else if(sh('salaryMultiple')) b.push(String(d.salaryMultiple).replace(/\s*[x×]\s*$/i,'')+' × salary');
-  if(sh('pctSalary')) b.push(String(d.pctSalary).replace('%','')+'% of salary');
-  if(sh('payToAge')) b.push('to age '+d.payToAge);
-  if(sh('waitingPeriod')) b.push('wait '+d.waitingPeriod);
-  if(sh('scheme')) b.push(d.scheme+(sh('plan')?' '+d.plan:''));
-  if(sh('postRetirementSubsidy')) b.push('Post-retirement subsidy: '+d.postRetirementSubsidy);
-  if(sh('nominee')) b.push('Nominee: '+d.nominee);
-  if(d.endsAtRetirement==='Yes') b.push('Ends at retirement');
-  return b;
-}
-
 function renderFinPos(c){
   var rows = finposFor(c.ID).filter(function(r){ return FP_NOT_ITEM_KINDS.indexOf(r.Kind)<0; });
   var byKind = {};
@@ -3930,14 +3834,12 @@ function renderFinPos(c){
       if(d.loanAcc==='Credit') totAssets += fpN(d.loanBal);
       else if(d.loanAcc==='Debit') totLiabs += fpN(d.loanBal);
     }
-    else if(r.Kind==='benefit'){ /* corporate benefit — not an asset; own subtotals below */ }
     else {
       totAssets += fpN(d.value);
       totLiabs  += fpN(d.bondOut) + fpN(d.financeOut);
     }
   });
   var net = totAssets - totLiabs;
-  var benTot = fpBenTotals(rows);
 
   var html =
     '<div style="margin-bottom:16px;display:flex;justify-content:space-between;align-items:center">'+
@@ -3958,16 +3860,6 @@ function renderFinPos(c){
       '<h3 style="font-family:\'DM Serif Display\',serif;font-size:14px;color:var(--navy)">'+k.icon+' '+k.label+(items.length?' ('+items.length+')':'')+'</h3>'+
       '<button class="btn b-gd xs" data-act="add-finpos" data-id="'+c.ID+'" data-kind="'+k.kind+'">'+k.add+'</button>'+
       '</div>';
-    if(k.kind==='benefit'){
-      html += '<div style="font-size:11px;color:#889;margin:-4px 0 8px">Employer benefits not on the Policies tab. Not assets — excluded from Total Assets and Net Position.</div>';
-      if(items.length){
-        html += '<div class="card" style="margin-bottom:10px"><div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px;padding:12px 16px">'+
-          '<div><div style="font-size:10px;color:#999;text-transform:uppercase;letter-spacing:.4px">Retirement funds</div><div style="font-weight:700;font-size:15px;color:var(--navy)">'+(benTot.retN?fpR(benTot.ret):'—')+'</div></div>'+
-          '<div><div style="font-size:10px;color:#999;text-transform:uppercase;letter-spacing:.4px">Group cover (death)</div><div style="font-weight:700;font-size:15px;color:var(--navy)">'+(benTot.cover>0?fpR(benTot.cover):'—')+'</div>'+
-          (benTot.multN?'<div style="font-size:10.5px;color:#9a6a1f">+ '+benTot.multN+' by salary multiple (not totalled)</div>':'')+'</div>'+
-          '</div></div>';
-      }
-    }
     if(!items.length){
       html += '<div class="card" style="margin-bottom:10px"><div class="empty cb" style="padding:14px;font-size:12px">No '+k.label.toLowerCase()+' captured yet.</div></div>';
       return;
@@ -3986,13 +3878,7 @@ function renderFinPos(c){
         if(d.buySell==='Yes') badges += '<span style="background:#e8f5e9;color:#2e7d5a;border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700">Buy &amp; Sell in place</span>';
         else badges += '<span style="background:#fff3e0;color:#9a6a1f;border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700">No Buy &amp; Sell</span>';
       }
-      if(r.Kind==='benefit'){
-        // Benefits carry no estate fields (no sold at death / disability badges).
-        if(d.benefitType) badges += '<span style="background:var(--gold);color:var(--navy);border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700">'+d.benefitType+'</span>';
-        else badges += '<span style="background:#fde8e8;color:var(--rose);border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700">⚠ Benefit type not set</span>';
-        var _bdup = fpBenPolicyDup(c.ID, d);
-        if(_bdup) badges += '<span style="background:#fff3e0;color:#9a6a1f;border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700">⚠ '+fpBenDupText(_bdup)+'</span>';
-      } else if(r.Kind!=='liability'){
+      if(r.Kind!=='liability'){
         if(d.soldDeath==='Yes')  badges += '<span style="background:#fff3e0;color:#9a6a1f;border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700">Sold at death</span>';
         if(d.soldDisab==='Yes')  badges += '<span style="background:#fff3e0;color:#9a6a1f;border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700">Sold at disability</span>';
       } else if(d.payOffDisab==='Yes'){
@@ -4040,36 +3926,6 @@ function renderFinPos(c){
       } else if(r.Kind==='expense'){
         cells = cell('Amount /pm', money(d.amountPM))+
                 cell('Category', d.expCategory||'—');
-      } else if(r.Kind==='benefit'){
-        // Corporate benefit: common fields, then only the selected type's fields.
-        var bh = function(k){ return fpBenShows(d,k); };
-        var yn = function(v){ return v||'—'; };
-        cells = cell('Employer', d.employer||'—')+
-                cell('Fund / Insurer', d.fundOrInsurer||'—')+
-                (d.administrator?cell('Administrator', d.administrator):'')+
-                cell('Member No.', d.memberNo||'—')+
-                (bh('fundType')?cell('Fund Type', d.fundType||'—'):'')+
-                (bh('value')?cell('Fund Value', money(d.value)+asAt):'')+
-                (bh('vested')?cell('Vested Pot', money(d.vested)):'')+
-                (bh('savings')?cell('Savings Pot', money(d.savings)):'')+
-                (bh('retirement')?cell('Retirement Pot', money(d.retirement)):'')+
-                (bh('cover')?cell('Cover', money(d.cover)+(bh('value')?'':asAt)):'')+
-                (bh('salaryMultiple')?cell('Salary Multiple', d.salaryMultiple?String(d.salaryMultiple).replace(/\s*[x×]\s*$/i,'')+' ×':'—'):'')+
-                (bh('pctSalary')?cell('% of Salary', d.pctSalary?String(d.pctSalary).replace('%','')+'%':'—'):'')+
-                (bh('salaryBasisPM')?cell('Salary Basis /pm', money(d.salaryBasisPM)):'')+
-                (bh('waitingPeriod')?cell('Waiting Period', d.waitingPeriod||'—'):'')+
-                (bh('payToAge')?cell('Pays to Age', d.payToAge||'—'):'')+
-                (bh('scheme')?cell('Scheme', d.scheme||'—'):'')+
-                (bh('plan')?cell('Plan', d.plan||'—'):'')+
-                (bh('dependants')?cell('Dependants', d.dependants||'—'):'')+
-                (bh('postRetirementSubsidy')?cell('Post-retirement Subsidy', yn(d.postRetirementSubsidy)):'')+
-                (bh('nominationHeld')?cell('Nomination Held', yn(d.nominationHeld)):'')+
-                (bh('nominee')?cell('Nominee', d.nominee||'—'):'')+
-                cell('Employee /pm', money(d.eePM))+
-                cell('Employer /pm', money(d.erPM))+
-                cell('Ends at Retirement', yn(d.endsAtRetirement))+
-                cell('Continuation Option', yn(d.continuationOption))+
-                (!bh('value')&&!bh('cover')&&d.valueDate?cell('Info as at', fdate(d.valueDate)):'');
       } else {
         // Liability
         cells = cell('Type', d.liabType||'—')+
@@ -10338,12 +10194,44 @@ function buildFnaDataPack(cid, includeSpouse){
   }
 
   // ── Policies (reusable for the linked spouse appendix) ──
+  // Group risk on a Pension / Provident fund, readable (6 Oct 2026; replaces the raw JSON).
+  // Each row's approved status is its own setting, else the fund's. Estate lines for the
+  // member's own Life Cover only: approved = inside the fund, s.37C, not counted for estate
+  // duty, credit_to the fund nomination; unapproved = outside the fund, counted, paid to the
+  // row's nominee. A missing status is printed as NOT CAPTURED, never assumed.
+  function packGroupRisk(p, bens){
+    if(p.HasGroupRisk==='No'){ line('  Group risk benefits: none (fund marked No group risk)'); return; }
+    var rows = grRows(p).filter(function(r){ return fpN(r.cover)>0 || clean(r.basis) || clean(r.notes); });
+    if(!rows.length) return;
+    var fund = (p.GroupRiskApproved==='Approved'||p.GroupRiskApproved==='Unapproved') ? p.GroupRiskApproved : 'NOT SET';
+    line('  Group risk benefits (fund setting: '+fund+'; premiums already inside the fund contribution):');
+    var apr=0, unapr=0, unk=0;
+    var credit = bens.length ? bens.map(function(b){ return (b.name||'(unnamed)')+(b.type?' ['+b.type+']':'')+(b.pct?' '+String(b.pct).replace('%','')+'%':''); }).join('; ')+' (fund nomination)'
+                             : 'no nomination captured — fund trustees decide (s.37C)';
+    rows.forEach(function(r){
+      var st = grRowStatus(r, p.GroupRiskApproved);
+      var amt = fpN(r.cover)>0 ? fpR(fpN(r.cover))+(grIsIncome(r)?' /pm':'') : 'cover NOT CAPTURED';
+      var t = '    • '+(r.type||'Benefit')+': '+amt+(clean(r.basis)?' ('+r.basis+')':'')+' — ';
+      if(r.type==='Life Cover'){
+        if(st==='Approved'){ t += 'Approved, inside the fund: s.37C, NOT counted for estate duty; credit_to: '+credit; apr += fpN(r.cover); }
+        else if(st==='Unapproved'){ t += 'Unapproved, outside the fund: COUNTED for estate duty (deemed property); paid_to_nominee: '+(clean(r.nominee)?r.nominee:'NOT CAPTURED'); unapr += fpN(r.cover); }
+        else { t += 'approved status NOT CAPTURED (decides estate duty — classify before the FNA)'; unk += fpN(r.cover); }
+      } else {
+        t += st ? st : 'approved status NOT CAPTURED';
+        if(st==='Unapproved' && GR_NOMINEE_TYPES.indexOf(r.type)>=0) t += '; paid_to_nominee: '+(clean(r.nominee)?r.nominee:'NOT CAPTURED');
+      }
+      line(t);
+      if(clean(r.notes)) line('        notes: '+r.notes);
+    });
+    if(apr || unapr || unk) line('  GroupLifeCover (computed): approved '+fpR(apr)+' (not counted for estate duty) · unapproved '+fpR(unapr)+' (counted)'+(unk?' · NOT CLASSIFIED '+fpR(unk):''));
+  }
   function packPolicies(forCid, prefix){
     // Dead policies (Replaced / Cancelled / Lapsed) never reach the FNA (Clinton, 21 Sep 2026).
     var pols = polsFor(forCid).filter(function(p){ return p.Status!=='Replaced' && p.Status!=='Cancelled' && p.Status!=='Lapsed'; });
     line('── '+prefix+'POLICIES ('+pols.length+' active/current) ──');
     if(!pols.length) line('  (none captured)');
-    var polSkip = {ID:1, ClientID:1, ReviewHistory:1, _pendingSave:1, LastAccessed:1, CapturedDate:1, ReplacedBy:1, ReplacedDate:1, ReplacedPolicyNo:1, Beneficiaries:1};
+    var polSkip = {ID:1, ClientID:1, ReviewHistory:1, _pendingSave:1, LastAccessed:1, CapturedDate:1, ReplacedBy:1, ReplacedDate:1, ReplacedPolicyNo:1, Beneficiaries:1,
+      HasGroupRisk:1, GroupRiskApproved:1, GroupRiskBenefits:1};   // group risk printed readably below (6 Oct 2026)
     pols.forEach(function(p, i){
       line('  ── Policy '+(i+1)+': '+(p.Insurer||'?')+' — '+(p.Type||'?')+(p.PolicyNo?' #'+p.PolicyNo:'')+' ──');
       // Beneficiary nominations, readable (stored as a JSON array of {type,name,pct})
@@ -10368,6 +10256,7 @@ function buildFnaDataPack(cid, includeSpouse){
         if(k==='BaseCost' && p.Type==='Offshore Flexible Investment'){ line('  '+k+': '+v+' (in the investment\'s own currency, see FX line in Notes)'); return; }
         line('  '+k+': '+v);
       });
+      if(p.Type==='Pension Fund' || p.Type==='Provident Fund') packGroupRisk(p, bens);
       // CGT-bearing discretionary investments: a blank base cost prints explicitly (Sep 2026)
       if(POL_CGT_TYPES.indexOf(p.Type)>=0 && String(p.BaseCost===undefined||p.BaseCost===null?'':p.BaseCost).trim()===''){
         line('  BaseCost: NOT CAPTURED');
@@ -10402,14 +10291,6 @@ function buildFnaDataPack(cid, includeSpouse){
         // CGT-on-death inputs left blank print explicitly, so the FNA flags them
         // instead of reading a blank as "not applicable" (Sep 2026).
         fpCgtMissing(r.Kind, d).forEach(function(m){ line('      '+m.key+': NOT CAPTURED'); });
-        // Corporate benefits (6 Oct 2026): flag an unclassified type; s.37C / estate lines
-        // for the three defined types only; duplicate-of-policy warning (option A).
-        if(r.Kind==='benefit'){
-          if(fpBenBlank(d.benefitType)) line('      benefitType: NOT CAPTURED — classify before the FNA');
-          fpBenEstateLines(d).forEach(function(x){ line('      '+x.key+': '+x.val); });
-          var _pdup = fpBenPolicyDup(forCid, d);
-          if(_pdup) line('      ⚠ '+fpBenDupText(_pdup));
-        }
         if(r.Kind==='liability'){ totL += fpN(d.balance); }
         else if(r.Kind==='income'){ totIncPM += fpN(d.amountPM); }
         else if(r.Kind==='expense'){ totExpPM += fpN(d.amountPM); }
@@ -10417,8 +10298,6 @@ function buildFnaDataPack(cid, includeSpouse){
           totA += fpN(d.value);
           if(d.loanAcc==='Credit') totA += fpN(d.loanBal);
           else if(d.loanAcc==='Debit') totL += fpN(d.loanBal);
-        } else if(r.Kind==='benefit'){
-          // corporate benefit — not an asset; reported on its own line below
         } else {
           totA += fpN(d.value);
           totL += fpN(d.bondOut) + fpN(d.financeOut);
@@ -10427,12 +10306,6 @@ function buildFnaDataPack(cid, includeSpouse){
     });
     if(fpRows.length){
       line('  Balance sheet totals: Assets '+fpR(totA)+'  ·  Liabilities '+fpR(totL)+'  ·  Net '+fpR(totA-totL));
-      var _bt = fpBenTotals(fpRows);
-      if(_bt.n){
-        line('  Corporate benefits (NOT in the balance sheet totals): Retirement funds '+fpR(_bt.ret)+'  ·  Group life cover '+fpR(_bt.cover)+
-          ' (approved, inside the fund — not counted for estate duty: '+fpR(_bt.apr)+'; unapproved — counted for estate duty: '+fpR(_bt.unapr)+')'+
-          (_bt.multN?'  ·  plus '+_bt.multN+' group life benefit'+(_bt.multN===1?'':'s')+' captured only as a salary multiple (not totalled)':''));
-      }
       if(totIncPM>0 || totExpPM>0){
         line('  Monthly cash flow: Income '+fpR(totIncPM)+' /pm  ·  Expenses '+fpR(totExpPM)+' /pm'+(totIncPM>0&&totExpPM>0?'  ·  Surplus '+fpR(totIncPM-totExpPM)+' /pm':''));
       }
@@ -10885,7 +10758,6 @@ function fnaCapItem(r, meta){
   else if(r.Kind==='liability'){ if(d.liabType) bits.push(d.liabType); bits.push('Balance '+money(d.balance)); if(fpN(d.paymentPM)) bits.push(money(d.paymentPM)+' /pm'); if(d.payOffDisab==='Yes') bits.push('Pay off if disabled'); }
   else if(r.Kind==='income'){ if(d.incomeType) bits.push(d.incomeType); bits.push(money(d.amountPM)+' /pm'); if(fpN(d.bonus)) bits.push('Bonus '+money(d.bonus)+' /pa'); if(d.taxable==='No') bits.push('Non-taxable'); }
   else if(r.Kind==='expense'){ if(d.expCategory) bits.push(d.expCategory); bits.push(money(d.amountPM)+' /pm'); }
-  else if(r.Kind==='benefit'){ bits = fpBenBits(d); var _cdup = fpBenPolicyDup(r.ClientID, d); if(_cdup) bits.push('⚠ '+fpBenDupText(_cdup)); }
   else if(r.Kind==='need'){
     var isInc = d.needType==='Monthly income';
     bits.push(d.scenario||'Other');
@@ -11017,7 +10889,6 @@ function fnaCapRender(){
     body += fnaCapKindSection(cid, meta, 'other',     'Other assets',       '💼', '+ Add asset');
     body += fnaCapKindSection(cid, meta, 'business',  'Business interests', '🏢', '+ Add business interest');
     body += fnaCapKindSection(cid, meta, 'liability', 'Liabilities',        '💳', '+ Add liability');
-    body += fnaCapKindSection(cid, meta, 'benefit',   'Corporate benefits (employer funds and group cover not on the Policies tab)', '🏛', '+ Add corporate benefit');
   }
 
   else if(step.key==='needs'){
@@ -11039,7 +10910,6 @@ function fnaCapRender(){
       (function(){ if(!famF.length){ var ok=fnaFresh(meta.confirmed.family_none,meta)?1:0; return {l:'Spouse & dependants (none)', t:1, f:ok}; } var x=cnt(famF,function(m){ return fnaFresh(meta.confirmed['fam_'+m.ID],meta); }); return {l:'Spouse & dependants', t:x.t, f:x.f}; })(),
       (function(){ var x=cnt(rows.filter(function(r){return r.Kind==='income'||r.Kind==='expense';}),function(r){return fnaFresh(r.UpdatedAt,meta);}); return {l:'Income & expenses', t:x.t, f:x.f}; })(),
       (function(){ var x=cnt(rows.filter(function(r){return ['property','vehicle','other','business','liability'].indexOf(r.Kind)>-1;}),function(r){return fnaFresh(r.UpdatedAt,meta);}); return {l:'Assets & liabilities', t:x.t, f:x.f}; })(),
-      (function(){ var x=cnt(rows.filter(function(r){return r.Kind==='benefit';}),function(r){return fnaFresh(r.UpdatedAt,meta);}); return {l:'Corporate benefits', t:x.t, f:x.f}; })(),
       (function(){ var x=cnt(rows.filter(function(r){return r.Kind==='need';}),function(r){return fnaFresh(r.UpdatedAt,meta);}); return {l:'Needs', t:x.t, f:x.f}; })()
     ];
     var stale = secs.filter(function(s){ return s.t>s.f; });
@@ -12346,6 +12216,86 @@ var POL_INCOME_ROWS=[];
 var POL_LUMP_ROWS=[];
 var POL_BENS=[];
 var POL_GROUP_RISK_ROWS=[];
+// ── Group risk helpers (6 Oct 2026) — shared by the policy card, schedule, Data Pack, import ──
+// Each row may carry its own approved status ('Approved' / 'Unapproved'); blank = the fund's
+// GroupRiskApproved setting. Blank on both = NOT set (never assumed).
+var GR_NOMINEE_TYPES = ['Life Cover','Funeral','Other'];   // death benefits paid to a nominee when unapproved
+function grRows(p){
+  try{ var a = (p && p.GroupRiskBenefits) ? JSON.parse(p.GroupRiskBenefits) : []; return Array.isArray(a) ? a.filter(function(r){ return r && typeof r==='object'; }) : []; }
+  catch(e){ return []; }
+}
+function grRowStatus(r, fundSetting){
+  if(r && (r.approved==='Approved' || r.approved==='Unapproved')) return r.approved;
+  return (fundSetting==='Approved' || fundSetting==='Unapproved') ? fundSetting : '';
+}
+function grIsIncome(r){ return !!r && r.type==='Income Disability (PHI)'; }
+// ── Import (Schedule Builds JSON / Astute) → group risk rows (6 Oct 2026) ──
+// Approved status from statement wording only; anything unclear stays blank (never assumed).
+function grNormStatus(v){
+  var t = String(v==null?'':v).toLowerCase();
+  if(/unapproved|non-approved|non approved|outside the fund/.test(t)) return 'Unapproved';
+  if(/approved|inside the fund|in the fund|in fund/.test(t)) return 'Approved';
+  return '';
+}
+function grTypeFromPlan(plan, mode, monthlyAmt){
+  var t = String(plan||'').toLowerCase();
+  if(/income|\bphi\b|salary continuation|monthly/.test(t) || /month/i.test(mode||'') || clean(monthlyAmt)) return 'Income Disability (PHI)';
+  if(/funeral/.test(t)) return 'Funeral';
+  if(/spouse/.test(t)) return 'Spouse Cover';
+  if(/child/.test(t)) return 'Child Cover';
+  if(/dread|critical|severe|illness|trauma/.test(t)) return 'Dread Disease';
+  if(/disab|impair/.test(t)) return 'Capital Disability (Lump Sum)';
+  if(/life|death/.test(t)) return 'Life Cover';
+  return 'Other';
+}
+// covers[] from an import row → GroupRiskBenefits rows. Premium: only an annual figure
+// (annualPrem) goes into the annual premium field; a premium of unstated period is kept
+// in the row notes rather than guessed.
+function grRowsFromCovers(covers){
+  return (covers||[]).map(function(cv){
+    cv = cv||{};
+    var type = grTypeFromPlan(cv.plan, cv.mode, cv.monthlyAmt);
+    var inc = type==='Income Disability (PHI)';
+    var cover = inc ? (clean(cv.monthlyAmt)||clean(cv.amt)) : clean(cv.amt);
+    var notes = [];
+    if(clean(cv.notes)) notes.push(clean(cv.notes));
+    if(inc && clean(cv.elim)) notes.push(clean(cv.elim)+' waiting period');
+    if(inc && clean(cv.period)) notes.push(clean(cv.period));
+    if(!clean(cv.annualPrem) && N(cv.prem)>0) notes.push('statement premium R'+clean(cv.prem)+' (period not stated)');
+    return {type:type, basis:clean(cv.basis), cover:cover, prem:clean(cv.annualPrem), notes:notes.join('; '),
+            approved:grNormStatus(cv.approved), nominee:clean(cv.nominee)};
+  }).filter(function(r){ return N(r.cover)>0 || r.basis; });
+}
+// Refresh merge for group risk. A fresh row replaces the held row of the same benefit and
+// status, keeping anything typed by hand that the statement does not state (status,
+// nominee, basis, premium, notes). Held rows the statement does not list at all (e.g.
+// unapproved cover from a separate insurer statement) are kept.
+function grMergeRows(existing, fresh){
+  var held = grRows(existing), neu = grRows(fresh);
+  if(!neu.length) return fresh;
+  var used = {};
+  var fFund = fresh.GroupRiskApproved || existing.GroupRiskApproved || '';
+  neu.forEach(function(f){
+    var fSt = grRowStatus(f, '');
+    for(var i=0;i<held.length;i++){
+      if(used[i] || held[i].type!==f.type) continue;
+      var eSt = grRowStatus(held[i], existing.GroupRiskApproved);
+      if(fSt && eSt && fSt!==eSt) continue;
+      used[i] = true;
+      ['approved','nominee','basis','prem','notes'].forEach(function(k){ if(!clean(f[k]) && clean(held[i][k])) f[k] = held[i][k]; });
+      break;
+    }
+  });
+  var pairs = {};
+  neu.forEach(function(f){ pairs[f.type+'|'+grRowStatus(f, fFund)] = true; });
+  held.forEach(function(e, i){
+    if(used[i]) return;
+    if(!pairs[e.type+'|'+grRowStatus(e, existing.GroupRiskApproved)]) neu.push(e);
+  });
+  var out = JSON.parse(JSON.stringify(fresh));
+  out.GroupRiskBenefits = JSON.stringify(neu);
+  return out;
+}
 var POL_FUNDS=[];   // underlying-fund working rows for the policy edit modal
 
 // ── Underlying-fund store helpers (added 3 Sep 2026) ──────────────────────
@@ -12830,7 +12780,10 @@ function buildPolicyForm(p){
       // captured above (no double-counting on AUM / premium totals).
       if(isPension){
         var _hasGR = p.HasGroupRisk || (POL_GROUP_RISK_ROWS.length>0 ? 'Yes' : 'Yes'); // default Yes for new + existing
-        var _grApproved = p.GroupRiskApproved || 'Approved';
+        // Card default: Approved for a new / empty card (as before). A card that already
+        // holds rows but has no saved setting (an imported fund) is left unticked, so
+        // saving it never classifies those rows by default (6 Oct 2026).
+        var _grApproved = p.GroupRiskApproved || (POL_GROUP_RISK_ROWS.length ? '' : 'Approved');
         html+=sec('Group Risk Benefits');
         html+='<div class="fld"><label>This fund includes group risk benefits</label>'+
           '<div style="display:flex;gap:14px;margin-top:6px">'+
@@ -12839,26 +12792,17 @@ function buildPolicyForm(p){
           '</div></div>';
         html+='<div id="grWrap" style="display:'+(_hasGR==='No'?'none':'block')+';margin-top:10px">';
         // Approved / Unapproved selector
-        html+='<div class="fld"><label>Approved status <span style="font-size:10px;color:#889;font-weight:400">(drives tax treatment of payouts)</span></label>'+
+        html+='<div class="fld"><label>Approved status for this fund <span style="font-size:10px;color:#889;font-weight:400">(each benefit row can override below — drives tax and estate duty)</span></label>'+
           '<div style="display:flex;gap:14px;margin-top:6px;flex-wrap:wrap">'+
           '<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="pgrapproved" value="Approved"'+(_grApproved==='Approved'?' checked':'')+' onchange="updateGroupRiskTaxHint()">Approved (in fund)</label>'+
           '<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="pgrapproved" value="Unapproved"'+(_grApproved==='Unapproved'?' checked':'')+' onchange="updateGroupRiskTaxHint()">Unapproved (employer-owned, outside fund)</label>'+
           '</div></div>';
         // Tax-treatment hint
-        html+='<div id="grTaxHint" style="font-size:11px;padding:8px 10px;border-radius:6px;margin-top:6px;'+
-          (_grApproved==='Approved'
-            ? 'background:#eff6ff;border:1px solid #bfdbfe;color:#1e40af">'+
-              '<strong>Approved:</strong> Death and lump-sum disability payouts taxed under the retirement lump-sum table '+
-              '(R550k tax-free, then 18/27/36%). Income disability (PHI) taxable at marginal rates. '+
-              'Section 37C trustee discretion applies — nominations are guidance, not binding.'
-            : 'background:#fef3c7;border:1px solid #fcd34d;color:#92400e">'+
-              '<strong>Unapproved:</strong> Death and disability lump sums are tax-free under s10(1)(gI). '+
-              'PHI payouts tax-free since 1 March 2015 (premium not deductible). '+
-              'No s37C — paid per policy beneficiary nomination. Estate-dutiable unless spouse-beneficiary.')+
-          '</div>';
+        var _grHint = grTaxHint(_grApproved);
+        html+='<div id="grTaxHint" style="'+_grHint.css+'">'+_grHint.html+'</div>';
         // Benefit rows
         html+='<div style="font-size:11px;color:#889;margin:10px 0 6px 0">One row per benefit. Cover values feed the FNA Death &amp; Disability needs analysis. Premium is informational — already included in the fund contribution above.</div>';
-        html+='<div id="grRowsWrap">'+renderGroupRiskRows()+'</div>';
+        html+='<div id="grRowsWrap">'+renderGroupRiskRows(_grApproved)+'</div>';
         html+='<button type="button" class="btn b-gh sm" style="margin-top:6px" onclick="addGroupRiskRow()">+ Add Group Risk Benefit</button>';
         html+='</div>'; // end grWrap
       }
@@ -13568,9 +13512,18 @@ function pensionBreakdownCalc(){
 }
 
 // Render the group risk benefit rows.
-function renderGroupRiskRows(){
+// 6 Oct 2026: each row has its own Approved / Unapproved setting (blank = as the fund
+// setting above) and, for an unapproved death benefit, the nominee it is paid to.
+function renderGroupRiskRows(fundInit){
   if(POL_GROUP_RISK_ROWS.length===0) return '<div style="font-size:12px;color:#aaa;padding:8px 0">No group risk benefits added yet — click + Add Group Risk Benefit.</div>';
   var typeOpts=['Life Cover','Capital Disability (Lump Sum)','Income Disability (PHI)','Dread Disease','Funeral','Spouse Cover','Child Cover','Other'];
+  // While the card is being built the radios are not in the page yet (and an earlier
+  // card's may still be), so the builder passes the fund setting in; later redraws read it.
+  var fund;
+  if(arguments.length) fund = fundInit || '';
+  else { var _fEl = document.querySelector('#grWrap input[name="pgrapproved"]:checked'); fund = _fEl ? _fEl.value : ''; }
+  var esc = function(v){ return String(v==null?'':v).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;'); };
+  var inp = 'border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px';
   return POL_GROUP_RISK_ROWS.map(function(r,i){
     // Income Disability is captured as a MONTHLY figure (matches FNA's existing IP convention,
     // where ipPM is monthly). All other group risk types are lump-sum R amounts.
@@ -13578,27 +13531,36 @@ function renderGroupRiskRows(){
     var isIPRow = (r.type==='Income Disability (PHI)');
     var coverLabel  = isIPRow ? 'Monthly Cover (R)' : 'Cover Amount (R)';
     var coverPh     = isIPRow ? 'R / month'         : 'R lump sum';
-    return '<div style="background:var(--smoke);border-radius:8px;padding:10px 12px;margin-bottom:8px">'+
-      '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">'+
-      // Type change re-renders the whole rows block so the cover label flips. oninput on all
-      // other fields keeps POL_GROUP_RISK_ROWS in sync so no pending input is lost on re-render.
-      '<select onchange="POL_GROUP_RISK_ROWS['+i+'].type=this.value;var w=document.getElementById(\'grRowsWrap\');if(w)w.innerHTML=renderGroupRiskRows();pensionBreakdownCalc()" style="border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px;flex:1.2">'+
+    var eff = grRowStatus(r, fund);
+    var showNom = eff==='Unapproved' && GR_NOMINEE_TYPES.indexOf(r.type)>=0;
+    var stOpts = [['','As fund setting ('+(fund||'not set')+')'],['Approved','Approved (inside the fund)'],['Unapproved','Unapproved (outside the fund)']];
+    return '<div style="background:var(--smoke);border-radius:8px;padding:10px 12px;margin-bottom:8px'+(eff?'':';border:1.5px solid #f5c2c2')+'">'+
+      '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">'+
+      // Type / status change re-renders the whole rows block so labels and the nominee field
+      // follow. oninput on all other fields keeps POL_GROUP_RISK_ROWS in sync so no pending
+      // input is lost on re-render.
+      '<select onchange="POL_GROUP_RISK_ROWS['+i+'].type=this.value;var w=document.getElementById(\'grRowsWrap\');if(w)w.innerHTML=renderGroupRiskRows();pensionBreakdownCalc()" style="'+inp+';flex:1.2">'+
         typeOpts.map(function(o){return '<option'+(r.type===o?' selected':'')+'>'+o+'</option>';}).join('')+
       '</select>'+
-      '<input type="text" value="'+((r.basis||'').replace(/"/g,'&quot;'))+'" placeholder="Cover basis (e.g. 3 × salary, 75% of salary)" oninput="POL_GROUP_RISK_ROWS['+i+'].basis=this.value" style="flex:2;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px">'+
+      '<select title="Approved status of this benefit" onchange="POL_GROUP_RISK_ROWS['+i+'].approved=this.value;var w=document.getElementById(\'grRowsWrap\');if(w)w.innerHTML=renderGroupRiskRows()" style="'+inp+';flex:1.2">'+
+        stOpts.map(function(o){return '<option value="'+o[0]+'"'+((r.approved||'')===o[0]?' selected':'')+'>'+o[1]+'</option>';}).join('')+
+      '</select>'+
+      '<input type="text" value="'+esc(r.basis)+'" placeholder="Cover basis (e.g. 3 × salary, 75% of salary)" oninput="POL_GROUP_RISK_ROWS['+i+'].basis=this.value" style="'+inp+';flex:2;min-width:160px">'+
       '<button type="button" onclick="groupRiskRowDelete('+i+')" style="background:var(--rose);color:#fff;border:none;border-radius:6px;padding:5px 9px;cursor:pointer;font-size:11px;font-weight:700">✕</button>'+
       '</div>'+
+      (eff?'':'<div style="font-size:11px;color:#9e2a2b;margin:-2px 0 6px">⚠ Approved status not set — choose it on this row or for the whole fund above.</div>')+
       '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">'+
-      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">'+coverLabel+(isIPRow?' <span style="color:#b45309">— enter MONTHLY amount</span>':'')+'</div><input type="text" value="'+(r.cover||'')+'" placeholder="'+coverPh+'" oninput="POL_GROUP_RISK_ROWS['+i+'].cover=this.value" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
-      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Annual Premium (R) <span style="color:#889">— from statement, feeds breakdown</span></div><input type="text" value="'+(r.prem||'')+'" placeholder="R / year" oninput="POL_GROUP_RISK_ROWS['+i+'].prem=this.value;pensionContribCalc()" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
+      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">'+coverLabel+(isIPRow?' <span style="color:#b45309">— enter MONTHLY amount</span>':'')+'</div><input type="text" value="'+esc(r.cover)+'" placeholder="'+coverPh+'" oninput="POL_GROUP_RISK_ROWS['+i+'].cover=this.value" style="width:100%;box-sizing:border-box;'+inp+'"></div>'+
+      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Annual Premium (R) <span style="color:#889">— from statement, feeds breakdown</span></div><input type="text" value="'+esc(r.prem)+'" placeholder="R / year" oninput="POL_GROUP_RISK_ROWS['+i+'].prem=this.value;pensionContribCalc()" style="width:100%;box-sizing:border-box;'+inp+'"></div>'+
       '</div>'+
-      '<div style="margin-top:6px"><input type="text" value="'+((r.notes||'').replace(/"/g,'&quot;'))+'" placeholder="Notes (e.g. waiting period, insurer limit, age band)" oninput="POL_GROUP_RISK_ROWS['+i+'].notes=this.value" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
+      (showNom?'<div style="margin-top:6px"><div style="font-size:10px;color:#889;margin-bottom:3px">Nominee — paid to (outside the fund, so not the fund\'s beneficiaries)</div><input type="text" value="'+esc(r.nominee)+'" placeholder="Name, relationship, % (blank = not captured)" oninput="POL_GROUP_RISK_ROWS['+i+'].nominee=this.value" style="width:100%;box-sizing:border-box;'+inp+'"></div>':'')+
+      '<div style="margin-top:6px"><input type="text" value="'+esc(r.notes)+'" placeholder="Notes (e.g. waiting period, insurer limit, age band)" oninput="POL_GROUP_RISK_ROWS['+i+'].notes=this.value" style="width:100%;box-sizing:border-box;'+inp+'"></div>'+
       '</div>';
   }).join('');
 }
 
 function addGroupRiskRow(){
-  POL_GROUP_RISK_ROWS.push({type:'Life Cover',basis:'',cover:'',prem:'',notes:''});
+  POL_GROUP_RISK_ROWS.push({type:'Life Cover',basis:'',cover:'',prem:'',notes:'',approved:'',nominee:''});
   var w=document.getElementById('grRowsWrap'); if(w) w.innerHTML=renderGroupRiskRows();
 }
 
@@ -13615,23 +13577,29 @@ function toggleGroupRiskSection(){
   if(wrap) wrap.style.display = (v==='No' ? 'none' : 'block');
 }
 
-// Swap the tax-treatment hint based on Approved/Unapproved selection.
+// Tax-treatment hint for the fund's Approved / Unapproved setting ('' = not set yet).
+function grTaxHint(v){
+  var base='font-size:11px;padding:8px 10px;border-radius:6px;margin-top:6px;';
+  if(v==='Approved') return {css:base+'background:#eff6ff;border:1px solid #bfdbfe;color:#1e40af',
+    html:'<strong>Approved:</strong> Death and lump-sum disability payouts taxed under the retirement lump-sum table '+
+      '(R550k tax-free, then 18/27/36%). Income disability (PHI) taxable at marginal rates. '+
+      'Section 37C trustee discretion applies — nominations are guidance, not binding.'};
+  if(v==='Unapproved') return {css:base+'background:#fef3c7;border:1px solid #fcd34d;color:#92400e',
+    html:'<strong>Unapproved:</strong> Death and disability lump sums are tax-free under s10(1)(gI). '+
+      'PHI payouts tax-free since 1 March 2015 (premium not deductible). '+
+      'No s37C — paid per policy beneficiary nomination. Estate-dutiable unless spouse-beneficiary.'};
+  return {css:base+'background:#fde8e8;border:1px solid #f5c2c2;color:#9e2a2b',
+    html:'<strong>Approved status not set.</strong> Choose it here for the whole fund, or on each benefit row below. '+
+      'It decides tax and whether the cover counts for estate duty, so it is never assumed.'};
+}
+// Swap the tax-treatment hint based on Approved/Unapproved selection, and redraw the
+// rows so their "As fund setting" label and nominee field follow the new setting.
 function updateGroupRiskTaxHint(){
   var el = document.querySelector('input[name="pgrapproved"]:checked');
-  var v  = el ? el.value : 'Approved';
+  var v  = el ? el.value : '';
   var hint = document.getElementById('grTaxHint');
-  if(!hint) return;
-  if(v==='Approved'){
-    hint.style.cssText='font-size:11px;padding:8px 10px;border-radius:6px;margin-top:6px;background:#eff6ff;border:1px solid #bfdbfe;color:#1e40af';
-    hint.innerHTML='<strong>Approved:</strong> Death and lump-sum disability payouts taxed under the retirement lump-sum table '+
-      '(R550k tax-free, then 18/27/36%). Income disability (PHI) taxable at marginal rates. '+
-      'Section 37C trustee discretion applies — nominations are guidance, not binding.';
-  } else {
-    hint.style.cssText='font-size:11px;padding:8px 10px;border-radius:6px;margin-top:6px;background:#fef3c7;border:1px solid #fcd34d;color:#92400e';
-    hint.innerHTML='<strong>Unapproved:</strong> Death and disability lump sums are tax-free under s10(1)(gI). '+
-      'PHI payouts tax-free since 1 March 2015 (premium not deductible). '+
-      'No s37C — paid per policy beneficiary nomination. Estate-dutiable unless spouse-beneficiary.';
-  }
+  if(hint){ var h = grTaxHint(v); hint.style.cssText = h.css; hint.innerHTML = h.html; }
+  var w = document.getElementById('grRowsWrap'); if(w) w.innerHTML = renderGroupRiskRows();
 }
 
 // Toggle the payer-name field visibility + label/placeholder based on PayerType.
@@ -14398,63 +14366,6 @@ function openFinPosModal(cid, kind, fpid){
       fld('fpamountPM','Amount per Month (R)',d.amountPM||'')+
       '</div>'+
       fld('fpnotes','Notes',d.notes||'','textarea');
-  } else if(FP_KIND==='benefit'){
-    // Corporate benefit (6 Oct 2026). Own branch: never the value / passesTo / soldDeath
-    // estate fields. Every type-specific input is rendered once (prefilled from the row)
-    // and shown / hidden by fpBenToggle(); collectFinPosForm keeps only the chosen type's.
-    var yn = ['','Yes','No'];
-    var bw = function(key, inner){ return '<div class="fpBenF" data-benf="'+key+'">'+inner+'</div>'; };
-    var bf = function(key, lbl){ return bw(key, fld('fpb_'+key, lbl, d[key]||'')); };
-    var bs = function(key, lbl, opts){ return bw(key, fs('fpb_'+key, lbl, opts, d[key]||'')); };
-    html =
-      '<div style="font-size:12px;color:#1e40af;background:#eff6ff;border:1px solid #bfdbfe;border-radius:7px;padding:8px 12px;margin-bottom:12px">'+
-      'For employer benefits <strong>not</strong> on the Policies tab. A Pension / Provident fund you are on record for stays on the Policies tab, with its Group Risk Benefits there — capture each benefit once.</div>'+
-      '<div class="g2">'+
-      fs('fpbenefitType','Benefit Type',[''].concat(FP_BEN_TYPES),d.benefitType||'')+
-      fs('fpowner','Member (whose benefit)',['Client','Spouse'],d.owner||'Client')+
-      '</div>'+
-      fld('fpdesc','Description (leave blank for "fund / insurer + benefit type")',d.desc||'')+
-      '<div class="g2">'+
-      fld('fpemployer','Employer',(row?d.employer:(d.employer||(c&&clean(c.Employer))))||'')+
-      fld('fpfundOrInsurer','Fund / Insurer',d.fundOrInsurer||'')+
-      '</div>'+
-      '<div class="g2">'+
-      fld('fpadministrator','Administrator',d.administrator||'')+
-      fld('fpmemberNo','Member / Policy No.',d.memberNo||'')+
-      '</div>'+
-      '<div class="g2">'+
-      bs('fundType','Fund Type',['','Pension','Provident'])+
-      bf('value','Fund Value (R)')+
-      bf('vested','Vested Pot (R)')+
-      bf('savings','Savings Pot (R)')+
-      bf('retirement','Retirement Pot (R)')+
-      bf('cover','Cover Amount (R)')+
-      bf('salaryMultiple','Or Salary Multiple (e.g. 3 = 3 × annual salary)')+
-      bf('pctSalary','% of Salary Paid')+
-      bf('salaryBasisPM','Salary the Cover is Based On, per Month (R)')+
-      bf('waitingPeriod','Waiting Period (e.g. 3 months)')+
-      bf('payToAge','Pays to Age')+
-      bf('scheme','Medical Scheme')+
-      bf('plan','Plan / Option')+
-      bf('dependants','Dependants Covered')+
-      bs('postRetirementSubsidy','Employer Subsidy Continues after Retirement',yn)+
-      bs('nominationHeld','Beneficiary Nomination Held',yn)+
-      bw('nominee','<div class="fld"><label>Nominee(s) — name, relationship, %</label><input type="text" id="fpb_nominee" list="fpNameList" value="'+clean(d.nominee||'')+'" autocomplete="off" placeholder="Choose from family or type"></div>')+
-      '</div>'+
-      '<div class="g2">'+
-      fld('fpvalueDate','Values / Cover as at',d.valueDate||'','date')+
-      '<div></div>'+
-      '</div>'+
-      '<div class="g2">'+
-      fld('fpeePM','Employee Contribution /pm (R)',d.eePM||'')+
-      fld('fperPM','Employer Contribution /pm (R)',d.erPM||'')+
-      '</div>'+
-      '<div class="g2">'+
-      fs('fpendsAtRetirement','Benefit Ends at Retirement',yn,d.endsAtRetirement||'')+
-      fs('fpcontinuationOption','Continuation Option on Leaving',yn,d.continuationOption||'')+
-      '</div>'+
-      fld('fpnotes','Notes',d.notes||'','textarea')+
-      dataList;
   } else {
     var top =
       fld('fpdesc', FP_KIND==='business'?'Business / Entity Name':'Description', d.desc||'')+
@@ -14535,7 +14446,7 @@ function openFinPosModal(cid, kind, fpid){
     html = top + mid + death + fld('fpnotes','Notes',d.notes||'','textarea') + dataList;
   }
 
-  var fpSingular = {property:'Property', vehicle:'Vehicle', other:'Other Asset', business:'Business Interest', liability:'Liability', need:'Need', income:'Income Source', expense:'Expense Category', benefit:'Corporate Benefit'}[FP_KIND] || 'Item';
+  var fpSingular = {property:'Property', vehicle:'Vehicle', other:'Other Asset', business:'Business Interest', liability:'Liability', need:'Need', income:'Income Source', expense:'Expense Category'}[FP_KIND] || 'Item';
   document.getElementById('fpModT').textContent = (FP_EDIT_ID?'Edit ':'Add ')+(FP_KIND==='need'?'🎯':kindMeta.icon)+' '+fpSingular;
   document.getElementById('fpModB').innerHTML = html;
   document.getElementById('delFpBtn').style.display = FP_EDIT_ID ? '' : 'none';
@@ -14546,14 +14457,6 @@ function openFinPosModal(cid, kind, fpid){
       var w = document.getElementById('fpNameWrap');
       if(w) w.style.display = passSel.value==='Named person' ? 'flex' : 'none';
     });
-  }
-  // Corporate benefit modal: show only the chosen type's fields (6 Oct 2026)
-  if(FP_KIND==='benefit'){
-    ['fpbenefitType','fpb_nominationHeld'].forEach(function(id){
-      var el = document.getElementById(id);
-      if(el) el.addEventListener('change', fpBenToggle);
-    });
-    fpBenToggle();
   }
   // Need modal: toggle income-only fields on need type, named person on "For Whom"
   var ntSel = document.getElementById('fpneedType');
@@ -14588,23 +14491,6 @@ function openFinPosModal(cid, kind, fpid){
   document.getElementById('fpMod').classList.add('open');
 }
 
-// Show / hide the type-specific inputs in the Corporate Benefit modal. With no type
-// chosen (an unclassified import), any input that already holds a value stays visible.
-function fpBenToggle(){
-  var tSel = document.getElementById('fpbenefitType');
-  var t = tSel ? tSel.value : '';
-  var keep = FP_BEN_FIELDS[t] || [];
-  var nomSel = document.getElementById('fpb_nominationHeld');
-  document.querySelectorAll('#fpModB .fpBenF').forEach(function(w){
-    var k = w.getAttribute('data-benf');
-    var inp = document.getElementById('fpb_'+k);
-    var show = t ? keep.indexOf(k)>=0 : !!(inp && String(inp.value).trim()!=='');
-    // Nominee: for fund-paid types only once a nomination is held; always for unapproved.
-    if(show && t && k==='nominee' && keep.indexOf('nominationHeld')>=0) show = !!(nomSel && nomSel.value==='Yes');
-    w.style.display = show ? '' : 'none';
-  });
-}
-
 function collectFinPosForm(){
   var d = { desc:g('fpdesc'), owner:g('fpowner'), notes:g('fpnotes') };
   if(FP_KIND==='need'){
@@ -14618,20 +14504,6 @@ function collectFinPosForm(){
     d.benTo = needAsksForWhom(d.scenario) ? g('fpbenTo') : '';
     d.benName = d.benTo==='Named person' ? g('fpbenName') : '';
     return d;
-  }
-  if(FP_KIND==='benefit'){
-    // Common fields, then ONLY the selected type's fields (no stale keys, no estate fields).
-    var bt = g('fpbenefitType');
-    var b = { owner:g('fpowner'), desc:g('fpdesc'), benefitType:bt, employer:g('fpemployer'),
-      fundOrInsurer:g('fpfundOrInsurer'), administrator:g('fpadministrator'), memberNo:g('fpmemberNo'),
-      valueDate:g('fpvalueDate') };
-    (FP_BEN_FIELDS[bt]||[]).forEach(function(k){ b[k] = g('fpb_'+k); });
-    if(b.nominationHeld!==undefined && b.nominationHeld!=='Yes') b.nominee = '';
-    b.eePM = g('fpeePM'); b.erPM = g('fperPM');
-    b.endsAtRetirement = g('fpendsAtRetirement'); b.continuationOption = g('fpcontinuationOption');
-    b.notes = g('fpnotes');
-    if(!b.desc) b.desc = fpBenDesc(b);
-    return b;
   }
   if(FP_KIND==='liability'){
     d.liabType = g('fpliabType');
@@ -14683,11 +14555,7 @@ function collectFinPosForm(){
 }
 
 function saveFinPos(){
-  // Corporate benefit: the type decides which fields are kept, so it is required; the
-  // description builds itself from fund / insurer + type when left blank.
-  if(FP_KIND==='benefit'){
-    if(!g('fpbenefitType')){ toast('Choose the Benefit Type first','err'); var _bt=document.getElementById('fpbenefitType'); if(_bt) _bt.focus(); return; }
-  } else if(!g('fpdesc')){ toast('Description required','err'); return; }
+  if(!g('fpdesc')){ toast('Description required','err'); return; }
   // Typing guard (1 Oct 2026): an income need escalating more than 15% a year is
   // almost always a slip (43 for 4). Ask before saving rather than store it.
   if(FP_KIND==='need' && g('fpneedType')==='Monthly income' && g('fpesc')!==''){
@@ -15220,7 +15088,6 @@ function pcNormalize(obj){
     liabilities:Array.isArray(obj.liabilities)?obj.liabilities:[],
     income:Array.isArray(obj.income)?obj.income:[],
     expense:Array.isArray(obj.expense)?obj.expense:[],
-    group_benefits:Array.isArray(obj.group_benefits)?obj.group_benefits:[],   // Corporate Benefits (6 Oct 2026)
     flags:Array.isArray(obj.flags)?obj.flags:[],
     notes:(typeof obj.notes==='string')?obj.notes:'' };
 }
@@ -15440,35 +15307,6 @@ function pcExpCategory(s){
   return 'Other';
 }
 
-// Corporate benefits (6 Oct 2026): snap free text to a FP_BEN_TYPES option.
-// Returns '' when unsure — never guessed. Group life with no approved / unapproved
-// wording stays blank because that word decides estate duty.
-function pcBenefitType(v){
-  var t=String(v||'').toLowerCase().replace(/\s+/g,' ').trim();
-  if(!t) return '';
-  for(var i=0;i<FP_BEN_TYPES.length;i++){ if(FP_BEN_TYPES[i].toLowerCase()===t) return FP_BEN_TYPES[i]; }
-  if(/medical|gap cover/.test(t)) return 'Medical aid / Gap cover (employer)';
-  if(/funeral|personal accident|\bgpa\b/.test(t)) return 'Funeral / Group personal accident';
-  if(/severe illness|dread|critical illness/.test(t)) return 'Severe illness';
-  if(/\bphi\b|income disab|disability income|income protect|income continuation|salary continuation/.test(t)) return 'Income disability / PHI';
-  if(/disab/.test(t)) return 'Lump sum disability';
-  if(/life|death/.test(t)){
-    if(/unapproved|non-approved|non approved|outside the fund/.test(t)) return 'Unapproved group life';
-    if(/approved|inside the fund|in the fund|in fund/.test(t)) return 'Approved group life (inside the fund)';
-    return '';
-  }
-  if(/pension|provident|retirement fund|umbrella fund/.test(t)) return 'Retirement fund';
-  return '';
-}
-// Yes / No that stays blank when not stated (unlike pcYes, which defaults to No).
-function pcYN(v){
-  if(v===true) return 'Yes'; if(v===false) return 'No';
-  var t=String(v==null?'':v).toLowerCase().trim();
-  if(t==='yes'||t==='y'||t==='1'||t==='true') return 'Yes';
-  if(t==='no'||t==='n'||t==='0'||t==='false') return 'No';
-  return '';
-}
-
 // Assemble finpos rows from a payload (pure — used by both preview and commit).
 function pcFinposRows(payload){
   var rows=[]; var S=function(v){ return (v==null)?'':String(v); };
@@ -15515,44 +15353,11 @@ function pcFinposRows(payload){
       desc:S(x.desc||x.name||'Expense'), notes:S(x.notes),
       expCategory:pcExpCategory(x.expCategory||x.category||x.type), amountPM:S(x.amountPM||x.amount||x.monthly) }});
   });
-  // Corporate benefits → Kind 'benefit' (6 Oct 2026). Never writes value-as-asset,
-  // passesTo or soldDeath. Unrecognised / missing type → blank and flagged; with no
-  // type, every supplied field is kept so nothing is lost before it is classified.
-  (payload.group_benefits||[]).forEach(function(b){
-    if(!b || typeof b!=='object') return;
-    var bt=pcBenefitType(b.benefitType||b.type);
-    var src={
-      fundType:b.fundType, value:b.value||b.fundValue, vested:b.vested, savings:b.savings, retirement:b.retirement,
-      nominationHeld:pcYN(b.nominationHeld), nominee:b.nominee,
-      cover:b.cover||b.sumAssured, salaryMultiple:b.salaryMultiple||b.multiple, salaryBasisPM:b.salaryBasisPM,
-      pctSalary:b.pctSalary, waitingPeriod:b.waitingPeriod, payToAge:b.payToAge,
-      scheme:b.scheme, plan:b.plan, dependants:b.dependants, postRetirementSubsidy:pcYN(b.postRetirementSubsidy) };
-    // Fund type: from the field, else from the type text (pension / provident).
-    var ft=String(src.fundType||'').toLowerCase(), tt=String(b.benefitType||b.type||'').toLowerCase();
-    src.fundType = (ft.indexOf('provident')>=0||(!ft&&tt.indexOf('provident')>=0)) ? 'Provident' : ((ft.indexOf('pension')>=0||(!ft&&tt.indexOf('pension')>=0)) ? 'Pension' : '');
-    // A named nominee means a nomination is held.
-    if(!src.nominationHeld && S(src.nominee).trim()) src.nominationHeld='Yes';
-    var d={ owner:(String(b.owner||b.member||'').toLowerCase().indexOf('spouse')>=0)?'Spouse':'Client',
-      desc:'', benefitType:bt, employer:S(b.employer), fundOrInsurer:S(b.fundOrInsurer||b.fund||b.insurer),
-      administrator:S(b.administrator), memberNo:S(b.memberNo||b.memberNumber||b.policyNo), valueDate:S(b.valueDate) };
-    var keys = bt ? (FP_BEN_FIELDS[bt]||[]) : Object.keys(src);
-    keys.forEach(function(k){ var v=S(src[k]); if(bt || v.trim()!=='') d[k]=v; });
-    d.eePM=S(b.eePM||b.employeePM); d.erPM=S(b.erPM||b.employerPM);
-    d.endsAtRetirement=pcYN(b.endsAtRetirement); d.continuationOption=pcYN(b.continuationOption);
-    d.notes=S(b.notes);
-    d.desc=fpBenDesc(d)||'Corporate benefit';
-    rows.push({Kind:'benefit',Data:d});
-  });
   return rows;
 }
 // One-line human summary of a proposed row (for the preview list).
 function pcRowSummary(r){
-  var d=r.Data, icon={need:'🎯',property:'🏠',vehicle:'🚗',business:'🏢',other:'💼',liability:'💳',income:'💰',expense:'📊',benefit:'🏛'}[r.Kind]||'•';
-  if(r.Kind==='benefit'){
-    var bb=fpBenBits(d).slice(1); // type is already in desc / flagged below
-    return icon+' '+astuteEsc(d.desc)+(bb.length?' — '+astuteEsc(bb.join(', ')):'')+
-      (d.benefitType?'':' <span style="color:#d97706;font-weight:700">⚠ benefit type not recognised — classify it on the Financial Position tab</span>');
-  }
+  var d=r.Data, icon={need:'🎯',property:'🏠',vehicle:'🚗',business:'🏢',other:'💼',liability:'💳',income:'💰',expense:'📊'}[r.Kind]||'•';
   if(r.Kind==='income') return icon+' '+astuteEsc(d.desc)+' — R'+astuteEsc(d.amountPM||'0')+'/m'+(d.incomeType?' ('+astuteEsc(d.incomeType)+')':'');
   if(r.Kind==='expense') return icon+' '+astuteEsc(d.desc)+' — R'+astuteEsc(d.amountPM||'0')+'/m'+(d.expCategory?' ('+astuteEsc(d.expCategory)+')':'');
   if(r.Kind==='need'){
@@ -16829,7 +16634,7 @@ function renderAstutePreview(){
       (r.isPackage?'<div style="font-size:11.5px;color:#667;margin-top:4px">ℹ Package wrapper — the actual products are listed separately below it.</div>':'');
     if(r.include){
       html += '<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">'+
-        '<label style="font-size:11px;color:#667">Import as<br><select onchange="ASTUTE_ROWS['+i+'].type=this.value" style="border:1.5px solid var(--mist);border-radius:7px;padding:6px 8px;font-family:inherit;font-size:12.5px;margin-top:2px">'+
+        '<label style="font-size:11px;color:#667">Import as<br><select onchange="ASTUTE_ROWS['+i+'].type=this.value;renderAstutePreview()" style="border:1.5px solid var(--mist);border-radius:7px;padding:6px 8px;font-family:inherit;font-size:12.5px;margin-top:2px">'+
         ASTUTE_TYPE_OPTS.map(function(o){return '<option'+(r.type===o?' selected':'')+'>'+o+'</option>';}).join('')+'</select></label>'+
         '<label style="font-size:11px;color:#667">Status<br><select onchange="ASTUTE_ROWS['+i+'].status=this.value" style="border:1.5px solid var(--mist);border-radius:7px;padding:6px 8px;font-family:inherit;font-size:12.5px;margin-top:2px">'+
         ['Active','Lapsed','Paid Up','Cancelled'].map(function(o){return '<option'+(r.status===o?' selected':'')+'>'+o+'</option>';}).join('')+'</select></label>'+
@@ -16848,6 +16653,24 @@ function renderAstutePreview(){
           if(cls.fee || N(r.polFee)) html += '• Policy fee: R'+(Math.round((cls.fee+N(r.polFee))*100)/100)+' p/m<br>';
           if(cls.ddNotes.length) html += '• Dread disease options (no rand value in Astute): '+cls.ddNotes.map(astuteEsc).join(', ')+' — will be added to dread disease notes.<br>';
           html += '</div><div style="font-size:11.5px;color:#92400e">⚠ Risk benefits imported from Astute — verify amounts, waiting and benefit periods against the policy schedule.</div>';
+        }
+      } else if(r.type==='Pension Fund'||r.type==='Provident Fund'){
+        // Group risk on an employer fund (6 Oct 2026): shown before anything is saved.
+        var _gp = grRowsFromCovers(r.covers);
+        if(_gp.length){
+          var _gUnset = 0, _gEx = astuteFindExisting(r);
+          var _gFund = r.grFund || (_gEx ? (_gEx.GroupRiskApproved||'') : '');   // on a refresh the held fund setting still applies
+          html += '<div style="font-size:11.5px;color:#475;margin-top:6px;line-height:1.6"><strong>Group risk benefits</strong>'+(_gFund?' (fund: '+_gFund+(r.grFund?'':', as held')+')':'')+'<br>';
+          _gp.forEach(function(G){
+            var st = grRowStatus(G, _gFund);
+            if(!st) _gUnset++;
+            html += '• '+astuteEsc(G.type)+': '+(N(G.cover)?'R'+Number(N(G.cover)).toLocaleString()+(grIsIncome(G)?'/month':''):'cover not stated')+
+              (G.basis?' <span style="color:#889">('+astuteEsc(G.basis)+')</span>':'')+' — '+(st?astuteEsc(st):'<span style="color:#b45309;font-weight:700">approved status not stated</span>')+
+              (st==='Unapproved'&&G.nominee?' · paid to '+astuteEsc(G.nominee):'')+'<br>';
+          });
+          html += '</div>';
+          if(_gUnset) html += '<div style="font-size:11.5px;color:#92400e">⚠ '+_gUnset+' benefit'+(_gUnset>1?'s':'')+' without an approved / unapproved status — it decides estate duty, so set it on the policy card after import.</div>';
+          if(_gEx) html += '<div style="font-size:11px;color:#667">On refresh, benefits you added by hand that this statement does not list are kept, and a status or nominee you typed is kept when the statement has none.</div>';
         }
       } else if(!r.covers.length && (r.type==='Life / Income Protector'||r.type==='Business Assurance')){
         html += '<div style="font-size:11.5px;color:#92400e;margin-top:6px">⚠ No benefit detail in the Astute data — capture cover amounts from the policy schedule after import.</div>';
@@ -16954,6 +16777,9 @@ function astuteFundsToNotes(r){
 //                the annual income escalation. Alias accepted: coverEsc.
 //     funds:[{name,value,alloc,units,price,asOf}],
 //     covers:[{plan,code,amt,prem,mode,monthlyAmt,period,elim,benEsc}],
+//              ← on a Pension / Provident Fund, covers are its GROUP RISK benefits (6 Oct 2026),
+//                with extra keys approved ("Approved"/"Unapproved"), nominee, basis,
+//                annualPrem, notes; plus policy-level groupRiskApproved for the whole fund.
 //     bens:[{name,pct,benType,linkType,dob}] }
 function parseAstutePasteJSON(txt){
   var raw = String(txt||'').trim();
@@ -16985,7 +16811,10 @@ function parseAstutePasteJSON(txt){
       cv = cv||{};
       return {plan:clean(cv.plan)||clean(cv.type), code:clean(cv.code), amt:clean(cv.amt)||clean(cv.cover),
               prem:clean(cv.prem), mode:clean(cv.mode), monthlyAmt:clean(cv.monthlyAmt),
-              period:clean(cv.period), elim:clean(cv.elim)||clean(cv.waiting), benEsc:clean(cv.benEsc)};
+              period:clean(cv.period), elim:clean(cv.elim)||clean(cv.waiting), benEsc:clean(cv.benEsc),
+              // group risk on a Pension / Provident fund (6 Oct 2026)
+              approved:clean(cv.approved), nominee:clean(cv.nominee), basis:clean(cv.basis),
+              annualPrem:clean(cv.annualPrem), notes:clean(cv.notes)};
     }) : [];
     var type = clean(o.type) || astuteProposeType(clean(o.productType)||clean(o.astType), clean(o.product), funds);
     var status = clean(o.status) || 'Active';
@@ -17026,6 +16855,7 @@ function parseAstutePasteJSON(txt){
       ownerName: ownerName,
       insuredName: insuredName,
       jointLife: clean(o.jointLife),
+      grFund: grNormStatus(o.groupRiskApproved),   // Pension / Provident: fund-wide approved status, if stated (6 Oct 2026)
       bizType: clean(o.bizType),           // Business Assurance: Buy & Sell / Contingent Liability / Keyman
       keyPosition: clean(o.keyPosition),   // Business Assurance: key person's role
       irr: clean(o.irr),                   // stated IRR from statement → IllustrativeRate (shows as IRR badge)
@@ -17178,6 +17008,8 @@ function astuteMergePolicy(existing, fresh){
   // fresh row has none, so an Astute pull (which rarely states CPI increases)
   // never wipes a hand-entered escalation (1 Oct 2026). A fresh value always wins.
   if(!_keepMoney) fresh = astuteCarryRowEsc(existing, fresh);
+  // Group risk rows: refresh by benefit + status, keep hand-typed detail and unlisted rows (6 Oct 2026).
+  if(!_keepMoney) fresh = grMergeRows(existing, fresh);
   Object.keys(fresh).forEach(function(k){
     if(preserve[k]) return;
     if(_keepMoney && ASTUTE_MONEY_KEYS.indexOf(k)>=0) return;
@@ -17281,6 +17113,7 @@ function runAstuteImport(){
     }
     // Policy fee: PolFee tag on the policy + any fee riders found above
     var policyFee = N(r.polFee) + coverFee;
+    var _grImp = (r.type==='Pension Fund'||r.type==='Provident Fund') ? grRowsFromCovers(r.covers) : [];
     function lumpSum(t){ var s=0; lumps.forEach(function(x){if(x.type===t)s+=N(x.cover);}); return s?String(s):''; }
     // A beneficiary matched to a family member is saved under that member's
     // name, so every policy carries one spelling (famImportBen, 25 Sep 2026).
@@ -17361,7 +17194,9 @@ function runAstuteImport(){
       Insured:r.insuredName||'',
       PayerType:'', PayerName:'',
       PensionableSalary:'', MemberContribPct:'', EmployerContribPct:'', AnnualAdminFees:'',
-      HasGroupRisk:'', GroupRiskApproved:'', GroupRiskBenefits:'[]',
+      // Pension / Provident: covers become Group Risk Benefits rows (6 Oct 2026). Other
+      // types keep these blank. A blank status stays blank and is flagged on the card.
+      HasGroupRisk:(_grImp.length?'Yes':''), GroupRiskApproved:(_grImp.length?(r.grFund||''):''), GroupRiskBenefits:JSON.stringify(_grImp),
       Notes:(function(){
         var base=astuteFundsToNotes(r); var extra=[];
         if(fxMarker) extra.push(fxMarker);                                       // offshore currency marker (native + dated rates)
@@ -19400,6 +19235,31 @@ function openPolicySchedule(cid){
     return out;
   }
 
+  // Group risk benefits on a Pension / Provident fund card (6 Oct 2026). Factual record
+  // only: benefit, approved status, cover, basis and, for an unapproved death benefit,
+  // who it is paid to. Premiums are not shown (already inside the fund contribution) and
+  // none of this is added to the Portfolio Summary cover totals.
+  function groupRiskTable(p){
+    if(p.HasGroupRisk==='No') return '';
+    var rows=grRows(p).filter(function(r){ return N(r.cover)>0 || clean(r.basis); });
+    if(!rows.length) return '';
+    var dash='<span style="color:#bbb">&mdash;</span>';
+    var stTxt={'Approved':'Approved (inside the fund)','Unapproved':'Unapproved (outside the fund)'};
+    var body='';
+    rows.forEach(function(r){
+      var st=grRowStatus(r, p.GroupRiskApproved);
+      var sub=[];
+      if(clean(r.notes)) sub.push(escHtml(r.notes));
+      if(st==='Unapproved' && GR_NOMINEE_TYPES.indexOf(r.type)>=0 && clean(r.nominee)) sub.push('Paid to '+escHtml(r.nominee));
+      var cov = N(r.cover)>0 ? (R(r.cover)+(grIsIncome(r)?'<span style="font-size:10px;color:'+MUT+'"> /pm</span>':'')) : dash;
+      body+='<tr><td><span style="color:'+INK+';font-weight:600">'+escHtml(r.type||'Benefit')+'</span>'+
+        (sub.length?'<div style="font-size:10px;color:'+MUT+';margin-top:1px">'+sub.join(' &middot; ')+'</div>':'')+'</td>'+
+        '<td style="text-align:left">'+(st?stTxt[st]:dash)+'</td><td>'+cov+'</td><td>'+(clean(r.basis)?escHtml(r.basis):dash)+'</td></tr>';
+    });
+    return '<div style="padding:0 18px 12px"><div style="font-size:9px;text-transform:uppercase;letter-spacing:.6px;color:'+MUT+';margin:2px 0 4px">Group risk benefits</div>'+
+      '<table class="btbl"><thead><tr><th>Benefit</th><th style="text-align:left">Status</th><th>Cover</th><th>Basis</th></tr></thead><tbody>'+body+'</tbody></table></div>';
+  }
+
   // Underlying-fund pills.
   function fundPills(funds,ccy){
     funds=(funds||[]).filter(function(f){ return N(f.value)>0 || (f.alloc && N(f.alloc)>0); });
@@ -19577,6 +19437,7 @@ function openPolicySchedule(cid){
 
     card+=fieldGrid(fields);
     if(isRiskP||isBizP) card+=riskBenefitRows(p).html;
+    if(p.Type==='Pension Fund'||p.Type==='Provident Fund') card+=groupRiskTable(p);
     card+=fundPills(funds, fx?fx.ccy:'');
 
     // Beneficiaries + payer strip
