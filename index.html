@@ -173,7 +173,7 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--cream);c
     <div class="nsec">Main</div>
     <div class="ni on" data-nav="dash">🏠 Dashboard</div>
     <div class="ni" data-nav="clients">👥 Clients</div>
-    <div class="ni" data-nav="tasks">✅ Tasks <span id="tbadge" style="margin-left:auto;background:var(--rose);color:#fff;border-radius:10px;padding:1px 7px;font-size:10px;display:none"></span></div>
+    <div class="ni" data-nav="tasks">✅ Tasks <span id="nbadge" title="New tasks given to you that you have not opened yet" style="margin-left:auto;background:#7c3aed;color:#fff;border-radius:10px;padding:1px 7px;font-size:10px;font-weight:700;display:none"></span><span id="tbadge" style="margin-left:auto;background:var(--rose);color:#fff;border-radius:10px;padding:1px 7px;font-size:10px;display:none"></span></div>
     <div class="ni" data-nav="cases">📂 Open Cases <span id="cbadge" style="margin-left:auto;background:var(--gold);color:#fff;border-radius:10px;padding:1px 7px;font-size:10px;display:none"></span></div>
     <div class="ni" data-nav="reviews">📞 Reviews</div>
     <div class="ni" data-nav="register">📊 Register</div>
@@ -602,6 +602,7 @@ function syncNow(quiet) {
     }catch(e){}
 
     DB.tasks  = loaded.tasks||[];
+    taskLinkCheck(loaded.tasks);   // is the 6 Oct 2026 database update in? (WorkEventID / NewForAssignee)
     // Re-apply any locally pending task saves (mirror clients/policies above) so a
     // task created or edited while the server was unreachable is never wiped by a sync.
     try{
@@ -755,6 +756,11 @@ function post(data, cb){
     // Never send the internal _pendingSave flag to Supabase (no such column).
     var sendRow = row;
     if(row && row._pendingSave !== undefined){ sendRow = Object.assign({}, row); delete sendRow._pendingSave; }
+    // Task <-> work event columns (6 Oct 2026): if the database update has not
+    // been run yet, leave them out so ordinary task saves keep working.
+    if(table==='tasks' && sendRow && window._taskLinkReady===false && (sendRow.WorkEventID!==undefined || sendRow.NewForAssignee!==undefined)){
+      sendRow = Object.assign({}, sendRow); delete sendRow.WorkEventID; delete sendRow.NewForAssignee;
+    }
     sbFetch('POST', '/rest/v1/'+table, [sendRow], function(res, err){
       // Save-failure protection for locally-cached tables: on failure flag the local
       // record so syncNow keeps it; on success clear the flag. Prevents a failed save
@@ -853,6 +859,13 @@ function post(data, cb){
   }
   else if(action==='updateTaskNotes'){
     patch('tasks', data.id, {Notes: data.notes}, cb);
+  }
+  else if(action==='patchTask'){
+    // Any task columns, e.g. {WorkEventID} or {NewForAssignee} (6 Oct 2026).
+    var tf = Object.assign({}, data.fields||{});
+    if(window._taskLinkReady===false){ delete tf.WorkEventID; delete tf.NewForAssignee; }
+    if(!Object.keys(tf).length){ if(cb) cb({ok:1}); }
+    else patch('tasks', data.id, tf, cb);
   }
   else if(action==='updateDueDate'){
     var fields2 = {};
@@ -1621,11 +1634,17 @@ function reopenTask(id){
   closeAll(); render();
   post({action:'updateTaskNotes',id:id,notes:t.Notes},function(){});
   post({action:'toggleTask',id:id,done:false},function(){ toast('Task reopened ↩','ok'); });
+  if(t.WorkEventID) taskReopenLinkedEvent(t);   // its completed work event reopens too (6 Oct 2026)
 }
 function updateBadge(){
   var n=DB.tasks.filter(function(t){return !isdone(t);}).length;
   var b=document.getElementById('tbadge');
   if(b){b.textContent=n;b.style.display=n>0?'':'none';}
+  // 🆕 tasks given to whoever is signed in that they have not opened yet (6 Oct 2026).
+  var nn=taskNewForMe().length;
+  var nb=document.getElementById('nbadge');
+  if(nb){ nb.textContent='🆕 '+nn; nb.style.display=nn>0?'':'none'; }
+  if(b) b.style.marginLeft = nn>0 ? '4px' : 'auto';
   updateCasesBadge();
 }
 // Open Cases sidebar badge (Build 4). Keeps the board data fresh in the
@@ -2105,6 +2124,12 @@ function renderDash(){
     }).join('')+
     '<button class="btn b-gd xs" style="font-size:10px;padding:3px 8px" data-act="open-task">+ Task</button>'+
     '</div></div>'+
+    (function(){
+      // 🆕 strip (6 Oct 2026): tasks someone gave you that you have not opened yet.
+      var nn=taskNewForMe().length;
+      if(!nn || dashFilter==='new') return '';
+      return '<div style="background:#ede9fe;border-left:3px solid #7c3aed;padding:6px 14px;font-size:12px;font-weight:700;color:#5b21b6;cursor:pointer" data-act="dash-task-filter" data-filter="new">🆕 '+nn+' new task'+(nn===1?'':'s')+' given to you: tap to view</div>';
+    })()+
     (overdue.length&&dashFilter!=='overdue'?'<div style="background:#fde8e8;border-left:3px solid var(--rose);padding:6px 14px;font-size:12px;font-weight:700;color:var(--rose);cursor:pointer" data-act="dash-task-filter" data-filter="overdue">🚨 '+overdue.length+' overdue — tap to view</div>':'')+
     '<div style="display:flex;gap:4px;padding:8px 14px;border-bottom:1px solid var(--smoke)">'+
     (function(){
@@ -2121,6 +2146,8 @@ function renderDash(){
         ['completed','Completed'+(allDone.length?'<span style="background:#888;color:#fff;border-radius:8px;padding:0 5px;font-size:9px;margin-left:3px;font-weight:700">'+allDone.length+'</span>':'')]
       ];
       if(window.DASH_USER_FILTER==='Wife') filters.push(['ccd','👁 CC\'d'+(ccT.length?' ('+ccT.length+')':'')]);
+      var _nNew=taskNewForMe().length;
+      if(_nNew || dashFilter==='new') filters.unshift(['new','🆕 New'+(_nNew?'<span style="background:#7c3aed;color:#fff;border-radius:8px;padding:0 5px;font-size:9px;margin-left:3px;font-weight:700">'+_nNew+'</span>':'')]);
       return filters.map(function(f){
         var isActive=dashFilter===f[0];
         return '<button class="btn '+(isActive?'b-nv':'b-gh')+' xs" style="font-size:11px" data-act="dash-task-filter" data-filter="'+f[0]+'">'+f[1]+'</button>';
@@ -2134,14 +2161,14 @@ function renderDash(){
         if(!clean(t.DueDate)) return false;
         var d=new Date(t.DueDate); d.setHours(0,0,0,0); return d>today;
       });
-      var show=dashFilter==='open'?myT:dashFilter==='today'?dueToday:dashFilter==='overdue'?overdue:dashFilter==='upcoming'?upcoming:dashFilter==='completed'?allDone:dashFilter==='ccd'?ccT:dueToday;
+      var show=dashFilter==='open'?myT:dashFilter==='today'?dueToday:dashFilter==='overdue'?overdue:dashFilter==='upcoming'?upcoming:dashFilter==='completed'?allDone:dashFilter==='ccd'?ccT:dashFilter==='new'?taskNewForMe():dueToday;
       if(dashFilter==='completed') show=show.slice().sort(function(a,b){ return taskDoneTime(b)-taskDoneTime(a); });
       else show=show.slice().sort(function(a,b){
         var da=a.DueDate?new Date(a.DueDate):new Date('9999-12-31');
         var db=b.DueDate?new Date(b.DueDate):new Date('9999-12-31');
         return da-db;
       });
-      if(show.length===0) return '<div class="empty" style="padding:20px">'+(dashFilter==='open'?'No open tasks \u2705':dashFilter==='today'?'Nothing due today \u2705':dashFilter==='overdue'?'No overdue tasks \u2705':dashFilter==='upcoming'?'No upcoming tasks \u2705':dashFilter==='ccd'?'No CC\'d tasks \uD83D\uDC41':'No completed tasks yet')+'</div>';
+      if(show.length===0) return '<div class="empty" style="padding:20px">'+(dashFilter==='open'?'No open tasks \u2705':dashFilter==='today'?'Nothing due today \u2705':dashFilter==='overdue'?'No overdue tasks \u2705':dashFilter==='upcoming'?'No upcoming tasks \u2705':dashFilter==='ccd'?'No CC\'d tasks \uD83D\uDC41':dashFilter==='new'?'No new tasks for you \u2705':'No completed tasks yet')+'</div>';
       return show.map(function(t){
         var c='';
         if(clean(t.DueDate)){var d=new Date(t.DueDate);d.setHours(0,0,0,0);if(d<today)c='rose';else if(d.getTime()===today.getTime())c='sage';}
@@ -4855,12 +4882,14 @@ var EVENT_DOC_CHECKLISTS = {
   ],
   REV_LIFE: [
     {key:'REVIEW_NOTES',  label:'Review Notes',             required:'mandatory', multiple:true},
+    {key:'RENEWAL_LTRS',  label:'Insurer renewal / anniversary letters', required:'optional', note:'The insurers\' letters or schedules for the policies being reviewed', multiple:true},
     {key:'FNA_UPDATE',    label:'Updated FNA',              required:'optional', note:'If material changes', multiple:true},
     {key:'OUTCOME_LTR',   label:'Outcome Letter/Email to Client',required:'mandatory', multiple:true},
     {key:'EMAIL_CORR',    label:'Email Correspondence',     required:'optional', multiple:true, note:'Important emails related to this review'}
   ],
   REV_INVEST: [
     {key:'REVIEW_NOTES',  label:'Review Notes',             required:'mandatory', multiple:true},
+    {key:'RENEWAL_LTRS',  label:'Insurer renewal / anniversary letters', required:'optional', note:'The administrators\' anniversary statements or letters for the policies being reviewed', multiple:true},
     {key:'PERF_REPORT',   label:'Performance Report',       required:'mandatory', multiple:true},
     {key:'OUTCOME_LTR',   label:'Outcome Letter/Email to Client',required:'mandatory', multiple:true},
     {key:'EMAIL_CORR',    label:'Email Correspondence',     required:'optional', multiple:true, note:'Important emails related to this review'}
@@ -5004,21 +5033,24 @@ function eventTypeLabel(ev){
 
 // ── New-case task ────────────────────────────────────────────────────────────
 // Same record shape and save path as saveTask(), so it behaves like any task.
+// 6 Oct 2026: the task is joined to its work event (WorkEventID), and is flagged
+// 🆕 for the person it goes to until they open it.
 function createCaseTask(ev, clientId, creator){
   var c = DB.clients.find(function(x){ return String(x.ID) === String(clientId); });
-  var title = ('New case: '+eventTypeLabel(ev)+(ev.Outcome ? ' · '+ev.Outcome : '')).replace(/[<>]/g, '');
+  var title = taskTitleForEvent(ev);
   var now = new Date().toISOString();
-  var text = 'Case opened by '+userLabel(creator)+'. Open the client\'s Work Events tab to work it.'+
+  var text = (isRevType(ev.EventType) ? 'Review' : 'Case')+' opened by '+userLabel(creator)+'. This task is joined to its work event: documents uploaded here are filed in the work event, and closing either one closes both.'+
     (ev.Notes && String(ev.Notes).trim() ? '\nCase notes: '+String(ev.Notes).trim() : '');
   var task = {ID:'t_'+Date.now(), Title:title, Assignee:ev.ResponsibleUser, DueDate:localDateStr(),
     Priority:'Normal', CCWife:'', ClientName:c ? c.Name : '',
     Notes:JSON.stringify([{date:now, text:text, user:creator}]),
-    Done:false, Timestamp:now, OpenedBy:creator, OpenedDate:now};
+    Done:false, Timestamp:now, OpenedBy:creator, OpenedDate:now,
+    WorkEventID: (ev.ID && window._taskLinkReady !== false) ? String(ev.ID) : '', NewForAssignee: ev.ResponsibleUser !== creator ? 'Yes' : ''};
   task._pendingSave = true;   // same sync protection as saveTask()
   DB.tasks.push(task);
   try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
   post({action:'saveTask', task:task}, function(res){
-    if(!(res && res.ok)) toast('⚠️ Case created, but the task for '+userLabel(task.Assignee)+' could not be saved. Please add it by hand.','err');
+    if(!(res && res.ok)) toast('⚠️ Work event created, but the task for '+userLabel(task.Assignee)+' could not be saved. Open the work event and use "+ Make a task".','err');
   });
   return task;
 }
@@ -5075,6 +5107,7 @@ function openNtuModal(eventId){
       close();
       if(window._board) window._board.loadedAt = 0;
       toast('Case marked NTU','ok');
+      taskCloseForEvent(eventId, 'Work event marked NTU: '+patch.ClosedReason);   // its task closes too (6 Oct 2026)
       loadEvents(clientId);
     });
   });
@@ -5088,6 +5121,7 @@ function reopenEvent(eventId){
     if(err){ alert('Could not reopen: '+err); return; }
     if(window._board) window._board.loadedAt = 0;
     toast('Case reopened','ok');
+    taskReopenForEvent(eventId);   // its task reopens too (6 Oct 2026)
     loadEvents(clientId);
   });
 }
@@ -5412,8 +5446,9 @@ function renderBoardCard(){
     html += '<div style="display:flex;gap:10px;align-items:flex-start">';
     html += '<span style="background:'+ageBg+';color:'+ageClr+';border-radius:6px;padding:2px 7px;font-size:11px;font-weight:700;white-space:nowrap;min-width:38px;text-align:center" title="Opened '+fdate(ev.EventDate)+'">'+(days === null ? '—' : days+'d')+'</span>';
     html += '<div style="flex:1;min-width:0">';
+    var _bt = taskForEvent(ev.ID);   // 🆕 its task not opened yet (6 Oct 2026)
     html += '<div style="font-size:13px;font-weight:700;color:var(--ink)">'+escHtml(c ? c.Name : '(client not found)')+
-      ' <span style="font-weight:400;color:#667;font-size:12px">· '+escHtml(eventTypeLabel(ev))+'</span></div>';
+      ' <span style="font-weight:400;color:#667;font-size:12px">· '+escHtml(eventTypeLabel(ev))+'</span>'+(_bt ? ' '+taskNewPill(_bt) : '')+'</div>';
     html += '<div style="font-size:12px;color:'+(ev.Outcome ? '#0e413a' : '#aab')+';font-weight:'+(ev.Outcome ? '600' : '400')+(ev.Outcome ? '' : ';font-style:italic')+'">'+
       (ev.Outcome ? escHtml(ev.Outcome) : 'No case name')+'<span style="color:#889;font-weight:400;font-style:normal"> · opened '+fdate(ev.EventDate)+'</span></div>';
     if(reqs.length){
@@ -5449,17 +5484,22 @@ function renderCasesPage(){
 // word such as "September" or "March; October". This page lists active
 // clients due THIS month and NEXT month, with their last Annual Review Work
 // Event, plus a count of active clients with no review month set.
-window._revEvents = window._revEvents || {loadedAt:0, loading:false, byClient:{}, err:false};
+window._revEvents = window._revEvents || {loadedAt:0, loading:false, byClient:{}, allByClient:{}, err:false};
+// 6 Oct 2026: every Annual Review work event per client is kept (allByClient),
+// because creating one now closes that client's review reminder for the month.
 function loadReviewEvents(){
   var R = window._revEvents;
   if(R.loading) return;
   R.loading = true;
-  sbFetch('GET','/rest/v1/work_events?EventType=in.(REV_LIFE,REV_INVEST)&select=ClientID,EventDate,EventType,Status&order=EventDate.desc', null, function(rows, err){
+  sbFetch('GET','/rest/v1/work_events?EventType=in.(REV_LIFE,REV_INVEST)&select=ID,ClientID,EventDate,EventType,Status,Outcome,ResponsibleUser,CreatedBy&order=EventDate.desc', null, function(rows, err){
     R.loading = false; R.loadedAt = Date.now();
     if(err){ R.err = true; }
     else {
-      R.err = false; R.byClient = {};
-      (rows || []).forEach(function(r){ if(!R.byClient[r.ClientID]) R.byClient[r.ClientID] = r; }); // newest first
+      R.err = false; R.byClient = {}; R.allByClient = {};
+      (rows || []).forEach(function(r){
+        if(!R.byClient[r.ClientID]) R.byClient[r.ClientID] = r; // newest first
+        (R.allByClient[r.ClientID] = R.allByClient[r.ClientID] || []).push(r);
+      });
     }
     if(PAGE === 'reviews' || PAGE === 'dash'){ var _s=captureScrolls(); render(); restoreScrolls(_s); }
   });
@@ -5633,7 +5673,25 @@ function revAnnItems(polIdx, cid, ym){
   out.sort(function(a,b){ return a.day-b.day; });
   return out;
 }
-function revHasReviewMonth(c, ym){ return clientReviewMonths(c).indexOf(revYmDate(ym).getMonth()) >= 0; }
+// 6 Oct 2026: a typed review month only counts while the client has no policy of
+// yours with a start date (broker of record ticked Yes). Once their policies are
+// captured, the policy anniversaries bring them up instead and the month is ignored.
+function revHasReviewMonth(c, ym, polIdx){
+  if(revHasOwnPolicy(polIdx || revPolicyIndex(), c)) return false;
+  return clientReviewMonths(c).indexOf(revYmDate(ym).getMonth()) >= 0;
+}
+function revHasOwnPolicy(polIdx, c){
+  return (polIdx[String(c.ID)]||[]).some(function(x){ return aumFlag(x.pol.AdvisorOfRecord)==='Yes'; });
+}
+// The first Annual Review work event dated on or after the 1st of month ym (e.g. '2026-10').
+// Opening one closes the client's review reminder for that month and any carried over.
+function revEventSince(cid, ym){
+  var R = window._revEvents;
+  var list = (R && R.allByClient) ? (R.allByClient[cid] || R.allByClient[String(cid)] || []) : [];
+  var from = ym+'-01', hit = null;
+  list.forEach(function(e){ var d = String(e.EventDate||'').slice(0,10); if(d >= from && (!hit || d < String(hit.EventDate))) hit = e; });
+  return hit;
+}
 // Clients with no trigger of their own (no reminding policy, no review month) can come up in the feed.
 function revHasTrigger(polIdx, c){ return !!(polIdx[String(c.ID)]||[]).length || clientReviewMonths(c).length>0; }
 // The feed batch for a month: clients with no trigger and no contact in the 12 months
@@ -5679,19 +5737,23 @@ function revBuild(){
   var feedIds = batchIds(cur);
   active.forEach(function(c){
     var lg = revLog(c.ID);
-    var open = [];
+    var open = [], closedByRev = false;
     months.forEach(function(ym){
       var ann = revAnnItems(polIdx, c.ID, ym);
-      var rev = revHasReviewMonth(c, ym);
+      var rev = revHasReviewMonth(c, ym, polIdx);
       if(!ann.length && !rev) return;
       var e = lg.months[ym];
       if(e && e.s==='done') return;
+      if(revEventSince(c.ID, ym)){ closedByRev = true; return; }   // an Annual Review work event opened in or after this month closes it (6 Oct 2026)
       open.push({ym:ym, ann:ann, rev:rev});
     });
     var inFeed = !!feedIds[String(c.ID)];
     var doneNow = lg.months[cur] && lg.months[cur].s==='done' ? lg.months[cur] : null;
+    // Counted under "Done this month" only when the review closed something that was due.
+    var revNow = (doneNow || !(closedByRev || inFeed)) ? null : revEventSince(c.ID, cur);
+    if(revNow) doneNow = {s:'done', at:String(revNow.EventDate||''), by:revNow.CreatedBy||revNow.ResponsibleUser||'', note:'🔄 Review opened'+(revNow.Outcome ? ': '+revNow.Outcome : ''), review:revNow};
     var pending = !!((revLogRow(c.ID)||{})._pendingSave);
-    if(doneNow){ out.done.push({c:c, e:doneNow, pending:pending}); }
+    if(doneNow){ out.done.push({c:c, e:doneNow, pending:pending, review:!!revNow}); }
     var sz = lg.snooze;
     var snoozing = !!(sz && sz.until && sz.until > todayStr);
     // A client put off from the feed is no longer in the batch, but still belongs under Not now.
@@ -5767,10 +5829,18 @@ function revRowHtml(r, cur){
       lines+last+warn+
     '</div>'+
     '<div style="display:flex;gap:4px;flex-shrink:0;align-items:flex-start">'+
-      btn('✓ Done','revOpenDone','b-sg','Spoke to them / reviewed: closes this client for the month')+
+      // 6 Oct 2026: 📋 Start review opens the task and its Annual Review work event together
+      // (that closes the reminder). An anniversary on your own policy is a review you earn
+      // on, so it has no ✓ Done: it must leave a review file. ✓ Done stays for calls with
+      // nothing to file (not-your-policy anniversaries, review months, the feed).
+      btn('📋 Start review','revStartReview','b-nv','Open a task and its Annual Review work event together. The reminder closes.')+
+      (revRowHasOwnAnn(r) ? '' : btn('✓ Done','revOpenDone','b-sg','Call only, nothing to file: closes this client for the month'))+
       btn('⏸ Not now','revOpenSnooze','b-gh','Hide until a date you pick')+
-      btn('📅 Task','revMakeTask','b-gh','Make a follow-up task')+
     '</div></div>';
+}
+function revRowHasOwnAnn(r){
+  if(window._taskLinkReady === false) return false;   // before the database update, ✓ Done stays (Start review can't run yet)
+  return !r.feed && (r.open||[]).some(function(o){ return (o.ann||[]).some(function(a){ return !a.notMine; }); });
 }
 function revCardHtml(full, prebuilt){
   var R = prebuilt || revBuild(), cur = R.cur;
@@ -5790,7 +5860,9 @@ function revCardHtml(full, prebuilt){
       return '<div class="ri" style="padding:5px 12px;font-size:11.5px;display:flex;gap:8px;align-items:center;cursor:pointer" data-act="open-client" data-id="'+id+'">'+
         '<span style="flex:1"><b>'+escHtml(d.c.Name||'')+'</b> <span style="color:#889">· '+escHtml(fdate(String(d.e.at||'').slice(0,10)))+(d.e.by?' · '+escHtml(userLabel(d.e.by)):'')+(d.e.note?' · '+escHtml(d.e.note):'')+'</span>'+
         (d.pending?' <span style="color:var(--rose);font-weight:700" onclick="event.stopPropagation();revRetry(\''+id+'\')">⚠️ not saved · retry</span>':'')+'</span>'+
-        '<button class="btn b-gh xs" style="font-size:10px;padding:2px 7px" onclick="event.stopPropagation();revUndoDone(\''+id+'\')">undo</button></div>';
+        // A review closed by its work event has no undo here: deleting that work event brings the reminder back.
+        (d.review ? '<span style="font-size:10px;color:#667" title="Closed by its Annual Review work event. Deleting that work event brings the reminder back.">🔄 review</span>'
+                  : '<button class="btn b-gh xs" style="font-size:10px;padding:2px 7px" onclick="event.stopPropagation();revUndoDone(\''+id+'\')">undo</button>')+'</div>';
     }).join('')+'</details>' : '';
   var snzHtml = R.snoozed.length ? '<details style="border-top:1px solid var(--smoke)" ontoggle="window._revSnzOpen=this.open"'+(window._revSnzOpen?' open':'')+'><summary style="padding:6px 12px;font-size:11px;font-weight:700;color:#667;cursor:pointer">⏸ Not now ('+R.snoozed.length+')</summary>'+
     R.snoozed.map(function(r){
@@ -5819,7 +5891,7 @@ function revCardHtml(full, prebuilt){
 function revNextMonthHtml(){
   var R = revBuild(); var nx = revNextYm(R.cur); var list = [];
   R.active.forEach(function(c){
-    var ann = revAnnItems(R.polIdx, c.ID, nx), rv = revHasReviewMonth(c, nx);
+    var ann = revAnnItems(R.polIdx, c.ID, nx), rv = revHasReviewMonth(c, nx, R.polIdx);
     if(ann.length || rv) list.push({c:c, ann:ann, rv:rv});
   });
   list.sort(function(a,b){ var da=a.ann.length?a.ann[0].day:0, db=b.ann.length?b.ann[0].day:0; return da!==db ? da-db : String(a.c.Name||'').localeCompare(String(b.c.Name||'')); });
@@ -5869,7 +5941,7 @@ function revConfirmDone(cid, presetNote){
     revMonthList().forEach(function(ym){
       if(ym===cur){ lg.months[ym] = entry; return; }
       var e = lg.months[ym]; if(e && e.s==='done') return;
-      if(revAnnItems(polIdx, cid, ym).length || revHasReviewMonth(c, ym)) lg.months[ym] = entry;
+      if(revAnnItems(polIdx, cid, ym).length || revHasReviewMonth(c, ym, polIdx)) lg.months[ym] = entry;
     });
     lg.last = at; lg.snooze = null;
   }, function(ok){ if(ok) toast((c.Name||'Client')+' ticked off ✓','ok'); });
@@ -5909,20 +5981,8 @@ function revConfirmSnooze(cid){
   revUpdate(cid, function(lg){ lg.snooze = sz; }, function(ok){ if(ok) toast('Back on the list on '+fdate(u),'ok'); });
 }
 function revUnsnooze(cid){ revUpdate(cid, function(lg){ lg.snooze = null; }); }
-function revMakeTask(cid){
-  var c = revClient(cid); if(!c) return;
-  var R = revBuild();
-  var r = R.rows.concat(R.snoozed).filter(function(x){ return String(x.c.ID)===String(cid); })[0];
-  var items = [];
-  if(r && !r.feed) r.open.forEach(function(o){
-    o.ann.forEach(function(a){ var p=a.pol; items.push((p.Insurer||'Policy')+(p.Type?' '+p.Type:'')+' anniversary '+a.day+' '+revYmLabel(o.ym,true)+(p.PolicyNo?' ('+p.PolicyNo+')':'')); });
-    if(o.rev) items.push('Annual review month '+revYmLabel(o.ym,true));
-  });
-  openTaskModal(c.Name);
-  var tt = document.getElementById('tt'); if(tt) tt.value = 'Review follow-up: '+(c.Name||'');
-  var tn = document.getElementById('tn'); if(tn) tn.value = items.length ? items.join('\n') : 'Not spoken to in a year: phone to reconnect.';
-  document.getElementById('tMod').classList.add('open');
-}
+// (6 Oct 2026: the old "📅 Task" button and revMakeTask are replaced by
+// "📋 Start review" (revStartReview), which makes the task and its work event together.)
 // One-off (per computer): ticks made on the old day-by-day reminders for policy
 // anniversaries from REV_FROM up to today become Done ticks, so nothing ticked is asked again.
 function revMigrateOldTicks(){
@@ -6622,7 +6682,8 @@ function createPolicyCompletionTask(ev, pol, c, who, replIds){
             : '');
   var task = {ID:'t_'+(Date.now()+1), Title:('Complete policy: '+pol.Insurer+(pol.PolicyNo ? ' '+pol.PolicyNo : '')+' · '+(c ? c.Name : '')+(isRepl ? ' (REPLACEMENT)' : '')).replace(/[<>]/g, ''),
     Assignee:'Clinton', DueDate:localDateStr(), Priority: isRepl ? 'Urgent' : 'Normal', CCWife:'', ClientName: c ? c.Name : '',
-    Notes: JSON.stringify([{date:now, text:text, user:who}]), Done:false, Timestamp:now, OpenedBy:who, OpenedDate:now};
+    Notes: JSON.stringify([{date:now, text:text, user:who}]), Done:false, Timestamp:now, OpenedBy:who, OpenedDate:now,
+    NewForAssignee: who !== 'Clinton' ? 'Yes' : ''};   // 🆕 for Clinton until he opens it (6 Oct 2026); not joined to the case (it is its own job)
   task._pendingSave = true;
   DB.tasks.push(task);
   try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
@@ -7719,6 +7780,8 @@ function openBoardCase(clientId, eventId){
   openClient(clientId);
   CTAB = 'events';
   window._selectedEvent = eventId;
+  if(window._evTaskFresh) delete window._evTaskFresh[eventId];   // re-read its task from the server
+  taskClearNew(taskForEvent(eventId));   // opening the work event counts as opening its task (6 Oct 2026)
   loadEvents(clientId);
   loadEventDocs(eventId);
   render();
@@ -7770,6 +7833,7 @@ function loadEventDocs(eventId, cb){
       if(--waiting > 0) return;
       if(cb) cb();
       else if(SEL && CTAB==='events') render();
+      tevRefresh(eventId);   // a task pop-up showing this work event's documents (6 Oct 2026)
     }
     loadEventNA(eventId, both);
     loadEventReqs(eventId, both);
@@ -7936,6 +8000,9 @@ function renderEventDetail(ev, c, pols){
       '<b>NTU</b>'+(ev.ClosedReason ? ': '+escHtml(ev.ClosedReason) : '')+(ev.CompletedAt ? ' <span style="color:#889">· '+fdate(ev.CompletedAt)+'</span>' : '')+'</div>';
   }
   html += '</div>';
+
+  // Its task and the shared notes (6 Oct 2026)
+  html += evTaskBoxHtml(ev);
 
   // Letter of Introduction in force on the case date (New Business)
   html += renderEventLoi(ev, c);
@@ -8216,10 +8283,17 @@ function openNewEventModal(clientId){
     var r = document.getElementById('ev_responsible').value;
     var h = document.getElementById('ev_task_hint');
     if(!h) return;
-    if(!eventGetsCaseTask(t)){ h.textContent = ''; return; }
+    // 6 Oct 2026: every work event gets a task joined to it, including your own,
+    // because the business runs from tasks.
+    if(window._taskLinkReady === false){
+      if(!eventGetsCaseTask(t)){ h.textContent = ''; return; }
+      h.textContent = (r === curUser) ? 'No task: you are responsible for this case yourself.' : '📨 A task "New case" will go to '+userLabel(r)+', due today.';
+      return;
+    }
+    if(!t){ h.textContent = ''; return; }
     h.textContent = (r === curUser)
-      ? 'No task: you are responsible for this case yourself.'
-      : '📨 A task "New case" will go to '+userLabel(r)+', due today.';
+      ? '✅ A task joined to this work event goes into your tasks, due today.'
+      : '📨 A task joined to this work event goes to '+userLabel(r)+', due today, flagged 🆕 until they open it.';
   }
   document.getElementById('ev_responsible').addEventListener('change', updateTaskHint);
   document.getElementById('ev_type').addEventListener('change', updateTaskHint);
@@ -8254,6 +8328,7 @@ function openNewEventModal(clientId){
     if(subRequired && !subtype){ alert('Please select a sub-type'); return; }
 
     var row = {
+      ID: newUuid(),   // made here (6 Oct 2026) so the task can be joined to it
       ClientID: clientId,
       EventType: type,
       EventSubType: subtype || null,
@@ -8271,15 +8346,20 @@ function openNewEventModal(clientId){
         return;
       }
       document.body.removeChild(ov);
-      // New-case task to the Responsible person (NB + Servicing only, and not
-      // when you assign the case to yourself).
-      var sentTo = null;
-      if(eventGetsCaseTask(type) && resp !== curUser){
+      window._evById[row.ID] = row;
+      // 6 Oct 2026: every work event gets a task joined to it (yours too). Before the
+      // database update is run: the old rule (NB + Servicing, not when it is your own).
+      var sentTo = null, mine = false;
+      if(window._taskLinkReady !== false){
+        createCaseTask(row, clientId, curUser);
+        if(resp !== curUser) sentTo = resp; else mine = true;
+      } else if(eventGetsCaseTask(type) && resp !== curUser){
         createCaseTask(row, clientId, curUser);
         sentTo = resp;
       }
+      if(isRevType(type)){ revEventAddLocal(row); if(window._revEvents) window._revEvents.loadedAt = 0; }
       if(window._board) window._board.loadedAt = 0;
-      toast('✓ Event created'+(sentTo ? ' · task sent to '+userLabel(sentTo) : ''),'ok');
+      toast('✓ Event created'+(sentTo ? ' · task sent to '+userLabel(sentTo) : mine ? ' · task added to your tasks' : ''),'ok');
       // Open the new event's detail view
       if(res && res.length){ window._selectedEvent = res[0].ID; }
       loadEvents(clientId);
@@ -8323,7 +8403,9 @@ function openEditEventModal(eventId){
 
     '<div style="margin-bottom:12px"><label style="font-size:12px;font-weight:600;color:#445;display:block;margin-bottom:4px">Responsible</label>'+
     '<select id="edit_ev_responsible" style="width:100%;padding:8px 10px;border:1.5px solid #ccc;border-radius:6px;font-size:13px;font-family:inherit">'+
-    userOptions(ev.ResponsibleUser)+
+    // An older work event with nobody set shows its task's person (6 Oct 2026), so saving
+    // a note change does not quietly move the task to whoever is first in the list.
+    userOptions(ev.ResponsibleUser || ((taskForEvent(ev.ID)||{}).Assignee) || '')+
     '</select></div>'+
 
     '<div style="margin-bottom:12px"><label style="font-size:12px;font-weight:600;color:#445;display:block;margin-bottom:4px">Case name</label>'+
@@ -8357,6 +8439,8 @@ function openEditEventModal(eventId){
       if(err){ alert('Save failed: '+err); return; }
       document.body.removeChild(ov);
       toast('✓ Event updated','ok');
+      taskReassignForEvent(eventId, resp);   // its task follows if the person changed (6 Oct 2026; no-op when it is already theirs)
+      if(window._board) window._board.loadedAt = 0;
       loadEvents(clientId);
     });
   };
@@ -8367,6 +8451,8 @@ function openEditEventModal(eventId){
 // Open a specific event's detail view
 function openEventDetail(eventId){
   window._selectedEvent = eventId;
+  if(window._evTaskFresh) delete window._evTaskFresh[eventId];   // re-read its task from the server
+  taskClearNew(taskForEvent(eventId));   // opening the work event counts as opening its task (6 Oct 2026)
   loadEventDocs(eventId);
   render();
 }
@@ -8406,13 +8492,19 @@ function markEventComplete(eventId){
     function(res, err){
       if(err){ alert('Could not mark complete: '+err); return; }
       toast('✓ Event marked complete','ok');
+      taskCloseForEvent(eventId, 'Completed with its work event.');   // its task closes too (6 Oct 2026)
+      if(window._revEvents) window._revEvents.loadedAt = 0;
       loadEvents(clientId);
     });
 }
 
 // Delete an event (and its docs + links — cascade delete)
-function deleteEvent(eventId, clientId){
-  if(!confirm('Delete this event, all its linked documents, and policy links? This cannot be undone.')) return;
+function deleteEvent(eventId, clientId, _fresh){
+  // Re-read its tasks first (6 Oct 2026), so the question names the right task.
+  if(!_fresh){ tasksFreshForEvent(eventId, function(){ deleteEvent(eventId, clientId, true); }); return; }
+  var _evTasks = tasksForEvent(eventId);
+  if(!confirm('Delete this event, all its linked documents, and policy links? This cannot be undone.'+
+    (_evTasks.length ? '\n\nIts task is deleted too:\n'+_evTasks.map(function(t){ return '• '+(t.Title||'')+' ('+userLabel(t.Assignee||'Clinton')+')'; }).join('\n') : ''))) return;
   // First delete docs (and their files in storage)
   var docs = window._eventDocs[eventId] || [];
   // Build 3: skip stored files that a reused copy on another case still needs.
@@ -8432,6 +8524,16 @@ function deleteEvent(eventId, clientId){
             if(err){ alert('Delete failed: '+err); return; }
             toast('Event deleted','ok');
             window._selectedEvent = null;
+            // 6 Oct 2026: its task goes too, and an Annual Review's reminder comes back.
+            tasksDeleteForEvent(eventId);
+            var _R = window._revEvents;
+            if(_R){
+              Object.keys(_R.allByClient||{}).forEach(function(k){ _R.allByClient[k] = (_R.allByClient[k]||[]).filter(function(e){ return String(e.ID) !== String(eventId); }); });
+              Object.keys(_R.byClient||{}).forEach(function(k){ if(_R.byClient[k] && String(_R.byClient[k].ID) === String(eventId)) delete _R.byClient[k]; });
+              _R.loadedAt = 0;
+            }
+            delete window._evById[eventId];
+            if(window._board) window._board.loadedAt = 0;
             loadEvents(clientId);
           });
         });
@@ -8445,6 +8547,8 @@ function deleteEvent(eventId, clientId){
 function openEventDocUpload(eventId, docKey, isReplace){
   var clientId = SEL;
   var ev = (window._events[clientId]||[]).find(function(e){return String(e.ID)===String(eventId);});
+  // 6 Oct 2026: also from a task pop-up, on any page (the work event of that task).
+  if(!ev){ ev = evFindAny(eventId); if(ev) clientId = ev.ClientID; }
   if(!ev){ alert('Event not found'); return; }
   var checklist = eventChecklist(ev);
   var cat = checklist.find(function(x){return x.key===docKey;});
@@ -8655,6 +8759,8 @@ function handleClientDocFiles(clientId, docKey, files){
 function handleEventDocFiles(eventId, docKey, files){
   var clientId = SEL;
   var ev = (window._events[clientId] || []).find(function(e){ return String(e.ID) === String(eventId); });
+  // 6 Oct 2026: also from a task pop-up, on any page (the work event of that task).
+  if(!ev){ ev = evFindAny(eventId); if(ev) clientId = ev.ClientID; }
   if(!ev){ toast('Work Event not found. Refresh and try again.', 'err'); return; }
   var cat = eventChecklist(ev).find(function(x){ return x.key === docKey; });
   if(!cat){ toast('Unknown document heading', 'err'); return; }
@@ -8960,6 +9066,10 @@ function renderTaskDocsSection(taskId){
   var box = document.getElementById('tlogDocsList');
   if(!box) return;
   var docs = window._taskDocs[taskId] || [];
+  // A task joined to a work event shows its own (older) attachments only if it has any.
+  var _t = DB.tasks.find(function(x){ return String(x.ID)===String(taskId); });
+  var _wrap = document.getElementById('tlogDocsWrap');
+  if(_t && _t.WorkEventID && _wrap) _wrap.style.display = docs.length ? '' : 'none';
   if(docs.length===0){
     box.innerHTML = '<div style="font-size:12px;color:#889;font-style:italic;padding:6px 0">No attachments yet — emails, screenshots, supporting docs all welcome here.</div>';
     return;
@@ -9186,6 +9296,640 @@ function unlinkPolicy(linkId, eventId){
   });
 }
 
+// ══ TASKS ↔ WORK EVENTS (6 Oct 2026) ════════════════════════════════════════
+// A case or a review is worked from its TASK; the WORK EVENT is the compliance
+// file behind it. They are joined by tasks.WorkEventID (Tasks_WorkEvent_Link.sql):
+//   · documents uploaded in the task are filed in the work event (one place);
+//   · notes typed in either show in both (the task log is the running note);
+//   · changing who is responsible in either changes both;
+//   · closing either closes both (missing mandatory documents warn first);
+//     reopening either reopens both; deleting the work event deletes its task.
+// tasks.NewForAssignee = 'Yes' flags a task given to someone until they open it
+// (or open its work event).
+var TASK_BUSY = {};   // task IDs with a completion / make-a-case still on its way (double-click guard)
+var TASK_LINK_SQL_MSG = 'This needs the database update for this version (Tasks_WorkEvent_Link.sql), which has not been run in Supabase yet.\n\nNothing was created. Please tell Clinton.';
+window._taskLinkReady = (window._taskLinkReady === undefined) ? null : window._taskLinkReady;   // null = not known yet
+window._evById = window._evById || {};    // EventID -> work_events row, for work events opened from a task
+
+// Is the database update in? Read from the tasks rows the sync just loaded.
+function taskLinkCheck(rows){
+  if(rows && rows.length){
+    var r0 = rows[0];
+    window._taskLinkReady = ('WorkEventID' in r0) && ('NewForAssignee' in r0);
+    taskLinkWarnOnce();
+    return;
+  }
+  sbFetch('GET','/rest/v1/tasks?select=ID,WorkEventID,NewForAssignee&limit=1', null, function(res, err){
+    if(err && /WorkEventID|NewForAssignee|column/i.test(String(err))) window._taskLinkReady = false;
+    else if(!err) window._taskLinkReady = true;
+    taskLinkWarnOnce();
+  });
+}
+function taskLinkWarnOnce(){
+  if(window._taskLinkReady !== false || window._taskLinkWarned) return;
+  window._taskLinkWarned = true;
+  console.error('Tasks_WorkEvent_Link.sql has not been run: tasks.WorkEventID / tasks.NewForAssignee are missing.');
+  toast('Database update for this version not run yet (Tasks_WorkEvent_Link.sql). Joining tasks to work events is off until it is.','err');
+}
+
+function newUuid(){
+  try{ if(window.crypto && crypto.randomUUID) return crypto.randomUUID(); }catch(e){}
+  var b = new Uint8Array(16);
+  try{ crypto.getRandomValues(b); }catch(e){ for(var i=0;i<16;i++) b[i] = Math.floor(Math.random()*256); }
+  b[6] = (b[6] & 0x0f) | 0x40; b[8] = (b[8] & 0x3f) | 0x80;
+  var h = Array.prototype.map.call(b, function(x){ return ('0'+x.toString(16)).slice(-2); }).join('');
+  return h.slice(0,8)+'-'+h.slice(8,12)+'-'+h.slice(12,16)+'-'+h.slice(16,20)+'-'+h.slice(20);
+}
+function isRevType(t){ return t === 'REV_LIFE' || t === 'REV_INVEST'; }
+function taskTitleForEvent(ev){
+  var s = isRevType(ev.EventType)
+    ? 'Annual review'+(ev.Outcome ? ': '+ev.Outcome : ' ('+eventTypeLabel(ev)+')')
+    : 'New case: '+eventTypeLabel(ev)+(ev.Outcome ? ' · '+ev.Outcome : '');
+  return s.replace(/[<>]/g, '');
+}
+function tasksForEvent(eid){ return DB.tasks.filter(function(t){ return eid && String(t.WorkEventID||'') === String(eid); }); }
+// The task joined to a work event: the open one if there is one, else the latest.
+function taskForEvent(eid){
+  var list = tasksForEvent(eid);
+  return list.filter(function(t){ return !isdone(t); })[0] || list[list.length-1] || null;
+}
+function taskNewForMe(){
+  if(window._taskLinkReady === false) return [];   // flags are not stored until the database update is run
+  var me = cu();
+  return DB.tasks.filter(function(t){ return !isdone(t) && t.NewForAssignee === 'Yes' && (t.Assignee||'Clinton') === me; });
+}
+// Opened by the person it was given to: the 🆕 flag goes.
+function taskClearNew(t){
+  if(!t || t.NewForAssignee !== 'Yes' || (t.Assignee||'Clinton') !== cu()) return;
+  t.NewForAssignee = '';
+  post({action:'patchTask', id:t.ID, fields:{NewForAssignee:''}}, function(){});
+  updateBadge();
+}
+function taskLogPush(t, text){
+  var log = [];
+  try{ log = JSON.parse(t.Notes||'[]'); }catch(e){ if(t.Notes) log = [{date:t.Timestamp||'', text:t.Notes, user:t.Assignee||''}]; }
+  if(!Array.isArray(log)) log = [];
+  log.push({date:new Date().toISOString(), text:text, user:cu()});
+  t.Notes = JSON.stringify(log);
+}
+function taskNewPill(t){
+  if(window._taskLinkReady === false || isdone(t) || t.NewForAssignee !== 'Yes') return '';
+  var mine = (t.Assignee||'Clinton') === cu();
+  return '<span title="'+(mine ? 'Given to you and not opened yet' : 'Not opened yet by '+escHtml(userLabel(t.Assignee||'Clinton')))+'" style="background:#7c3aed;color:#fff;border-radius:10px;padding:1px 7px;font-size:10px;font-weight:700">🆕 '+(mine ? 'New for you' : 'Not opened yet')+'</span>';
+}
+function taskLinkPill(t){
+  return t.WorkEventID ? '<span title="Joined to a work event: documents uploaded in this task are filed there" style="background:#e6f0ee;color:#0e413a;border-radius:10px;padding:1px 7px;font-size:10px;font-weight:700">📋 Work event</span>' : '';
+}
+
+// ── Work event lookups from anywhere (a task can be opened on any page) ──
+function evFindAny(eid){
+  if(!eid) return null;
+  var hit = null;
+  Object.keys(window._events||{}).forEach(function(cid){
+    (window._events[cid]||[]).forEach(function(e){ if(!hit && String(e.ID) === String(eid)) hit = e; });
+  });
+  return hit || window._evById[eid] || null;
+}
+function evFetch(eid, cb){
+  sbFetch('GET','/rest/v1/work_events?ID=eq.'+encodeURIComponent(eid)+'&select=*', null, function(rows, err){
+    if(err){ cb(evFindAny(eid), err); return; }
+    var ev = (rows && rows[0]) || null;
+    if(ev){
+      window._evById[eid] = ev;
+      var list = window._events[ev.ClientID];
+      if(list){ var i = list.findIndex(function(e){ return String(e.ID) === String(eid); }); if(i >= 0) list[i] = ev; }
+    } else delete window._evById[eid];
+    cb(ev, null);
+  });
+}
+function evAfterChange(clientId){
+  if(window._board) window._board.loadedAt = 0;
+  if(window._reg) window._reg.loadedAt = 0;
+  if(window._revEvents) window._revEvents.loadedAt = 0;
+  if(clientId && window._events[clientId]) loadEvents(clientId);
+}
+// Complete or reopen a work event from its task.
+function evSetStatus(eid, status, cb){
+  var fields = status === 'complete' ? {Status:'complete', CompletedAt:nowStamp()} : {Status:'in_progress', ClosedReason:null, CompletedAt:null};
+  sbFetch('PATCH','/rest/v1/work_events?ID=eq.'+encodeURIComponent(eid), fields, function(res, err){
+    var ev = evFindAny(eid);
+    if(!err && ev) Object.keys(fields).forEach(function(k){ ev[k] = fields[k]; });
+    if(err) toast('⚠️ The task changed, but its work event could not be '+(status==='complete'?'completed':'reopened')+'. Open the work event and do it there.','err');
+    evAfterChange(ev ? ev.ClientID : null);
+    if(cb) cb(!err);
+  });
+}
+
+// ── Create a work event and its task together ──
+// o.ev: work_events row WITH an ID (newUuid). o.task: task row with WorkEventID = o.ev.ID.
+// o.links: [{PolicyID, Action}]. o.keepTaskOnFail: if the work event can't be created,
+// keep the task as an ordinary one (nothing typed is lost) instead of removing it.
+// The task goes into DB.tasks straight away (the notepad's "Create Task" relies on that).
+function caseLinkCreate(o, cb){
+  var task = o.task, ev = o.ev;
+  task._pendingSave = true;
+  DB.tasks.push(task);
+  try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
+  render();
+  sbFetch('POST','/rest/v1/work_events', [ev], function(res, err){
+    if(err){
+      // A background sync may have swapped the task object for a copy: always go by ID.
+      var cur = DB.tasks.find(function(x){ return String(x.ID) === String(task.ID); }) || task;
+      if(o.keepTaskOnFail){
+        cur.WorkEventID = ''; task.WorkEventID = '';
+        post({action:'saveTask', task:cur}, function(){});
+        alert('The work event could not be created, so the task was saved on its own.\n\nOpen the task and use "📋 Make this a case" to try again.\n\n('+err+')');
+      } else {
+        DB.tasks = DB.tasks.filter(function(x){ return String(x.ID) !== String(task.ID); });
+        try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
+        alert('Could not create the work event, so nothing was created. Please try again.\n\n('+err+')');
+      }
+      render();
+      if(cb) cb(false);
+      return;
+    }
+    window._evById[ev.ID] = ev;
+    var links = (o.links||[]).map(function(l){ return {WorkEventID:ev.ID, PolicyID:String(l.PolicyID), Action:l.Action||'reviewed'}; });
+    function saveTheTask(){
+      var cur = DB.tasks.find(function(x){ return String(x.ID) === String(task.ID); }) || task;
+      post({action:'saveTask', task:cur}, function(r2){
+        if(r2 && r2.ok) toast(o.okMsg || 'Task and work event created ✓','ok');
+        else toast('⚠️ Work event created, but its task could not be saved. It is kept on this computer: try Sync, or open the work event and use "+ Make a task".','err');
+        render();
+      });
+      if(isRevType(ev.EventType)) revEventAddLocal(ev);   // shows at once; the reload below confirms it
+      evAfterChange(ev.ClientID);
+      if(cb) cb(true);
+    }
+    if(!links.length){ saveTheTask(); return; }
+    sbFetch('POST','/rest/v1/work_event_policies', links, function(r3, e3){
+      if(e3) toast('⚠️ Work event created, but its policies could not be linked. Link them on the work event.','err');
+      saveTheTask();
+    });
+  });
+}
+// Make a new Annual Review show at once on the Reviews list (before the next reload).
+function revEventAddLocal(ev){
+  var R = window._revEvents; if(!R) return;
+  var row = {ID:ev.ID, ClientID:ev.ClientID, EventDate:ev.EventDate, EventType:ev.EventType, Status:ev.Status||'in_progress', Outcome:ev.Outcome||'', ResponsibleUser:ev.ResponsibleUser||'', CreatedBy:ev.CreatedBy||''};
+  R.allByClient = R.allByClient || {};
+  var list = (R.allByClient[ev.ClientID] = R.allByClient[ev.ClientID] || []);
+  if(!list.some(function(x){ return String(x.ID) === String(ev.ID); })) list.unshift(row);
+  var b = R.byClient[ev.ClientID];
+  if(!b || String(b.EventDate||'') <= String(row.EventDate)) R.byClient[ev.ClientID] = row;
+}
+function evRowNew(clientId, type, subtype, caseName, responsible, notes){
+  return {ID:newUuid(), ClientID:clientId, EventType:type, EventSubType:subtype || null, EventDate:localDateStr(),
+    Status:'in_progress', ResponsibleUser:responsible, Outcome:caseName || null, Notes:notes || '',
+    CreatedBy:cu(), CreatedAt:nowStamp()};
+}
+
+// ── Case fields (type, sub-type, case name), shared by New Task and "Make this a case" ──
+function caseSubtypesFor(t){
+  return isNbType(t) ? NB_SUBTYPES : isSvcType(t) ? SVC_SUBTYPES : isNegType(t) ? NEG_SUBTYPES : [];
+}
+function caseFieldsHtml(px, defType, defName){
+  return '<div class="fld"><label>Type of case *</label><select id="'+px+'Type" onchange="caseFieldsTypeChange(\''+px+'\')">'+
+      '<option value="">Select…</option>'+EVENT_TYPES.map(function(t){ return '<option value="'+t.key+'"'+(t.key===defType?' selected':'')+'>'+t.icon+' '+escHtml(t.label)+'</option>'; }).join('')+
+    '</select></div>'+
+    '<div class="fld"><label>Sub-type</label><select id="'+px+'Sub" disabled><option value="">(choose the type first)</option></select></div>'+
+    '<div class="fld"><label>Case name</label><input type="text" id="'+px+'Name" maxlength="200" value="'+escHtml(defName||'')+'" placeholder="e.g. Bidvest 222i030 replacing 2 × Hollard" autocomplete="off"></div>';
+}
+function caseFieldsTypeChange(px){
+  var t = (document.getElementById(px+'Type')||{}).value || '';
+  var sel = document.getElementById(px+'Sub'); if(!sel) return;
+  var subs = caseSubtypesFor(t);
+  if(!subs.length){ sel.innerHTML = '<option value="">(none)</option>'; sel.disabled = true; return; }
+  sel.disabled = false;
+  sel.innerHTML = '<option value="">Select…</option>'+subs.map(function(s){ return '<option value="'+s.key+'">'+escHtml(s.label)+'</option>'; }).join('');
+}
+function caseFieldsRead(px){
+  var t = (document.getElementById(px+'Type')||{}).value || '';
+  var s = (document.getElementById(px+'Sub')||{}).value || '';
+  var n = String((document.getElementById(px+'Name')||{}).value || '').trim();
+  if(!t) return {error:'Choose the type of case'};
+  if(caseSubtypesFor(t).length && !s) return {error:'Choose the sub-type'};
+  return {type:t, subtype:s, caseName:n};
+}
+
+// A small dialog above any open pop-up. onOk(box, close) does the work and closes it.
+function miniDialog(title, bodyHtml, okLabel, onOk){
+  var ov = document.createElement('div');
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(10,20,40,.55);z-index:10001;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(2px)';
+  var box = document.createElement('div');
+  box.style.cssText = 'background:#fff;border-radius:12px;padding:22px 26px;max-width:520px;width:92%;max-height:86vh;overflow:auto;box-shadow:0 12px 48px rgba(0,0,0,.25);font-family:inherit';
+  box.innerHTML = '<div style="font-family:Georgia,serif;font-size:17px;color:#0e413a;margin-bottom:10px">'+title+'</div>'+bodyHtml+
+    '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px">'+
+      '<button type="button" data-role="cancel" class="btn b-gh sm">Cancel</button>'+
+      '<button type="button" data-role="ok" class="btn b-gd sm">'+okLabel+'</button>'+
+    '</div>';
+  ov.appendChild(box);
+  document.body.appendChild(ov);
+  function close(){ if(ov.parentNode) ov.parentNode.removeChild(ov); if(window._miniDialogClose === close) window._miniDialogClose = null; }
+  window._miniDialogClose = close;
+  box.querySelector('[data-role=cancel]').addEventListener('click', close);
+  ov.addEventListener('click', function(e){ if(e.target === ov) close(); });
+  box.querySelector('[data-role=ok]').addEventListener('click', function(){ onOk(box, close); });
+  return {box:box, close:close};
+}
+
+// ── New Task pop-up: "This is a case" ──
+function taskCaseToggle(){
+  var on = !!(document.getElementById('tcase')||{}).checked;
+  var bx = document.getElementById('tcaseBox'); if(bx) bx.style.display = on ? '' : 'none';
+  if(on){
+    var nm = document.getElementById('tcName'), tt = document.getElementById('tt');
+    if(nm && !nm.value && tt) nm.value = tt.value;
+  }
+}
+
+// ── "📋 Make this a case" on an existing task ──
+function taskMakeCase(tid){
+  var t = DB.tasks.find(function(x){ return String(x.ID) === String(tid); });
+  if(!t) return;
+  if(t.WorkEventID){ toast('This task already has a work event','err'); return; }
+  if(TASK_BUSY['mc_'+tid]){ toast('Already creating the work event for this task…','err'); return; }
+  if(window._taskLinkReady === false){ alert(TASK_LINK_SQL_MSG); return; }
+  var c = findClientByName(t.ClientName);
+  if(!c){ alert('This task has no client. Set the client first (Client re-link, then Save & Close), then make it a case.'); return; }
+  miniDialog('📋 Make this a case',
+    '<div style="font-size:12.5px;color:#556;margin-bottom:10px">Opens a work event for <b>'+escHtml(c.Name)+'</b> and joins it to this task. '+
+      'The work event goes to <b>'+escHtml(userLabel(t.Assignee||'Clinton'))+'</b>, who this task belongs to.</div>'+
+      caseFieldsHtml('mc', '', t.Title||''),
+    '📋 Make it a case',
+    function(box, close){
+      var f = caseFieldsRead('mc');
+      if(f.error){ toast(f.error,'err'); return; }
+      if(TASK_BUSY['mc_'+tid] || t.WorkEventID){ close(); return; }   // second click while the first is still on its way
+      var ev = evRowNew(c.ID, f.type, f.subtype, f.caseName, t.Assignee||'Clinton', '');
+      TASK_BUSY['mc_'+tid] = true;
+      close();
+      sbFetch('POST','/rest/v1/work_events', [ev], function(res, err){
+        var tt = DB.tasks.find(function(x){ return String(x.ID) === String(tid); }) || t;   // a sync may have replaced the object
+        delete TASK_BUSY['mc_'+tid];
+        if(err){ alert('Could not create the work event. Nothing was changed.\n\n('+err+')'); return; }
+        window._evById[ev.ID] = ev;
+        tt.WorkEventID = ev.ID;
+        taskLogPush(tt, 'Work event opened for this task: '+eventTypeLabel(ev)+(ev.Outcome ? ' · '+ev.Outcome : '')+'.');
+        post({action:'patchTask', id:tt.ID, fields:{WorkEventID:ev.ID}}, function(r){
+          if(!(r && r.ok)) toast('⚠️ Work event created, but it could not be joined to this task. Open the work event and use "+ Make a task".','err');
+        });
+        post({action:'updateTaskNotes', id:tt.ID, notes:tt.Notes}, function(){});
+        if(isRevType(ev.EventType)) revEventAddLocal(ev);
+        evAfterChange(c.ID);
+        toast('Work event created and joined to this task ✓','ok');
+        if(String(TASK_LOG_ID) === String(tt.ID)) openTaskLogModal(tt.ID);
+        else render();
+      });
+    });
+}
+
+// ── A work event's tasks, fresh from the server ──
+// The client profile page does not auto-refresh tasks (it would flicker), so
+// anything done from a work event first re-reads its tasks: another computer may
+// have added a note, reassigned or closed it in the meantime. Rows saved here
+// but not yet on the server (_pendingSave) are kept as they are.
+function tasksFreshForEvent(eid, cb){
+  if(!eid || window._taskLinkReady === false){ cb(false); return; }
+  sbFetch('GET','/rest/v1/tasks?WorkEventID=eq.'+encodeURIComponent(eid)+'&select=*', null, function(rows, err){
+    if(err || !Array.isArray(rows)){ cb(false); return; }
+    rows.forEach(function(r){
+      var local = DB.tasks.find(function(x){ return String(x.ID) === String(r.ID); });
+      if(!local) DB.tasks.push(r);
+      else if(!local._pendingSave){ Object.keys(local).forEach(function(k){ if(!(k in r) && k.charAt(0) !== '_') delete local[k]; }); Object.assign(local, r); }
+    });
+    // Tasks deleted on another computer go here too.
+    var ids = rows.map(function(r){ return String(r.ID); });
+    DB.tasks = DB.tasks.filter(function(x){ return String(x.WorkEventID||'') !== String(eid) || x._pendingSave || ids.indexOf(String(x.ID)) >= 0; });
+    try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
+    cb(true);
+  });
+}
+// Work event detail: re-read its task once each time the work event is opened.
+window._evTaskFresh = window._evTaskFresh || {};
+function evTaskFreshOnce(eid){
+  if(window._evTaskFresh[eid]) return;
+  window._evTaskFresh[eid] = true;
+  tasksFreshForEvent(eid, function(ok){
+    if(ok) taskClearNew(taskForEvent(eid));   // in case the task only arrived now
+    if(ok && PAGE === 'client' && CTAB === 'events' && String(window._selectedEvent) === String(eid)){ var _s = captureScrolls(); render(); restoreScrolls(_s); }
+  });
+}
+
+// ── "+ Make a task" on a work event that has none ──
+function evMakeTask(eid){
+  if(window._taskLinkReady === false){ alert(TASK_LINK_SQL_MSG); return; }
+  var ev0 = evFindAny(eid);
+  if(!ev0){ toast('Work Event not found. Refresh and try again.','err'); return; }
+  if(window._evMakingTask === eid) return;
+  window._evMakingTask = eid;
+  tasksFreshForEvent(eid, function(){
+    window._evMakingTask = null;
+    var open = tasksForEvent(eid).filter(function(t){ return !isdone(t); })[0];
+    if(open){ toast('This work event already has an open task ('+userLabel(open.Assignee||'Clinton')+')','err'); render(); return; }
+    var ev = ev0;
+    if(!ev.ResponsibleUser){
+      // An older work event with nobody responsible: it becomes yours, on the work event as well.
+      ev.ResponsibleUser = cu();
+      sbFetch('PATCH','/rest/v1/work_events?ID=eq.'+encodeURIComponent(eid), {ResponsibleUser:ev.ResponsibleUser}, function(){});
+    }
+    createCaseTask(ev, ev.ClientID, cu());
+    toast('Task created for '+userLabel(ev.ResponsibleUser)+' ✓','ok');
+    render();
+  });
+}
+
+// ── Work event side: close / reopen / reassign / delete the joined task ──
+// Each re-reads the task from the server first (see tasksFreshForEvent).
+function taskCloseForEvent(eid, text){
+  tasksFreshForEvent(eid, function(){
+    var t = taskForEvent(eid);
+    if(!t || isdone(t)) return;
+    taskLogPush(t, text || 'Completed with its work event.');
+    t.Done = true;
+    post({action:'updateTaskNotes', id:t.ID, notes:t.Notes}, function(){});
+    post({action:'toggleTask', id:t.ID, done:true}, function(){});
+    render();
+  });
+}
+function taskReopenForEvent(eid){
+  tasksFreshForEvent(eid, function(){
+    var list = tasksForEvent(eid);
+    if(!list.length || list.some(function(t){ return !isdone(t); })) return;
+    var t = list[list.length-1];
+    taskLogPush(t, 'Task reopened with its work event.');
+    t.Done = false;
+    post({action:'updateTaskNotes', id:t.ID, notes:t.Notes}, function(){});
+    post({action:'toggleTask', id:t.ID, done:false}, function(){});
+    render();
+  });
+}
+function taskReassignForEvent(eid, resp){
+  tasksFreshForEvent(eid, function(){
+    var t = taskForEvent(eid);
+    if(!t || isdone(t) || (t.Assignee||'Clinton') === resp) return;
+    t.Assignee = resp;
+    t.NewForAssignee = resp !== cu() ? 'Yes' : '';
+    taskLogPush(t, '[Reassigned to '+userLabel(resp)+' with its work event]');
+    post({action:'updateDueDate', id:t.ID, assignee:t.Assignee, dueDate:t.DueDate}, function(){});
+    post({action:'updateTaskNotes', id:t.ID, notes:t.Notes}, function(){});
+    post({action:'patchTask', id:t.ID, fields:{NewForAssignee:t.NewForAssignee}}, function(){});
+    render();
+  });
+}
+function tasksDeleteForEvent(eid){
+  if(window._taskLinkReady === false){ render(); return; }   // nothing can be joined before the database update
+  // Server side by WorkEventID, so a task this computer has not seen yet goes too.
+  sbFetch('DELETE','/rest/v1/tasks?WorkEventID=eq.'+encodeURIComponent(eid), null, function(res, err){
+    if(err) toast('⚠️ Work event deleted, but its task could not be deleted. Delete it from Tasks.','err');
+    DB.tasks = DB.tasks.filter(function(x){ return String(x.WorkEventID||'') !== String(eid); });
+    try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
+    render();
+  });
+}
+// Task side: the person responsible changed, so the work event follows.
+function taskAssigneeChanged(t){
+  t.NewForAssignee = (t.Assignee||'Clinton') !== cu() ? 'Yes' : '';
+  post({action:'patchTask', id:t.ID, fields:{NewForAssignee:t.NewForAssignee}}, function(){});
+  if(!t.WorkEventID) return;
+  sbFetch('PATCH','/rest/v1/work_events?ID=eq.'+encodeURIComponent(t.WorkEventID), {ResponsibleUser:t.Assignee}, function(res, err){
+    var ev = evFindAny(t.WorkEventID);
+    if(err){ toast('⚠️ Task reassigned, but its work event still shows the old person. Change it with Edit Event.','err'); return; }
+    if(ev) ev.ResponsibleUser = t.Assignee;
+    evAfterChange(ev ? ev.ClientID : null);
+  });
+}
+// Task side: reopening a task reopens its completed work event (an NTU stays NTU).
+function taskReopenLinkedEvent(t){
+  if(!t || !t.WorkEventID) return;
+  evFetch(t.WorkEventID, function(ev){
+    if(!ev) return;
+    if(ev.Status === 'complete') evSetStatus(ev.ID, 'in_progress', function(ok){ if(ok) toast('Its work event is open again','ok'); });
+    else if(ev.Status === 'ntu') toast('Its work event stays NTU. Reopen it on the work event if the case is back on.','ok');
+  });
+}
+
+// ── Task side: completing a joined task completes its work event ──
+// go(ev) runs the normal completion; ev is the work event to complete with it, or null.
+function taskLinkedComplete(t, go, cancel){
+  var who = t.Assignee||'Clinton';
+  var head = 'Mark this task complete?\n\n'+(t.Title||'')+'\nAssigned to: '+userLabel(who)+(who !== cu() ? '\n\nThis is '+userLabel(who)+'\'s task, not yours.' : '');
+  function ask(msg, ev){ if(confirm(msg)) go(ev); else if(cancel) cancel(); }
+  evFetch(t.WorkEventID, function(ev, err){
+    if(!ev){
+      ask(head+(err ? '\n\nIts work event could not be reached just now, so only the task will close.' : '\n\nIts work event no longer exists.'), null);
+      return;
+    }
+    if(ev.Status !== 'in_progress'){
+      ask(head+'\n\nIts work event is already closed ('+eventStatusInfo(ev).txt+').', null);
+      return;
+    }
+    loadEventDocs(ev.ID, function(){
+      var missing = eventMissingDocs(ev, window._eventDocs[ev.ID]||[], window._eventNA[ev.ID]||new Set());
+      ask(head+'\n\nIts work event closes with it:\n'+eventTypeLabel(ev)+(ev.Outcome ? ' · '+ev.Outcome : '')+
+        (missing.length ? '\n\n⚠ '+missing.length+' mandatory document'+(missing.length===1?'':'s')+' missing (not uploaded, not marked N/A):\n\n'+
+          missing.map(function(m){ return '• '+m.label; }).join('\n')+'\n\nComplete both anyway?' : ''), ev);
+    });
+  });
+}
+function taskLinkedAfterComplete(t, ev, snapNotes, snapDone){
+  if(!ev) return;
+  var tid = t.ID;
+  evSetStatus(ev.ID, 'complete', function(ok){ if(ok) toast('Task and its work event complete ✓','ok'); });
+  undoToast('Task and work event marked complete', '↩ Undo', function(){
+    restoreTaskState(tid, snapNotes, snapDone);
+    evSetStatus(ev.ID, 'in_progress');
+  });
+}
+
+// ── Task pop-up: the work event's documents, filed straight into the work event ──
+function tevLoad(t){
+  var eid = t.WorkEventID, tid = t.ID;
+  evFetch(eid, function(ev){
+    if(String(TASK_LOG_ID) !== String(tid)) return;
+    var el = document.getElementById('tlogEvPanel'); if(!el) return;
+    if(!ev){ el.innerHTML = '<div style="font-size:12px;color:#b23;padding:8px 10px;background:#fdecea;border-radius:6px">The work event joined to this task was not found (it may have been deleted).</div>'; return; }
+    loadEventDocs(eid, function(){ tevRender(tid); });
+  });
+}
+function tevRefresh(eid){
+  if(!TASK_LOG_ID || !document.getElementById('tlogEvPanel')) return;
+  var t = DB.tasks.find(function(x){ return String(x.ID) === String(TASK_LOG_ID); });
+  if(t && String(t.WorkEventID||'') === String(eid)) tevRender(t.ID);
+}
+function tevRender(tid){
+  var el = document.getElementById('tlogEvPanel'); if(!el) return;
+  var t = DB.tasks.find(function(x){ return String(x.ID) === String(tid); }); if(!t) return;
+  var ev = evFindAny(t.WorkEventID);
+  if(!ev){ el.innerHTML = ''; return; }
+  var docs = window._eventDocs[ev.ID] || [];
+  var naSet = window._eventNA[ev.ID] || new Set();
+  var list = eventChecklist(ev);
+  var missing = eventMissingDocs(ev, docs, naSet);
+  var st = eventStatusInfo(ev);
+  var open = ev.Status === 'in_progress';
+  var h = '<div style="border:1.5px solid #cfe0dc;border-radius:8px;background:#f7fbfa;padding:10px 12px;margin-bottom:12px">'+
+    '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px">'+
+      '<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:.6px">📋 Work event</div>'+
+      '<span style="font-size:12.5px;font-weight:700;color:#0e413a">'+escHtml(eventTypeLabel(ev))+'</span>'+
+      (ev.Outcome ? '<span style="font-size:12px;color:#445">· '+escHtml(ev.Outcome)+'</span>' : '')+
+      '<span style="background:'+st.bg+';color:'+st.clr+';padding:1px 7px;border-radius:4px;font-size:10px;font-weight:700;text-transform:uppercase">'+escHtml(st.txt)+'</span>'+
+      '<button class="btn b-gh xs" style="margin-left:auto;font-size:11px" data-act="tev-open" data-cid="'+escHtml(String(ev.ClientID))+'" data-eid="'+escHtml(String(ev.ID))+'" title="Open the work event on the client\'s Work Events tab">Open work event ↗</button>'+
+    '</div>'+
+    (ev.Notes && String(ev.Notes).trim() ? '<div style="font-size:12px;color:#3d3300;background:#fff8dc;border-left:3px solid #e0b800;border-radius:3px;padding:4px 8px;margin-bottom:6px;white-space:pre-wrap;word-break:break-word">📝 '+escHtml(String(ev.Notes).trim())+'</div>' : '')+
+    '<div style="font-size:12px;font-weight:600;margin-bottom:6px;color:'+(missing.length ? '#b95900' : '#2d7a3e')+'">'+
+      (missing.length ? '⚠ '+missing.length+' mandatory document'+(missing.length===1?'':'s')+' missing' : '✓ All mandatory documents present')+
+      ' <span style="font-weight:400;color:#667">· uploads here are filed in the work event · drag files onto a heading</span></div>';
+  list.forEach(function(item){
+    var files = docs.filter(function(d){ return d.DocType === item.key; });
+    var isNA = naSet.has(item.key);
+    var isMand = item.required === 'mandatory' || item.required === 'conditional';
+    var dot = isNA ? '⊘' : files.length ? '✅' : isMand ? '❌' : '<span style="color:#aab;font-weight:700">✗</span>';
+    h += '<div'+docDropAttrs('event', ev.ID, item.key, (files.length && !item.multiple ? 'Drop to replace: ' : 'Drop to add to: ')+item.label, isNA)+' style="display:flex;gap:8px;align-items:flex-start;padding:5px 8px;border-radius:5px;margin-bottom:3px;background:'+(isNA ? '#f0f0f0' : files.length ? '#eaf5ec' : isMand ? '#fdf2e6' : '#fff')+(isNA ? ';opacity:.6' : '')+'">'+
+      '<div style="width:18px;font-size:13px">'+dot+'</div>'+
+      '<div style="flex:1;min-width:0">'+
+        '<div style="font-size:12.5px;font-weight:600'+(isNA ? ';text-decoration:line-through' : '')+'">'+escHtml(item.label)+
+          (item.required === 'optional' && !item.custom ? ' <span style="color:#889;font-weight:400;font-size:11px">(optional)</span>' : '')+
+          (isNA ? ' <span style="color:#889;font-size:10px;font-weight:700">· N/A</span>' : '')+'</div>'+
+        files.map(function(d){
+          return '<div style="font-size:11px;color:#556;display:flex;gap:6px;align-items:center;margin-top:2px">📄 <span style="flex:1;word-break:break-word">'+escHtml(d.FileName||'file')+'</span>'+
+            '<button class="btn b-gh xs" style="font-size:10px;padding:1px 7px" data-act="event-doc-view" data-did="'+escHtml(String(d.ID))+'">View</button></div>';
+        }).join('')+
+      '</div>'+
+      (isNA ? '' : '<button class="btn b-nv xs" style="font-size:10.5px;padding:3px 9px" data-act="tev-upload" data-eid="'+escHtml(String(ev.ID))+'" data-dk="'+escHtml(item.key)+'"'+(files.length && !item.multiple ? ' data-replace="1"' : '')+'>'+(files.length && !item.multiple ? 'Replace' : '+ Upload')+'</button>')+
+    '</div>';
+  });
+  if(!open) h += '<div style="font-size:11px;color:#667;margin-top:4px">This work event is closed. Reopen the task (or the work event) to carry on.</div>';
+  h += '</div>';
+  el.innerHTML = h;
+}
+
+// ── Work event detail: its task, and the shared notes ──
+function evTaskBoxHtml(ev){
+  evTaskFreshOnce(ev.ID);
+  var t = taskForEvent(ev.ID);
+  if(!t){
+    return '<div style="margin:0 0 14px;padding:8px 12px;background:#fafaf5;border:1px dashed #c9cfc9;border-radius:6px;font-size:12px;color:#667;display:flex;gap:10px;align-items:center">'+
+      '<span style="flex:1">No task for this work event yet. Everyone works cases from their tasks.</span>'+
+      '<button class="btn b-nv sm" data-act="ev-make-task" data-eid="'+escHtml(String(ev.ID))+'" style="font-size:11px;padding:4px 10px">+ Make a task</button></div>';
+  }
+  var log = [];
+  try{ log = JSON.parse(t.Notes||'[]'); }catch(e){ if(t.Notes) log = [{date:t.Timestamp||'', text:t.Notes, user:t.Assignee||''}]; }
+  if(!Array.isArray(log)) log = [];
+  var shown = log.slice().reverse().slice(0, 6);
+  var done = isdone(t);
+  return '<div style="margin:0 0 14px;padding:10px 12px;background:#f5f7ff;border:1.5px solid #d6dcf5;border-radius:8px">'+
+    '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px">'+
+      '<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:.6px">✅ Task</div>'+
+      '<span style="font-size:12.5px;font-weight:600'+(done ? ';text-decoration:line-through;color:#889' : '')+'">'+escHtml(t.Title||'')+'</span>'+
+      '<span style="font-size:11px;color:#667">· '+escHtml(userLabel(t.Assignee||'Clinton'))+(clean(t.DueDate) ? ' · due '+fdate(t.DueDate) : '')+(done ? ' · done' : '')+'</span>'+
+      taskNewPill(t)+
+      '<button class="btn b-gh xs" style="margin-left:auto;font-size:11px" data-act="open-task-log" data-id="'+escHtml(String(t.ID))+'">Open task</button>'+
+    '</div>'+
+    '<div style="font-size:10px;color:#889;margin-bottom:4px">Notes are shared with the task: anything added here shows there, and the other way round.</div>'+
+    (shown.length ? '<div style="max-height:170px;overflow-y:auto;background:#fff;border:1px solid var(--smoke);border-radius:6px;padding:6px 9px;margin-bottom:6px">'+
+      shown.map(function(e){
+        return '<div style="padding:4px 0;border-bottom:1px solid #f0f1f4"><div style="font-size:10px;font-weight:700;color:var(--gold)">'+
+          (e.date ? escHtml(new Date(e.date).toLocaleString('en-ZA',{day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'})) : '')+' · '+escHtml(userLabel(e.user||''))+'</div>'+
+          '<div style="font-size:12px;white-space:pre-wrap;word-break:break-word">'+escHtml(e.text||'')+'</div></div>';
+      }).join('')+(log.length > shown.length ? '<div style="font-size:10.5px;color:#889;padding-top:4px">'+(log.length - shown.length)+' earlier note'+(log.length - shown.length === 1 ? '' : 's')+' in the task</div>' : '')+'</div>' : '')+
+    (done ? '' : '<div style="display:flex;gap:6px"><textarea id="evTaskNote_'+escHtml(String(t.ID))+'" rows="2" placeholder="Add a note (goes into the task)" style="flex:1;padding:6px 8px;border:1.5px solid #ccc;border-radius:6px;font-size:12.5px;font-family:inherit;resize:vertical"></textarea>'+
+      '<button class="btn b-gd sm" data-act="ev-task-note" data-id="'+escHtml(String(t.ID))+'" style="align-self:flex-start">Add note</button></div>')+
+  '</div>';
+}
+function evTaskAddNote(tid){
+  var t0 = DB.tasks.find(function(x){ return String(x.ID) === String(tid); });
+  var box = document.getElementById('evTaskNote_'+tid);
+  var txt = box ? String(box.value||'').trim() : '';
+  if(!t0 || !txt){ toast('Type a note first','err'); return; }
+  if(box) box.disabled = true;
+  // Re-read the task first, so a note added on another computer is not overwritten.
+  tasksFreshForEvent(t0.WorkEventID, function(ok){
+    var t = DB.tasks.find(function(x){ return String(x.ID) === String(tid); });
+    if(!t && ok){ if(box) box.disabled = false; toast('This task no longer exists (it was deleted on another computer). Use "+ Make a task" first.','err'); render(); return; }
+    t = t || t0;
+    taskLogPush(t, txt);
+    post({action:'updateTaskNotes', id:t.ID, notes:t.Notes}, function(r){ if(r && r.ok) toast('Note added to the task ✓','ok'); else toast('⚠️ Note not saved to the server. Please try again.','err'); });
+    render();
+  });
+}
+
+// ── Reviews list: 📋 Start review (task + Annual Review work event, together) ──
+function revStartReview(cid){
+  var c = revClient(cid); if(!c) return;
+  if(window._taskLinkReady === false){ alert(TASK_LINK_SQL_MSG); return; }
+  if(TASK_BUSY['sr_'+cid]){ toast('Still starting the review for '+(c.Name||'this client')+'…','err'); return; }
+  var R = revBuild(), cur = R.cur;
+  var r = R.rows.concat(R.snoozed).filter(function(x){ return String(x.c.ID) === String(cid); })[0];
+  var items = [], seen = {}, monthsSeen = [];
+  if(r && !r.feed) r.open.forEach(function(o){
+    o.ann.forEach(function(a){
+      if(seen[a.pol.ID]) return; seen[a.pol.ID] = 1;
+      items.push({pol:a.pol, ym:o.ym, day:a.day, years:a.years, notMine:a.notMine});
+      if(monthsSeen.indexOf(o.ym) < 0) monthsSeen.push(o.ym);
+    });
+  });
+  var anyRisk = items.some(function(x){ return aumIsRisk(x.pol); });
+  var defType = !items.length || anyRisk ? 'REV_LIFE' : 'REV_INVEST';
+  var monthTxt = (monthsSeen.length ? monthsSeen : [cur]).map(function(ym){ return revYmLabel(ym, true); }).join('/');
+  var defName = items.length
+    ? items.map(function(x){ return (x.pol.Insurer||x.pol.Type||'Policy')+(clean(x.pol.PolicyNo) ? ' '+x.pol.PolicyNo : ''); }).join(' + ')+' anniversary '+monthTxt
+    : (r && r.feed ? 'Reconnect: not spoken to in a year' : 'Annual review '+monthTxt);
+  var openRevs = ((window._revEvents && window._revEvents.allByClient && window._revEvents.allByClient[cid]) || []).filter(function(e){ return e.Status === 'in_progress'; });
+  var warn = openRevs.length ? '<div style="background:#fff8dc;border-left:3px solid #e0b800;border-radius:4px;padding:8px 10px;font-size:12px;color:#3d3300;margin-bottom:10px">'+
+      '<b>An Annual Review is already open for this client:</b>'+
+      openRevs.map(function(e){ return '<div style="display:flex;gap:8px;align-items:center;margin-top:4px"><span style="flex:1">'+escHtml(e.Outcome||eventTypeLabel(e))+' · opened '+escHtml(fdate(e.EventDate))+'</span>'+
+        '<button type="button" class="btn b-gh xs" onclick="revOpenExistingReview(\''+escHtml(String(e.ID))+'\',\''+escHtml(String(cid))+'\')">Open it</button></div>'; }).join('')+
+      '<div style="margin-top:4px;color:#667">Open that one instead, or start a new review below.</div></div>' : '';
+  var polHtml = items.length ? '<div class="fld"><label>Policies to link to the review</label>'+
+      items.map(function(x, i){
+        var p = x.pol;
+        return '<label style="display:flex;gap:8px;align-items:flex-start;font-size:12.5px;padding:3px 0;cursor:pointer;text-transform:none;letter-spacing:0;font-weight:400;color:var(--ink)">'+
+          '<input type="checkbox" data-pol="'+escHtml(String(p.ID))+'" checked style="margin-top:2px;width:15px;height:15px;accent-color:#0e413a">'+
+          '<span>'+escHtml((p.Insurer||'Policy')+(p.Type?' · '+p.Type:'')+(clean(p.PolicyNo)?' · '+p.PolicyNo:''))+' <span style="color:#889">· '+x.day+' '+escHtml(revYmLabel(x.ym,true))+' · year '+x.years+(x.notMine?' · not your policy':'')+(clean(p.Status) && p.Status!=='Active'?' · '+escHtml(p.Status):'')+'</span></span></label>';
+      }).join('')+'</div>' : '';
+  miniDialog('📋 Start review · '+escHtml(c.Name||''),
+    warn+
+    '<div style="font-size:12.5px;color:#556;margin-bottom:10px">Creates a task and its Annual Review work event together. The reminder closes. Documents you upload in the task are filed in the work event.</div>'+
+    polHtml+
+    '<div class="g2"><div class="fld"><label>Review type</label><select id="srType">'+
+      '<option value="REV_LIFE"'+(defType==='REV_LIFE'?' selected':'')+'>🔄 Annual Review — Life</option>'+
+      '<option value="REV_INVEST"'+(defType==='REV_INVEST'?' selected':'')+'>🔄 Annual Review — Invest</option></select></div>'+
+    '<div class="fld"><label>Task for</label><select id="srWho">'+userOptions('Clinton')+'</select></div></div>'+
+    '<div class="fld"><label>Case name</label><input type="text" id="srName" maxlength="200" value="'+escHtml(defName)+'" autocomplete="off"></div>'+
+    '<div class="fld"><label>Due date</label><input type="date" id="srDue" value="'+localDateStr()+'"></div>'+
+    '<div class="fld"><label>Note (optional)</label><textarea id="srNote" style="min-height:56px" placeholder="Anything to remember for this review"></textarea></div>',
+    '📋 Start review',
+    function(box, close){
+      var type = (box.querySelector('#srType')||{}).value || 'REV_LIFE';
+      var who = (box.querySelector('#srWho')||{}).value || 'Clinton';
+      var name = String((box.querySelector('#srName')||{}).value||'').trim();
+      var due = (box.querySelector('#srDue')||{}).value || localDateStr();
+      var note = String((box.querySelector('#srNote')||{}).value||'').trim();
+      var pids = Array.prototype.map.call(box.querySelectorAll('input[data-pol]:checked'), function(i){ return i.getAttribute('data-pol'); });
+      var ev = evRowNew(c.ID, type, '', name, who, '');
+      var now = new Date().toISOString();
+      var lines = items.filter(function(x){ return pids.indexOf(String(x.pol.ID)) >= 0; }).map(function(x){
+        var p = x.pol; return '• '+(p.Insurer||'Policy')+(p.Type?' '+p.Type:'')+(clean(p.PolicyNo)?' ('+p.PolicyNo+')':'')+': anniversary '+x.day+' '+revYmLabel(x.ym,true)+', year '+x.years+(x.notMine?' (not your policy)':'');
+      });
+      var text = 'Review started from the Reviews list by '+userLabel(cu())+'.'+(lines.length ? '\n'+lines.join('\n') : (r && r.feed ? '\nNot spoken to in a year: phone to reconnect.' : ''))+(note ? '\n'+note : '');
+      var task = {ID:'t_'+Date.now(), Title:taskTitleForEvent(ev), Assignee:who, DueDate:due, Priority:'Normal', CCWife:'', ClientName:c.Name||'',
+        Notes:JSON.stringify([{date:now, text:text, user:cu()}]), Done:false, Timestamp:now, OpenedBy:cu(), OpenedDate:now,
+        WorkEventID:ev.ID, NewForAssignee: who !== cu() ? 'Yes' : ''};
+      if(TASK_BUSY['sr_'+cid]){ close(); return; }   // a second click while the first is on its way
+      TASK_BUSY['sr_'+cid] = true;
+      close();
+      caseLinkCreate({ev:ev, task:task, links:pids.map(function(id){ return {PolicyID:id, Action:'reviewed'}; }), keepTaskOnFail:false,
+        okMsg:'Review started: task for '+userLabel(who)+' ✓'}, function(){ delete TASK_BUSY['sr_'+cid]; var _s=captureScrolls(); render(); restoreScrolls(_s); });
+    });
+}
+function revOpenExistingReview(eid, cid){
+  if(window._miniDialogClose) window._miniDialogClose();
+  var t = taskForEvent(eid);
+  if(t){ openTaskLogModal(t.ID); return; }
+  openBoardCase(cid, eid);
+}
+
 // TASKS PAGE
 function renderTasks(){
   if(!window.TASK_USER_FILTER) window.TASK_USER_FILTER = cu();
@@ -9235,6 +9979,7 @@ function taskRowColored(t, color){
     '<div style="flex:1;cursor:pointer" data-act="open-task-log" data-id="'+t.ID+'">'+
     '<div style="font-size:13px;font-weight:600;color:var(--ink)">'+( t.Priority==='Urgent'?'🔴 ':'')+( t.Title||'')+'</div>'+
     '<div style="font-size:11px;color:#889;margin-top:2px;display:flex;gap:8px;flex-wrap:wrap">'+
+    taskNewPill(t)+taskLinkPill(t)+
     (t.Priority==='Urgent'?'<span style="background:#fde8e8;color:var(--rose);border-radius:10px;padding:1px 7px;font-size:10px;font-weight:700">URGENT</span>':'')+
     (String(t.CCWife||'').toLowerCase()==='yes'&&assignee!=='Wife'?'<span style="background:#e0eeff;color:#2563ab;border-radius:10px;padding:1px 7px;font-size:10px;font-weight:700">👁 CC Tracy</span>':'')+
     '<span style="'+nameBg+';border-radius:10px;padding:1px 7px;font-size:10px;font-weight:700">'+userLabel(assignee)+'</span>'+
@@ -9266,6 +10011,7 @@ function taskRow(t){
     '<div style="flex:1;cursor:pointer" data-act="open-task-log" data-id="'+t.ID+'">'+
     '<div style="font-size:13px;font-weight:500'+(done?';text-decoration:line-through;color:#aaa':'')+'">'+(t.Priority==='Urgent'?'🔴 ':'')+( t.Title||'')+'</div>'+
     '<div class="tmeta" style="font-size:11px;color:#889;margin-top:2px;display:flex;gap:8px;flex-wrap:wrap">'+
+    taskNewPill(t)+taskLinkPill(t)+
     (t.Priority==='Urgent'?'<span style="background:#fde8e8;color:var(--rose);border-radius:10px;padding:1px 7px;font-size:10px;font-weight:700">URGENT</span>':'')+
     (String(t.CCWife||'').toLowerCase()==='yes'&&assignee!=='Wife'?'<span style="background:#e0eeff;color:#2563ab;border-radius:10px;padding:1px 7px;font-size:10px;font-weight:700">👁 CC Tracy</span>':'')+
     '<span style="'+(done?'background:var(--smoke)':nameBg)+';border-radius:10px;padding:1px 7px;font-size:10px;font-weight:700">'+userLabel(assignee)+'</span>'+
@@ -17366,6 +18112,16 @@ function openTaskModal(clientName){
       return '<option value="'+c.Name+'"'+(TC===c.Name?' selected':'')+'>'+c.Name+'</option>';
     }).join('')+
     '</select></div>'+
+    // 6 Oct 2026: a new case (or review) can start from the task. The work event is
+    // created with it and joined to it; "Assign To" is who is responsible for both.
+    '<div style="margin:2px 0 10px;padding:8px 10px;background:#f7fbfa;border:1px solid #cfe0dc;border-radius:7px">'+
+      '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;font-weight:600;color:var(--navy);text-transform:none;letter-spacing:0">'+
+      '<input type="checkbox" id="tcase" onchange="taskCaseToggle()" style="width:16px;height:16px;accent-color:var(--navy)"> 📋 This is a case: open a work event with this task</label>'+
+      '<div id="tcaseBox" style="display:none;margin-top:8px">'+
+        '<div style="font-size:11.5px;color:#556;margin-bottom:6px">Pick the client above. The work event goes to the person in "Assign To". Documents uploaded in the task are filed in the work event.</div>'+
+        caseFieldsHtml('tc', '', '')+
+      '</div>'+
+    '</div>'+
     '<div class="fld"><label>Initial Note</label>'+
     '<textarea id="tn" placeholder="Describe the task..." style="min-height:80px"></textarea></div>';
   document.getElementById('tMod').classList.add('open');
@@ -17375,6 +18131,8 @@ function openTaskLogModal(taskId){
   var t = DB.tasks.find(function(x){ return String(x.ID)===String(taskId); });
   if(!t) return;
   TASK_LOG_ID = taskId;
+  taskClearNew(t);   // opened by the person it was given to: the 🆕 flag goes (6 Oct 2026)
+  var _linked = !!t.WorkEventID;
   var log = [];
   try{ log = JSON.parse(t.Notes||'[]'); }catch(e){ if(t.Notes) log=[{date:t.Timestamp||'',text:t.Notes,user:t.Assignee||''}]; }
   // Resolve the linked client (tolerant of spacing/case) so we can offer a
@@ -17392,24 +18150,31 @@ function openTaskLogModal(taskId){
         : '<span title="This task&#39;s client name does not match any client — use the Client re-link selector below to fix it" style="background:#fde8e8;color:var(--rose);border-radius:10px;padding:2px 9px;font-size:10px;font-weight:700">⚠ 👤 '+t.ClientName+' (not linked)</span>')
       : '')+
     (t.DueDate?bx('bx-rd','📅 Due '+fdate(t.DueDate)):'')+
+    taskLinkPill(t)+taskNewPill(t)+
+    (!_linked && !isdone(t) ? '<button class="btn b-gh xs" data-act="task-make-case" data-id="'+escHtml(String(t.ID))+'" title="Open a work event for this task and join them" style="font-size:11px;padding:2px 10px">📋 Make this a case</button>' : '')+
     '</div>'+
+    // 6 Oct 2026: a task joined to a work event shows that work event's documents here,
+    // and uploads go straight into the work event (the compliance file).
+    (_linked ? '<div id="tlogEvPanel"><div style="font-size:12px;color:#889;font-style:italic;padding:6px 0 10px">Loading the work event…</div></div>' : '')+
     '<div style="max-height:300px;overflow-y:auto;border:1.5px solid var(--smoke);border-radius:8px;padding:12px;background:#fafaf8">'+
     (log.length===0?'<div style="color:#aaa;font-size:13px">No activity yet</div>':
     log.slice().reverse().map(function(e){
       return '<div style="margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid var(--smoke);last-child:border:none">'+
         '<div style="font-size:10px;font-weight:700;color:var(--gold);margin-bottom:4px">'+
         (e.date?new Date(e.date).toLocaleString('en-ZA',{day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}):'')+'  ·  '+userLabel(e.user||cu())+'</div>'+
-        '<div style="font-size:13px;line-height:1.7;white-space:pre-wrap">'+e.text+'</div>'+
+        '<div style="font-size:13px;line-height:1.7;white-space:pre-wrap">'+escHtml(e.text)+'</div>'+
         '</div>';
     }).join(''))+
     '</div></div>'+
     // ── Attachments section ────────────────────────────────────────────────
     // Operational chase material lives here: emails, screenshots, supporting
     // docs. NOT for advice records — those go to Work Events (FAIS s9).
-    '<div style="margin-bottom:12px">'+
+    // A task joined to a work event has no attachments box of its own (files go to the
+    // work event above); older attachments, if any, are still listed (tlogDocsWrap).
+    '<div id="tlogDocsWrap" style="margin-bottom:12px'+(_linked ? ';display:none' : '')+'">'+
       '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">'+
-        '<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:.6px">📎 Attachments</div>'+
-        '<button class="btn b-gh sm" data-act="task-doc-upload" data-tid="'+t.ID+'" style="padding:4px 12px;font-size:11px">+ Attach File</button>'+
+        '<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:.6px">📎 '+(_linked ? 'Older attachments on this task' : 'Attachments')+'</div>'+
+        (_linked ? '' : '<button class="btn b-gh sm" data-act="task-doc-upload" data-tid="'+t.ID+'" style="padding:4px 12px;font-size:11px">+ Attach File</button>')+
       '</div>'+
       '<div id="tlogDocsList" style="border:1px solid var(--smoke);border-radius:6px;padding:8px;background:#fff;max-height:200px;overflow-y:auto">'+
         '<div style="font-size:12px;color:#889;font-style:italic;padding:6px 0">Loading attachments…</div>'+
@@ -17450,6 +18215,7 @@ function openTaskLogModal(taskId){
   // Load attachments lazily when the modal opens. The list will populate
   // via renderTaskDocsSection once the fetch returns.
   loadTaskDocs(taskId);
+  if(_linked) tevLoad(t);
 }
 
 function toggleTaskPri(){
@@ -17474,6 +18240,23 @@ function saveTask(){
   var ccWife = document.getElementById('tccwife') && document.getElementById('tccwife').checked ? 'Yes' : '';
   var task={ID:id,Title:title,Assignee:g('tas'),DueDate:g('tdue'),Priority:g('tpri')||'Normal',
     CCWife:ccWife,ClientName:g('tcl'),Notes:log,Done:false,Timestamp:now,OpenedBy:cu(),OpenedDate:now};
+  // 🆕 flag for the person it is given to, until they open it (6 Oct 2026).
+  task.NewForAssignee = (task.Assignee && task.Assignee !== cu()) ? 'Yes' : '';
+  // "📋 This is a case": create the work event with it and join them (6 Oct 2026).
+  var _caseBox = document.getElementById('tcase');
+  if(_caseBox && _caseBox.checked){
+    var cf = caseFieldsRead('tc');
+    if(cf.error){ toast(cf.error,'err'); return; }
+    var cc = findClientByName(task.ClientName);
+    if(!cc){ toast('Pick the client for this case','err'); return; }
+    if(window._taskLinkReady === false){ alert(TASK_LINK_SQL_MSG); return; }
+    var cev = evRowNew(cc.ID, cf.type, cf.subtype, cf.caseName || title, task.Assignee || cu(), '');
+    task.WorkEventID = cev.ID;
+    closeAll();
+    caseLinkCreate({ev:cev, task:task, links:[], keepTaskOnFail:true,
+      okMsg:'Task and its work event created'+(task.Assignee !== cu() ? ' for '+userLabel(task.Assignee) : '')+' ✓'});
+    return;
+  }
   // ── Protect against in-flight sync wiping this task before the server responds.
   // Same pattern as savePolicy / saveClient / saveFinPos: flag the record BEFORE
   // pushing to DB so a background sync sees the flag and keeps the record.
@@ -17488,32 +18271,48 @@ function saveTask(){
   });
 }
 
-function completeTaskFromLog(){
-  var t = DB.tasks.find(function(x){ return String(x.ID)===String(TASK_LOG_ID); });
+function completeTaskFromLog(linked){
+  // The task this was started on (6 Oct 2026): a joined task's question comes back
+  // after a server round trip, by which time another task may be open.
+  var _tid = (linked && linked.tid) || TASK_LOG_ID;
+  var t = DB.tasks.find(function(x){ return String(x.ID)===String(_tid); });
   if(!t) return;
+  // 6 Oct 2026: a task joined to a work event completes it too (one combined question,
+  // with any missing mandatory documents listed). linked = {asked, ev, tid} once answered.
+  if(t.WorkEventID && !(linked && linked.asked)){
+    if(isdone(t) || TASK_BUSY[String(t.ID)]) return;   // double click
+    TASK_BUSY[String(t.ID)] = true;
+    taskLinkedComplete(t, function(ev){ completeTaskFromLog({asked:true, ev:ev, tid:t.ID}); }, function(){ delete TASK_BUSY[String(t.ID)]; });
+    return;
+  }
+  delete TASK_BUSY[String(t.ID)];
+  if(isdone(t)) return;   // already completed (e.g. a second question answered)
   // Say exactly which task is being closed and whose it is, so a task can't
   // be closed by mistake from the wrong window or by the wrong person.
   var _who = t.Assignee||'Clinton';
   var _msg = 'Mark this task complete?\n\n'+(t.Title||'')+'\nAssigned to: '+userLabel(_who);
   if(_who !== cu()) _msg += '\n\nThis is '+userLabel(_who)+'\'s task, not yours.';
-  if(!confirm(_msg)) return;
+  if(!(linked && linked.asked) && !confirm(_msg)) return;
   // Snapshot BEFORE mutating, so the undo toast can restore the task exactly
   // (removing the completion log line too), not just flip the tick back.
   var tid = t.ID;
   var snapNotes = t.Notes;
   var snapDone = t.Done;
-  var entry = document.getElementById('tlogentry');
+  var _same = String(TASK_LOG_ID) === String(tid);   // is this task's pop-up still the one open?
+  var entry = _same ? document.getElementById('tlogentry') : null;
   var log = [];
   try{ log = JSON.parse(t.Notes||'[]'); }catch(e){ if(t.Notes) log=[{date:t.Timestamp||'',text:t.Notes,user:t.Assignee||''}]; }
   var noteText = (entry && entry.value.trim()) ? entry.value.trim()+' [Marked complete]' : 'Task completed.';
   log.push({date:new Date().toISOString(), text:noteText, user:cu()});
   t.Notes = JSON.stringify(log);
   t.Done = true;
-  closeAll(); render();
-  post({action:'updateDueDate',id:TASK_LOG_ID,assignee:t.Assignee,dueDate:t.DueDate},function(){});
-  post({action:'updateTaskNotes',id:TASK_LOG_ID,notes:t.Notes},function(){});
-  post({action:'toggleTask',id:TASK_LOG_ID,done:true},function(){});
+  if(_same) closeAll();
+  render();
+  post({action:'updateDueDate',id:tid,assignee:t.Assignee,dueDate:t.DueDate},function(){});
+  post({action:'updateTaskNotes',id:tid,notes:t.Notes},function(){});
+  post({action:'toggleTask',id:tid,done:true},function(){});
   undoToast('Task marked complete', '↩ Undo', function(){ restoreTaskState(tid, snapNotes, snapDone); });
+  if(linked && linked.ev) taskLinkedAfterComplete(t, linked.ev, snapNotes, snapDone);   // closes its work event; undo reopens both
 }
 
 function saveTaskLog(){
@@ -17528,9 +18327,11 @@ function saveTaskLog(){
   var priEl = document.getElementById('tpri');
   var newPri = priEl ? priEl.value : '';
   var entryText = entry.value.trim();
+  var _reassigned = false;
   if(newAssignee && newAssignee !== t.Assignee){
     entryText += ' [Reassigned to '+userLabel(newAssignee)+']';
     t.Assignee = newAssignee;
+    _reassigned = true;
   }
   if(newPri && newPri !== t.Priority){
     entryText += ' [Priority set to '+newPri+']';
@@ -17562,6 +18363,9 @@ function saveTaskLog(){
   // Save to server
   post({action:'updateDueDate',id:TASK_LOG_ID,assignee:t.Assignee,dueDate:t.DueDate},function(){});
   post({action:'updateTaskNotes',id:TASK_LOG_ID,notes:t.Notes},function(){toast('Entry added ✓','ok');});
+  // 🆕 flag for the new person, and its work event follows (6 Oct 2026). Set before any
+  // full-row save below, so that save carries the flag too.
+  if(_reassigned) taskAssigneeChanged(t);
   // ClientName lives on the task row itself, so persist the whole task when re-linked.
   if(_relinked){ post({action:'saveTask', task:JSON.parse(JSON.stringify(t))}, function(){}); }
   // Stay in the modal — refresh the log view in place without closing
@@ -17583,9 +18387,10 @@ function saveTaskLogAndClose(){
   // Reassign
   var reassign = document.getElementById('treassign');
   var newAssignee = reassign ? reassign.value : '';
+  var _reassigned = false;
   if(newAssignee && newAssignee !== t.Assignee){
     t.Assignee = newAssignee;
-    changed = true;
+    changed = true; _reassigned = true;
   }
   // Priority
   var priEl = document.getElementById('tpri');
@@ -17618,6 +18423,7 @@ function saveTaskLogAndClose(){
   }
   if(changed){
     post({action:'updateDueDate',id:TASK_LOG_ID,assignee:t.Assignee,dueDate:t.DueDate},function(){});
+    if(_reassigned) taskAssigneeChanged(t);   // 🆕 flag for the new person; its work event follows (6 Oct 2026). Before the full-row save.
     // ClientName is a task-row column, so persist the full task when re-linked.
     if(_relinked){ post({action:'saveTask', task:JSON.parse(JSON.stringify(t))}, function(){}); }
     toast(_relinked?'Task re-linked ✓':'Saved ✓','ok');
@@ -17625,12 +18431,21 @@ function saveTaskLogAndClose(){
   closeAll(); render();
 }
 
-function toggleTask(id,wasDone){
+function toggleTask(id,wasDone,linked){
   var t=DB.tasks.find(function(x){return x.ID===id;});
   if(!t) return;
   var who=t.Assignee||'Clinton';
+  // 6 Oct 2026: ticking a task joined to a work event completes the work event too
+  // (one combined question, listing missing mandatory documents).
+  if(!wasDone && t.WorkEventID && !(linked && linked.asked)){
+    if(isdone(t) || TASK_BUSY[String(t.ID)]) return;   // double click
+    TASK_BUSY[String(t.ID)] = true;
+    taskLinkedComplete(t, function(ev){ toggleTask(id, false, {asked:true, ev:ev}); }, function(){ delete TASK_BUSY[String(t.ID)]; });
+    return;
+  }
+  if(linked && linked.asked){ delete TASK_BUSY[String(t.ID)]; if(isdone(t)) return; }   // already completed meanwhile
   // Ticking someone else's task closes it for them, so ask first.
-  if(!wasDone && who!==cu()){
+  if(!wasDone && who!==cu() && !(linked && linked.asked)){
     if(!confirm('Mark this task complete?\n\n'+(t.Title||'')+'\nAssigned to: '+userLabel(who)+'\n\nThis is '+userLabel(who)+'\'s task, not yours.')) return;
   }
   var snapNotes=t.Notes, snapDone=t.Done;
@@ -17647,11 +18462,19 @@ function toggleTask(id,wasDone){
   // accidental tick can be reversed (this also removes the audit line).
   if(!wasDone){
     undoToast('Task marked complete', '↩ Undo', function(){ restoreTaskState(id, snapNotes, snapDone); });
+    if(linked && linked.ev) taskLinkedAfterComplete(t, linked.ev, snapNotes, snapDone);   // closes its work event; undo reopens both
+  } else if(t.WorkEventID){
+    taskReopenLinkedEvent(t);   // unticked: its completed work event reopens too
   }
 }
 
 function delTask(id){
-  if(!confirm('Delete this task?'))return;
+  var _dt=DB.tasks.find(function(x){return x.ID===id;});
+  if(_dt && _dt.WorkEventID){
+    // 6 Oct 2026: deleting the task never deletes its work event (the compliance file).
+    if(!confirm('Delete this task?\n\nIts work event stays: that is the compliance file. You can make a new task for it from the work event.'))return;
+  }
+  else if(!confirm('Delete this task?'))return;
   DB.tasks=DB.tasks.filter(function(t){return t.ID!==id;});
   render();
   post({action:'deleteRow',sheet:'Tasks',id:id});
@@ -17751,6 +18574,12 @@ document.addEventListener('click', function(e){
         case 'view-schedule':     openPolicySchedule(el.getAttribute('data-cid')); break;
         case 'logout':         sbForceLogin(); break;
         case 'del-task':       delTask(id); break;
+        // Tasks ↔ work events (6 Oct 2026)
+        case 'task-make-case': taskMakeCase(id); break;
+        case 'tev-upload':     openEventDocUpload(el.getAttribute('data-eid'), el.getAttribute('data-dk'), el.getAttribute('data-replace')==='1'); break;
+        case 'tev-open':       closeAll(); openBoardCase(el.getAttribute('data-cid'), el.getAttribute('data-eid')); break;
+        case 'ev-make-task':   evMakeTask(el.getAttribute('data-eid')); break;
+        case 'ev-task-note':   evTaskAddNote(id); break;
         case 'add-spouse':     openFamModal(id,'Spouse'); break;
         case 'add-child-row':  addChildRow(); break;
         case 'remove-child':   removeChild(id); break;
