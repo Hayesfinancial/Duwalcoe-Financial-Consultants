@@ -1408,6 +1408,66 @@ var CL_HOLDS_GROUPS = [
   ['will',     'Will (with you)',         []]
 ];
 function hasWillWithYou(c){ return c && c.HasWill==='Yes' && c.WillThroughMe==='Yes'; }
+// Will status in one click from the client card (7 Oct 2026). Writes the same two
+// fields as Edit → Will / Estate Planning (HasWill, WillThroughMe); date and attorney are left alone.
+// [key, label in the chooser, label on the pill, colour, HasWill, WillThroughMe]
+var WILL_STATES = [
+  ['unasked',   'Not asked yet',       'Will not asked',   '#94a3b8', '',    ''],
+  ['no',        'No will',             'No will',          '#9e2a2b', 'No',  'No'],
+  ['elsewhere', 'Will elsewhere',      'Will (elsewhere)', '#d97706', 'Yes', 'No'],
+  ['mine',      'Will with Duwalcoe',  'Will (mine)',      '#2e7d5a', 'Yes', 'Yes']
+];
+function willStateOf(c){
+  if(c.HasWill==='Yes') return c.WillThroughMe==='Yes' ? 'mine' : 'elsewhere';
+  if(c.HasWill==='No') return 'no';
+  return 'unasked';
+}
+function willQuickOpen(cid){
+  var c = DB.clients.find(function(x){ return String(x.ID)===String(cid); });
+  if(!c) return;
+  var cur = willStateOf(c);
+  var ov = document.createElement('div');
+  ov.id = 'willQuick';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(10,20,40,.55);z-index:10001;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(2px)';
+  ov.innerHTML = '<div style="background:#fff;border-radius:12px;padding:20px 22px;max-width:360px;width:90%;box-shadow:0 12px 48px rgba(0,0,0,.25);font-family:inherit">'+
+    '<div style="font-family:Georgia,serif;font-size:17px;color:#0e413a;margin-bottom:4px">📜 Will · '+escHtml(c.Name||'')+'</div>'+
+    '<div style="font-size:12px;color:#667;margin-bottom:12px">Pick one. Date and attorney stay in Edit → Will / Estate Planning.</div>'+
+    WILL_STATES.map(function(w){
+      var on = w[0]===cur;
+      return '<button type="button" data-will="'+w[0]+'" style="display:flex;align-items:center;gap:10px;width:100%;margin-bottom:6px;padding:9px 12px;border-radius:8px;cursor:pointer;font-family:inherit;font-size:13.5px;font-weight:700;text-align:left;'+
+        'border:2px solid '+(on ? w[3] : '#e2e6ea')+';background:'+(on ? '#f7f8fa' : '#fff')+';color:#1f2933">'+
+        '<span style="width:12px;height:12px;border-radius:50%;background:'+w[3]+';flex-shrink:0"></span>'+escHtml(w[1])+(on ? '<span style="margin-left:auto;font-size:11px;color:#667;font-weight:600">now</span>' : '')+'</button>';
+    }).join('')+
+    '<div style="text-align:right;margin-top:6px"><button type="button" data-will="" class="btn b-gh sm">Cancel</button></div></div>';
+  document.body.appendChild(ov);
+  function close(){ if(ov.parentNode) ov.parentNode.removeChild(ov); }
+  ov.addEventListener('click', function(e){
+    if(e.target === ov){ close(); return; }
+    var b = e.target.closest ? e.target.closest('[data-will]') : null;
+    if(!b) return;
+    var k = b.getAttribute('data-will');
+    close();
+    if(k && k !== cur) willQuickSet(c.ID, k);
+  });
+}
+function willQuickSet(cid, key){
+  var c = DB.clients.find(function(x){ return String(x.ID)===String(cid); });
+  var w = WILL_STATES.filter(function(x){ return x[0]===key; })[0];
+  if(!c || !w) return;
+  var before = {HasWill:c.HasWill, WillThroughMe:c.WillThroughMe};
+  var f = {HasWill:w[4], WillThroughMe:w[5]};
+  c.HasWill = f.HasWill; c.WillThroughMe = f.WillThroughMe;
+  try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
+  var _s = captureScrolls(); render(); restoreScrolls(_s);
+  post({action:'patchClientFields', id:c.ID, fields:f}, function(res){
+    if(res && res.ok){ toast((c.Name||'Client')+': '+w[1],'ok'); return; }
+    // Not saved: put it back so the card never shows something the server doesn't have.
+    c.HasWill = before.HasWill; c.WillThroughMe = before.WillThroughMe;
+    try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
+    var _s2 = captureScrolls(); render(); restoreScrolls(_s2);
+    toast('⚠️ Will status not saved to the server. Please try again.','err');
+  });
+}
 // Duwalcoe referral ticks: [group key, clients column, short label, long label]
 var DUW_TICKS = [
   ['st',     'ShortTermDuwalcoe', 'ST',     'Short-term through Duwalcoe'],
@@ -2692,16 +2752,11 @@ function renderProfile(){
     // 🔴 #9e2a2b No will            — HasWill=No
     // ⚪ #94a3b8 Will not asked     — HasWill empty/undefined
     // Skipped for company clients (companies don't have wills in this sense).
-    (c.ClientType!=='Company' ? (
-      c.HasWill==='Yes' && c.WillThroughMe==='Yes' ?
-        '<span style="background:#2e7d5a;color:#fff;border-radius:20px;padding:2px 12px;font-size:13px;font-weight:700;letter-spacing:0.02em">📜 Will (mine)</span>'
-      : c.HasWill==='Yes' ?
-        '<span style="background:#d97706;color:#fff;border-radius:20px;padding:2px 12px;font-size:13px;font-weight:700;letter-spacing:0.02em">📜 Will (elsewhere)</span>'
-      : c.HasWill==='No' ?
-        '<span style="background:#9e2a2b;color:#fff;border-radius:20px;padding:2px 12px;font-size:13px;font-weight:700;letter-spacing:0.02em">📜 No will</span>'
-      :
-        '<span style="background:#94a3b8;color:#fff;border-radius:20px;padding:2px 12px;font-size:13px;font-weight:700;letter-spacing:0.02em">📜 Will not asked</span>'
-    ) : '')+
+    // 7 Oct 2026: click the pill to change it (willQuickOpen); same two fields as Edit.
+    (c.ClientType!=='Company' ? (function(){
+      var _wk = willStateOf(c), _w = WILL_STATES.filter(function(x){ return x[0]===_wk; })[0];
+      return '<span data-will-pill="1" onclick="event.stopPropagation();willQuickOpen(\''+escHtml(String(c.ID))+'\')" title="Click to change the will status" style="background:'+_w[3]+';color:#fff;border-radius:20px;padding:2px 12px;font-size:13px;font-weight:700;letter-spacing:0.02em;cursor:pointer">📜 '+_w[2]+' ▾</span>';
+    })() : '')+
     (c.Cohabiting==='Yes'?'<span style="background:#0e413a;color:#ccd660;border-radius:20px;padding:2px 12px;font-size:13px;font-weight:700;letter-spacing:0.02em" title="Cohabiting / life partner (distinct from marital status)">🤝 Life partner</span>':'')+
     '</div>'+
     (clean(c.MaidenName)?'<div style="font-size:12px;color:#aabbd4;margin-bottom:2px">Maiden name: <strong style="color:#ccd8e8">'+c.MaidenName+'</strong></div>':'')+
