@@ -1777,7 +1777,11 @@ function ntNoticeClose(){
   _ntShown = [];
   var el = document.getElementById('ntNotice'); if(el && el.parentNode) el.parentNode.removeChild(el);
 }
+// Clinton reads his task list himself and does not want pop-ups (9 Oct 2026): for him
+// only the 🆕 badge and the tab title. Tracy and Courtney get the notice.
+var NT_NOTICE_OFF_FOR = ['Clinton'];
 function ntNoticeRender(){
+  if(NT_NOTICE_OFF_FOR.indexOf(cu()) >= 0){ ntNoticeClose(); return; }
   var items = _ntShown.map(function(id){ return DB.tasks.find(function(x){ return String(x.ID) === id; }); })
     .filter(function(t){ return t && !isdone(t) && t.NewForAssignee === 'Yes' && (t.Assignee||'Clinton') === cu(); });
   if(!items.length){ ntNoticeClose(); return; }
@@ -9922,6 +9926,41 @@ function taskCaseToggle(){
     var nm = document.getElementById('tcName'), tt = document.getElementById('tt');
     if(nm && !nm.value && tt) nm.value = tt.value;
   }
+}
+
+// ── ✏️ Edit a task's heading (9 Oct 2026) ──
+// Saves only the Title column, and notes the old heading in the task log.
+function taskRename(tid){
+  var t = DB.tasks.find(function(x){ return String(x.ID) === String(tid); });
+  if(!t) return;
+  var dlg = miniDialog('✏️ Edit heading',
+    '<div class="fld"><label>Heading *</label><input type="text" id="trnTitle" maxlength="200" autocomplete="off" style="width:100%;box-sizing:border-box"></div>',
+    'Save heading',
+    function(box, close){
+      var nt = String((document.getElementById('trnTitle')||{}).value || '').replace(/\s+/g,' ').trim();
+      if(!nt){ toast('Type a heading first','err'); return; }
+      var cur = DB.tasks.find(function(x){ return String(x.ID) === String(tid); }) || t;   // a sync may have replaced the object
+      var old = cur.Title || '';
+      close();
+      if(nt === old) return;
+      cur.Title = nt;
+      taskLogPush(cur, '[Heading changed from "'+old+'"]');
+      try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
+      post({action:'patchTask', id:cur.ID, fields:{Title:nt}}, function(r){
+        if(r && r.ok) toast('Heading saved ✓','ok');
+        else toast('⚠️ The new heading was not saved to the server. Please try again.','err');
+      });
+      post({action:'updateTaskNotes', id:cur.ID, notes:cur.Notes}, function(){});
+      var tm = document.getElementById('tMod');
+      if(String(TASK_LOG_ID) === String(cur.ID) && tm && tm.classList.contains('open')){
+        tm.querySelector('h3').textContent = nt;
+        var lg = document.getElementById('tlogentry');
+        if(!(lg && lg.value.trim())) openTaskLogModal(cur.ID);   // shows the log line; kept as is if a note is being typed
+      }
+      render();
+    });
+  var inp = dlg.box.querySelector('#trnTitle');
+  if(inp){ inp.value = t.Title || ''; inp.focus(); inp.select(); inp.addEventListener('keydown', function(e){ if(e.key === 'Enter'){ e.preventDefault(); dlg.box.querySelector('[data-role=ok]').click(); } }); }
 }
 
 // ── "📋 Make this a case" on an existing task ──
@@ -18654,6 +18693,7 @@ function openTaskLogModal(taskId){
       : '')+
     (t.DueDate?bx('bx-rd','📅 Due '+fdate(t.DueDate)):'')+
     taskLinkPill(t)+taskNewPill(t)+
+    '<button class="btn b-gh xs" data-act="task-rename" data-id="'+escHtml(String(t.ID))+'" title="Change this task\'s heading" style="font-size:11px;padding:2px 10px">✏️ Edit heading</button>'+
     (!_linked && !isdone(t) ? '<button class="btn b-gh xs" data-act="task-make-case" data-id="'+escHtml(String(t.ID))+'" title="Open a work event for this task. You choose who works the case." style="font-size:11px;padding:2px 10px">📋 Make '+(_panels.length ? 'another' : 'this a')+' case</button>' : '')+
     '</div>'+
     // 6 Oct 2026: a task joined to a work event shows that work event's documents here,
@@ -19079,6 +19119,7 @@ document.addEventListener('click', function(e){
         case 'del-task':       delTask(id); break;
         // Tasks ↔ work events (6 Oct 2026)
         case 'task-make-case': taskMakeCase(id); break;
+        case 'task-rename':    taskRename(id); break;
         case 'tev-upload':     openEventDocUpload(el.getAttribute('data-eid'), el.getAttribute('data-dk'), el.getAttribute('data-replace')==='1'); break;
         case 'tev-open':       closeAll(); openBoardCase(el.getAttribute('data-cid'), el.getAttribute('data-eid')); break;
         case 'ev-make-task':   evMakeTask(el.getAttribute('data-eid')); break;
