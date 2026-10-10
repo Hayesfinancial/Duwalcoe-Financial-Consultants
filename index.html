@@ -11549,6 +11549,12 @@ function buildFnaDataPack(cid, includeSpouse){
         if(dC)  line('  TotalDeathCover (computed): '+dC);
         if(dD)  line('  TotalDisabilityCover (computed): '+dD);
         if(dDD) line('  TotalDreadDiseaseCover (computed): '+dDD);
+        // Benefits on another person's life (10 Oct 2026): NOT cover on this client, already
+        // left out of the totals above. Paid to the policy owner if THAT person dies first.
+        lumpOtherLives(p).forEach(function(r){
+          line('  CoverOnAnotherLife: '+(r.type||'Cover')+' '+N(r.cover)+' on the life of '+clean(r.life).trim()+
+               ' (NOT death cover on this client; excluded from the totals above; pays the policy owner on that person\'s death)');
+        });
       }catch(e){}
       Object.keys(p).forEach(function(k){
         if(polSkip[k]) return;
@@ -14609,6 +14615,10 @@ function renderLumpRows(){
       '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Premium Esc %</div><input type="text" value="'+(r.premEsc||'')+'" placeholder="% or Age Rated" onchange="POL_LUMP_ROWS['+i+'].premEsc=this.value;calcWeightedAvgPremEsc()" oninput="calcWeightedAvgPremEsc()" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
       '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Benefit Esc %</div><input type="text" value="'+(r.benEsc||'')+'" placeholder="%" onchange="POL_LUMP_ROWS['+i+'].benEsc=this.value" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
       '</div>'+
+      // Whose life this benefit is on (10 Oct 2026). Blank = this client. A name here
+      // (e.g. the spouse) keeps the cover OUT of the client's cover totals and FNA.
+      '<div style="margin-top:8px"><div style="font-size:10px;color:#889;margin-bottom:3px">On the life of <span style="color:#aaa">(leave blank if this client &mdash; fill in for a spouse or other life; not counted as this client\'s cover)</span></div>'+
+      '<input type="text" value="'+escHtml(clean(r.life))+'" placeholder="This client" onchange="POL_LUMP_ROWS['+i+'].life=this.value.trim()" style="width:100%;box-sizing:border-box;border:1.5px solid '+(lumpOnOtherLife(r)?'#d97706':'var(--mist)')+';border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
       '</div>';
   }).join('');
 }
@@ -15048,18 +15058,32 @@ function N(v){ return crmNum(v||'0'); }
 // lumpSum() reads the LumpBenefits JSON array and sums all matching rows.
 // Falls back to the legacy single field only when no JSON is present (very
 // old policies). legacyKey = the single-field name to fall back to.
+// A benefit row on SOMEONE ELSE'S life (e.g. the spouse benefit on a Discovery
+// Classic Life Plan, Petruccione 10 Oct 2026) carries that person's name in
+// row.life. Blank = the client. Such a row pays the policy owner when THAT
+// person dies, so it is not cover on the client and is left out of every
+// client cover total. Its premium still counts (the client pays it).
+function lumpOnOtherLife(r){ return !!(r && clean(r.life).trim()); }
 function lumpSum(p, matchType, legacyKey){
   if(p && p.LumpBenefits){
     try{
       var rows=JSON.parse(p.LumpBenefits);
       if(rows && rows.length){
         var tot=0;
-        rows.forEach(function(r){ if(r.type===matchType) tot+=N(r.cover); });
+        rows.forEach(function(r){ if(r && r.type===matchType && !lumpOnOtherLife(r)) tot+=N(r.cover); });
         return tot;
       }
     }catch(e){}
   }
   return N(p?p[legacyKey]:0);
+}
+// Benefit rows with a cover amount on another person's life, for display only.
+function lumpOtherLives(p){
+  try{
+    var rows=JSON.parse((p&&p.LumpBenefits)||'[]');
+    if(!Array.isArray(rows)) return [];
+    return rows.filter(function(r){ return lumpOnOtherLife(r) && N(r.cover)>0; });
+  }catch(e){ return []; }
 }
 // Income benefits within a policy are NOT additive — multiple rows describe
 // phases of one continuous income stream (e.g. Limited 2yr → Extended to 65).
@@ -15070,7 +15094,7 @@ function incomeMax(p){
       var rows=JSON.parse(p.IncomeBenefits);
       if(rows && rows.length){
         var mx=0;
-        rows.forEach(function(r){ var a=N(r.amount); if(a>mx) mx=a; });
+        rows.forEach(function(r){ if(lumpOnOtherLife(r)) return; var a=N(r.amount); if(a>mx) mx=a; });   // income on another life is not the client's cover (10 Oct 2026)
         return mx;
       }
     }catch(e){}
@@ -15444,9 +15468,10 @@ function collectPolicyForm(){
     // personal cover = total death cover). Was using .find() = first-row-only,
     // which silently under-counted multi-row policies. Same rule for
     // Capital Disability and Dread Disease.
-    BenDeath:(function(){ var s=0; POL_LUMP_ROWS.forEach(function(x){if(x.type==='Life Cover')s+=N(x.cover);}); return s?String(s):''; })(),
-    BenDisability:(function(){ var s=0; POL_LUMP_ROWS.forEach(function(x){if(x.type==='Capital Disability')s+=N(x.cover);}); return s?String(s):''; })(),
-    BenDreadDisease:(function(){ var s=0; POL_LUMP_ROWS.forEach(function(x){if(x.type==='Dread Disease / Severe Illness')s+=N(x.cover);}); return s?String(s):''; })(),
+    // Rows on another person's life (row.life) are not cover on the client (10 Oct 2026).
+    BenDeath:(function(){ var s=0; POL_LUMP_ROWS.forEach(function(x){if(x.type==='Life Cover' && !lumpOnOtherLife(x))s+=N(x.cover);}); return s?String(s):''; })(),
+    BenDisability:(function(){ var s=0; POL_LUMP_ROWS.forEach(function(x){if(x.type==='Capital Disability' && !lumpOnOtherLife(x))s+=N(x.cover);}); return s?String(s):''; })(),
+    BenDreadDisease:(function(){ var s=0; POL_LUMP_ROWS.forEach(function(x){if(x.type==='Dread Disease / Severe Illness' && !lumpOnOtherLife(x))s+=N(x.cover);}); return s?String(s):''; })(),
     DreadDiseaseType:'Lump Sum',
     DreadDiseaseNotes:(function(){ var labels=POL_LUMP_ROWS.filter(function(x){return x.type==='Dread Disease / Severe Illness' && x.label;}).map(function(x){return x.label;}); return labels.join(' · '); })(),
     LumpBenefits:JSON.stringify(POL_LUMP_ROWS),
@@ -16222,13 +16247,15 @@ function openPolicyView(cid,idx){
       field('Dread disease', cov(dd)),
       field('Income protection', ipm>0?cov(ipm,tag('/pm')):''),
       field('Cover ends', dt(p.MaturityDate))
-    ]);
+    ].concat(lumpOtherLives(p).map(function(r){   // cover on another life: shown, not counted (10 Oct 2026)
+      return field(escHtml((r.type==='Life Cover'?'Life cover':(r.type||'Cover'))+' on '+clean(r.life).trim()+' (not this client)'), cov(r.cover));
+    })));
     h+=tot||'<div style="font-size:12px;color:#aaa">No cover amounts captured.</div>';
     var lumps=arr(p.LumpBenefits);
     if(lumps.length){
       h+='<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:.5px;margin-top:4px">Lump sum benefits</div>';
       h+=table(['Benefit','Cover','Premium','Premium esc.','Cover esc.'],
-        lumps.map(function(r){ return [escHtml(r.type||'')+(clean(r.label)?sub(escHtml(r.label)):''), cov(r.cover), rprem(r.prem), pct(r.premEsc), pct(r.benEsc)]; }), [1,2]);
+        lumps.map(function(r){ return [escHtml(r.type||'')+(clean(r.label)?sub(escHtml(r.label)):'')+(lumpOnOtherLife(r)?sub('On the life of '+escHtml(clean(r.life).trim())+' &middot; not counted as this client&rsquo;s cover'):''), cov(r.cover), rprem(r.prem), pct(r.premEsc), pct(r.benEsc)]; }), [1,2]);
     }
     if(clean(p.DreadDiseaseNotes)) h+=grid([field('Dread disease notes', txt(p.DreadDiseaseNotes), {wide:true})]);
     put('R');
@@ -18126,8 +18153,8 @@ function astuteClassifyCovers(covers){
         type: fixedTerm ? 'Temporary IP' : 'Income Protection',
         label: cv.plan||'', amount: amt, prem: cv.prem||'',
         waiting: astuteMapWaiting(cv.elim), term: term,
-        esc:'', premEscType:'Fixed %', premEsc:'', benEsc:cv.benEsc||'', claimEsc:'',
-        taxable:'No', convert:'No'
+        esc:'', premEscType:'Fixed %', premEsc:cv.premEsc||'', benEsc:cv.benEsc||'', claimEsc:cv.claimEsc||'',
+        taxable:'No', convert:'No', life:cv.life||''
       });
       return;
     }
@@ -18135,7 +18162,7 @@ function astuteClassifyCovers(covers){
       if(N(cv.prem)){
         // Premium-bearing rider without a benefit amount (CashBack, premium
         // waiver, etc.) — keep its premium on an Other Lump Sum row.
-        lumps.push({type:'Other Lump Sum', label:cv.plan||'', cover:'', prem:cv.prem, premEsc:'', benEsc:''});
+        lumps.push({type:'Other Lump Sum', label:cv.plan||'', cover:'', prem:cv.prem, premEsc:cv.premEsc||'', benEsc:'', life:cv.life||''});
       } else if(/top[\s-]?up|extended|extender/i.test(cv.plan)){
         // Qualitative dread/disability option rider (no rand amount in Astute
         // feed) — e.g. Liberty Living Lifestyle Top-Up Option, Extended Option.
@@ -18158,7 +18185,7 @@ function astuteClassifyCovers(covers){
             nameStr.indexOf('trauma')>=0 || /living lifestyle/.test(nameStr)){
       t = 'Dread Disease / Severe Illness';
     }
-    lumps.push({type:t, label:cv.plan||'', cover:cv.amt, prem:cv.prem||'', premEsc:'', benEsc:cv.benEsc||''});
+    lumps.push({type:t, label:cv.plan||'', cover:cv.amt, prem:cv.prem||'', premEsc:cv.premEsc||'', benEsc:cv.benEsc||'', life:cv.life||''});
   });
   return {lumps:lumps, incomes:incomes, fee:fee, ddNotes:ddNotes};
 }
@@ -18458,7 +18485,8 @@ function renderAstutePreview(){
         if(cls.lumps.length || cls.incomes.length || cls.fee){
           html += '<div style="font-size:11.5px;color:#475;margin-top:6px;line-height:1.6">';
           cls.lumps.forEach(function(L){
-            html += '• '+astuteEsc(L.type)+': '+(N(L.cover)?'R'+Number(L.cover).toLocaleString():'premium-only rider'+(N(L.prem)?' R'+L.prem+' p/m':''))+(L.label?' <span style="color:#889">('+astuteEsc(L.label)+')</span>':'')+'<br>';
+            html += '• '+astuteEsc(L.type)+': '+(N(L.cover)?'R'+Number(L.cover).toLocaleString():'premium-only rider'+(N(L.prem)?' R'+L.prem+' p/m':''))+(L.label?' <span style="color:#889">('+astuteEsc(L.label)+')</span>':'')+
+                    (lumpOnOtherLife(L)?' <span style="color:#b45309;font-weight:700">on the life of '+astuteEsc(L.life)+' — not counted as this client\'s cover</span>':'')+'<br>';
           });
           cls.incomes.forEach(function(I){ html += '• '+astuteEsc(I.type)+' (income): R'+Number(I.amount).toLocaleString()+'/month, '+astuteEsc(I.waiting)+' waiting, '+astuteEsc(I.term)+(I.label?' <span style="color:#889">('+astuteEsc(I.label)+')</span>':'')+'<br>'; });
           if(cls.fee || N(r.polFee)) html += '• Policy fee: R'+(Math.round((cls.fee+N(r.polFee))*100)/100)+' p/m<br>';
@@ -18587,7 +18615,10 @@ function astuteFundsToNotes(r){
 //                has an amount and no benEsc of its own; on a Life Annuity it is
 //                the annual income escalation. Alias accepted: coverEsc.
 //     funds:[{name,value,alloc,units,price,asOf}],
-//     covers:[{plan,code,amt,prem,mode,monthlyAmt,period,elim,benEsc}],
+//     covers:[{plan,code,amt,prem,mode,monthlyAmt,period,elim,benEsc,premEsc,claimEsc,insured}],
+//              ← insured (10 Oct 2026): the benefit is on ANOTHER person's life (e.g. the
+//                spouse benefit on a Discovery Life Plan). Kept on the row as "life" and
+//                left out of the client's cover totals and FNA; its premium still counts.
 //              ← on a Pension / Provident Fund, covers are its GROUP RISK benefits (6 Oct 2026),
 //                with extra keys approved ("Approved"/"Unapproved"), nominee, basis,
 //                annualPrem, notes; plus policy-level groupRiskApproved for the whole fund.
@@ -18620,9 +18651,16 @@ function parseAstutePasteJSON(txt){
     }).filter(function(f){return f.name;}) : [];
     var covers = Array.isArray(o.covers) ? o.covers.map(function(cv){
       cv = cv||{};
+      // covers[].insured (alias life): the benefit is on another person's life, e.g. the
+      // spouse benefit on a Discovery Classic Life Plan (10 Oct 2026). The client's own
+      // name counts as blank. covers[].premEsc / claimEsc: per-benefit increases the
+      // paste contract has documented since 1 Oct 2026 but this mapping was dropping.
+      var _cvLife = clean(cv.insured).trim() || clean(cv.life).trim();
+      if(_cvLife && astuteNameMatch(_cvLife, clientName)) _cvLife = '';
       return {plan:clean(cv.plan)||clean(cv.type), code:clean(cv.code), amt:clean(cv.amt)||clean(cv.cover),
               prem:clean(cv.prem), mode:clean(cv.mode), monthlyAmt:clean(cv.monthlyAmt),
               period:clean(cv.period), elim:clean(cv.elim)||clean(cv.waiting), benEsc:clean(cv.benEsc),
+              premEsc:clean(cv.premEsc), claimEsc:clean(cv.claimEsc), life:_cvLife,
               // group risk on a Pension / Provident fund (6 Oct 2026)
               approved:clean(cv.approved), nominee:clean(cv.nominee), basis:clean(cv.basis),
               annualPrem:clean(cv.annualPrem), notes:clean(cv.notes)};
@@ -18780,7 +18818,10 @@ function astuteCarryRowEsc(existing, fresh){
     fr.forEach(function(x, j){ if(x && !pairs[j]) pairs[j] = take(x, false); });
     fr.forEach(function(x, j){
       var e = pairs[j]; if(!x || !e) return;
-      ['premEsc','benEsc'].forEach(function(f){
+      // life: whose life the benefit is on (10 Oct 2026). An Astute pull never states it,
+      // so keep the marker already on the policy rather than let the refresh fold a
+      // spouse benefit back into the client's cover.
+      ['premEsc','benEsc','life'].forEach(function(f){
         if(!clean(x[f]) && clean(e[f])){ x[f] = e[f]; changed = true; }
       });
     });
@@ -18819,6 +18860,18 @@ function astuteMergePolicy(existing, fresh){
   // fresh row has none, so an Astute pull (which rarely states CPI increases)
   // never wipes a hand-entered escalation (1 Oct 2026). A fresh value always wins.
   if(!_keepMoney) fresh = astuteCarryRowEsc(existing, fresh);
+  // A carried "on the life of" marker changes which rows are the client's cover, so
+  // restate the stored totals from the rows (10 Oct 2026).
+  if(!_keepMoney && clean(fresh.LumpBenefits)){
+    try{
+      var _lr = JSON.parse(fresh.LumpBenefits);
+      if(Array.isArray(_lr) && _lr.some(lumpOnOtherLife)){
+        fresh = JSON.parse(JSON.stringify(fresh));
+        var _ls = function(t){ var s=0; _lr.forEach(function(x){ if(x && x.type===t && !lumpOnOtherLife(x)) s+=N(x.cover); }); return String(s); };
+        fresh.BenDeath = _ls('Life Cover'); fresh.BenDisability = _ls('Capital Disability'); fresh.BenDreadDisease = _ls('Dread Disease / Severe Illness');
+      }
+    }catch(e){}
+  }
   // Group risk rows: refresh by benefit + status, keep hand-typed detail and unlisted rows (6 Oct 2026).
   if(!_keepMoney) fresh = grMergeRows(existing, fresh);
   Object.keys(fresh).forEach(function(k){
@@ -18925,7 +18978,8 @@ function runAstuteImport(){
     // Policy fee: PolFee tag on the policy + any fee riders found above
     var policyFee = N(r.polFee) + coverFee;
     var _grImp = (r.type==='Pension Fund'||r.type==='Provident Fund') ? grRowsFromCovers(r.covers) : [];
-    function lumpSum(t){ var s=0; lumps.forEach(function(x){if(x.type===t)s+=N(x.cover);}); return s?String(s):''; }
+    // Rows on another person's life (covers[].insured) are not the client's cover (10 Oct 2026).
+    function lumpSum(t){ var s=0; lumps.forEach(function(x){if(x.type===t && !lumpOnOtherLife(x))s+=N(x.cover);}); return s?String(s):''; }
     // A beneficiary matched to a family member is saved under that member's
     // name, so every policy carries one spelling (famImportBen, 25 Sep 2026).
     var bensJson = JSON.stringify(r.bens.map(function(b){
@@ -21111,10 +21165,16 @@ function openPolicySchedule(cid){
       return '<td><span style="color:'+INK+';font-weight:600">'+escHtml(l||t)+'</span>'+(l&&t&&l.toLowerCase()!==t.toLowerCase()?'<span style="color:'+MUT+'"> &middot; '+escHtml(t)+'</span>':'')+'</td>';
     }
     var rows='';
+    // Benefit on another person's life (10 Oct 2026): say whose life, and that it is
+    // not part of this client's cover totals.
+    function lifeSub(r){
+      if(!lumpOnOtherLife(r)) return '';
+      return '<div style="font-size:10px;color:#b45309;margin-top:1px">On the life of '+escHtml(clean(r.life).trim())+' &middot; pays the policy owner on that death &middot; not counted in '+escHtml((c&&c.Name)||'the client')+'&rsquo;s cover</div>';
+    }
     lumps.forEach(function(r){
       var ce=escTxt(r.benEsc), pe=escTxt(r.premEsc);
       if(ce) out.anyCoverEsc=true; if(pe) out.anyPremEsc=true;
-      rows+='<tr>'+nameCell(r.label, r.type)+
+      rows+='<tr>'+nameCell(r.label, r.type).replace(/<\/td>$/, lifeSub(r)+'</td>')+
         '<td>'+(N(r.cover)>0?(rfx?fxDual(r.cover,rfx.coverRate,rfx.ccy,0):R(r.cover)):dash)+'</td>'+
         '<td>'+(N(r.prem)>0?(rfx?fxDual(r.prem,rfx.premRate,rfx.ccy,2):R(r.prem)):dash)+'</td>'+
         '<td>'+(ce||dash)+'</td><td>'+(pe||dash)+'</td></tr>';
@@ -21129,7 +21189,7 @@ function openPolicySchedule(cid){
       if(clean(r.waiting)) sub.push(escHtml(r.waiting)+' waiting period');
       if(clean(r.term)) sub.push(escHtml(r.term));
       if(escTxt(r.claimEsc)) sub.push('in-claim escalation '+escTxt(r.claimEsc));
-      rows+='<tr>'+nameCell(r.label, r.type).replace('</td>', (sub.length?'<div style="font-size:10px;color:'+MUT+';margin-top:1px">'+sub.join(' &middot; ')+'</div>':'')+'</td>')+
+      rows+='<tr>'+nameCell(r.label, r.type).replace('</td>', (sub.length?'<div style="font-size:10px;color:'+MUT+';margin-top:1px">'+sub.join(' &middot; ')+'</div>':'')+lifeSub(r)+'</td>')+
         '<td>'+(N(r.amount)>0?(rfx?fxDual(r.amount,rfx.coverRate,rfx.ccy,0,'<span style="font-size:10px;color:'+MUT+'"> /pm</span>'):R(r.amount)+'<span style="font-size:10px;color:'+MUT+'"> /pm</span>'):dash)+'</td>'+
         '<td>'+(N(r.prem)>0?(rfx?fxDual(r.prem,rfx.premRate,rfx.ccy,2):R(r.prem)):dash)+'</td>'+
         '<td>'+(ce||dash)+'</td><td>'+(pe||dash)+'</td></tr>';
@@ -21211,6 +21271,11 @@ function openPolicySchedule(cid){
       fields.push({label:'Death benefit', value:_cov(_death)});
       fields.push({label:'Disability',    value:_cov(lumpSum(p,'Capital Disability','BenDisability'))});
       fields.push({label:'Dread disease', value:_cov(lumpSum(p,'Dread Disease / Severe Illness','BenDreadDisease'))});
+      // Cover on another person's life (e.g. spouse benefit), shown but not in the totals (10 Oct 2026).
+      lumpOtherLives(p).forEach(function(r){
+        var _t={'Life Cover':'Life cover','Capital Disability':'Disability','Dread Disease / Severe Illness':'Dread disease'}[r.type]||r.type||'Cover';
+        fields.push({label:_t+' on '+escHtml(clean(r.life).trim()), value:_cov(N(r.cover))});
+      });
       var ipm=incomeMax(p);
       if(ipm>0) fields.push({label:'Income protection', value:(_rfx ? fxDual(ipm,_rfx.coverRate,_rfx.ccy,0,'<span style="font-size:10px;font-weight:400;color:'+MUT+'"> /pm</span>') : R(ipm)+'<span style="font-size:10px;font-weight:400;color:'+MUT+'"> /pm</span>')});
       if(N(p.Premium)>0){
