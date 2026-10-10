@@ -2853,7 +2853,7 @@ function renderProfile(){
     // Review reminder: current policies on this client that are not on your record.
     (function(){
       if(c.Status==='Inactive'||c.Status==='Cancelled') return '';   // no review for a closed client
-      var nm=polsFor(c.ID).filter(function(p){ return !willIsDeadPolicy(p) && aumState(p)==='notmine'; });
+      var nm=polsFor(c.ID).filter(function(p){ return !willIsDeadPolicy(p) && !isMedAidPol(p) && aumState(p)==='notmine'; });
       if(!nm.length) return '';
       var provs={}; nm.forEach(function(p){ var l=String(p.Insurer||'provider not captured').replace(/\s+/g,' ').trim(); provs[l]=1; });
       return '<div style="background:#fff7ed;border:1.5px solid #fdba74;border-radius:8px;padding:9px 14px;margin-bottom:10px;font-size:13px;color:#7c2d12">'+
@@ -5860,6 +5860,7 @@ function revPolicyIndex(){
   var by = {};
   (DB.policies||[]).forEach(function(p){
     if(willIsDeadPolicy(p)) return;
+    if(isMedAidPol(p)) return;   // medical aid is referral business, never reviewed (10 Oct 2026)
     if(aumFlag(p.AdvisorOfRecord)==='') return;
     var sp = String(p.StartDate||'').split(/[T ]/)[0].split(/[-\/]/);
     if(sp.length<3 || sp[0].length!==4) return;
@@ -7113,6 +7114,8 @@ function regBf(){ var R = window._reg; return (R.bf && String(R.bf.year) === Str
 // tick-list to set them. No schema change.
 var AUM_TAB = 'overview';
 var AUM_RISK_TYPES = {'Life / Income Protector':1,'Business Assurance':1,'Medical Aid':1};
+// Medical aid is referral business (firm's medical division) — never reviewed, never a "not mine" target (Clinton, 10 Oct 2026).
+function isMedAidPol(p){ return String(p&&p.Type||'').trim().toLowerCase()==='medical aid'; }
 function aumIsRisk(p){ return !!AUM_RISK_TYPES[p.Type]; }
 var AUM_CHOICES = {};   // policyId -> 'mine_aum' | 'mine' | 'notmine', until Apply
 // Providers Clinton has a contract with, shared for everyone in settings key
@@ -7159,7 +7162,7 @@ function aumProviderList(){
     var c=byClient[String(p.ClientID)]; if(c && (c.Status==='Inactive'||c.Status==='Cancelled')) return;
     var k=aumProvKey(p.Insurer); if(!k) return;
     if(!g[k]){ g[k]={key:k,label:String(p.Insurer).replace(/\s+/g,' ').trim(),n:0,notmine:0}; order.push(k); }
-    g[k].n++; if(aumState(p)==='notmine') g[k].notmine++;
+    g[k].n++; if(aumState(p)==='notmine' && !isMedAidPol(p)) g[k].notmine++;
   });
   order.sort(function(a,b){ return g[a].label.localeCompare(g[b].label); });
   return order.map(function(k){ return g[k]; });
@@ -7192,7 +7195,10 @@ function aumData(){
     return {p:p, c:c, name:c?(c.Name||''):'(client not found)', state:aumState(p), val:N(p.BenFundValue), risk:aumIsRisk(p)};
   });
   var d={rows:rows, aum:[], mine:[], notmine:[], notset:[], hiddenInactive:hidden};
-  rows.forEach(function(r){ d[r.state==='aum'?'aum':r.state].push(r); });
+  rows.forEach(function(r){
+    if(r.state==='notmine' && isMedAidPol(r.p)) return;   // medical aid: referral only, not a "not mine" target
+    d[r.state==='aum'?'aum':r.state].push(r);
+  });
   d.aumTotal=d.aum.reduce(function(t,r){ return t+r.val; },0);
   d.notmineVal=d.notmine.reduce(function(t,r){ return t+(r.risk?0:r.val); },0);
   d.notsetVal=d.notset.reduce(function(t,r){ return t+(r.risk?0:r.val); },0);
