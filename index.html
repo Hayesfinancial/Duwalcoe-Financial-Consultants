@@ -4034,7 +4034,32 @@ function renderPolicies(c,pols){
           '</tbody></table></div>';
       }
 
-      return (active.length===0?'<div class="empty cb">No policies yet</div>':polTableGrouped(active))+
+      // Policies on this client's life owned by a company client (11 Oct 2026): read only here,
+      // they live on the company's card.
+      var keyLifeHtml=(function(){
+        var kl=keyLifePolsFor(c.ID);
+        if(!kl.length) return '';
+        return '<div style="margin-top:10px;border:1.5px solid #e7d3b0;border-radius:8px;overflow:hidden">'+
+          '<div style="background:#fbf6ec;padding:8px 12px;font-size:12px;color:#92400e"><strong>🏢 On '+escHtml(c.Name||'this client')+'\u2019s life, owned by another client ('+kl.length+')</strong>'+
+          ' <span style="color:#889">· pays the company, not personal cover · edit on the company\u2019s card</span></div>'+
+          '<table class="tbl"><thead><tr><th>Owner</th><th>Insurer</th><th>Product</th><th>Policy No.</th><th>Business type</th><th>Cover</th><th>Estate dutiable</th><th></th></tr></thead><tbody>'+
+          kl.map(function(k){
+            var p=k.pol, ed=baEstateEff(p);
+            var cov=lumpSum(p,'Life Cover','BenDeath')||N(p.LoanAmount)||N(p.BenDeath);
+            return '<tr>'+
+              '<td><span data-act="open-client" data-id="'+escHtml(String(k.company.ID))+'" style="color:var(--navy);font-weight:600;text-decoration:underline;cursor:pointer">'+escHtml(k.company.Name||'Company')+'</span></td>'+
+              '<td style="font-weight:600">'+escHtml(p.Insurer||'—')+'</td>'+
+              '<td>'+escHtml(p.Product||'—')+'</td>'+
+              '<td style="font-family:monospace;font-size:12px">'+escHtml(p.PolicyNo||'—')+'</td>'+
+              '<td>'+escHtml(p.BizType||(p.Type==='Business Assurance'?'Not captured':p.Type||'—'))+'</td>'+
+              '<td>'+(cov?rnd(cov):'—')+'</td>'+
+              '<td>'+(p.Type!=='Business Assurance'?'—':(ed?escHtml(ed):'<span style="color:#9a3412;font-weight:700">⚠ Not set</span>'))+'</td>'+
+              '<td><button class="btn b-gh xs" data-act="view-policy" data-cid="'+escHtml(String(k.company.ID))+'" data-idx="'+k.idx+'" title="View the policy (read only)">👁 View</button></td>'+
+              '</tr>';
+          }).join('')+
+          '</tbody></table></div>';
+      })();
+      return (active.length===0?'<div class="empty cb">No policies yet</div>':polTableGrouped(active))+keyLifeHtml+
         (replaced.length?'<details style="margin-top:8px"><summary style="cursor:pointer;padding:10px 16px;font-size:12px;font-weight:700;color:#889;background:#f8f8f5">🔄 '+replaced.length+' '+
           (function(){ var nr=replaced.filter(function(p){ return p.Status==='Retired'; }).length; return nr===replaced.length ? 'Retired' : (nr ? 'Replaced or Retired' : 'Replaced'); })()+
           ' Polic'+(replaced.length===1?'y':'ies')+'</summary>'+polTableFlat(replaced,false)+'</details>':'');
@@ -11793,6 +11818,10 @@ function buildFnaDataPack(cid, includeSpouse){
         line('  '+k+': '+v);
       });
       if(p.Type==='Pension Fund' || p.Type==='Provident Fund') packGroupRisk(p, bens);
+      // Business Assurance with no estate dutiable value (11 Oct 2026): say so, never assume No.
+      if(p.Type==='Business Assurance' && !clean(p.EstateDutiable)){
+        line('  EstateDutiable: NOT CAPTURED'+(p.BizType==='Keyman'?' (family company test not done)':''));
+      }
       // CGT-bearing discretionary investments: a blank base cost prints explicitly (Sep 2026)
       if(POL_CGT_TYPES.indexOf(p.Type)>=0 && String(p.BaseCost===undefined||p.BaseCost===null?'':p.BaseCost).trim()===''){
         line('  BaseCost: NOT CAPTURED');
@@ -11804,6 +11833,40 @@ function buildFnaDataPack(cid, includeSpouse){
   // so the pack carries every active/current policy with its beneficiary nominations.
   // (Reverses the June 2026 exclusion, when schedules lived in Excel.)
   packPolicies(cid, '');
+
+  // ── Policies on this client's life owned by a company client (11 Oct 2026) ──
+  // Stored on the company's card only. Context for the FNA: the cover pays the company.
+  function packKeyLife(forCid, prefix){
+    var kl = keyLifePolsFor(forCid);
+    if(!kl.length) return;
+    line('── '+prefix+'POLICIES ON THIS CLIENT\'S LIFE OWNED BY ANOTHER CLIENT ('+kl.length+') ──');
+    line('  Owned by a company client and captured on the company\'s record. Pays the company, NOT personal cover; excluded from this client\'s cover totals.');
+    kl.forEach(function(k, i){
+      var p = k.pol;
+      line('  ── '+(i+1)+': '+(p.Insurer||'?')+' — '+(p.Type||'?')+(p.PolicyNo?' #'+p.PolicyNo:'')+' ──');
+      line('  Owner: '+(k.company.Name||'(company)')+' (company client)');
+      kv('Product', p.Product);
+      kv('BizType', p.BizType);
+      line('  LifeAssured: '+keyLifeNames(p)[0]);
+      kv('KeyPosition', p.KeyPosition);
+      kv('Status', p.Status);
+      kv('StartDate', p.StartDate);
+      var kD = lumpSum(p,'Life Cover','BenDeath'), kDis = lumpSum(p,'Capital Disability','BenDisability'), kDD = lumpSum(p,'Dread Disease / Severe Illness','BenDreadDisease');
+      if(kD)   line('  DeathCover (pays the company): '+kD);
+      if(kDis) line('  DisabilityCover (pays the company): '+kDis);
+      if(kDD)  line('  DreadDiseaseCover (pays the company): '+kDD);
+      kv('LoanAmount', p.LoanAmount);
+      kv('Premium', clean(p.Premium) ? p.Premium+(clean(p.Frequency)?' '+p.Frequency:'') : '');
+      kv('PayerType', p.PayerType||(p.Type==='Business Assurance'?'Company':''));
+      if(p.Type==='Business Assurance'){
+        line('  EstateDutiable: '+(clean(p.EstateDutiable) ? p.EstateDutiable : 'NOT CAPTURED'+(p.BizType==='Keyman'?' (family company test not done)':'')));
+      }
+      var kb = []; try{ kb = p.Beneficiaries ? JSON.parse(p.Beneficiaries) : []; if(!Array.isArray(kb)) kb = []; }catch(e){ kb = []; }
+      if(kb.length) line('  Beneficiaries: '+kb.map(function(b){ return (b.name||'(unnamed)')+(b.pct?' '+String(b.pct).replace('%','')+'%':''); }).join('; '));
+    });
+    line('');
+  }
+  packKeyLife(cid, '');
 
   // ── Financial Position (reusable for the linked spouse appendix) ──
   function packFinpos(forCid, prefix){
@@ -11996,6 +12059,7 @@ function buildFnaDataPack(cid, includeSpouse){
       line('');
       var _pfx = _pIsLP ? 'PARTNER ' : 'SPOUSE ';
       packPolicies(spId, _pfx);
+      packKeyLife(spId, _pfx);
       packFinpos(spId, _pfx);
       packWill(spId, _pfx);
     }
@@ -12602,6 +12666,81 @@ var WILL_SA_PROP_NEW = 'Property to pass to surviving spouse (s.4(q) deduction)'
 function willMigrate(D){ if(D && D.sa_prop===WILL_SA_PROP_OLD) D.sa_prop = WILL_SA_PROP_NEW; return D; }
 // Policy types that pay no death benefit to a beneficiary — left off the Will tab.
 var WILL_POL_SKIP_TYPES = ['Medical Aid'];
+// ── Business Assurance estate dutiable (11 Oct 2026) ──────────────────────
+// Default by type for a policy with no value yet: Contingent Liability = Yes,
+// Buy & Sell (or type not stated) = No, Keyman = '' (not set). A keyman policy is
+// deemed property in the life assured's estate when the owner is his family company
+// (s.3(3)(a)(ii) Estate Duty Act), so it is never assumed No.
+function baEstateDefault(bizType){
+  if(bizType==='Contingent Liability') return 'Yes';
+  if(bizType==='Keyman') return '';
+  return 'No';
+}
+// Policy form: a type change moves the radios to that type's default, unless the
+// policy already holds a value or a radio was clicked in this edit.
+function baEstateTypeChanged(bizType){
+  var lock=document.getElementById('pestate_lock');
+  if(lock && lock.value==='1') return;
+  var d=baEstateDefault(bizType);
+  document.querySelectorAll('input[name="pestate"]').forEach(function(r){ r.checked=(r.value===d); });
+  var u=document.getElementById('pestate_unset'); if(u) u.style.display=d?'none':'inline';
+}
+function baEstatePicked(){
+  var lock=document.getElementById('pestate_lock'); if(lock) lock.value='1';
+  var u=document.getElementById('pestate_unset'); if(u) u.style.display='none';
+}
+// What the CRM shows / packs for a Business Assurance policy: the stored value, else the
+// type default; '' = not set (keyman, family company test not done).
+function baEstateEff(p){ return clean(p.EstateDutiable) ? p.EstateDutiable : baEstateDefault(p.BizType); }
+
+// ── Policies on a person's life owned by a company client (11 Oct 2026) ────
+// A keyman (or other company-owned policy) is captured on the COMPANY's card, with the
+// key person named as life assured. The key person may or may not be a client. When the
+// life assured matches exactly one individual client by name (whole words or initials,
+// as for beneficiaries, so "Alewyn Mostert" = "Alewyn Jacobus Mostert" and a shared first
+// letter never matches), that client's Policies tab and FNA Data Pack show the policy.
+// Nothing is copied or stored: the company card stays the only home of the policy.
+function keyLifeNames(p){
+  var out=[];
+  if(clean(p.Insured)) out.push(String(p.Insured).trim());
+  if(clean(p.LifeAssured) && p.LifeAssuredType!=='Client') out.push(String(p.LifeAssured).trim());
+  return out;
+}
+function keyLifeClientId(p){
+  var names=keyLifeNames(p); if(!names.length) return '';
+  var hits={};   // client ID -> best grade
+  DB.clients.forEach(function(x){
+    if(x.ClientType==='Company' || !clean(x.Name)) return;
+    names.forEach(function(n){
+      var g=famNameGrade(String(x.Name).trim(), n);
+      if(g==='exact' || g==='initials'){ var k=String(x.ID); if(hits[k]!=='exact') hits[k]=g; }
+    });
+  });
+  var ids=Object.keys(hits);
+  if(ids.length===1) return ids[0];
+  // Several clients fit: only a single whole-word match with the same number of words settles it.
+  var ex=ids.filter(function(id){
+    var x=DB.clients.find(function(y){ return String(y.ID)===id; });
+    return hits[id]==='exact' && names.some(function(n){ return famTokens(n).length===famTokens(x.Name).length && famNameGrade0(String(x.Name).trim(), n)==='exact'; });
+  });
+  return ex.length===1 ? ex[0] : '';
+}
+// [{pol, company, idx}] — current policies on company cards whose life assured is this client.
+function keyLifePolsFor(cid){
+  var c=DB.clients.find(function(x){ return String(x.ID)===String(cid); });
+  if(!c || c.ClientType==='Company') return [];
+  var out=[];
+  DB.clients.forEach(function(co){
+    if(co.ClientType!=='Company') return;
+    var cp=polsFor(co.ID);
+    cp.forEach(function(p, i){
+      if(willIsDeadPolicy(p)) return;
+      if(keyLifeClientId(p)===String(cid)) out.push({pol:p, company:co, idx:i});
+    });
+  });
+  return out;
+}
+
 function willIsDeadPolicy(p){ return p.Status==='Replaced' || p.Status==='Retired' || p.Status==='Cancelled' || p.Status==='Lapsed'; }
 // Replaced, or Retired (the client retired from it into a new policy, e.g. a
 // pension fund into a living annuity; 11 Oct 2026). Both are history only.
@@ -14151,7 +14290,7 @@ function buildPolicyForm(p){
   // BUSINESS ASSURANCE
   if(isBiz){
     html+=sec('Business Assurance');
-    html+='<div class="g2">'+fs('pbiztype','Type',['Buy & Sell','Contingent Liability','Keyman'],p.BizType)+'</div>';
+    html+='<div class="g2">'+fs('pbiztype','Type',['Buy & Sell','Contingent Liability','Keyman'],p.BizType).replace('<select id="pbiztype"','<select id="pbiztype" onchange="baEstateTypeChanged(this.value)"')+'</div>';
     var laType=p.LifeAssuredType||(p.LifeAssured?'Other':'Client');
     html+='<div class="fld" style="margin-top:10px"><label>Life Assured</label><div style="display:flex;gap:8px;align-items:center;margin-top:4px">';
     html+='<select id="plifeassured_type" onchange="document.getElementById(\'pla_other\').style.display=this.value===\'Other\'?\'block\':\'none\'" style="border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px;min-width:160px">';
@@ -14161,13 +14300,15 @@ function buildPolicyForm(p){
     html+='<input id="plifeassured" type="text" value="'+(p.LifeAssured||'')+'" placeholder="Full name of life assured" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px">';
     html+='</div></div></div>';
     html+='<div class="g2" style="margin-top:10px">'+fld('pkeypos','Key Person Position',p.KeyPosition)+'<div></div></div>';
-    // Estate Dutiable: Contingent Liability = Yes, Buy & Sell and Keyman = No
-    var estDefault = p.EstateDutiable || (p.BizType==='Contingent Liability'?'Yes':'No');
+    // Estate Dutiable: Contingent Liability = Yes, Buy & Sell = No, Keyman = neither until chosen (11 Oct 2026)
+    var estDefault = clean(p.EstateDutiable) ? p.EstateDutiable : baEstateDefault(p.BizType);
     html+='<div class="fld" style="margin-top:10px"><label>Estate Dutiable</label>';
     html+='<div style="display:flex;gap:12px;margin-top:8px">';
-    html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="pestate" value="Yes"'+(estDefault==='Yes'?' checked':'')+'>Yes</label>';
-    html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="pestate" value="No"'+(estDefault!=='Yes'?' checked':'')+'>No</label>';
-    html+='</div><div style="font-size:11px;color:#889;margin-top:4px">Contingent Liability = Yes · Buy &amp; Sell and Keyman = No</div></div>';
+    html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="pestate" value="Yes" onclick="baEstatePicked()"'+(estDefault==='Yes'?' checked':'')+'>Yes</label>';
+    html+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="pestate" value="No" onclick="baEstatePicked()"'+(estDefault==='No'?' checked':'')+'>No</label>';
+    html+='<input type="hidden" id="pestate_lock" value="'+(clean(p.EstateDutiable)?'1':'')+'">';
+    html+='<span id="pestate_unset" style="font-size:12px;color:#9a3412;font-weight:600;align-self:center;display:'+(estDefault?'none':'inline')+'">⚠ Not set yet</span>';
+    html+='</div><div style="font-size:11px;color:#889;margin-top:4px">Contingent Liability = Yes · Buy &amp; Sell = No · Keyman: Yes if the company is a family company of the life assured, otherwise No</div></div>';
   }
 
   // PREMIUM
@@ -16428,13 +16569,14 @@ function openPolicyView(cid,idx){
   // ── Business assurance ──
   if(isBiz){
     var laT=p.LifeAssuredType||(clean(p.LifeAssured)?'Other':'Client');
-    var estEff=clean(p.EstateDutiable)||(p.BizType==='Contingent Liability'?'Yes':'No');
+    var estEff=baEstateEff(p);
     h+=sec('Business Assurance');
     h+=grid([
       field('Type', txt(p.BizType)||'Not captured'),
-      field('Life assured', laT==='Client' ? escHtml(c.Name||'Client') : (txt(p.LifeAssured)||escHtml(laT)+' — name not captured')),
+      // A company has no life (11 Oct 2026): on a company card "Client" means the life assured named above.
+      field('Life assured', laT==='Client' ? (isCompany ? (txt(p.Insured)||'Not captured') : escHtml(c.Name||'Client')) : (txt(p.LifeAssured)||escHtml(laT)+' — name not captured')),
       field('Key person position', txt(p.KeyPosition)),
-      field('Estate dutiable', escHtml(estEff)+(clean(p.EstateDutiable)?'':tag('(default for type)')))
+      field('Estate dutiable', estEff ? escHtml(estEff)+(clean(p.EstateDutiable)?'':tag('(default for type)')) : '⚠ Not set'+tag('(family company test not done)'), estEff ? undefined : {color:'#9a3412'})
     ]);
   }
 
@@ -18980,6 +19122,8 @@ function parseAstutePasteJSON(txt){
       grFund: grNormStatus(o.groupRiskApproved),   // Pension / Provident: fund-wide approved status, if stated (6 Oct 2026)
       bizType: clean(o.bizType),           // Business Assurance: Buy & Sell / Contingent Liability / Keyman
       keyPosition: clean(o.keyPosition),   // Business Assurance: key person's role
+      // Business Assurance estate dutiable (11 Oct 2026): only written when the block states it.
+      estateDutiable: (function(){ var t=clean(o.estateDutiable).trim(); return /^y/i.test(t)?'Yes':(/^n/i.test(t)?'No':''); })(),
       irr: clean(o.irr),                   // stated IRR from statement → IllustrativeRate (shows as IRR badge)
       growthRate: clean(o.growthRate),     // forward growth assumption → GrowthRate/PremGrowthRate (drives projection)
       eac: clean(o.eac),                   // effective annual cost → BenEscalation on Living Annuities, else a note
@@ -19316,8 +19460,9 @@ function runAstuteImport(){
     var pol = {
       Insurer:r.insurer, Product:r.product, PolicyNo:r.polNo, Type:r.type,
       StartDate:r.startDate, ClientIsOwner:(r.ownerIsClient?'Yes':'No'), Owner:(r.ownerIsClient?'':r.ownerName), Status:r.status,
-      // Business Assurance: estate-dutiable defaults from BizType (Contingent Liability = Yes; Buy & Sell / Keyman = No), mirroring the policy form. r.bizType is only set on non-Astute paste rows; Astute rows leave it blank (unchanged).
-      EstateDutiable:(r.type==='Business Assurance' ? (r.bizType==='Contingent Liability'?'Yes':'No') : ''),
+      // Business Assurance estate dutiable (11 Oct 2026): only a value the block states. A blank
+      // never overwrites the policy's value on a refresh; new policies get the type default below.
+      EstateDutiable:(r.type==='Business Assurance' ? (r.estateDutiable||'') : ''),
       AdvisorOfRecord:'Yes', CountsForAUM:'Yes',
       BizType:(r.bizType||''), LifeAssuredType:'', LifeAssured:'', LoanAmount:'', KeyPosition:(r.keyPosition||''),
       Premium:premiumVal, Frequency:r.frequency,
@@ -19381,6 +19526,9 @@ function runAstuteImport(){
     // LA tax treatment: new policies default to fully taxable (the edit screen's
     // own default); on a refresh a blank import keeps whatever is already held.
     if(!isUpdate && !clean(finalPol.LAIncomeTaxable)) finalPol.LAIncomeTaxable = 'Yes';
+    // Business Assurance estate dutiable, new policies only (11 Oct 2026): Contingent Liability = Yes,
+    // Buy & Sell (or type not stated) = No, Keyman = left unset until the family company test is done.
+    if(!isUpdate && finalPol.Type==='Business Assurance' && !clean(finalPol.EstateDutiable)) finalPol.EstateDutiable = baEstateDefault(finalPol.BizType);
     finalPol._pendingSave = true;
     if(isUpdate){ var ei = DB.policies.indexOf(existingPol); if(ei>=0) DB.policies[ei]=finalPol; else DB.policies.push(finalPol); }
     else DB.policies.push(finalPol);
