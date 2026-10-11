@@ -2765,7 +2765,7 @@ function clientTable(list,mini,isLeads,isFamily){
     '</tr></thead><tbody>'+
     list.map(function(c){
       var rev=daysTo(c.ReviewDate);
-      var np=polsFor(c.ID).filter(function(p){return p.Status!=='Replaced';}).length;
+      var np=polsFor(c.ID).filter(function(p){return !polIsEnded(p);}).length;
       var nt=DB.tasks.filter(function(t){return !isdone(t)&&sameClient(t.ClientName,c.Name);}).length;
       var em=clean(c.Email);
       var ag=ageOf(c);
@@ -2942,7 +2942,7 @@ function renderProfile(){
     })()+
     '<div class="tabs">'+
     '<div class="tab'+(CTAB==='overview'?' on':'')+'" data-act="tab" data-tab="overview">Overview</div>'+
-    '<div class="tab'+(CTAB==='policies'?' on':'')+'" data-act="tab" data-tab="policies">Policies ('+pols.filter(function(p){return p.Status!=='Replaced';}).length+')</div>'+
+    '<div class="tab'+(CTAB==='policies'?' on':'')+'" data-act="tab" data-tab="policies">Policies ('+pols.filter(function(p){return !polIsEnded(p);}).length+')</div>'+
     (function(){var fp=finposFor(c.ID).filter(function(r){return FP_NOT_ITEM_KINDS.indexOf(r.Kind)<0;});return '<div class="tab'+(CTAB==='finpos'?' on':'')+'" data-act="tab" data-tab="finpos">Financial Position'+(fp.length?' ('+fp.length+')':'')+'</div>';})()+
     (function(){var nd=finposFor(c.ID).filter(function(r){return r.Kind==='need';});return '<div class="tab'+(CTAB==='needs'?' on':'')+'" data-act="tab" data-tab="needs">Needs'+(nd.length?' ('+nd.length+')':'')+'</div>';})()+
     (function(){var bks=[];try{bks=c.BankDetails?JSON.parse(c.BankDetails):[];}catch(e){}return '<div class="tab'+(CTAB==='banking'?' on':'')+'" data-act="tab" data-tab="banking">Banking'+(bks.length?' ('+bks.length+')':'')+'</div>';})()+
@@ -3712,7 +3712,7 @@ function renderOverview(c,pols,roas,ctasks){
     var f=p.Frequency||'Monthly';
     return f==='Once Off'||f==='Lump Sum'||f==='Annually'||f==='Quarterly';
   }
-  var activePols=pols.filter(function(p){return p.Status!=='Replaced';});
+  var activePols=pols.filter(function(p){return !polIsEnded(p);});
   var recurringPers=activePols.filter(function(p){return !isNonMonthlyPrem(p) && p.Type!=='Business Assurance';});
   var recurringBiz=activePols.filter(function(p){return !isNonMonthlyPrem(p) && p.Type==='Business Assurance';});
   var nonMonthlyPols=activePols.filter(function(p){return isNonMonthlyPrem(p);});
@@ -3933,8 +3933,8 @@ function renderPolicies(c,pols){
     '<button class="btn b-gh sm" data-act="astute-import" data-cid="'+c.ID+'">📥 Import from Astute</button>'+
     '<button class="btn b-gd sm" data-act="open-new-policy" data-cid="'+c.ID+'">+ Add Policy</button></div></div>'+
     (function(){
-      var active=pols.filter(function(p){return p.Status!=='Replaced';});
-      var replaced=pols.filter(function(p){return p.Status==='Replaced';});
+      var active=pols.filter(function(p){return !polIsEnded(p);});
+      var replaced=pols.filter(function(p){return polIsEnded(p);});
 
       // Category definitions — kept aligned with the schedule's grouping so the
       // CRM and the printed schedule are always visually consistent. Order here
@@ -3970,8 +3970,10 @@ function renderPolicies(c,pols){
           '<td>'+(p.Product||'—')+(function(){
             var out='';
             var rl=polReplacesList(p).map(polById).filter(Boolean);
-            if(rl.length) out+='<div style="font-size:11px;color:#9a3412">↺ replaces '+escHtml(rl.map(polShortLabel).join(', '))+'</div>';
-            if(p.Status==='Replaced'){ var by=polReplacedByList(p.ID,''); if(by.length) out+='<div style="font-size:11px;color:#667">replaced by '+escHtml(by.map(polShortLabel).join(', '))+'</div>'; }
+            var rlRet=rl.filter(function(o){ return o.Status==='Retired'; }), rlRep=rl.filter(function(o){ return o.Status!=='Retired'; });
+            if(rlRep.length) out+='<div style="font-size:11px;color:#9a3412">↺ replaces '+escHtml(rlRep.map(polShortLabel).join(', '))+'</div>';
+            if(rlRet.length) out+='<div style="font-size:11px;color:#2e7d5a">← retirement from '+escHtml(rlRet.map(polShortLabel).join(', '))+'</div>';
+            if(polIsEnded(p)){ var by=polReplacedByList(p.ID,''); if(by.length) out+='<div style="font-size:11px;color:#667">'+polEndedWord(p)+' '+escHtml(by.map(polShortLabel).join(', '))+'</div>'; }
             return out;
           })()+'</td>'+
           '<td style="font-family:monospace;font-size:12px">'+(p.PolicyNo||'—')+'</td>'+
@@ -4033,7 +4035,9 @@ function renderPolicies(c,pols){
       }
 
       return (active.length===0?'<div class="empty cb">No policies yet</div>':polTableGrouped(active))+
-        (replaced.length?'<details style="margin-top:8px"><summary style="cursor:pointer;padding:10px 16px;font-size:12px;font-weight:700;color:#889;background:#f8f8f5">🔄 '+replaced.length+' Replaced Polic'+(replaced.length===1?'y':'ies')+'</summary>'+polTableFlat(replaced,false)+'</details>':'');
+        (replaced.length?'<details style="margin-top:8px"><summary style="cursor:pointer;padding:10px 16px;font-size:12px;font-weight:700;color:#889;background:#f8f8f5">🔄 '+replaced.length+' '+
+          (function(){ var nr=replaced.filter(function(p){ return p.Status==='Retired'; }).length; return nr===replaced.length ? 'Retired' : (nr ? 'Replaced or Retired' : 'Replaced'); })()+
+          ' Polic'+(replaced.length===1?'y':'ies')+'</summary>'+polTableFlat(replaced,false)+'</details>':'');
     })()+
     '</div>';
 }
@@ -5772,7 +5776,7 @@ function renderCasesPage(){
 // word such as "September" or "March; October". This page lists active
 // clients due THIS month and NEXT month, with their last Annual Review Work
 // Event, plus a count of active clients with no review month set.
-window._revEvents = window._revEvents || {loadedAt:0, loading:false, byClient:{}, allByClient:{}, err:false};
+window._revEvents = window._revEvents || {loadedAt:0, loading:false, byClient:{}, allByClient:{}, anyByClient:{}, err:false};
 // 6 Oct 2026: every Annual Review work event per client is kept (allByClient),
 // because creating one now closes that client's review reminder for the month.
 function loadReviewEvents(){
@@ -5781,13 +5785,18 @@ function loadReviewEvents(){
   R.loading = true;
   // select=* (not a column list) so this keeps working before and after the
   // ReviewMonth column is added; whether it is there is read from the rows.
-  sbFetch('GET','/rest/v1/work_events?EventType=in.(REV_LIFE,REV_INVEST)&select=*&order=EventDate.desc', null, function(rows, err){
+  // 11 Oct 2026: every case is loaded (not only Annual Reviews), because any case
+  // (new business, servicing, review, NTU included) counts as contact for the
+  // "not spoken to in a year" list. Reviews alone still close review reminders.
+  sbFetch('GET','/rest/v1/work_events?select=*&order=EventDate.desc', null, function(rows, err){
     R.loading = false; R.loadedAt = Date.now();
     if(err){ R.err = true; }
     else {
       if(rows && rows.length) window._revMonthReady = ('ReviewMonth' in rows[0]);
-      R.err = false; R.byClient = {}; R.allByClient = {};
+      R.err = false; R.byClient = {}; R.allByClient = {}; R.anyByClient = {};
       (rows || []).forEach(function(r){
+        (R.anyByClient[r.ClientID] = R.anyByClient[r.ClientID] || []).push(r);   // newest first
+        if(r.EventType!=='REV_LIFE' && r.EventType!=='REV_INVEST') return;
         if(!R.byClient[r.ClientID]) R.byClient[r.ClientID] = r; // newest first
         (R.allByClient[r.ClientID] = R.allByClient[r.ClientID] || []).push(r);
       });
@@ -5995,7 +6004,8 @@ function revRetry(cid){
     if(mine.snooze && (!b.snooze || String(mine.snooze.at||'') > String(b.snooze.at||''))) b.snooze = mine.snooze;
   }, function(ok){ if(ok) toast('Saved ✓','ok'); });
 }
-// Last contact as 'YYYY-MM-DD' (optionally only before a date): latest Done tick or Annual Review work event.
+// Last contact as 'YYYY-MM-DD' (optionally only before a date): latest Done tick or
+// case of any kind (11 Oct 2026; before that only Annual Review work events counted).
 function revLastContact(cid, before){
   var best = '';
   var lg = revLog(cid);
@@ -6005,9 +6015,20 @@ function revLastContact(cid, before){
     if(before && d >= before) return;
     if(d > best) best = d;
   });
-  var ev = (window._revEvents && window._revEvents.byClient) ? window._revEvents.byClient[cid] : null;
-  if(ev && ev.EventDate){ var d2=String(ev.EventDate).slice(0,10); if((!before || d2 < before) && d2 > best) best = d2; }
+  var evs = (window._revEvents && window._revEvents.anyByClient) ? (window._revEvents.anyByClient[cid] || window._revEvents.anyByClient[String(cid)] || []) : [];
+  evs.forEach(function(ev){
+    var d2 = String(ev.EventDate||'').slice(0,10);
+    if(d2 && (!before || d2 < before) && d2 > best) best = d2;
+  });
   return best;
+}
+// The first case of any kind opened on or after the 1st of month ym (for a client on
+// that month's "not spoken to" list: it counts as done, 11 Oct 2026).
+function revCaseSince(cid, ym){
+  var evs = (window._revEvents && window._revEvents.anyByClient) ? (window._revEvents.anyByClient[cid] || window._revEvents.anyByClient[String(cid)] || []) : [];
+  var hit = null;
+  evs.forEach(function(e){ var d = String(e.EventDate||'').slice(0,10); if(d >= ym+'-01' && (!hit || d < String(hit.EventDate).slice(0,10))) hit = e; });
+  return hit;
 }
 // ── What makes a client due ──
 // Policies that remind: current (not Replaced / Lapsed / Cancelled), a start date,
@@ -6149,8 +6170,11 @@ function revBuild(){
     // Counted under "Done this month" only when the review closed something that was due.
     var revNow = (doneNow || !(closedByRev || inFeed)) ? null : revEventSince(c.ID, cur);
     if(revNow) doneNow = {s:'done', at:String(revNow.EventDate||''), by:revNow.CreatedBy||revNow.ResponsibleUser||'', note:'🔄 Review opened'+(revNow.Outcome ? ': '+revNow.Outcome : ''), review:revNow};
+    // On this month's "not spoken to" list and a case of any kind was opened this month: done (11 Oct 2026).
+    var caseNow = (!doneNow && inFeed) ? revCaseSince(c.ID, cur) : null;
+    if(caseNow) doneNow = {s:'done', at:String(caseNow.EventDate||''), by:caseNow.CreatedBy||caseNow.ResponsibleUser||'', note:'🗂 Case opened'+(caseNow.Outcome ? ': '+caseNow.Outcome : '')};
     var pending = !!((revLogRow(c.ID)||{})._pendingSave);
-    if(doneNow){ out.done.push({c:c, e:doneNow, pending:pending, review:!!revNow}); }
+    if(doneNow){ out.done.push({c:c, e:doneNow, pending:pending, review:!!revNow, kase:!!caseNow}); }
     var sz = lg.snooze;
     var snoozing = !!(sz && sz.until && sz.until > todayStr);
     // A client put off from the feed is no longer in the batch, but still belongs under Not now.
@@ -6282,7 +6306,8 @@ function revCardHtml(full, prebuilt){
         '<span style="flex:1"><b>'+escHtml(d.c.Name||'')+'</b> <span style="color:#889">· '+escHtml(fdate(String(d.e.at||'').slice(0,10)))+(d.e.by?' · '+escHtml(userLabel(d.e.by)):'')+(d.e.note?' · '+escHtml(d.e.note):'')+'</span>'+
         (d.pending?' <span style="color:var(--rose);font-weight:700" onclick="event.stopPropagation();revRetry(\''+id+'\')">⚠️ not saved · retry</span>':'')+'</span>'+
         // A review closed by its work event has no undo here: deleting that work event brings the reminder back.
-        (d.review ? '<span style="font-size:10px;color:#667" title="Closed by its Annual Review work event. Deleting that work event brings the reminder back.">🔄 review</span>'
+        (d.kase ? '<span style="font-size:10px;color:#667" title="Closed by a case opened this month. Deleting that case brings them back.">🗂 case</span>'
+        : d.review ? '<span style="font-size:10px;color:#667" title="Closed by its Annual Review work event. Deleting that work event brings the reminder back.">🔄 review</span>'
                   : '<button class="btn b-gh xs" style="font-size:10px;padding:2px 7px" onclick="event.stopPropagation();revUndoDone(\''+id+'\')">undo</button>')+'</div>';
     }).join('')+'</details>' : '';
   var snzHtml = R.snoozed.length ? '<details style="border-top:1px solid var(--smoke)" ontoggle="window._revSnzOpen=this.open"'+(window._revSnzOpen?' open':'')+'><summary style="padding:6px 12px;font-size:11px;font-weight:700;color:#667;cursor:pointer">⏸ Not now ('+R.snoozed.length+')</summary>'+
@@ -11732,7 +11757,7 @@ function buildFnaDataPack(cid, includeSpouse){
   }
   function packPolicies(forCid, prefix){
     // Dead policies (Replaced / Cancelled / Lapsed) never reach the FNA (Clinton, 21 Sep 2026).
-    var pols = polsFor(forCid).filter(function(p){ return p.Status!=='Replaced' && p.Status!=='Cancelled' && p.Status!=='Lapsed'; });
+    var pols = polsFor(forCid).filter(function(p){ return !willIsDeadPolicy(p); });
     line('── '+prefix+'POLICIES ('+pols.length+' active/current) ──');
     if(!pols.length) line('  (none captured)');
     var polSkip = {ID:1, ClientID:1, ReviewHistory:1, _pendingSave:1, LastAccessed:1, CapturedDate:1, ReplacedBy:1, ReplacedDate:1, ReplacedPolicyNo:1, Beneficiaries:1,
@@ -12577,7 +12602,11 @@ var WILL_SA_PROP_NEW = 'Property to pass to surviving spouse (s.4(q) deduction)'
 function willMigrate(D){ if(D && D.sa_prop===WILL_SA_PROP_OLD) D.sa_prop = WILL_SA_PROP_NEW; return D; }
 // Policy types that pay no death benefit to a beneficiary — left off the Will tab.
 var WILL_POL_SKIP_TYPES = ['Medical Aid'];
-function willIsDeadPolicy(p){ return p.Status==='Replaced' || p.Status==='Cancelled' || p.Status==='Lapsed'; }
+function willIsDeadPolicy(p){ return p.Status==='Replaced' || p.Status==='Retired' || p.Status==='Cancelled' || p.Status==='Lapsed'; }
+// Replaced, or Retired (the client retired from it into a new policy, e.g. a
+// pension fund into a living annuity; 11 Oct 2026). Both are history only.
+function polIsEnded(p){ return !!p && (p.Status==='Replaced' || p.Status==='Retired'); }
+function polEndedWord(p){ return p && p.Status==='Retired' ? 'retired into' : 'replaced by'; }
 // Family names for the beneficiary boxes in sections 7 and 8, as "Name (Relationship)".
 function willNameOptions(c){
   var out=[], seen={};
@@ -14074,7 +14103,9 @@ function buildPolicyForm(p){
     '<input id="pown" type="text" value="'+(p.Owner||'')+'" placeholder="Owner name / entity" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px">'+
     '</div></div>'+'</div>';
   html+='<div class="g2">';
-  html+=fs('pst','Status',['Active','Lapsed','Paid Up','Cancelled'],p.Status||'Active');
+  // A Replaced / Retired policy keeps its status when edited (the list had no such
+  // option, so the box fell back to Active and saving brought it back; 11 Oct 2026).
+  html+=fs('pst','Status',['Active','Lapsed','Paid Up','Cancelled'].concat(polIsEnded(p)?[p.Status]:[]),p.Status||'Active');
   html+='<div></div></div>';
 
   // SERVICING FLAGS — Advisor of Record and AUM inclusion
@@ -16345,6 +16376,9 @@ function openPolicyView(cid,idx){
   if(p.Status==='Replaced'){
     var _by=polReplacedByList(p.ID,'');
     h+=note('🔄 Replaced'+(clean(p.ReplacedDate)?' on '+escHtml(fdate(p.ReplacedDate)):'')+(_by.length?' by <strong>'+escHtml(_by.map(polShortLabel).join(', '))+'</strong>':'')+'.','warn');
+  } else if(p.Status==='Retired'){
+    var _rby=polReplacedByList(p.ID,'');
+    h+=note('🏁 Retired'+(clean(p.ReplacedDate)?' on '+escHtml(fdate(p.ReplacedDate)):'')+(_rby.length?' into <strong>'+escHtml(_rby.map(polShortLabel).join(', '))+'</strong>':'')+'. Retirement, not a replacement.');
   }
   if(fx){
     var r=[];
@@ -16370,8 +16404,10 @@ function openPolicyView(cid,idx){
   var aorSet=aumFlag(p.AdvisorOfRecord)!=='';
   var aor=aorSet ? (p.AdvisorOfRecord==='Yes' ? 'Yes' : 'No — not mine') : '⚠ Not set';
   var aum=AUM_RISK_TYPES[type] ? (isMed?'No — medical aid':'No — risk policy') : (!aorSet ? '—' : (clean(p.CountsForAUM)||'⚠ Not set'));
-  var replTxt=(function(){ var rl=polReplacesList(p).map(polById).filter(Boolean); return rl.length ? rl.map(polShortLabel).join(', ') : clean(p.ReplacedPolicyNo); })();
-  var byTxt=(p.Status!=='Replaced') ? polReplacedByList(p.ID,'').map(polShortLabel).join(', ') : '';
+  var _rlV=polReplacesList(p).map(polById).filter(Boolean);
+  var replTxt=_rlV.length ? _rlV.map(polShortLabel).join(', ') : clean(p.ReplacedPolicyNo);
+  var replLbl=(_rlV.length && _rlV.every(function(o){ return o.Status==='Retired'; })) ? 'Retirement from' : 'Replaces';
+  var byTxt=!polIsEnded(p) ? polReplacedByList(p.ID,'').map(polShortLabel).join(', ') : '';
   h+=sec('Overview');
   h+=grid([
     field('Insurer', txt(p.Insurer)),
@@ -16381,7 +16417,7 @@ function openPolicyView(cid,idx){
     field('Premium paid by', payer),
     field('Broker of record', escHtml(aor), aorSet ? undefined : {color:'#9a3412'}),
     field('Counts for AUM', escHtml(aum)),
-    field('Replaces', replTxt?escHtml(replTxt):'', {color:'#2e7d5a'}),
+    field(replLbl, replTxt?escHtml(replTxt):'', {color:'#2e7d5a'}),
     field('Replaced by', byTxt?escHtml(byTxt):'', {color:'#9a3412'}),
     field('Captured', dt(p.CapturedDate)),
     field('Last updated', dt(p.LastUpdated))
@@ -16773,9 +16809,10 @@ function openPolicyHistory(cid,idx){
   (function(){
     var rl=polReplacesList(p).map(polById).filter(Boolean);
     var txt = rl.length ? rl.map(polShortLabel).join(', ') : (p.ReplacedPolicyNo||'');
-    if(txt) html+='<div style="grid-column:1/-1"><span style="color:#888;font-size:11px">Replaces</span><div style="font-weight:700;color:var(--sage)">'+escHtml(txt)+'</div></div>';
+    var rlLbl = (rl.length && rl.every(function(o){ return o.Status==='Retired'; })) ? 'Retirement from' : 'Replaces';
+    if(txt) html+='<div style="grid-column:1/-1"><span style="color:#888;font-size:11px">'+rlLbl+'</span><div style="font-weight:700;color:var(--sage)">'+escHtml(txt)+'</div></div>';
     var by=polReplacedByList(p.ID,'');
-    if(by.length) html+='<div style="grid-column:1/-1"><span style="color:#888;font-size:11px">Replaced by</span><div style="font-weight:700;color:#9a3412">'+escHtml(by.map(polShortLabel).join(', '))+'</div></div>';
+    if(by.length) html+='<div style="grid-column:1/-1"><span style="color:#888;font-size:11px">'+(p.Status==='Retired'?'Retired into':'Replaced by')+'</span><div style="font-weight:700;color:#9a3412">'+escHtml(by.map(polShortLabel).join(', '))+'</div></div>';
   })();
   html+='</div></div>';
 
@@ -16785,11 +16822,11 @@ function openPolicyHistory(cid,idx){
   } else {
     html+='<div style="font-size:12px;font-weight:700;text-transform:uppercase;color:#888;margin-bottom:8px">History (newest first)</div>';
     history.slice().reverse().forEach(function(h){
-      var isReplace=h.type==='replaced', isUnreplace=h.type==='unreplaced';
-      var color=isReplace?'#b45309':isUnreplace?'#64748b':'#0e413a';
+      var isReplace=h.type==='replaced', isUnreplace=h.type==='unreplaced', isRelabel=h.type==='relabel', isRet=h.kind==='Retired';
+      var color=isReplace?(isRet?'#2e7d5a':'#b45309'):(isUnreplace||isRelabel)?'#64748b':'#0e413a';
       html+='<div style="border:1px solid #eee;border-radius:8px;margin-bottom:10px;overflow:hidden">';
       html+='<div style="background:'+color+';color:#fff;padding:7px 14px;display:flex;justify-content:space-between;font-size:12px">';
-      html+='<span style="font-weight:700">'+(isReplace?'🔄 Policy Replaced':isUnreplace?'↩ Replacement undone':'📋 Policy Review')+'</span>';
+      html+='<span style="font-weight:700">'+(isReplace?(isRet?'🏁 Policy Retired':'🔄 Policy Replaced'):isUnreplace?(isRet?'↩ Retirement undone':'↩ Replacement undone'):isRelabel?'✏ '+escHtml(h.note||'Changed'):'📋 Policy Review')+'</span>';
       html+='<span>'+h.date+' · '+( h.by||'')+'</span></div>';
       html+='<div style="display:grid;grid-template-columns:1fr 1fr;padding:10px 14px;gap:6px;font-size:12px">';
       function chg(oldV,newV,lbl){
@@ -16882,23 +16919,29 @@ function polReplBoxHtml(p){
       if(String(o.ID)===selfId) return false;
       if(ticked.indexOf(String(o.ID))>=0) return true;
       return o.Status!=='Lapsed' && o.Status!=='Cancelled';
-    }).sort(function(a,b){ return (a.Status==='Replaced')-(b.Status==='Replaced') || String(a.Insurer||'').localeCompare(String(b.Insurer||'')); }) : [];
+    }).sort(function(a,b){ return (polIsEnded(a)?1:0)-(polIsEnded(b)?1:0) || String(a.Insurer||'').localeCompare(String(b.Insurer||'')); }) : [];
   // Not a replacement: no box, just a small link in case it is one after all
   // (a policy added by hand, or a case captured with the wrong sub-type).
   var hint='';
-  if(!show && polsFor(EPC).some(function(o){ return String(o.ID)!==selfId && ['Lapsed','Cancelled','Replaced'].indexOf(o.Status)<0; }))
+  if(!show && polsFor(EPC).some(function(o){ return String(o.ID)!==selfId && ['Lapsed','Cancelled','Replaced','Retired'].indexOf(o.Status)<0; }))
     hint='<div style="margin:6px 0 2px"><a href="#" onclick="polReplReveal();return false" style="font-size:12px;color:#889">🔄 Does this policy replace another policy? Click to tick it.</a></div>';
   if(!others.length && !replacedBy.length) return hint;
   var h=hint+'<div style="margin:8px 0 4px;padding:10px 12px;background:#fdf8f3;border:1px solid #f1dcc4;border-radius:7px">';
   if(replacedBy.length)
-    h+='<div style="font-size:12px;color:#9a3412;margin-bottom:'+(others.length?'8':'0')+'px"><b>This policy was replaced by:</b> '+escHtml(replacedBy.map(polShortLabel).join(', '))+'</div>';
+    h+='<div style="font-size:12px;color:#9a3412;margin-bottom:'+(others.length?'8':'0')+'px"><b>This policy was '+escHtml(polEndedWord(polById(selfId)))+':</b> '+escHtml(replacedBy.map(polShortLabel).join(', '))+'</div>';
   if(others.length){
     h+='<div style="font-size:12px;font-weight:700;color:var(--navy);margin-bottom:6px">🔄 '+((subs && subs.indexOf('Replacement')>=0 && !ticked.length)?'This case is a replacement: tick the policies it replaces':'This policy replaces')+
-      ' <span style="font-weight:400;color:#889">Saving marks them Replaced; unticking puts them back.</span></div>';
+      ' <span style="font-weight:400;color:#889">Saving marks them Replaced or Retired (below); unticking puts them back.</span></div>';
+    // Replaced, or Retired into this policy (a retirement, e.g. pension fund into a living annuity; 11 Oct 2026).
+    var _kindRet = ticked.some(function(id){ var o=polById(id); return o && o.Status==='Retired'; });
+    h+='<div style="display:flex;gap:14px;flex-wrap:wrap;align-items:center;font-size:12.5px;margin:0 0 6px">'+
+      '<label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="radio" name="pol_repl_kind" id="pol_repl_kind_rep" value="Replaced"'+(_kindRet?'':' checked')+' style="accent-color:#9e2a2b">🔄 Replaced <span style="color:#889">(a replacement)</span></label>'+
+      '<label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="radio" name="pol_repl_kind" id="pol_repl_kind_ret" value="Retired"'+(_kindRet?' checked':'')+' style="accent-color:#2e7d5a">🏁 Retired into this policy <span style="color:#889">(retirement, not a replacement)</span></label>'+
+    '</div>';
     h+=others.map(function(o){
       var on=ticked.indexOf(String(o.ID))>=0;
       var by=polReplacedByList(o.ID, selfId);
-      var note = o.Status==='Replaced' ? (by.length ? 'already replaced by '+by.map(polShortLabel).join(', ') : 'already replaced') : (o.Status||'Active');
+      var note = polIsEnded(o) ? (by.length ? 'already '+polEndedWord(o)+' '+by.map(polShortLabel).join(', ') : 'already '+o.Status.toLowerCase()) : (o.Status||'Active');
       return '<label style="display:flex;align-items:center;gap:8px;font-size:13px;padding:3px 0;cursor:pointer">'+
         '<input type="checkbox" class="pol-repl" value="'+escHtml(String(o.ID))+'" '+(on?'checked':'')+' style="width:16px;height:16px;cursor:pointer;accent-color:#9e2a2b">'+
         '<span><b>'+escHtml(o.Insurer||'—')+'</b> '+escHtml(o.PolicyNo||o.Product||'')+' <span style="color:#667">· '+escHtml(o.Type||'')+'</span> <span style="font-size:11px;color:#889">('+escHtml(note)+')</span></span></label>';
@@ -16935,25 +16978,40 @@ function polSaveQuiet(o){
 }
 // Apply the ticks from the policy form: mark newly ticked policies Replaced and
 // put unticked ones back. newPol is the policy being saved.
-function applyReplacementTicks(newPol, prevIds, nextIds){
+// kind: 'Replaced' (default) or 'Retired' (retired into newPol; 11 Oct 2026).
+function applyReplacementTicks(newPol, prevIds, nextIds, kind){
+  kind = (kind==='Retired') ? 'Retired' : 'Replaced';
   var now=new Date().toISOString().slice(0,10);
+  var verb = kind==='Retired' ? 'Retired into ' : 'Replaced by ';
   nextIds.filter(function(id){ return prevIds.indexOf(id)<0; }).forEach(function(id){
-    var o=polById(id); if(!o || o.Status==='Replaced') return;   // already replaced (e.g. one replaced by three)
+    var o=polById(id); if(!o || polIsEnded(o)) return;   // already replaced / retired (e.g. one replaced by three)
     var hist=[]; try{ hist=JSON.parse(o.ReviewHistory||'[]'); }catch(e){}
-    var snap=snapshotPolicy(o); snap.type='replaced'; snap.prevStatus=o.Status||'Active';
-    snap.note='Replaced by '+polShortLabel(newPol)+' on '+now+' ('+userLabel(cu())+')';
+    var snap=snapshotPolicy(o); snap.type='replaced'; snap.kind=kind; snap.prevStatus=o.Status||'Active';
+    snap.note=verb+polShortLabel(newPol)+' on '+now+' ('+userLabel(cu())+')';
     hist.push(snap);
-    o.ReviewHistory=JSON.stringify(hist); o.Status='Replaced'; o.ReplacedDate=now; o.LastUpdated=now;
+    o.ReviewHistory=JSON.stringify(hist); o.Status=kind; o.ReplacedDate=now; o.LastUpdated=now;
+    polSaveQuiet(o);
+  });
+  // Still ticked, but Replaced <-> Retired was changed on the form.
+  nextIds.filter(function(id){ return prevIds.indexOf(id)>=0; }).forEach(function(id){
+    var o=polById(id); if(!o || !polIsEnded(o) || o.Status===kind) return;
+    if(polReplacedByList(id, newPol.ID).length) return;          // another policy also ended it: leave it
+    var hist=[]; try{ hist=JSON.parse(o.ReviewHistory||'[]'); }catch(e){}
+    var snap=snapshotPolicy(o); snap.type='relabel'; snap.kind=kind;
+    snap.note='Changed from '+o.Status+' to '+kind+' ('+verb.trim().toLowerCase()+' '+polShortLabel(newPol)+')';
+    hist.push(snap);
+    o.ReviewHistory=JSON.stringify(hist); o.Status=kind; o.LastUpdated=now;
     polSaveQuiet(o);
   });
   prevIds.filter(function(id){ return nextIds.indexOf(id)<0; }).forEach(function(id){
-    var o=polById(id); if(!o || o.Status!=='Replaced') return;
+    var o=polById(id); if(!o || !polIsEnded(o)) return;
     if(polReplacedByList(id, newPol.ID).length) return;          // another policy still replaces it
     var hist=[]; try{ hist=JSON.parse(o.ReviewHistory||'[]'); }catch(e){}
     var prev='Active';
     for(var i=hist.length-1;i>=0;i--){ if(hist[i] && hist[i].type==='replaced'){ prev=hist[i].prevStatus||'Active'; break; } }
-    var snap=snapshotPolicy(o); snap.type='unreplaced';
-    snap.note='Replacement undone: no longer replaced by '+polShortLabel(newPol)+'. Status back to '+prev+'.';
+    var wasRet = o.Status==='Retired';
+    var snap=snapshotPolicy(o); snap.type='unreplaced'; snap.kind=o.Status;
+    snap.note=(wasRet?'Retirement undone: no longer retired into ':'Replacement undone: no longer replaced by ')+polShortLabel(newPol)+'. Status back to '+prev+'.';
     hist.push(snap);
     o.ReviewHistory=JSON.stringify(hist); o.Status=prev; o.ReplacedDate=''; o.LastUpdated=now;
     polSaveQuiet(o);
@@ -16994,6 +17052,7 @@ function savePolicy(){
   var _prevRepl = oldPol ? polReplacesList(oldPol) : polReplacesList({ReplacedBy:window.REPLACING_POL_ID||''});
   if(!oldPol) _prevRepl = [];   // a brand-new policy replaced nothing before this save
   var _boxes = document.querySelectorAll('#pMod .pol-repl');
+  var _replKind = (document.getElementById('pol_repl_kind_ret') && document.getElementById('pol_repl_kind_ret').checked) ? 'Retired' : 'Replaced';
   var _nextRepl = _boxes.length ? Array.prototype.filter.call(_boxes,function(b){return b.checked;}).map(function(b){return b.value;})
                                 : (oldPol ? polReplacesList(oldPol) : []);
   pol.ReplacedBy = polReplacesValue(_nextRepl);
@@ -17013,7 +17072,7 @@ function savePolicy(){
   pol._pendingSave = true;
   if(EPI!==null&&oldPol){var gi=DB.policies.indexOf(oldPol);if(gi>=0)DB.policies[gi]=pol;}
   else DB.policies.push(pol);
-  applyReplacementTicks(pol, _prevRepl, _nextRepl);
+  applyReplacementTicks(pol, _prevRepl, _nextRepl, _replKind);
   // Write to localStorage immediately — survives a refresh before server responds
   try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
   closeAll();render();
@@ -17043,7 +17102,7 @@ function deletePolicy(){
   var oldPol = (EPI!==null && existing[EPI]) ? existing[EPI] : null;
   if(!oldPol){ toast('Cannot find policy to delete','err'); return; }
   var label = (oldPol.Insurer||'') + (oldPol.Product?' — '+oldPol.Product:'') + (oldPol.PolicyNo?' ('+oldPol.PolicyNo+')':'');
-  var _rl = polReplacesList(oldPol).map(polById).filter(function(o){ return o && o.Status==='Replaced'; });
+  var _rl = polReplacesList(oldPol).map(polById).filter(function(o){ return o && polIsEnded(o); });
   if(!confirm('Permanently delete this policy?\n\n' + label + '\n\nThis cannot be undone.' +
      (_rl.length ? '\n\nIt replaced: '+_rl.map(polShortLabel).join(', ')+'. Those go back to their previous status (unless another policy also replaces them).' : ''))) return;
   // Remove from DB in memory
@@ -18962,7 +19021,7 @@ function astuteFindExisting(r){
   if(!target) return null;                       // no usable number → can't match, always create new
   return DB.policies.find(function(p){
     return String(p.ClientID)===String(ASTUTE_CID)
-      && p.Status!=='Replaced' && p.Status!=='Cancelled'
+      && p.Status!=='Replaced' && p.Status!=='Retired' && p.Status!=='Cancelled'
       && astuteNormPolNo(p.PolicyNo)===target;
   }) || null;
 }
@@ -20791,7 +20850,7 @@ function deleteSupplier(id){
 function openPolicySchedule(cid){
   var c=DB.clients.find(function(x){return String(x.ID)===String(cid);});
   if(!c){toast('Client not found','err');return;}
-  var allPols=polsFor(cid).filter(function(p){return p.Status!=='Replaced'&&p.Status!=='Cancelled'&&p.Status!=='Lapsed';});
+  var allPols=polsFor(cid).filter(function(p){return !willIsDeadPolicy(p);});
   var today=new Date().toLocaleDateString('en-ZA',{day:'2-digit',month:'long',year:'numeric'});
 
   function N(v){ return crmNum(v||'0'); }   // decimal-comma aware (see crmNum)
