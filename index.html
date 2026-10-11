@@ -2244,7 +2244,7 @@ function renderDash(){
   var dashFilter = window.DASH_TASK_FILTER||'today';
   if(!window.DASH_USER_FILTER) window.DASH_USER_FILTER=cu();
   // Reviews list (2 Oct 2026): feed size and last Annual Review events load once after sign-in.
-  if(REV_FEED_N===null && SB_AUTH.token) loadRevFeedN(function(){ if(PAGE==='dash'){ var _s=captureScrolls(); render(); restoreScrolls(_s); } });
+  if(revFeedNeedsLoad() && SB_AUTH.token) loadRevFeedN(function(){ if(PAGE==='dash'){ var _s=captureScrolls(); render(); restoreScrolls(_s); } });
   if(SB_AUTH.token && window._revEvents && !window._revEvents.loading && Date.now()-window._revEvents.loadedAt > BOARD_REFRESH_MS) loadReviewEvents();
   if(SB_AUTH.token) revMigrateOldTicks();
   var _rev = revBuild();
@@ -5821,6 +5821,16 @@ var REV_FEED_KEY = 'review_feed_per_month';
 var REV_FEED_DEFAULT = 15;
 var REV_FEED_N = null;                    // loaded from settings once after sign-in
 var _revFeedLoading = false;
+// 11 Oct 2026 (Clinton): each month's "not spoken to in a year" list is picked once
+// and kept in settings (Key review_feed_batch_YYYY-MM, Value = JSON list of client
+// IDs), the same list for everyone. A client leaves it when their policies are
+// entered (broker of record set, with a start date) and nobody is added in their
+// place, so the list can be finished. Before this it was re-picked on every screen
+// refresh and the next client in line slid into every gap.
+var REV_BATCH_PREFIX = 'review_feed_batch_';
+var REV_FEED_BATCHES = null;              // {ym:[clientId,...]}; null until loaded
+var _revBatchUnsaved = {}, _revBatchSaving = {}, _revBatchTried = {};
+var _revFeedTried = 0;
 var FP_NOT_ITEM_KINDS = ['need','need_notes','fna_meta','review_log'];   // finpos rows that are not assets/liabilities
 function revPad(n){ return ('0'+n).slice(-2); }
 function revYM(d){ return d.getFullYear()+'-'+revPad(d.getMonth()+1); }
@@ -5834,15 +5844,66 @@ function revMonthList(){
   return out;
 }
 function revHash(s){ var h=0; s=String(s); for(var i=0;i<s.length;i++){ h=((h<<5)-h+s.charCodeAt(i))|0; } return h>>>0; }
+// Called while either is not loaded yet (feed size, or the kept monthly lists).
+function revFeedNeedsLoad(){ return REV_FEED_N===null || REV_FEED_BATCHES===null; }
 function loadRevFeedN(cb){
   if(_revFeedLoading) return;
-  _revFeedLoading = true;
+  if(REV_FEED_N!==null && Date.now()-_revFeedTried < 60000) return;   // lists failed to load: try again after a minute, not on every refresh
+  _revFeedLoading = true; _revFeedTried = Date.now();
+  var left = 2;
+  function done(){ if(--left) return; _revFeedLoading = false; if(cb) cb(); }
   sbFetch('GET','/rest/v1/settings?Key=eq.'+REV_FEED_KEY+'&select=*',null,function(rows,err){
-    _revFeedLoading = false;
     var n = REV_FEED_DEFAULT;
     if(!err && rows && rows[0]){ var v=parseInt(rows[0].Value,10); if(isFinite(v) && v>=0) n=v; }
     REV_FEED_N = n;
-    if(cb) cb();
+    done();
+  });
+  sbFetch('GET','/rest/v1/settings?Key=like.'+REV_BATCH_PREFIX+'*&select=*',null,function(rows,err){
+    if(!err && Array.isArray(rows)){
+      var b = {};
+      rows.forEach(function(r){
+        var ym = String(r.Key||'').slice(REV_BATCH_PREFIX.length);
+        if(!/^\d{4}-\d{2}$/.test(ym)) return;
+        try{ var v = JSON.parse(r.Value); if(Array.isArray(v)) b[ym] = v.map(String); }catch(e){}
+      });
+      // A list picked on this computer that has not reached the server yet is kept.
+      if(REV_FEED_BATCHES) Object.keys(_revBatchUnsaved).forEach(function(ym){ if(!b[ym] && REV_FEED_BATCHES[ym]) b[ym] = REV_FEED_BATCHES[ym]; });
+      REV_FEED_BATCHES = b;
+    }
+    done();
+  });
+}
+// Everything the monthly pick depends on is loaded: clients, policies, the review
+// ticks, the review work events (last contact) and the lists already kept.
+function revPickReady(){
+  var R = window._revEvents;
+  return !!(DB.clients.length && DB.policies.length && window._revSyncOk && R && R.loadedAt && !R.err &&
+            REV_FEED_BATCHES && REV_FEED_N!==null);
+}
+// Save a month's list. Someone else may have picked the month a moment earlier:
+// theirs is kept (force = this computer's list wins, used when the number changes).
+function revSaveBatch(ym, force){
+  if(_revBatchSaving[ym]) return;
+  if(!force && _revBatchTried[ym] && Date.now()-_revBatchTried[ym] < 60000) return;
+  _revBatchSaving[ym] = true; _revBatchTried[ym] = Date.now();
+  var key = REV_BATCH_PREFIX+ym;
+  function post(){
+    sbFetch('POST','/rest/v1/settings',[{Key:key, Value:JSON.stringify(REV_FEED_BATCHES[ym]||[])}],function(r,e){
+      _revBatchSaving[ym] = false;
+      if(!e) delete _revBatchUnsaved[ym];       // failed: tried again on a later refresh
+    });
+  }
+  if(force){ post(); return; }
+  sbFetch('GET','/rest/v1/settings?Key=eq.'+key+'&select=*',null,function(rows,err){
+    if(err){ _revBatchSaving[ym] = false; return; }
+    var v = null;
+    try{ if(rows && rows[0]) v = JSON.parse(rows[0].Value); }catch(e){ v = null; }
+    if(Array.isArray(v)){
+      REV_FEED_BATCHES[ym] = v.map(String); delete _revBatchUnsaved[ym]; _revBatchSaving[ym] = false;
+      if(PAGE==='reviews' || PAGE==='dash'){ var _s=captureScrolls(); render(); restoreScrolls(_s); }
+      return;
+    }
+    post();
   });
 }
 function revSetFeedN(){
@@ -5853,7 +5914,20 @@ function revSetFeedN(){
   if(!isFinite(n) || n<0 || n>200){ toast('Please enter a number from 0 to 200','err'); return; }
   sbFetch('POST','/rest/v1/settings',[{Key:REV_FEED_KEY, Value:String(n)}],function(r,e){
     if(e){ toast('⚠️ Not saved to the server. Please try again.','err'); return; }
-    REV_FEED_N = n; toast('Saved: '+n+' a month','ok');
+    REV_FEED_N = n;
+    // This month's list is already picked: a bigger number adds the next clients in
+    // line now; a smaller one leaves this month as it is and starts next month.
+    var ym = revYM(new Date()), kept = REV_FEED_BATCHES && REV_FEED_BATCHES[ym];
+    if(kept && n > kept.length){
+      var have = {}; kept.forEach(function(id){ have[id] = 1; });
+      var extra = revFeedBatch(revPolicyIndex(), ym, n + kept.length, DB.clients.filter(isActiveClient))
+        .filter(function(c){ return !have[String(c.ID)]; }).slice(0, n - kept.length).map(function(c){ return String(c.ID); });
+      REV_FEED_BATCHES[ym] = kept.concat(extra); _revBatchUnsaved[ym] = true;
+      revSaveBatch(ym, true);
+      toast('Saved: '+n+' a month · '+extra.length+' added to this month\'s list','ok');
+    } else if(kept && n < kept.length){
+      toast('Saved: '+n+' a month · this month\'s list stays as it is, the new number starts next month','ok');
+    } else toast('Saved: '+n+' a month','ok');
     var _s=captureScrolls(); render(); restoreScrolls(_s);
   });
 }
@@ -5998,10 +6072,12 @@ function revEventSince(cid, ym){
 }
 // Clients with no trigger of their own (no reminding policy, no review month) can come up in the feed.
 function revHasTrigger(polIdx, c){ return !!(polIdx[String(c.ID)]||[]).length || clientReviewMonths(c).length>0; }
-// The feed batch for a month: clients with no trigger and no contact in the 12 months
+// Picks the feed for a month: clients with no trigger and no contact in the 12 months
 // before the month started, longest-silent first (never contacted first, then a fixed
-// order), N of them. Ticks during the month do not change the batch; an unticked
-// client stays at the front, so they carry into next month.
+// order), N of them. Ticks during the month do not change it; an unticked client
+// stays at the front, so they carry into next month. From 11 Oct 2026 the pick is
+// made once a month and kept (revBuild, REV_FEED_BATCHES); this is not re-run to
+// fill gaps.
 function revFeedBatch(polIdx, ym, n, active){
   if(!n) return [];
   var start = revYmDate(ym), startStr = localDateStr(start);
@@ -6013,7 +6089,7 @@ function revFeedBatch(polIdx, ym, n, active){
     var lc = revLastContact(c.ID, startStr);
     if(lc && lc > cut) return;
     var sz = revLog(c.ID).snooze;
-    if(ym===revYM(new Date()) && sz && sz.until && sz.until > today) return;  // put off: someone else fills the slot
+    if(ym===revYM(new Date()) && sz && sz.until && sz.until > today) return;  // put off when the month is picked: not picked
     list.push({c:c, lc:lc});
   });
   list.sort(function(a,b){
@@ -6033,12 +6109,29 @@ function revBuild(){
   var n = REV_FEED_N===null ? REV_FEED_DEFAULT : REV_FEED_N;
   var out = {cur:cur, rows:[], done:[], snoozed:[], feedN:n, months:months, polIdx:polIdx, active:active};
   if(cur < REV_FROM) return out;
-  var batchMemo = {};
+  var batchMemo = {}, byIdAct = null;
   function batchIds(ym){
-    if(!batchMemo[ym]){ var m = {}; revFeedBatch(polIdx, ym, n, active).forEach(function(c){ m[String(c.ID)] = 1; }); batchMemo[ym] = m; }
-    return batchMemo[ym];
+    if(batchMemo[ym]) return batchMemo[ym];
+    var m = {}, ids = REV_FEED_BATCHES ? REV_FEED_BATCHES[ym] : null;
+    if(!ids && ym===cur && revPickReady()){
+      // First time this month's list is needed: pick it once and keep it (11 Oct 2026).
+      ids = revFeedBatch(polIdx, ym, n, active).map(function(c){ return String(c.ID); });
+      REV_FEED_BATCHES[ym] = ids; _revBatchUnsaved[ym] = true;
+    }
+    if(ids){
+      // Kept list: a client drops off when their policies are entered (they now come
+      // up on their anniversaries) or they are no longer an active client. Nobody new
+      // is added in their place.
+      if(!byIdAct){ byIdAct = {}; active.forEach(function(c){ byIdAct[String(c.ID)] = c; }); }
+      ids.forEach(function(id){ var c = byIdAct[id]; if(c && !revHasTrigger(polIdx, c)) m[id] = 1; });
+    } else {
+      // Not picked yet (still loading) or a month before lists were kept.
+      revFeedBatch(polIdx, ym, n, active).forEach(function(c){ m[String(c.ID)] = 1; });
+    }
+    return batchMemo[ym] = m;
   }
   var feedIds = batchIds(cur);
+  if(_revBatchUnsaved[cur]) revSaveBatch(cur);
   active.forEach(function(c){
     var lg = revLog(c.ID);
     var open = [], closedByRev = false;
@@ -6114,7 +6207,9 @@ function revRowHtml(r, cur){
   var bar = r.feed ? '#7c3aed' : carried ? 'var(--rose)' : 'var(--sage)';
   var lines = '';
   if(r.feed){
-    lines += '<div style="font-size:11.5px;color:#5b21b6">👋 '+(r.last ? 'Last contact '+fdate(r.last) : 'No contact logged')+' · no policy or review month to bring them up</div>';
+    var why = revFeedReason(c);
+    lines += '<div style="font-size:11.5px;color:#5b21b6">👋 '+(r.last ? 'Last contact '+fdate(r.last) : 'No contact logged')+' · '+
+      (why.fix ? '<b style="color:#9a3412">'+escHtml(why.text)+'</b>' : escHtml(why.text))+'</div>';
   } else {
     r.open.forEach(function(o){
       o.ann.forEach(function(a){ lines += revAnnLine(a, o.ym, o.ym===cur); });
@@ -6141,6 +6236,26 @@ function revRowHtml(r, cur){
       (revRowHasOwnAnn(r) ? '' : btn('✓ Done','revOpenDone','b-sg','Call only, nothing to file: closes this client for the month'))+
       btn('⏸ Not now','revOpenSnooze','b-gh','Hide until a date you pick')+
     '</div></div>';
+}
+// Why a feed client has nothing to bring them up (11 Oct 2026). Policies whose broker
+// of record was never set, or with no start date, are a fix on the policy, not a reason
+// to phone: once fixed the client leaves this list for their anniversaries.
+function revFeedReason(c){
+  var live = 0, unset = 0, nodate = 0;
+  polsFor(c.ID).forEach(function(p){
+    if(willIsDeadPolicy(p) || isMedAidPol(p)) return;
+    live++;
+    if(aumFlag(p.AdvisorOfRecord)==='') unset++;
+    var sp = String(p.StartDate||'').split(/[T ]/)[0].split(/[-\/]/);
+    var y = +sp[0], m = +sp[1]-1, d = +sp[2];
+    if(sp.length<3 || sp[0].length!==4 || !(y>1900) || !(m>=0 && m<12) || !(d>=1 && d<=31)) nodate++;
+  });
+  if(!live) return {fix:false, text:'no policies on the CRM'};
+  var pl = function(k){ return k+' polic'+(k===1?'y':'ies'); };
+  var bits = [];
+  if(unset) bits.push(pl(unset)+': broker of record not set');
+  if(nodate) bits.push(pl(nodate)+' with no start date');
+  return {fix:true, text: bits.length ? bits.join(' · ') : pl(live)+' not bringing them up'};
 }
 function revRowHasOwnAnn(r){
   if(window._taskLinkReady === false) return false;   // before the database update, ✓ Done stays (Start review can't run yet)
@@ -6408,7 +6523,7 @@ function revMigrateOldTicks(){
 function renderReviewsPage(){
   var R = window._revEvents;
   if(!R.loading && Date.now() - R.loadedAt > BOARD_REFRESH_MS) loadReviewEvents();
-  if(REV_FEED_N===null && SB_AUTH.token) loadRevFeedN(function(){ if(PAGE==='reviews'){ var _s=captureScrolls(); render(); restoreScrolls(_s); } });
+  if(revFeedNeedsLoad() && SB_AUTH.token) loadRevFeedN(function(){ if(PAGE==='reviews'){ var _s=captureScrolls(); render(); restoreScrolls(_s); } });
   var B = revBuild();
   var pool = B.active.filter(function(c){ return !revHasTrigger(B.polIdx, c); }).length;
   return '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">'+
@@ -6420,7 +6535,7 @@ function renderReviewsPage(){
     revNextMonthHtml()+
     '<div style="padding:12px 16px;background:#f5f3ff;border-left:3px solid #7c3aed;border-radius:6px;font-size:12px;color:#4c1d95">'+
       '<b>'+pool+' of '+B.active.length+' active clients have no reminding policy and no review month.</b> '+
-      'They come up '+B.feedN+' a month under "Not spoken to in a year", longest silent first. As you capture their policies (with a start date and the broker-of-record tick), they move to their policy anniversaries instead.'+
+      'They come up '+B.feedN+' a month under "Not spoken to in a year", longest silent first. Each month\'s list is picked once and stays the same: when you enter a client\'s policies (broker of record set, with a start date) they leave the list and come up on their policy anniversaries, and nobody is added in their place.'+
     '</div>';
 }
 
@@ -13963,17 +14078,23 @@ function buildPolicyForm(p){
   html+='<div></div></div>';
 
   // SERVICING FLAGS — Advisor of Record and AUM inclusion
-  // Default to 'Yes' for unset (existing data migration: panel stays useful;
-  // user opts out the exceptions). Linked: ticking AOR auto-ticks AUM,
-  // unticking AOR auto-unticks AUM. AUM can be manually edited after to
-  // break the link (e.g. risk policies, collateralised assets).
-  var _aor = (p.AdvisorOfRecord===undefined||p.AdvisorOfRecord===null||p.AdvisorOfRecord==='') ? 'Yes' : p.AdvisorOfRecord;
+  // 11 Oct 2026 (Clinton): the form used to show a never-set "broker of record"
+  // as ticked, so the screen said Yes while the database was empty (and Reviews,
+  // which reads the database, treated those clients as having no policy). Now an
+  // EXISTING policy that was never set shows "Not set" with nothing chosen, and
+  // saving without choosing leaves it not set. A NEW policy (Add / Replace) still
+  // starts as Mine. Choosing Mine ticks AUM, Not mine unticks it; AUM can still be
+  // changed after (e.g. risk policies, collateralised assets).
+  var _aorUnset = !!window.POL_FORM_SELF_ID && aumFlag(p.AdvisorOfRecord)==='';
+  var _aor = _aorUnset ? '' : ((p.AdvisorOfRecord===undefined||p.AdvisorOfRecord===null||p.AdvisorOfRecord==='') ? 'Yes' : p.AdvisorOfRecord);
   var _aum = (p.CountsForAUM===undefined||p.CountsForAUM===null||p.CountsForAUM==='') ? 'Yes' : p.CountsForAUM;
+  var _aorPick = 'var aum=document.getElementById(\'pb_aum\');if(aum){aum.checked=(this.value===\'Yes\');}var w=document.getElementById(\'pb_aor_unset\');if(w)w.style.display=\'none\';';
   html+='<div style="display:flex;gap:24px;margin:8px 0 4px 0;padding:10px 12px;background:#f8f7f1;border:1px solid var(--smoke);border-radius:7px;align-items:center;flex-wrap:wrap">';
-  html+='<label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;font-weight:600;color:var(--navy)">'+
-    '<input type="checkbox" id="pb_aor" '+(_aor==='Yes'?'checked':'')+
-    ' onchange="(function(el){var aum=document.getElementById(\'pb_aum\');if(aum){aum.checked=el.checked;}})(this)"'+
-    ' style="width:16px;height:16px;cursor:pointer;accent-color:var(--sage)">Advisor / broker of record</label>';
+  html+='<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap"><span style="font-size:13px;font-weight:600;color:var(--navy)">Advisor / broker of record:</span>'+
+    '<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;font-weight:600;color:var(--navy)"><input type="radio" id="pb_aor_y" name="pb_aor_r" value="Yes"'+(_aor==='Yes'?' checked':'')+' onchange="'+_aorPick+'" style="width:15px;height:15px;cursor:pointer;accent-color:var(--sage)">✓ Mine</label>'+
+    '<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;font-weight:600;color:var(--navy)"><input type="radio" id="pb_aor_n" name="pb_aor_r" value="No"'+(_aor==='No'?' checked':'')+' onchange="'+_aorPick+'" style="width:15px;height:15px;cursor:pointer;accent-color:var(--sage)">✗ Not mine</label>'+
+    (_aorUnset ? '<span id="pb_aor_unset" style="font-size:12px;font-weight:700;color:#9a3412;background:#fff7ed;border:1px solid #fdba74;border-radius:6px;padding:2px 8px">⚠ Not set yet: choose one. Until it is set, this policy brings up no review reminder.</span>' : '')+
+    '</div>';
   // Life & risk, business assurance and medical aid never count as AUM (the AUM
   // page ignores the tick for these types), so the box is not shown for them and
   // collectPolicyForm saves 'No'.
@@ -13984,7 +14105,7 @@ function buildPolicyForm(p){
     '<input type="checkbox" id="pb_aum" '+(_aum==='Yes'?'checked':'')+
     ' style="width:16px;height:16px;cursor:pointer;accent-color:var(--sage)">Counts for AUM</label>';
   }
-  html+='<span style="font-size:11px;color:#889;font-style:italic">Untick "Advisor / broker of record" for policies you have captured but do not control (they show on the AUM page under Not mine). Untick AUM for policies you do control but that are not assets under management (e.g. life risk).</span>';
+  html+='<span style="font-size:11px;color:#889;font-style:italic">Choose "Not mine" for policies you have captured but do not control (they show on the AUM page under Not mine). Untick AUM for policies you do control but that are not assets under management (e.g. life risk).</span>';
   html+='</div>';
 
   // REPLACES: tick every policy this one replaces. Saving marks them Replaced;
@@ -15498,7 +15619,8 @@ function collectPolicyForm(){
   return {
     Insurer:g('pi'),Product:g('pp'),PolicyNo:g('pn'),Type:g('pt'),
     StartDate:g('psd'),ClientIsOwner:getR('pisowner'),Owner:g('pown'),Status:g('pst'),EstateDutiable:getR('pestate'),
-    AdvisorOfRecord:(document.getElementById('pb_aor')?(document.getElementById('pb_aor').checked?'Yes':'No'):'Yes'),
+    // Mine / Not mine; nothing chosen on a never-set policy saves '' (stays not set, 11 Oct 2026).
+    AdvisorOfRecord:(document.getElementById('pb_aor_y') ? (document.getElementById('pb_aor_y').checked ? 'Yes' : (document.getElementById('pb_aor_n').checked ? 'No' : '')) : 'Yes'),
     ReplacedBy:(function(){ var b=document.querySelectorAll('#pMod .pol-repl'); if(!b.length) return undefined;
       return polReplacesValue(Array.prototype.filter.call(b,function(x){return x.checked;}).map(function(x){return x.value;})); })(),
     // No AUM box = the form was showing a risk type. Saving a risk type → 'No'.
@@ -15506,7 +15628,7 @@ function collectPolicyForm(){
     // tick the same as "broker of record", instead of off.
     CountsForAUM:(document.getElementById('pb_aum') ? (document.getElementById('pb_aum').checked?'Yes':'No')
                  : (AUM_RISK_TYPES[g('pt')] ? 'No'
-                    : ((document.getElementById('pb_aor') && !document.getElementById('pb_aor').checked) ? 'No' : 'Yes'))),
+                    : ((document.getElementById('pb_aor_n') && document.getElementById('pb_aor_n').checked) ? 'No' : 'Yes'))),
     BizType:g('pbiztype'),LifeAssuredType:(document.getElementById('plifeassured_type')?document.getElementById('plifeassured_type').value:''),LifeAssured:g('plifeassured'),LoanAmount:'',KeyPosition:g('pkeypos'),
     Premium:g('ppm'),Frequency:g('pfreq'),
     PolicyFee:g('pfee'),
@@ -16244,8 +16366,10 @@ function openPolicyView(cid,idx){
   var payType=p.PayerType||(isBiz?'Company':'Client');
   var payer=escHtml(payType)+(clean(p.PayerName)&&payType!=='Client'?' — '+escHtml(p.PayerName):'');
   if(!p.PayerType && clean(p.Payer) && String(p.Payer).trim()!==String(c.Name||'').trim()) payer+=sub('Legacy payer text: '+escHtml(p.Payer));
-  var aor=clean(p.AdvisorOfRecord)||'Yes';
-  var aum=AUM_RISK_TYPES[type] ? (isMed?'No — medical aid':'No — risk policy') : (clean(p.CountsForAUM)||'Yes');
+  // 11 Oct 2026: never-set used to print as "Yes". Show the truth.
+  var aorSet=aumFlag(p.AdvisorOfRecord)!=='';
+  var aor=aorSet ? (p.AdvisorOfRecord==='Yes' ? 'Yes' : 'No — not mine') : '⚠ Not set';
+  var aum=AUM_RISK_TYPES[type] ? (isMed?'No — medical aid':'No — risk policy') : (!aorSet ? '—' : (clean(p.CountsForAUM)||'⚠ Not set'));
   var replTxt=(function(){ var rl=polReplacesList(p).map(polById).filter(Boolean); return rl.length ? rl.map(polShortLabel).join(', ') : clean(p.ReplacedPolicyNo); })();
   var byTxt=(p.Status!=='Replaced') ? polReplacedByList(p.ID,'').map(polShortLabel).join(', ') : '';
   h+=sec('Overview');
@@ -16255,7 +16379,7 @@ function openPolicyView(cid,idx){
     field('Policy owner', p.ClientIsOwner==='No' ? (txt(p.Owner)||'Not the client — name not captured') : escHtml(c.Name||'Client')),
     field(isCompany?'Life assured':'Life assured / insured', txt(p.Insured)||(isCompany?'':escHtml(c.Name||''))),
     field('Premium paid by', payer),
-    field('Broker of record', escHtml(aor)),
+    field('Broker of record', escHtml(aor), aorSet ? undefined : {color:'#9a3412'}),
     field('Counts for AUM', escHtml(aum)),
     field('Replaces', replTxt?escHtml(replTxt):'', {color:'#2e7d5a'}),
     field('Replaced by', byTxt?escHtml(byTxt):'', {color:'#9a3412'}),
@@ -16864,6 +16988,8 @@ function savePolicy(){
   pol.ClientID=EPC;
   pol.LastUpdated=now;
   pol.CapturedDate=oldPol?(oldPol.CapturedDate||now):now;
+  // Broker of record still not set: the AUM tick is left exactly as it was (11 Oct 2026).
+  if(oldPol && aumFlag(pol.AdvisorOfRecord)==='') pol.CountsForAUM = (oldPol.CountsForAUM==null ? '' : oldPol.CountsForAUM);
   // Replacement ticks. No tick-list shown (client has no other policies) = keep as is.
   var _prevRepl = oldPol ? polReplacesList(oldPol) : polReplacesList({ReplacedBy:window.REPLACING_POL_ID||''});
   if(!oldPol) _prevRepl = [];   // a brand-new policy replaced nothing before this save
