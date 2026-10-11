@@ -3529,6 +3529,87 @@ function confirmExistLink(linkedClientId) {
       }
     }
 
+    // ABSORB A NON-CLIENT PARTNER ROW (11 Oct 2026, Clinton). A statement import
+    // creates a non-client Spouse row when the spouse is not yet on the family
+    // card. Linking the spouse's own client record afterwards used to add a
+    // SECOND Spouse row beside it (the guard above only looks at client rows), so
+    // the card showed two spouses. Now the existing non-client row on either card
+    // is turned into the client link in place: same row ID, details from the
+    // client record, so nothing is duplicated. Same SA ID, or a name that matches
+    // by whole words / initials, is taken as the same person. A different SA ID
+    // blocks; a name that does not match asks first.
+    var _absorbed = [];
+    if(isPartnerType(rel)){
+      var _ncPartner = function(pid){
+        return DB.links.filter(function(l){
+          return String(l.PrincipalID)===String(pid) && isPartnerType(l.Type) && !(l.IsClient==='Yes' && clean(l.ClientID));
+        })[0] || null;
+      };
+      var _idOf = function(x){ return String((x&&x.IDNumber)||'').replace(/\D/g,''); };
+      var _pairs = [];
+      if(!fwdExists){ var _pr = _ncPartner(LINK_EXIST_CLIENT); if(_pr) _pairs.push({row:_pr, owner:principal, other:linked, otherId:linkedClientId, fwd:true}); }
+      if(!revExists){ var _lr = _ncPartner(linkedClientId); if(_lr) _pairs.push({row:_lr, owner:linked, other:principal, otherId:LINK_EXIST_CLIENT, fwd:false}); }
+      var _diffId = _pairs.filter(function(x){ var a=_idOf(x.row), b=_idOf(x.other); return a.length===13 && b.length===13 && a!==b; })[0];
+      if(_diffId){
+        _linkBusy = false;
+        toast((clean(_diffId.owner.Name)||'This client')+' already has a spouse ('+(clean(_diffId.row.Name)||'unnamed')+') with a different ID number. Reclassify or remove that one first.','err');
+        return;
+      }
+      var _unsure = _pairs.filter(function(x){
+        var a=_idOf(x.row), b=_idOf(x.other);
+        if(a.length===13 && b.length===13) return false;          // same ID (different IDs blocked above)
+        var g = famNameGrade(x.row.Name, x.other.Name);
+        return !(g==='exact' || g==='initials');
+      });
+      if(_unsure.length){
+        var _q = _unsure.map(function(x){
+          return (clean(x.owner.Name)||'This client')+"'s family card already has a "+String(x.row.Type||'Spouse').toLowerCase()+' who is not a client: '+(clean(x.row.Name)||'unnamed')+'. Is that '+(clean(x.other.Name)||'the client you are linking')+'?';
+        }).join('\n\n');
+        if(!confirm(_q+'\n\nOK = yes, replace that row with the link to the client record (no second spouse).\nCancel = stop, nothing is linked.')){
+          _linkBusy = false;
+          return;
+        }
+      }
+      _pairs.forEach(function(x){
+        var oldName = x.row.Name;
+        x.row.Name     = x.other.Name || x.row.Name;
+        x.row.IDNumber = x.other.IDNumber || x.row.IDNumber || '';
+        x.row.DOB      = x.other.DOB || x.row.DOB || '';
+        if(saIdValid(x.row.IDNumber)) x.row.DOB = dobFromID(String(x.row.IDNumber).replace(/\D/g,'')) || x.row.DOB;
+        x.row.Cell     = x.other.Cell || x.row.Cell || '';
+        x.row.Email    = x.other.Email || x.row.Email || '';
+        x.row.Type     = rel;                                     // Spouse / Life Partner read the same from both sides
+        x.row.IsClient = 'Yes';
+        x.row.ClientID = String(x.otherId);
+        x.row._pendingSave = true;
+        if(x.fwd) fwdExists = x.row; else revExists = x.row;
+        _absorbed.push({row:x.row, oldName:oldName, ownerId:(x.fwd?LINK_EXIST_CLIENT:linkedClientId)});
+      });
+      // Beneficiaries are stored by name on the policies. Where a policy of that
+      // client still carries the old row's exact spelling (e.g. "A Uren" from the
+      // statement), move it to the client record's name so one spelling is used.
+      _absorbed.forEach(function(a){
+        var nn = String(a.row.Name||'').trim(), on = String(a.oldName||'').trim();
+        if(!nn || !on || nn===on) return;
+        DB.policies.forEach(function(p){
+          if(String(p.ClientID)!==String(a.ownerId)) return;
+          var arr; try{ arr = JSON.parse(p.Beneficiaries||'[]'); }catch(e){ return; }
+          if(!Array.isArray(arr)) return;
+          var hit = false;
+          arr.forEach(function(b){ if(b && String(b.name||'').trim()===on){ b.name = nn; hit = true; } });
+          if(!hit) return;
+          p.Beneficiaries = JSON.stringify(arr);
+          polSaveQuiet(p);
+        });
+      });
+      _absorbed.forEach(function(a){
+        post({action:'saveFamMember', member:a.row}, function(res){
+          if(!(res && res.ok)) toast('⚠️ Could not reach server — the spouse row for '+(clean(a.row.Name)||'the spouse')+' is kept locally and will retry on next sync. It is NOT lost.','err');
+        });
+      });
+    }
+    var _absNote = _absorbed.length ? ' (the existing non-client spouse row was updated, no second spouse added)' : '';
+
     // For a Spouse link, mirror each partner's details onto the other's Spouse*
     // fields (both directions) so the spouse pulls through to the FNA, the
     // client-details card and the ID audit — not just the family-link row.
@@ -3558,7 +3639,8 @@ function confirmExistLink(linkedClientId) {
       try{localStorage.setItem('du_db',JSON.stringify(DB));}catch(e){}
       closeAll();
       render();
-      if(_refreshed) toast('Spouse details for '+principal.Name+' & '+linked.Name+' refreshed','ok');
+      if(_absorbed.length) toast(linked.Name+' linked as '+rel+_absNote,'ok');
+      else if(_refreshed) toast('Spouse details for '+principal.Name+' & '+linked.Name+' refreshed','ok');
       else toast(linked.Name+' is already linked to '+principal.Name+' — no duplicate created','err');
       return;
     }
@@ -3612,7 +3694,7 @@ function confirmExistLink(linkedClientId) {
       if(pending===0){
         _linkBusy = false;
         if(anyFail) toast('⚠️ Could not reach server — link kept locally and will retry on next sync. It is NOT lost.','err');
-        else toast(linked.Name + ' linked as ' + rel,'ok');
+        else toast(linked.Name + ' linked as ' + rel + _absNote,'ok');
       }
     }
     if(linkAB){ pending++; }
@@ -18937,6 +19019,21 @@ function runAstuteImport(){
     DB.links.push(link);
     linksCreated++;
     post({action:'saveFamMember', member:link}, function(){});
+    // A spouse lives in two places: the family-link row AND the client record's
+    // Spouse* fields, which the FNA data pack, client card and ID audit read
+    // (see saveFamMember). The import only wrote the row, so a spouse added here
+    // was missing from the FNA data pack (11 Oct 2026). Fill the client record
+    // when it has no spouse yet; never overwrite one.
+    if(lk.linkType==='Spouse' && c && !clean(c.SpouseName)){
+      c.SpouseName = lk.name;
+      if(clean(lk.idNumber)) c.SpouseIDNumber = lk.idNumber;
+      var _spDob = saIdValid(lk.idNumber) ? dobFromID(String(lk.idNumber).replace(/\D/g,'')) : lk.dob;
+      if(clean(_spDob)) c.SpouseDOB = _spDob;
+      c._pendingSave = true;
+      post({action:'saveClient', client:c}, function(res){
+        if(!(res && res.ok)) toast('⚠️ Spouse added to the family card, but the client record could not be updated — press Sync so the FNA data pack shows the spouse.','err');
+      });
+    }
   });
 
   // ── 2. Policies: full collectPolicyForm key shape + savePolicy meta ──
