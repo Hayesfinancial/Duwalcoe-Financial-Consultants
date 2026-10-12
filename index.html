@@ -189,6 +189,7 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--cream);c
     <div class="ndiv"></div>
     <div class="nsec">Tools</div>
     <div class="ni" data-act="open-factfind">📋 New Fact Find</div>
+    <div class="ni" data-act="wbk-open">📗 Fact Find Workbook</div>
     <div class="ni" data-act="fna-new">📊 Launch FNA (new client)</div>
     <div class="ni" data-act="sync">🔄 Sync Now</div>
   </div>
@@ -342,6 +343,17 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--cream);c
     <div class="mf">
       <button class="btn b-gh sm" data-close="1">Cancel</button>
       <button class="btn b-gd sm" id="pcImportBtn" style="display:none" onclick="runPasteClaudeImport()">💾 Import</button>
+    </div>
+  </div>
+</div>
+<div class="ov" id="wbkMod">
+  <div class="modal" style="max-width:900px">
+    <div class="mh"><h3 id="wbkModT">📗 Fact find workbook</h3><button class="xb" data-close="1">✕</button></div>
+    <div class="mb" id="wbkModB"></div>
+    <input type="file" id="wbkFile" accept=".xlsx" style="display:none">
+    <div class="mf">
+      <button class="btn b-gh sm" data-close="1">Close</button>
+      <button class="btn b-gd sm" id="wbkImportBtn" style="display:none" onclick="wbkCommit()">💾 Import</button>
     </div>
   </div>
 </div>
@@ -641,6 +653,7 @@ function syncNow(quiet) {
       });
     }catch(e){}
     DB.links  = loaded.familylinks||[];
+    famDepCheck(loaded.familylinks);   // is the 12 Oct 2026 database update in? (familylinks.Dependent)
     // Re-apply any locally pending family-member saves/edits (spouse, children, dependants).
     try{
       var _ldbL=JSON.parse(localStorage.getItem('du_db')||'{}');
@@ -775,6 +788,10 @@ function post(data, cb){
     if(table==='tasks' && sendRow && window._taskLinkReady===false && (sendRow.WorkEventID!==undefined || sendRow.NewForAssignee!==undefined)){
       sendRow = Object.assign({}, sendRow); delete sendRow.WorkEventID; delete sendRow.NewForAssignee;
     }
+    // familylinks.Dependent (12 Oct 2026): leave it out until the database column exists.
+    if(table==='familylinks' && sendRow && sendRow.Dependent!==undefined && window._famDepReady!==true){
+      sendRow = Object.assign({}, sendRow); delete sendRow.Dependent;
+    }
     sbFetch('POST', '/rest/v1/'+table, [sendRow], function(res, err){
       // Save-failure protection for locally-cached tables: on failure flag the local
       // record so syncNow keeps it; on success clear the flag. Prevents a failed save
@@ -851,14 +868,17 @@ function post(data, cb){
   else if(action==='updateFamMember'){
     // PATCH all editable fields on an existing familylinks row.
     var m = data.member || {};
-    patch('familylinks', m.ID, {
+    var _fp = {
       Name: m.Name||'',
       IDNumber: m.IDNumber||'',
       DOB: m.DOB||'',
       Cell: m.Cell||'',
       Email: m.Email||'',
       Type: m.Type||''
-    }, cb);
+    };
+    // Dependent (12 Oct 2026) only once the database column exists (Familylinks_Dependent.sql)
+    if(m.Dependent!==undefined && window._famDepReady===true) _fp.Dependent = m.Dependent||'';
+    patch('familylinks', m.ID, _fp, cb);
   }
   else if(action==='upgradeFamMember'){
     patch('familylinks', data.id, {IsClient:'Yes', ClientID:data.clientId}, cb);
@@ -2917,6 +2937,7 @@ function renderProfile(){
     "<a href='"+buildFormsUrl(c)+"' target='_blank' style='text-decoration:none'><button class='btn b-sk sm' style='background:#0e413a;color:#ccd660;border-color:#2a3a5e'>📝 Forms</button></a>"+
     '<button class="btn b-gd sm" data-act="fna-capture" title="Guided FNA interview capture — walk through personal, family, income, assets and needs, confirm or update each item, then build the Data Pack.">📋 FNA Capture</button>'+
     '<button class="btn b-sk sm" style="background:#0e413a;color:#a8b938;border-color:#2a3a5e" onclick="copyFnaDataPack(\''+c.ID+'\')">📦 FNA Data Pack</button>'+
+    (c.ClientType==='Company' ? '' : '<button class="btn b-sk sm" style="background:#0e413a;color:#a8b938;border-color:#2a3a5e" title="Export the Excel fact find filled from this record, or import a completed one" onclick="wbkOpen(\''+c.ID+'\')">📗 Excel Fact Find</button>')+
     '<button class="btn b-sk sm" style="background:#0e413a;color:#d4af5a;border-color:#2a3a5e" onclick="printBrokerAuth(\''+c.ID+'\')">📄 Broker Auth</button>'+
     '<button class="btn b-sk sm" style="background:#0e413a;color:#d4af5a;border-color:#2a3a5e" onclick="printClientConsent(\''+c.ID+'\')">📄 Policy Consent</button>'+
     '<a href="https://drive.google.com/drive/search?q='+encodeURIComponent(c.Name)+'" target="_blank" style="text-decoration:none"><button class="btn b-gh sm" style="color:#fff;border-color:#334466">📁 Drive</button></a>'+
@@ -3015,6 +3036,22 @@ function famFor(cid){
   return own.concat(extra);
 }
 
+// ── Financially dependent (12 Oct 2026) ────────────────────────────────────
+// familylinks.Dependent ('Yes' / 'No' / '' = not asked). Needs Familylinks_Dependent.sql;
+// until that has run the question is hidden and never sent, so family saves keep working.
+window._famDepReady = (window._famDepReady === undefined) ? null : window._famDepReady;
+function famDepCheck(rows){
+  if(rows && rows.length){ window._famDepReady = ('Dependent' in rows[0]); return; }
+  sbFetch('GET','/rest/v1/familylinks?select=ID,Dependent&limit=1', null, function(res, err){
+    if(err && /Dependent|column/i.test(String(err))) window._famDepReady = false;
+    else if(!err) window._famDepReady = true;
+  });
+}
+function famDepToggle(){
+  var w = document.getElementById('fam_dep_wrap'), r = document.getElementById('fam_rel');
+  if(w && r) w.style.display = isPartnerType(r.value) ? 'none' : '';
+}
+
 function openFamModal(cid, type, linkId){
   FAM_CLIENT = cid;
   FAM_TYPE = type || 'Spouse';
@@ -3065,7 +3102,11 @@ function openFamModal(cid, type, linkId){
     fld('fam_dob', 'Date of Birth', preDob, 'date')+
     fld('fam_cell', 'Cell', preCell)+
     '</div>'+
-    (type==='Spouse' ? fld('fam_email','Email',preEmail) : '');
+    (type==='Spouse' ? fld('fam_email','Email',preEmail) : '')+
+    (window._famDepReady===true ? '<div id="fam_dep_wrap">'+fs('fam_dep','Financially dependent on the client?',['','Yes','No'], existing ? (existing.Dependent||'') : '')+'</div>' : '');
+  var _rel = document.getElementById('fam_rel');
+  if(_rel) _rel.addEventListener('change', famDepToggle);
+  famDepToggle();
   document.getElementById('famMod').classList.add('open');
 }
 
@@ -3076,6 +3117,8 @@ function saveFamMember(){
   var idnum = document.getElementById('fam_id') ? document.getElementById('fam_id').value.trim() : '';
   var cell = document.getElementById('fam_cell') ? document.getElementById('fam_cell').value.trim() : '';
   var email = document.getElementById('fam_email') ? document.getElementById('fam_email').value.trim() : '';
+  var depEl = document.getElementById('fam_dep');
+  var dep = depEl ? depEl.value : null;   // null = question not shown (database update not in yet)
   // Relationship selector (in the modal) governs the link's Type on both new and
   // edited rows. Fall back to the modal's open-type if the field is somehow absent.
   var relType = document.getElementById('fam_rel') ? document.getElementById('fam_rel').value : FAM_TYPE;
@@ -3119,6 +3162,7 @@ function saveFamMember(){
     existing.Cell = cell;
     existing.Email = email;
     existing.Type = relType;
+    if(dep!==null) existing.Dependent = isPartnerType(relType) ? '' : dep;
     // Preserve IsClient / ClientID — don't reset an upgraded spouse back to non-client.
     link = existing;
   } else {
@@ -3135,6 +3179,7 @@ function saveFamMember(){
       IsClient: 'No',
       ClientID: ''
     };
+    if(dep!==null && !isPartnerType(relType)) link.Dependent = dep;
     DB.links.push(link);
   }
 
@@ -3795,6 +3840,8 @@ function renderOverview(c,pols,roas,ctasks){
         (clean(liveIdNum)?' <span>🪪 '+(String(liveIdNum).match(/e[\+\-]/i)?Number(liveIdNum).toFixed(0):liveIdNum)+'</span>':'')+
         (clean(liveDob)?' <span>🎂 '+fdate(liveDob)+(calcAge(liveDob)!==null?' · Age '+calcAge(liveDob):'')+'</span>':'')+
         (clean(liveCell)?' <span>📱 '+liveCell+'</span>':'')+
+        (!_isPartner&&m.Dependent==='Yes'?' <span>🤝 Dependent</span>':'')+
+        (!_isPartner&&m.Dependent==='No'?' <span>Not dependent</span>':'')+
         (clean(liveIncome)?' <span>💰 '+rnd(liveIncome)+' /pm</span>':'')+
         ((_isPartner&&clean(liveAnniv))?' <span>💍 '+fdate(liveAnniv)+'</span>':'')+
         '</div></div>'+
@@ -4126,7 +4173,10 @@ function finposFor(cid){
   return DB.finpos.filter(function(r){ return String(r.ClientID)===String(cid); });
 }
 function fpData(row){
-  try{ return row.Data ? JSON.parse(row.Data) : {}; }catch(e){ return {}; }
+  var d;
+  try{ d = row.Data ? JSON.parse(row.Data) : {}; }catch(e){ return {}; }
+  if(row && row.Kind==='business') fpBizNormalize(d);
+  return d;
 }
 // Tolerant number parse: "R 1,200,000" / "1200000.50" / "" → number (0 if unparsable)
 function fpN(v){
@@ -4144,6 +4194,100 @@ function fpPassesToLabel(d){
   return d.passesTo;
 }
 
+// ── Business interests: what the entity holds, client's and spouse's shares (12 Oct 2026) ──
+// One business row per company, CC or trust (Clinton, option A): the client's % and loan
+// account AND the spouse's % and loan account sit on the same row, and what the entity holds
+// (property, bonds, other assets, other debts) is typed once, in d.holdings.
+// d.value = client's share, d.valueSpouse = spouse's share. With valMethod "Worked out from
+// what it holds" both are worked out on save from the holdings and the loan accounts;
+// otherwise they are the values typed in (accountant's value or an estimate). Rows from
+// before this change have no valMethod and keep their typed value.
+// A trust has no shares: the client's (or spouse's) interest in it is the loan account only;
+// the holdings are recorded so the FNA knows what the trust owns.
+// The shareholder loan accounts are NOT a holdings kind: they already live on the row
+// (loanAcc/loanBal and loanAccSpouse/loanBalSpouse) and count as the shareholder's asset
+// (Credit) or debt (Debit). For the entity's own net assets the same loan counts the other way.
+var FP_SOURCE_OPTS = ['Books','Statement','Valuation','Estimate'];
+var FP_SOURCE_KINDS = ['property','vehicle','other','business','liability'];
+var FP_HOLD_KINDS = ['Property','Bond','Other asset','Other debt'];
+var FP_BIZ_WORKED = 'Worked out from what it holds';
+var FP_BIZ_GIVEN  = 'Value given (accountant or estimate)';
+var FP_ENTITY_TYPES = ['','Pty Ltd','CC','Trust','Partnership','Sole Proprietor','Other'];
+function fpHoldings(d){
+  var h = d ? d.holdings : null;
+  if(typeof h==='string'){ try{ h = JSON.parse(h); }catch(e){ h = []; } }
+  return Array.isArray(h) ? h : [];
+}
+function fpIsTrust(d){ return !!d && d.entityType==='Trust'; }
+function fpHoldIsDebt(x){ return !!x && (x.kind==='Bond' || x.kind==='Other debt'); }
+// Rows from before 12 Oct 2026 were one row per person: a row owned by the Spouse carried the
+// spouse's %, share, loan and CGT inputs in the client fields. Read them as the spouse's.
+function fpBizNormalize(d){
+  if(!d || d.owner!=='Spouse' || d.pctHeldSpouse!==undefined || d.valueSpouse!==undefined) return d;
+  [['pctHeld','pctHeldSpouse'],['value','valueSpouse'],['loanAcc','loanAccSpouse'],['loanBal','loanBalSpouse'],
+   ['baseCost','baseCostSpouse'],['dateAcquired','dateAcquiredSpouse'],['activeInv','activeInvSpouse']].forEach(function(p){
+    if(d[p[0]]!==undefined){ d[p[1]] = d[p[0]]; d[p[0]] = ''; }
+  });
+  return d;
+}
+// The entity's net assets from what it holds, after the shareholder loan accounts.
+function fpBizCalc(d){
+  var assets = 0, debts = 0, hs = fpHoldings(d);
+  hs.forEach(function(x){ var v = fpN(x.value); if(fpHoldIsDebt(x)) debts += v; else assets += v; });
+  [['loanAcc','loanBal'],['loanAccSpouse','loanBalSpouse']].forEach(function(p){
+    var b = fpN(d[p[1]]);
+    if(d[p[0]]==='Credit') debts += b;        // the entity owes the shareholder
+    else if(d[p[0]]==='Debit') assets += b;   // the shareholder owes the entity
+  });
+  return {assets:assets, debts:debts, nav:assets-debts, count:hs.length};
+}
+// A company or CC share is never worth less than nil (limited liability). A partnership or
+// sole proprietor's business belongs to the owner, so a negative figure is real.
+function fpBizFloors(d){ return d.entityType!=='Partnership' && d.entityType!=='Sole Proprietor'; }
+function fpBizWorked(d){
+  var c = fpBizCalc(d), nav = c.nav;
+  if(fpBizFloors(d) && nav < 0) nav = 0;
+  return {calc:c, nav:nav, client:Math.round(nav*fpN(d.pctHeld)/100), spouse:Math.round(nav*fpN(d.pctHeldSpouse)/100)};
+}
+// Before a business row is saved: work out the shares and set the owner from who holds what.
+function fpBizFinalize(d){
+  if(fpIsTrust(d)){ d.pctHeld = ''; d.pctHeldSpouse = ''; d.value = ''; d.valueSpouse = ''; d.valMethod = ''; }
+  else if(d.valMethod===FP_BIZ_WORKED){
+    var w = fpBizWorked(d);
+    d.value = String(w.client);
+    d.valueSpouse = fpN(d.pctHeldSpouse)>0 ? String(w.spouse) : '';
+  }
+  var cl = fpN(d.pctHeld)>0 || fpN(d.value)!==0 || d.loanAcc==='Credit' || d.loanAcc==='Debit';
+  var sp = fpN(d.pctHeldSpouse)>0 || fpN(d.valueSpouse)!==0 || d.loanAccSpouse==='Credit' || d.loanAccSpouse==='Debit';
+  d.owner = (cl && sp) ? 'Joint' : (sp ? 'Spouse' : 'Client');
+  return d;
+}
+// Who holds shares. A row where neither % nor a value is given counts as the client's (as before).
+function fpBizSpouseHolds(d){ return fpN(d.pctHeldSpouse)>0 || fpN(d.valueSpouse)!==0; }
+function fpBizClientHolds(d){ return fpN(d.pctHeld)>0 || String(d.value===undefined||d.value===null?'':d.value).trim()!=='' || !fpBizSpouseHolds(d); }
+// Household balance sheet effect of a business row: both shares plus both loan accounts.
+function fpBizBalance(d){
+  var a = fpN(d.value) + fpN(d.valueSpouse), l = 0;
+  [['loanAcc','loanBal'],['loanAccSpouse','loanBalSpouse']].forEach(function(p){
+    if(d[p[0]]==='Credit') a += fpN(d[p[1]]);
+    else if(d[p[0]]==='Debit') l += fpN(d[p[1]]);
+  });
+  return {assets:a, liabs:l};
+}
+// First names for labels: the client's calling name, and the spouse's first name.
+function fpClientLabel(c){ var n = c ? (clean(c.CallingName) || String(c.Name||'').split(' ')[0]) : ''; return n || 'Client'; }
+function fpSpouseLabel(c){
+  var n = c ? clean(c.SpouseName) : '';
+  if(!n && c && typeof partnerLinkFor==='function'){ var l = partnerLinkFor(c.ID); if(l) n = clean(l.Name); }
+  return n ? String(n).split(' ')[0] : 'Spouse';
+}
+function fpLoanTxt(acc, bal){
+  if(acc==='Credit') return 'Credit (entity owes them) '+fpR(fpN(bal));
+  if(acc==='Debit') return 'Debit (they owe the entity) '+fpR(fpN(bal));
+  if(acc==='None') return 'None';
+  return '';
+}
+
 function renderFinPos(c){
   var rows = finposFor(c.ID).filter(function(r){ return FP_NOT_ITEM_KINDS.indexOf(r.Kind)<0; });
   var byKind = {};
@@ -4158,10 +4302,9 @@ function renderFinPos(c){
     else if(r.Kind==='income'){ totIncomePM += fpN(d.amountPM); }
     else if(r.Kind==='expense'){ totExpensePM += fpN(d.amountPM); }
     else if(r.Kind==='business'){
-      totAssets += fpN(d.value);
-      // Loan account direction decides which side of the balance sheet it sits on
-      if(d.loanAcc==='Credit') totAssets += fpN(d.loanBal);
-      else if(d.loanAcc==='Debit') totLiabs += fpN(d.loanBal);
+      // Both shares, and each loan account on the side its direction puts it (12 Oct 2026)
+      var _bb = fpBizBalance(d);
+      totAssets += _bb.assets; totLiabs += _bb.liabs;
     }
     else {
       totAssets += fpN(d.value);
@@ -4202,9 +4345,11 @@ function renderFinPos(c){
       if(d.owner) badges += '<span style="background:var(--sky);color:#fff;border-radius:10px;padding:2px 10px;font-size:11px;font-weight:600">'+d.owner+'</span>';
       if(r.Kind==='property' && d.primaryRes==='Yes') badges += '<span style="background:#e8f5e9;color:#2e7d5a;border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700">Primary Residence</span>';
       if(r.Kind==='other' && d.type) badges += '<span style="background:var(--gold);color:var(--navy);border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700">'+d.type+'</span>';
+      if(d.source) badges += '<span style="background:'+(d.source==='Estimate'?'#fff3e0;color:#9a6a1f':'#eef2f6;color:#556')+';border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700">'+(d.source==='Estimate'?'⚠ Estimate':'Source: '+d.source)+'</span>';
       if(r.Kind==='business'){
         if(d.entityType) badges += '<span style="background:var(--gold);color:var(--navy);border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700">'+d.entityType+'</span>';
-        if(d.buySell==='Yes') badges += '<span style="background:#e8f5e9;color:#2e7d5a;border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700">Buy &amp; Sell in place</span>';
+        if(fpIsTrust(d)) { /* a trust has no buy and sell */ }
+        else if(d.buySell==='Yes') badges += '<span style="background:#e8f5e9;color:#2e7d5a;border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700">Buy &amp; Sell in place</span>';
         else badges += '<span style="background:#fff3e0;color:#9a6a1f;border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700">No Buy &amp; Sell</span>';
       }
       if(r.Kind!=='liability'){
@@ -4213,7 +4358,7 @@ function renderFinPos(c){
       } else if(d.payOffDisab==='Yes'){
         badges += '<span style="background:#fff3e0;color:#9a6a1f;border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700">Pay off if disabled</span>';
       }
-      var cells = '';
+      var cells = '', extra = '';
       var asAt = d.valueDate ? '<span style="font-size:10px;color:#999;font-weight:400"> as at '+fdate(d.valueDate)+'</span>' : '';
       if(r.Kind==='property'){
         cells = cell('Value', money(d.value)+asAt)+
@@ -4234,19 +4379,30 @@ function renderFinPos(c){
                 cell('Date Acquired', d.dateAcquired?fdate(d.dateAcquired):'—')+
                 cell('Passes to at Death', fpPassesToLabel(d));
       } else if(r.Kind==='business'){
-        var loanTxt = '—';
-        if(d.loanAcc==='Credit') loanTxt = 'Credit (co. owes client): '+money(d.loanBal);
-        else if(d.loanAcc==='Debit') loanTxt = 'Debit (client owes co.): '+money(d.loanBal);
-        else if(d.loanAcc==='None') loanTxt = 'None';
-        cells = cell('% Held', d.pctHeld?d.pctHeld+'%':'—')+
-                cell('Value of Client\'s Share', money(d.value)+asAt)+
-                cell('Valuation Basis', d.valBasis||'—')+
-                cell('Loan Account', loanTxt)+
-                cell('Base Cost', money(d.baseCost))+
-                cell('Date Acquired', d.dateAcquired?fdate(d.dateAcquired):'—')+
-                cell('Main Use', d.mainUse||'—')+
-                cell('Actively Involved', d.activeInv||'—')+
-                cell('Passes to at Death', fpPassesToLabel(d));
+        // Option A (12 Oct 2026): one row per entity, client's and spouse's interest side by side
+        var _cn = fpClientLabel(c), _sn = fpSpouseLabel(c);
+        var _spHolds = fpN(d.pctHeldSpouse)>0 || fpN(d.valueSpouse)!==0;
+        var _spLoan = d.loanAccSpouse==='Credit' || d.loanAccSpouse==='Debit';
+        if(fpIsTrust(d)){
+          cells = cell(_cn+'\'s Loan Account', fpLoanTxt(d.loanAcc, d.loanBal)||'—')+
+                  (_spLoan?cell(_sn+'\'s Loan Account', fpLoanTxt(d.loanAccSpouse, d.loanBalSpouse)):'')+
+                  cell('Passes to at Death', fpPassesToLabel(d));
+        } else {
+          cells = cell(_cn+'\'s %', d.pctHeld?d.pctHeld+'%':'—')+
+                  cell(_cn+'\'s Share', money(d.value)+asAt)+
+                  (_spHolds?cell(_sn+'\'s %', d.pctHeldSpouse?d.pctHeldSpouse+'%':'—')+cell(_sn+'\'s Share', money(d.valueSpouse)):'')+
+                  cell('Valued', (d.valMethod===FP_BIZ_WORKED?'Worked out from holdings':(d.valMethod?'Value given':'—'))+(d.valBasis?' · '+d.valBasis:''))+
+                  cell(_cn+'\'s Loan Account', fpLoanTxt(d.loanAcc, d.loanBal)||'—')+
+                  (_spLoan?cell(_sn+'\'s Loan Account', fpLoanTxt(d.loanAccSpouse, d.loanBalSpouse)):'')+
+                  cell(_cn+'\'s Base Cost', money(d.baseCost))+
+                  cell('Date Acquired', d.dateAcquired?fdate(d.dateAcquired):'—')+
+                  (_spHolds?cell(_sn+'\'s Base Cost', money(d.baseCostSpouse)):'')+
+                  cell('Main Use', d.mainUse||'—')+
+                  cell(_cn+' Actively Involved', d.activeInv||'—')+
+                  (_spHolds?cell(_sn+' Actively Involved', d.activeInvSpouse||'—'):'')+
+                  cell('Passes to at Death', fpPassesToLabel(d));
+        }
+        extra = fpHoldingsHtml(d);
       } else if(r.Kind==='income'){
         cells = cell('Amount /pm', money(d.amountPM))+
                 cell('Type', d.incomeType||'—')+
@@ -4269,6 +4425,7 @@ function renderFinPos(c){
         '<span style="font-weight:700;font-size:15px">'+(d.desc||'—')+'</span>'+badges+pending+
         '</div>'+
         '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:6px 18px">'+cells+'</div>'+
+        extra+
         (d.notes?'<div style="margin-top:8px;font-size:12px;color:#667;font-style:italic">'+d.notes+'</div>':'')+
         '</div>'+
         '<div style="flex-shrink:0;margin-left:12px">'+
@@ -4278,6 +4435,24 @@ function renderFinPos(c){
     }).join('');
   });
   return html;
+}
+
+// What a business row's entity holds, as a small read-only table (12 Oct 2026).
+function fpHoldingsHtml(d){
+  var hs = fpHoldings(d);
+  var hasLoan = ['loanAcc','loanAccSpouse'].some(function(k){ return d[k]==='Credit' || d[k]==='Debit'; });
+  if(!hs.length && !(d.valMethod===FP_BIZ_WORKED && hasLoan)) return '';
+  var w = fpBizWorked(d), td = 'padding:3px 6px;border-top:1px solid #eef1f4';
+  var h = '<div style="margin-top:10px;font-size:10px;color:#999;text-transform:uppercase;letter-spacing:.3px">What '+(fpIsTrust(d)?'the trust':'the entity')+' holds'+(fpIsTrust(d)?' (not the client\'s, for information)':'')+'</div>'+
+    '<table style="width:100%;border-collapse:collapse;font-size:12px;margin-top:3px"><tr style="color:#889;text-align:left"><th style="padding:3px 6px;font-weight:600">Item</th><th style="padding:3px 6px;font-weight:600">Kind</th><th style="padding:3px 6px;font-weight:600;text-align:right">Value (R)</th><th style="padding:3px 6px;font-weight:600;text-align:right">Base cost (R)</th><th style="padding:3px 6px;font-weight:600">Source</th></tr>';
+  hs.forEach(function(x){
+    h += '<tr><td style="'+td+'">'+wfEsc(x.desc||'—')+(x.notes?'<div style="color:#889;font-size:11px">'+wfEsc(x.notes)+'</div>':'')+'</td><td style="'+td+'">'+wfEsc(x.kind||'')+'</td>'+
+      '<td style="'+td+';text-align:right;color:'+(fpHoldIsDebt(x)?'var(--rose)':'inherit')+'">'+(String(x.value||'').trim()===''?'—':(fpHoldIsDebt(x)?'−':'')+fpR(fpN(x.value)))+'</td>'+
+      '<td style="'+td+';text-align:right">'+(String(x.baseCost||'').trim()===''?'—':fpR(fpN(x.baseCost)))+'</td><td style="'+td+'">'+wfEsc(x.source||'')+'</td></tr>';
+  });
+  h += '</table><div style="margin-top:4px;font-size:12px;color:#556">Net assets after shareholder loan accounts: <strong>'+fpR(w.calc.nav)+'</strong>'+
+    (fpIsTrust(d)?'':(w.calc.nav<0&&fpBizFloors(d)?' (a share is never valued below nil)':''))+'</div>';
+  return h;
 }
 
 // ══ NEEDS (client-stated needs for FNA work) ═════════════════════════════
@@ -11739,7 +11914,8 @@ function buildFnaDataPack(cid, includeSpouse){
     fam.forEach(function(m){
       var fAge = calcAge(m.DOB);
       var fStamp = fm.startedAt ? (fnaFresh(fm.confirmed['fam_'+m.ID], fm) ? '  [✓ confirmed '+fm.confirmed['fam_'+m.ID]+']' : '  [⚠ NOT reviewed at this FNA capture]') : '';
-      line('  '+(m.Type||'Member')+': '+(m.Name||'')+(m.DOB?' — born '+m.DOB:'')+(fAge!==null?' (age '+fAge+')':'')+(clean(m.IDNumber)?' — ID '+m.IDNumber:'')+fStamp);
+      var fDep = isPartnerType(m.Type) ? '' : (m.Dependent==='Yes' ? ' — financially dependent' : (m.Dependent==='No' ? ' — not dependent' : (window._famDepReady===true ? ' — dependent: NOT CAPTURED' : '')));
+      line('  '+(m.Type||'Member')+': '+(m.Name||'')+(m.DOB?' — born '+m.DOB:'')+(fAge!==null?' (age '+fAge+')':'')+(clean(m.IDNumber)?' — ID '+m.IDNumber:'')+fDep+fStamp);
     });
     line('');
   } else if(fm.startedAt && fnaFresh(fm.confirmed.family_none, fm)){
@@ -11868,6 +12044,31 @@ function buildFnaDataPack(cid, includeSpouse){
   }
   packKeyLife(cid, '');
 
+  // ── Business row detail (12 Oct 2026): who holds what, how it is valued, what the entity holds ──
+  function packBizDetail(d, forCid){
+    var bc = DB.clients.find(function(x){ return String(x.ID)===String(forCid); }) || {};
+    var cn = clean(bc.Name) || 'Client', sn = clean(bc.SpouseName) || 'Spouse';
+    if(fpIsTrust(d)){
+      line('      Trust: no shares. Only the loan accounts belong to the estates; the trust\'s own assets below are NOT in anyone\'s estate.');
+    } else {
+      if(fpBizClientHolds(d)) line('      '+cn+'\'s share: '+(String(d.value||'').trim()===''?'NOT CAPTURED':fpR(fpN(d.value)))+(d.pctHeld?' ('+d.pctHeld+'%)':''));
+      if(fpBizSpouseHolds(d)) line('      '+sn+'\'s share: '+fpR(fpN(d.valueSpouse))+(d.pctHeldSpouse?' ('+d.pctHeldSpouse+'%)':'')+' (the spouse\'s own asset; passes under the spouse\'s will)');
+      line('      Share value basis: '+(d.valMethod===FP_BIZ_WORKED?'worked out from what the entity holds (net assets x % held)':(d.valMethod?'value given (accountant or estimate), not worked out':'value as captured (before the holdings field existed)'))+(d.valBasis?'; '+d.valBasis:''));
+    }
+    if(fpLoanTxt(d.loanAccSpouse, d.loanBalSpouse)) line('      '+sn+'\'s loan account: '+fpLoanTxt(d.loanAccSpouse, d.loanBalSpouse));
+    var hs = fpHoldings(d);
+    if(hs.length){
+      line('      What the '+(fpIsTrust(d)?'trust':'entity')+' holds ('+hs.length+'):');
+      hs.forEach(function(x){
+        line('        - '+(x.desc||'(no description)')+' — '+(x.kind||'?')+': '+(String(x.value||'').trim()===''?'value NOT CAPTURED':fpR(fpN(x.value)))+
+          (x.kind==='Property'?(String(x.baseCost||'').trim()===''?', base cost NOT CAPTURED':', base cost '+fpR(fpN(x.baseCost))):(String(x.baseCost||'').trim()!==''?', base cost '+fpR(fpN(x.baseCost)):''))+
+          (x.source?', source '+x.source+(x.source==='Estimate'?' (⚠ estimate)':''):'')+(x.notes?' ['+x.notes+']':''));
+      });
+      var bw = fpBizWorked(d);
+      line('      Net assets of the '+(fpIsTrust(d)?'trust':'entity')+' after shareholder loan accounts: '+fpR(bw.calc.nav)+(bw.calc.nav<0&&fpBizFloors(d)&&!fpIsTrust(d)?' (shares taken as nil)':'')+'. No allowance for tax the entity would pay on selling its assets.');
+    }
+  }
+
   // ── Financial Position (reusable for the linked spouse appendix) ──
   function packFinpos(forCid, prefix){
     var fpRows = finposFor(forCid).filter(function(r){ return FP_NOT_ITEM_KINDS.indexOf(r.Kind)<0; });
@@ -11882,11 +12083,14 @@ function buildFnaDataPack(cid, includeSpouse){
         var d = fpData(r);
         line('  • '+(d.desc||'(no description)')+fnaStampTxt(r.UpdatedAt, fm));
         Object.keys(d).forEach(function(key){
-          if(key==='desc') return;
+          if(key==='desc' || key==='holdings') return;
           var v = d[key];
           if(v===undefined || v===null || String(v).trim()==='') return;
           line('      '+key+': '+v);
         });
+        // Source of the figure (12 Oct 2026): an estimate is flagged, never read as a fact.
+        if(d.source==='Estimate') line('      ⚠ ESTIMATE: the client\'s own figure, not from books, a statement or a valuation.');
+        if(r.Kind==='business') packBizDetail(d, forCid);
         // CGT-on-death inputs left blank print explicitly, so the FNA flags them
         // instead of reading a blank as "not applicable" (Sep 2026).
         fpCgtMissing(r.Kind, d).forEach(function(m){ line('      '+m.key+': NOT CAPTURED'); });
@@ -11894,9 +12098,8 @@ function buildFnaDataPack(cid, includeSpouse){
         else if(r.Kind==='income'){ totIncPM += fpN(d.amountPM); }
         else if(r.Kind==='expense'){ totExpPM += fpN(d.amountPM); }
         else if(r.Kind==='business'){
-          totA += fpN(d.value);
-          if(d.loanAcc==='Credit') totA += fpN(d.loanBal);
-          else if(d.loanAcc==='Debit') totL += fpN(d.loanBal);
+          var _pb = fpBizBalance(d);
+          totA += _pb.assets; totL += _pb.liabs;
         } else {
           totA += fpN(d.value);
           totL += fpN(d.bondOut) + fpN(d.financeOut);
@@ -11989,6 +12192,23 @@ function buildFnaDataPack(cid, includeSpouse){
     line('  Executor fee basis: '+feeTxt);
     wk('Executor security', W.ex_security);
     wk('Executor notes', W.ex_notes);
+    // Capital Legacy will fields (12 Oct 2026)
+    if(Object.keys(W).some(function(k){ return k.indexOf('cl_')===0 && clean(W[k]); })){
+      line('  Capital Legacy instructions:');
+      if(W.cl_lang) line('    Will language: '+(W.cl_lang==='Other (below)'?(W.cl_lang_other||'Other'):W.cl_lang));
+      if(W.cl_wt) line('    Widow\'s Trust: '+W.cl_wt+(W.cl_wt_sp_inc?'; spouse as income beneficiary: '+W.cl_wt_sp_inc:'')+(W.cl_wt_kids_cap?'; children as capital beneficiaries: '+W.cl_wt_kids_cap:''));
+      var _wcap = [1,2,3].map(function(i){ return clean(W['cl_wt_cap'+i+'_name']) ? W['cl_wt_cap'+i+'_name']+(clean(W['cl_wt_cap'+i+'_rel'])?' ('+W['cl_wt_cap'+i+'_rel']+')':'') : ''; }).filter(Boolean);
+      if(_wcap.length) line('    Widow\'s Trust other capital beneficiaries: '+_wcap.join('; '));
+      if(clean(W.cl_pt_ben)) line('    Provider\'s Trust beneficiary: '+W.cl_pt_ben+(clean(W.cl_pt_rel)?' ('+W.cl_pt_rel+')':''));
+      if(clean(W.cl_nok_name)) line('    Next of kin: '+W.cl_nok_name+(clean(W.cl_nok_rel)?' ('+W.cl_nok_rel+')':''));
+      var _cts = [1,2].map(function(i){ return clean(W['cl_ct'+i+'_name']) ? W['cl_ct'+i+'_name']+(clean(W['cl_ct'+i+'_rel'])?' ('+W['cl_ct'+i+'_rel']+')':'') : ''; }).filter(Boolean);
+      if(_cts.length) line('    Co-trustees: '+_cts.join('; '));
+      if(W.cl_exec) line('    Capital Legacy as executor: '+W.cl_exec+(W.cl_exec==='Yes'?' (the executor fee basis above is as captured; confirm Capital Legacy\'s own fee before using it)':''));
+      var _ces = [1,2].map(function(i){ return clean(W['cl_ce'+i+'_name']) ? W['cl_ce'+i+'_name']+(clean(W['cl_ce'+i+'_rel'])?' ('+W['cl_ce'+i+'_rel']+')':'') : ''; }).filter(Boolean);
+      if(_ces.length) line('    Co-executors: '+_ces.join('; '));
+      if(W.cl_organ_reg==='Yes') line('    Organ donor: register on the client\'s behalf');
+      if(W.cl_collect) line('    Will collection service: '+W.cl_collect);
+    }
     wk('Additional instructions to attorney', W.add_notes);
     // Status
     if(clean(W.signed_date)) line('  Will signed: '+W.signed_date+(clean(W.ou_attorney)?' (attorney: '+W.ou_attorney+')':''));
@@ -12342,7 +12562,10 @@ function fpCgtMissing(kind, d){
   var want = [];
   if(kind==='property') want = [['baseCost','base cost']];
   else if(kind==='other' && FP_CGT_OTHER_TYPES.indexOf(d.type)>=0) want = [['baseCost','base cost']];
-  else if(kind==='business') want = [['baseCost','base cost'],['dateAcquired','date acquired'],['mainUse','main use'],['activeInv','active involvement']];
+  else if(kind==='business' && !fpIsTrust(d)){
+    want = fpBizClientHolds(d) ? [['baseCost','base cost'],['dateAcquired','date acquired'],['mainUse','main use'],['activeInv','active involvement']] : [['mainUse','main use']];
+    if(fpBizSpouseHolds(d)) want = want.concat([['baseCostSpouse','spouse\'s base cost'],['dateAcquiredSpouse','spouse\'s date acquired'],['activeInvSpouse','spouse\'s active involvement']]);
+  }
   return want.filter(function(w){ return blank(w[0]); }).map(function(w){ return {key:w[0], label:w[1]}; });
 }
 // One financial-position / need row as a compact confirm card.
@@ -12354,7 +12577,8 @@ function fnaCapItem(r, meta){
   if(r.Kind==='property'){ bits.push('Value '+money(d.value)); if(fpN(d.bondOut)) bits.push('Bond '+money(d.bondOut)); if(d.primaryRes==='Yes') bits.push('Primary residence'); bits.push('→ '+fpPassesToLabel(d)); }
   else if(r.Kind==='vehicle'){ bits.push('Value '+money(d.value)); if(fpN(d.financeOut)) bits.push('Finance '+money(d.financeOut)); bits.push('→ '+fpPassesToLabel(d)); }
   else if(r.Kind==='other'){ if(d.type) bits.push(d.type); bits.push('Value '+money(d.value)); bits.push('→ '+fpPassesToLabel(d)); }
-  else if(r.Kind==='business'){ if(d.pctHeld) bits.push(d.pctHeld+'% held'); bits.push('Share '+money(d.value)); if(d.loanAcc==='Credit'||d.loanAcc==='Debit') bits.push('Loan a/c '+d.loanAcc+' '+money(d.loanBal)); bits.push(d.buySell==='Yes'?'Buy & Sell in place':'No Buy & Sell'); if(d.mainUse) bits.push(d.mainUse); if(d.dateAcquired) bits.push('Acquired '+fdate(d.dateAcquired)); if(d.activeInv) bits.push('Actively involved: '+d.activeInv); }
+  else if(r.Kind==='business' && fpIsTrust(d)){ bits.push('Trust'); if(d.loanAcc==='Credit'||d.loanAcc==='Debit') bits.push('Loan a/c '+d.loanAcc+' '+money(d.loanBal)); if(d.loanAccSpouse==='Credit'||d.loanAccSpouse==='Debit') bits.push('Spouse loan a/c '+d.loanAccSpouse+' '+money(d.loanBalSpouse)); if(fpHoldings(d).length) bits.push(fpHoldings(d).length+' holdings'); }
+  else if(r.Kind==='business'){ if(d.pctHeld) bits.push(d.pctHeld+'% held'); bits.push('Share '+money(d.value)); if(fpN(d.pctHeldSpouse)>0) bits.push('Spouse '+d.pctHeldSpouse+'%, share '+money(d.valueSpouse)); if(fpHoldings(d).length) bits.push(fpHoldings(d).length+' holdings'); if(d.loanAcc==='Credit'||d.loanAcc==='Debit') bits.push('Loan a/c '+d.loanAcc+' '+money(d.loanBal)); bits.push(d.buySell==='Yes'?'Buy & Sell in place':'No Buy & Sell'); if(d.mainUse) bits.push(d.mainUse); if(d.dateAcquired) bits.push('Acquired '+fdate(d.dateAcquired)); if(d.activeInv) bits.push('Actively involved: '+d.activeInv); }
   else if(r.Kind==='liability'){ if(d.liabType) bits.push(d.liabType); bits.push('Balance '+money(d.balance)); if(fpN(d.paymentPM)) bits.push(money(d.paymentPM)+' /pm'); if(d.payOffDisab==='Yes') bits.push('Pay off if disabled'); }
   else if(r.Kind==='income'){ if(d.incomeType) bits.push(d.incomeType); bits.push(money(d.amountPM)+' /pm'); if(fpN(d.bonus)) bits.push('Bonus '+money(d.bonus)+' /pa'); if(d.taxable==='No') bits.push('Non-taxable'); }
   else if(r.Kind==='expense'){ if(d.expCategory) bits.push(d.expCategory); bits.push(money(d.amountPM)+' /pm'); }
@@ -12764,6 +12988,8 @@ function wfTL(D,k,listId){ return '<input class="wfi" data-wf="'+k+'" list="'+li
 function wfA(D,k,rows){ return '<textarea class="wfi" data-wf="'+k+'" rows="'+(rows||3)+'">'+wfEsc(D[k]||'')+'</textarea>'; }
 function wfS(D,k,opts){ var v=D[k]||''; var o='<option value="">— select —</option>'; for(var i=0;i<opts.length;i++){ o+='<option'+(String(v)===String(opts[i])?' selected':'')+'>'+wfEsc(opts[i])+'</option>'; } return '<select class="wfi" data-wf="'+k+'">'+o+'</select>'; }
 function wfR(D,k,opts){ var v=D[k]||''; var h='<div class="wropts">'; for(var i=0;i<opts.length;i++){ h+='<label class="wopt"><input type="radio" name="wr_'+k+'" data-wfr="'+k+'" value="'+wfEsc(opts[i])+'"'+(v===opts[i]?' checked':'')+'> <span>'+opts[i]+'</span></label>'; } return h+'</div>'; }
+// Radios on one line, for short choices such as Yes / No (12 Oct 2026)
+function wfRI(D,k,opts){ var v=D[k]||''; var h='<div class="wropts" style="display:flex;flex-direction:row;gap:4px 24px;flex-wrap:wrap">'; for(var i=0;i<opts.length;i++){ h+='<label class="wopt"><input type="radio" name="wr_'+k+'" data-wfr="'+k+'" value="'+wfEsc(opts[i])+'"'+(v===opts[i]?' checked':'')+'> <span>'+opts[i]+'</span></label>'; } return h+'</div>'; }
 function wfC(D,k,label){ return '<label class="wopt"><input type="checkbox" data-wfc="'+k+'"'+((D[k]||'')==='Yes'?' checked':'')+'> <span>'+label+'</span></label>'; }
 function wfF(label,ctrl){ return '<div style="margin-bottom:8px"><div style="font-size:10.5px;color:#556;font-weight:600;margin-bottom:3px">'+label+'</div>'+ctrl+'</div>'; }
 function wfG2(a,b){ return '<div class="wg2">'+a+b+'</div>'; }
@@ -12866,7 +13092,7 @@ function renderWillRefPanel(c){
   var nnRow  = (typeof needNotesRowFor==='function') ? needNotesRowFor(c.ID) : null;
   var nnTxt  = nnRow ? (fpData(nnRow).text||'') : '';
   var assetTot=0, liabTot=0, aH='', lH='', nH='';
-  assets.forEach(function(r){ var d=fpData(r); var v=fpN(d.value); assetTot+=v; var meta=[]; if(fpN(d.bondOut))meta.push('bond '+fpR(fpN(d.bondOut))); if(fpN(d.financeOut))meta.push('finance '+fpR(fpN(d.financeOut))); if(d.passesTo)meta.push('→ '+fpPassesToLabel(d)); aH+='<tr><td>'+wfEsc(d.desc||r.Kind)+'</td><td style="text-align:right;white-space:nowrap">'+fpR(v)+'</td><td style="color:#889;font-size:11px">'+wfEsc(meta.join(' · '))+'</td><td style="text-align:right;white-space:nowrap"><button class="btn b-gh xs" onclick="willEditFinpos(\''+c.ID+'\',\''+r.Kind+'\',\''+r.ID+'\')">edit</button></td></tr>'; });
+  assets.forEach(function(r){ var d=fpData(r); var v=fpN(d.value); assetTot+=v; var meta=[]; if(r.Kind==='business'&&fpN(d.pctHeldSpouse)>0)meta.push('spouse\'s share '+fpR(fpN(d.valueSpouse))+' not included'); if(fpN(d.bondOut))meta.push('bond '+fpR(fpN(d.bondOut))); if(fpN(d.financeOut))meta.push('finance '+fpR(fpN(d.financeOut))); if(d.passesTo)meta.push('→ '+fpPassesToLabel(d)); aH+='<tr><td>'+wfEsc(d.desc||r.Kind)+'</td><td style="text-align:right;white-space:nowrap">'+fpR(v)+'</td><td style="color:#889;font-size:11px">'+wfEsc(meta.join(' · '))+'</td><td style="text-align:right;white-space:nowrap"><button class="btn b-gh xs" onclick="willEditFinpos(\''+c.ID+'\',\''+r.Kind+'\',\''+r.ID+'\')">edit</button></td></tr>'; });
   liabs.forEach(function(r){ var d=fpData(r); var v=fpN(d.balance); liabTot+=v; lH+='<tr><td>'+wfEsc(d.desc||'Liability')+'</td><td style="text-align:right;white-space:nowrap">'+fpR(v)+'</td><td style="color:#889;font-size:11px">'+wfEsc(d.liabType||'')+'</td><td style="text-align:right;white-space:nowrap"><button class="btn b-gh xs" onclick="willEditFinpos(\''+c.ID+'\',\'liability\',\''+r.ID+'\')">edit</button></td></tr>'; });
   needs.forEach(function(r){ var d=fpData(r); var amt=fpN(d.amount); var inc=(d.needType==='Monthly income'); var at=inc?(fpR(amt)+' /pm'+(d.years?' × '+d.years+'yr':'')):fpR(amt); nH+='<tr><td>'+wfEsc(d.desc||d.scenario||'Need')+'</td><td>'+wfEsc(d.scenario||'')+'</td><td style="text-align:right;white-space:nowrap">'+at+'</td><td style="color:#667">'+wfEsc(fpPassesToLabel({passesTo:d.benTo,passesToName:d.benName}))+'</td></tr>'; });
 
@@ -12929,8 +13155,15 @@ function willFinposList(c, kind){
       if(fpN(d.bondOut)) bits.push('bond '+fpR(fpN(d.bondOut)));
     } else {
       if(d.entityType) bits.push(wfEsc(d.entityType));
-      if(d.pctHeld) bits.push(wfEsc(String(d.pctHeld).replace('%',''))+'% held');
-      bits.push(d.buySell==='Yes'?'buy &amp; sell in place':'no buy &amp; sell recorded');
+      if(fpIsTrust(d)){
+        if(fpLoanTxt(d.loanAcc, d.loanBal)) bits.push('loan account '+wfEsc(fpLoanTxt(d.loanAcc, d.loanBal)));
+      } else {
+        if(d.pctHeld) bits.push(wfEsc(String(d.pctHeld).replace('%',''))+'% held');
+        if(fpN(d.pctHeldSpouse)>0) bits.push('spouse holds '+wfEsc(String(d.pctHeldSpouse).replace('%',''))+'% ('+fpR(fpN(d.valueSpouse))+')');
+        bits.push(d.buySell==='Yes'?'buy &amp; sell in place':'no buy &amp; sell recorded');
+      }
+      var _hs = fpHoldings(d);
+      if(_hs.length) bits.push('holds: '+_hs.map(function(x){ return wfEsc(x.desc||x.kind||'item'); }).join(', '));
     }
     bits.push('passes to '+wfEsc(fpPassesToLabel(d)));
     if(d.soldDeath==='Yes') bits.push('sold at death');
@@ -13049,7 +13282,7 @@ function renderWill(c){
   h += wfG2( wfF('Trustee 2 — full names', wfT(D,'tr2_name')), wfF('ID number', wfT(D,'tr2_id')) );
   h += wfG2( wfF('Trustee 3 — full names', wfT(D,'tr3_name')), wfF('ID number', wfT(D,'tr3_id')) );
   h += wfF('Termination', wfR(D,'tr_term',['Terminates when beneficiary reaches a set age (below)','Trustees may pay capital sooner for education, medical, first home, etc.','Income distributed as needed; capital held until termination age']));
-  h += wfG2( wfF('Termination age (commonly 21 or 25)', wfT(D,'tr_term_age')), '' );
+  h += wfG2( wfF('Termination / vesting age (commonly 21 or 25)', wfT(D,'tr_term_age')), '' );
   h += wfF('Special trust instructions', wfA(D,'tr_notes',2));
 
   // ── 7. Specific bequests ──
@@ -13098,6 +13331,7 @@ function renderWill(c){
   h += wfG2( wfF('Date of existing living will', wfT(D,'lw_date')), '' );
   h += '<div style="font-weight:700;font-size:12px;margin:8px 0 2px;color:#445">Organ donation</div>';
   h += wfR(D,'organ',['I wish to donate my organs and tissues where medically suitable','I do not wish to donate organs or tissues','I am already a registered organ donor']);
+  h += wfC(D,'cl_organ_reg','Register me as an organ donor (done on my behalf).');
 
   // ── 11. Funeral wishes ──
   h += wfH('11','Funeral wishes');
@@ -13149,6 +13383,31 @@ function renderWill(c){
   h += wfC(D,'ex_assume','Executor may assume a co-executor (e.g. a professional firm).');
   h += wfF('Other powers / special instructions to executor', wfA(D,'ex_notes',2));
 
+  // ── 17. Capital Legacy (12 Oct 2026) ──
+  // The questions on the Capital Legacy will form that the sections above do not already ask.
+  // Trust vesting age is the termination age in section 6; organ donor registration is in section 10.
+  h += wfH('17','Capital Legacy instructions');
+  h += wfNote('Only for a will drafted through Capital Legacy. Plan, medical, premium and debit order questions are not captured here.');
+  h += wfF('Will language', wfRI(D,'cl_lang',['English','Afrikaans','Other (below)']));
+  h += wfG2( wfF('Other language', wfT(D,'cl_lang_other')), '' );
+  h += '<div style="font-weight:700;font-size:12px;margin:8px 0 3px;color:#445">Widow\'s Trust</div>';
+  h += wfF('Establish a Widow\'s Trust?', wfRI(D,'cl_wt',['Yes','No']));
+  h += wfF('Spouse as income beneficiary?', wfRI(D,'cl_wt_sp_inc',['Yes','No']));
+  h += wfF('Children as capital beneficiaries?', wfRI(D,'cl_wt_kids_cap',['Yes','No']));
+  [1,2,3].forEach(function(i){ h += wfG2( wfF('Other capital beneficiary '+i+' — full names', wfT(D,'cl_wt_cap'+i+'_name')), wfF('Relationship', wfT(D,'cl_wt_cap'+i+'_rel')) ); });
+  h += '<div style="font-weight:700;font-size:12px;margin:8px 0 3px;color:#445">Provider\'s Trust</div>';
+  h += wfG2( wfF('Beneficiary — full names', wfT(D,'cl_pt_ben')), wfF('Relationship', wfT(D,'cl_pt_rel')) );
+  h += '<div style="font-weight:700;font-size:12px;margin:8px 0 3px;color:#445">Next of kin</div>';
+  h += wfG2( wfF('Full names', wfT(D,'cl_nok_name')), wfF('Relationship', wfT(D,'cl_nok_rel')) );
+  h += wfG2( wfF('Cell', wfT(D,'cl_nok_cell')), wfF('Email', wfT(D,'cl_nok_email')) );
+  h += '<div style="font-weight:700;font-size:12px;margin:8px 0 3px;color:#445">Co-trustees</div>';
+  [1,2].forEach(function(i){ h += wfG2( wfF('Co-trustee '+i+' — full names', wfT(D,'cl_ct'+i+'_name')), wfF('ID number', wfT(D,'cl_ct'+i+'_id')) ) + wfG2( wfF('Relationship', wfT(D,'cl_ct'+i+'_rel')), '' ); });
+  h += '<div style="font-weight:700;font-size:12px;margin:8px 0 3px;color:#445">Executor</div>';
+  h += wfF('Capital Legacy as executor?', wfRI(D,'cl_exec',['Yes','No']));
+  [1,2].forEach(function(i){ h += wfG2( wfF('Co-executor '+i+' — full names', wfT(D,'cl_ce'+i+'_name')), wfF('ID number', wfT(D,'cl_ce'+i+'_id')) ) + wfG2( wfF('Relationship', wfT(D,'cl_ce'+i+'_rel')), '' ); });
+  h += '<div style="font-weight:700;font-size:12px;margin:8px 0 3px;color:#445">Will collection</div>';
+  h += wfF('Use the will collection service?', wfRI(D,'cl_collect',['Yes','No']));
+
   // ── Office use ──
   h += wfH('★','Office use — forwarding &amp; completion');
   h += wfNote('Filling in the “signed on” date marks the will as complete and flips the client’s status to “Will (mine)”.');
@@ -13168,8 +13427,10 @@ function renderWill(c){
 }
 
 // Save the will instruction sheet — deterministic one-row-per-client (like saveNeedNotes).
-function saveWill(cid){
-  var D = collectWill();
+function saveWill(cid, Dgiven, cb){
+  // Dgiven / cb (12 Oct 2026): the fact find workbook import saves will data it has merged
+  // itself and needs to know whether the server accepted it. Screen saves pass neither.
+  var D = Dgiven || collectWill();
   var now = new Date().toISOString().slice(0,16).replace('T',' ');
   var existing = willFor(cid);
   var rowObj = { ID: existing ? existing.ID : ('will_'+cid), ClientID: cid, Data: JSON.stringify(D), UpdatedAt: now };
@@ -13184,10 +13445,12 @@ function saveWill(cid){
       var i=DB.willinstr.findIndex(function(x){return x.ID===rowObj.ID;});
       if(i>=0) DB.willinstr[i]=forServer;
       try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
-      if(typeof toast==='function') toast('Will details saved ✓','ok');
+      if(!cb && typeof toast==='function') toast('Will details saved ✓','ok');
+      if(cb) cb(true);
     } else {
       console.error('Will NOT saved to server. Retained locally with _pendingSave. ID:', rowObj.ID);
-      if(typeof toast==='function') toast('Saved on this device — will sync when online','err');
+      if(!cb && typeof toast==='function') toast('Saved on this device — will sync when online','err');
+      if(cb) cb(false);
     }
   });
   maybeFlipWillStatus(cid, D);
@@ -13300,7 +13563,7 @@ function printWillSheet(cid){
     if(D.tr3_name) h += two('Trustee 3', D.tr3_name, 'ID number', D.tr3_id);
   }
   ['Terminates when beneficiary reaches a set age (below)','Trustees may pay capital sooner for education, medical, first home, etc.','Income distributed as needed; capital held until termination age'].forEach(function(o){ h+=opt(D.tr_term,o); });
-  if(D.tr_term_age) h += one('Termination age', D.tr_term_age);
+  if(D.tr_term_age) h += one('Termination / vesting age', D.tr_term_age);
   if(D.tr_notes) h += note('Special trust instructions', D.tr_notes);
 
   // 7. Bequests
@@ -13346,6 +13609,7 @@ function printWillSheet(cid){
   if(D.lw_date) h += one('Date of existing living will', D.lw_date);
   h += '<div style="font-size:10px;font-weight:700;margin:6px 0 2px">Organ donation</div>';
   ['I wish to donate my organs and tissues where medically suitable','I do not wish to donate organs or tissues','I am already a registered organ donor'].forEach(function(o){ h+=opt(D.organ,o); });
+  if(D.cl_organ_reg==='Yes') h += chk(D.cl_organ_reg,'Register me as an organ donor (done on my behalf).');
 
   // 11. Funeral
   h += sh('11. Funeral wishes');
@@ -13391,6 +13655,25 @@ function printWillSheet(cid){
   if(D.ex_fee_rate) h += one('Agreed rate (%) + VAT', D.ex_fee_rate);
   h += chk(D.ex_assume,'Executor may assume a co-executor (e.g. a professional firm).');
   if(D.ex_notes) h += note('Other powers / special instructions', D.ex_notes);
+
+  // 17. Capital Legacy (12 Oct 2026) — printed only when something was captured
+  var _clKeys = Object.keys(D).filter(function(k){ return k.indexOf('cl_')===0 && k!=='cl_organ_reg' && clean(D[k]) && D[k]!=='No'; });
+  if(_clKeys.length){
+    h += sh('17. Capital Legacy instructions');
+    if(D.cl_lang) h += one('Will language', D.cl_lang==='Other (below)' ? (D.cl_lang_other||'Other') : D.cl_lang);
+    if(D.cl_wt||D.cl_wt_sp_inc||D.cl_wt_kids_cap){
+      h += '<div style="font-size:10px;font-weight:700;margin:6px 0 2px">Widow\'s Trust</div>';
+      h += two('Establish a Widow\'s Trust', D.cl_wt, 'Spouse as income beneficiary', D.cl_wt_sp_inc);
+      h += one('Children as capital beneficiaries', D.cl_wt_kids_cap);
+    }
+    [1,2,3].forEach(function(i){ if(D['cl_wt_cap'+i+'_name']) h += two('Other capital beneficiary '+i, D['cl_wt_cap'+i+'_name'], 'Relationship', D['cl_wt_cap'+i+'_rel']); });
+    if(D.cl_pt_ben) h += two('Provider\'s Trust beneficiary', D.cl_pt_ben, 'Relationship', D.cl_pt_rel);
+    if(D.cl_nok_name){ h += two('Next of kin', D.cl_nok_name, 'Relationship', D.cl_nok_rel); h += two('Cell', D.cl_nok_cell, 'Email', D.cl_nok_email); }
+    [1,2].forEach(function(i){ if(D['cl_ct'+i+'_name']) h += two('Co-trustee '+i, D['cl_ct'+i+'_name']+(D['cl_ct'+i+'_rel']?' ('+D['cl_ct'+i+'_rel']+')':''), 'ID number', D['cl_ct'+i+'_id']); });
+    if(D.cl_exec) h += one('Capital Legacy as executor', D.cl_exec);
+    [1,2].forEach(function(i){ if(D['cl_ce'+i+'_name']) h += two('Co-executor '+i, D['cl_ce'+i+'_name']+(D['cl_ce'+i+'_rel']?' ('+D['cl_ce'+i+'_rel']+')':''), 'ID number', D['cl_ce'+i+'_id']); });
+    if(D.cl_collect) h += one('Will collection service', D.cl_collect);
+  }
 
   // Declaration
   h += sh('Client declaration');
@@ -16049,6 +16332,9 @@ function openFinPosModal(cid, kind, fpid){
       fld('fppaymentPM','Payment per Month (R)',d.paymentPM||'')+
       fpChk('fppayOffDisab','Pay off if disabled',d.payOffDisab)+
       '</div>'+
+      '<div class="g2">'+
+      fs('fpsource','Source of the Balance',[''].concat(FP_SOURCE_OPTS),d.source||'')+
+      '</div>'+
       fld('fpnotes','Notes',d.notes||'','textarea');
   } else if(FP_KIND==='income'){
     html =
@@ -16076,21 +16362,19 @@ function openFinPosModal(cid, kind, fpid){
       '</div>'+
       fld('fpnotes','Notes',d.notes||'','textarea');
   } else {
-    var top =
-      fld('fpdesc', FP_KIND==='business'?'Business / Entity Name':'Description', d.desc||'')+
+    // Business rows have their own block (12 Oct 2026, option A): see fpBizFormHtml.
+    var top = FP_KIND==='business' ? fpBizFormHtml(c, d) :
+      fld('fpdesc', 'Description', d.desc||'')+
       '<div class="g2">'+
       fs('fpowner','Owner',ownerOpts,d.owner||'Client')+
       (FP_KIND==='other'?fs('fptype','Asset Type',otherTypeOpts,d.type||''):'')+
-      (FP_KIND==='business'?fs('fpentityType','Entity Type',['','Pty Ltd','CC','Partnership','Sole Proprietor','Other'],d.entityType||''):'')+
       '</div>'+
-      (FP_KIND==='business'?
-        '<div class="g2">'+
-        fld('fppctHeld','% Shareholding / Member\'s Interest',d.pctHeld||'')+
-        fs('fpvalBasis','Valuation Basis',['','Latest financials','Informal estimate','Other'],d.valBasis||'')+
-        '</div>':'')+
       '<div class="g2">'+
-      fld('fpvalue', FP_KIND==='business'?'Value of Client\'s Share (R)':'Current Value (R)', d.value||'')+
+      fld('fpvalue', 'Current Value (R)', d.value||'')+
       fld('fpvalueDate','Value as at',d.valueDate||'','date')+
+      '</div>'+
+      '<div class="g2">'+
+      fs('fpsource','Source of the Value',[''].concat(FP_SOURCE_OPTS),d.source||'')+
       '</div>';
     var mid = '';
     if(FP_KIND==='property'){
@@ -16114,25 +16398,7 @@ function openFinPosModal(cid, kind, fpid){
         fld('fpfinancePM','Finance Payment per Month (R)',d.financePM||'')+
         '</div>';
     } else if(FP_KIND==='business'){
-      // CGT on death + small business relief inputs (Sep 2026): base cost, date acquired
-      // (five-year test), main use (active trading vs letting/investment), active involvement.
-      // Selects start blank so "not captured" is distinguishable from "No".
-      mid =
-        '<div class="g2">'+
-        fld('fpbaseCost','Base Cost of Client\'s Share (R) — for CGT',d.baseCost||'')+
-        fld('fpdateAcquired','Date Acquired',d.dateAcquired||'','date')+
-        '</div>'+
-        '<div class="g2">'+
-        fs('fpmainUse','Main Use of the Business',['','Active trading business','Mainly property to let','Mainly investments (shares, cash, loans)','Mixed (trading plus letting or investments)'],d.mainUse||'')+
-        fs('fpactiveInv','Client Actively Involved in Running It',['','Yes','No'],d.activeInv||'')+
-        '</div>'+
-        '<div class="g2">'+
-        fs('fploanAcc','Loan Account (Credit = co. owes client)',['','None','Credit','Debit'],d.loanAcc||'')+
-        fld('fploanBal','Loan Account Balance (R)',d.loanBal||'')+
-        '</div>'+
-        '<div class="g2">'+
-        fpChk('fpbuySell','Buy &amp; Sell agreement in place',d.buySell)+
-        '</div>';
+      mid = '';   // all business fields are in fpBizFormHtml (12 Oct 2026)
     } else { // other
       mid =
         '<div class="g2">'+
@@ -16142,7 +16408,7 @@ function openFinPosModal(cid, kind, fpid){
     }
     var death =
       '<div class="g2">'+
-      fs('fppassesTo','Passes to at Death',passOpts,d.passesTo||'Estate')+
+      fs('fppassesTo', FP_KIND==='business' ? 'Passes to at Death (the client\'s share and loan account)' : 'Passes to at Death', passOpts, d.passesTo||'Estate')+
       '<div class="fld" id="fpNameWrap" style="display:'+((d.passesTo||'Estate')==='Named person'?'flex':'none')+'">'+
       '<label>Named Person</label>'+
       '<input type="text" id="fppassesToName" list="fpNameList" value="'+clean(d.passesToName||'')+'" autocomplete="off" placeholder="Choose from family or type a name">'+
@@ -16197,7 +16463,164 @@ function openFinPosModal(cid, kind, fpid){
       if(nw) nw.style.display = (ask && btSel.value==='Named person') ? 'flex' : 'none';
     });
   }
+  if(FP_KIND==='business'){
+    ['fpentityType','fpvalMethod','fploanAcc','fploanAccSpouse'].forEach(function(id){ var el=document.getElementById(id); if(el) el.addEventListener('change', fpBizRecalc); });
+    fpBizRecalc();
+  }
   document.getElementById('fpMod').classList.add('open');
+}
+
+// ── Business row form (12 Oct 2026, option A) ──────────────────────────────
+function fpNewHoldId(){ return 'h'+Date.now().toString(36)+Math.floor(Math.random()*1e6).toString(36); }
+function fpHoldRowHtml(x){
+  x = x || {};
+  var ist = 'width:100%;box-sizing:border-box;padding:5px 4px;border:1px solid #cdd6dd;border-radius:6px;font-size:12px;font-family:inherit;background:#fff';
+  var kinds = FP_HOLD_KINDS.map(function(k){ return '<option'+(x.kind===k?' selected':'')+'>'+k+'</option>'; }).join('');
+  var srcs = '<option value=""></option>'+FP_SOURCE_OPTS.map(function(k){ return '<option'+(x.source===k?' selected':'')+'>'+k+'</option>'; }).join('');
+  return '<tr class="fpHoldRow" data-hid="'+wfEsc(x.id||fpNewHoldId())+'">'+
+    '<td style="padding:2px"><input class="fph-desc" style="'+ist+'" value="'+wfEsc(x.desc||'')+'" placeholder="e.g. 5 Main Rd, Hermanus"></td>'+
+    '<td style="padding:2px"><select class="fph-kind" style="'+ist+'" onchange="fpBizRecalc()">'+kinds+'</select></td>'+
+    '<td style="padding:2px"><input class="fph-value" style="'+ist+';text-align:right" value="'+wfEsc(x.value||'')+'" oninput="fpBizRecalc()"></td>'+
+    '<td style="padding:2px"><input class="fph-base" style="'+ist+';text-align:right" value="'+wfEsc(x.baseCost||'')+'"></td>'+
+    '<td style="padding:2px"><select class="fph-src" style="'+ist+'">'+srcs+'</select></td>'+
+    '<td style="padding:2px"><input class="fph-notes" style="'+ist+'" value="'+wfEsc(x.notes||'')+'"></td>'+
+    '<td style="padding:2px"><button type="button" class="btn b-gh xs" title="Remove" onclick="this.closest(\'tr\').remove();fpBizRecalc()">✕</button></td></tr>';
+}
+function fpHoldAdd(){
+  var b = document.getElementById('fpHoldBody'); if(!b) return;
+  b.insertAdjacentHTML('beforeend', fpHoldRowHtml({}));
+  fpBizRecalc();
+}
+function fpHoldRead(){
+  var out = [];
+  document.querySelectorAll('#fpHoldBody tr.fpHoldRow').forEach(function(tr){
+    function q(cls){ var e = tr.querySelector('.'+cls); return e ? String(e.value).trim() : ''; }
+    var x = {id:tr.getAttribute('data-hid')||fpNewHoldId(), desc:q('fph-desc'), kind:q('fph-kind'), value:q('fph-value'), baseCost:q('fph-base'), source:q('fph-src'), notes:q('fph-notes')};
+    if(x.desc || x.value || x.baseCost || x.notes) out.push(x);
+  });
+  return out;
+}
+function fpBizFormHtml(c, d){
+  var cn = fpClientLabel(c), sn = fpSpouseLabel(c);
+  var vm = d.valMethod===FP_BIZ_WORKED ? FP_BIZ_WORKED : FP_BIZ_GIVEN;
+  var loanOpts = ['','None','Credit','Debit'];
+  var hs = fpHoldings(d);
+  var sub = 'font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:.6px;margin:14px 0 6px';
+  var th = 'text-align:left;font-size:10.5px;color:#667;font-weight:600;padding:2px 4px';
+  return fld('fpdesc','Business / Entity Name', d.desc||'')+
+    '<div class="g2">'+
+      fs('fpentityType','Entity Type',FP_ENTITY_TYPES,d.entityType||'')+
+      fs('fpsource','Source of the Figures',[''].concat(FP_SOURCE_OPTS),d.source||'')+
+    '</div>'+
+    '<div id="fpBizShareWrap">'+
+      '<div style="'+sub+'">Who holds it</div>'+
+      '<div class="g2">'+
+        fld('fppctHeld', cn+'\'s % Held', d.pctHeld||'', 'text', 'oninput="fpBizRecalc()"')+
+        fld('fppctHeldSpouse', sn+'\'s % Held (blank if none)', d.pctHeldSpouse||'', 'text', 'oninput="fpBizRecalc()"')+
+      '</div>'+
+      '<div class="g2">'+
+        fs('fpvalMethod','How the Shares are Valued',[FP_BIZ_WORKED,FP_BIZ_GIVEN],vm)+
+        fs('fpvalBasis','Valuation Basis',['','Latest financials','Informal estimate','Other'],d.valBasis||'')+
+      '</div>'+
+      '<div class="g2" id="fpBizGivenWrap">'+
+        fld('fpvalue', 'Value of '+cn+'\'s Share (R)', d.value||'', 'text', 'oninput="fpBizRecalc()"')+
+        fld('fpvalueSpouse', 'Value of '+sn+'\'s Share (R)', d.valueSpouse||'', 'text', 'oninput="fpBizRecalc()"')+
+      '</div>'+
+      '<div class="g2">'+ fld('fpvalueDate','Value as at',d.valueDate||'','date') +'</div>'+
+    '</div>'+
+    '<div style="'+sub+'" id="fpHoldTitle">What the entity holds</div>'+
+    '<div style="font-size:11.5px;color:#778;margin:-2px 0 6px">Property at market value with its base cost, bonds, other assets and other debts. Not the shareholder loan accounts: those go below.</div>'+
+    '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;table-layout:fixed;min-width:600px"><thead><tr>'+
+      '<th style="'+th+';width:24%">Description</th><th style="'+th+';width:17%">Kind</th><th style="'+th+';width:14%">Value / balance (R)</th><th style="'+th+';width:13%">Base cost (R)</th><th style="'+th+';width:15%">Source</th><th style="'+th+'">Notes</th><th style="width:34px"></th>'+
+    '</tr></thead><tbody id="fpHoldBody">'+hs.map(fpHoldRowHtml).join('')+'</tbody></table></div>'+
+    '<div style="margin:6px 0 2px"><button type="button" class="btn b-gh xs" onclick="fpHoldAdd()">＋ Add what it holds</button></div>'+
+    '<div id="fpBizCalcLine" style="margin:8px 0 4px;padding:8px 10px;background:#f5f7fa;border-radius:8px;font-size:12.5px;color:#334;line-height:1.5"></div>'+
+    '<div style="'+sub+'">Loan accounts</div>'+
+    '<div class="g2">'+
+      fs('fploanAcc',cn+'\'s Loan Account (Credit = entity owes '+cn+')',loanOpts,d.loanAcc||'')+
+      fld('fploanBal',cn+'\'s Loan Balance (R)',d.loanBal||'','text','oninput="fpBizRecalc()"')+
+    '</div>'+
+    '<div class="g2">'+
+      fs('fploanAccSpouse',sn+'\'s Loan Account (Credit = entity owes '+sn+')',loanOpts,d.loanAccSpouse||'')+
+      fld('fploanBalSpouse',sn+'\'s Loan Balance (R)',d.loanBalSpouse||'','text','oninput="fpBizRecalc()"')+
+    '</div>'+
+    '<div id="fpBizCgtWrap">'+
+      // CGT on death + small business relief inputs (Sep 2026): base cost, date acquired
+      // (five-year test), main use, active involvement. Selects start blank so "not
+      // captured" is distinguishable from "No". The spouse's own set shows when the spouse holds shares.
+      '<div style="'+sub+'">For CGT on death</div>'+
+      '<div class="g2">'+
+        fld('fpbaseCost','Base Cost of '+cn+'\'s Share (R)',d.baseCost||'')+
+        fld('fpdateAcquired','Date '+cn+' Acquired It',d.dateAcquired||'','date')+
+      '</div>'+
+      '<div class="g2">'+
+        fs('fpmainUse','Main Use of the Business',['','Active trading business','Mainly property to let','Mainly investments (shares, cash, loans)','Mixed (trading plus letting or investments)'],d.mainUse||'')+
+        fs('fpactiveInv',cn+' Actively Involved in Running It',['','Yes','No'],d.activeInv||'')+
+      '</div>'+
+      '<div id="fpBizSpCgtWrap">'+
+        '<div class="g2">'+
+          fld('fpbaseCostSpouse','Base Cost of '+sn+'\'s Share (R)',d.baseCostSpouse||'')+
+          fld('fpdateAcquiredSpouse','Date '+sn+' Acquired It',d.dateAcquiredSpouse||'','date')+
+        '</div>'+
+        '<div class="g2">'+
+          fs('fpactiveInvSpouse',sn+' Actively Involved in Running It',['','Yes','No'],d.activeInvSpouse||'')+
+        '</div>'+
+      '</div>'+
+      '<div class="g2">'+ fpChk('fpbuySell','Buy &amp; Sell agreement in place',d.buySell) +'</div>'+
+    '</div>';
+}
+// Read the business block of the open form into a data object (no owner yet).
+function fpBizReadForm(){
+  return {
+    entityType:g('fpentityType'), source:g('fpsource'),
+    pctHeld:g('fppctHeld').replace('%','').trim(), pctHeldSpouse:g('fppctHeldSpouse').replace('%','').trim(),
+    valMethod:g('fpvalMethod'), valBasis:g('fpvalBasis'),
+    value:g('fpvalue'), valueSpouse:g('fpvalueSpouse'), valueDate:g('fpvalueDate'),
+    holdings:fpHoldRead(),
+    loanAcc:g('fploanAcc'), loanBal:'', loanAccSpouse:g('fploanAccSpouse'), loanBalSpouse:'',
+    baseCost:g('fpbaseCost'), dateAcquired:g('fpdateAcquired'), mainUse:g('fpmainUse'), activeInv:g('fpactiveInv'),
+    baseCostSpouse:g('fpbaseCostSpouse'), dateAcquiredSpouse:g('fpdateAcquiredSpouse'), activeInvSpouse:g('fpactiveInvSpouse'),
+    buySell:fpChkVal('fpbuySell'),
+    _loanBal:g('fploanBal'), _loanBalSpouse:g('fploanBalSpouse')
+  };
+}
+function fpBizFormData(){
+  var d = fpBizReadForm();
+  d.loanBal = (d.loanAcc==='Credit'||d.loanAcc==='Debit') ? d._loanBal : '';
+  d.loanBalSpouse = (d.loanAccSpouse==='Credit'||d.loanAccSpouse==='Debit') ? d._loanBalSpouse : '';
+  delete d._loanBal; delete d._loanBalSpouse;
+  if(fpN(d.pctHeldSpouse)<=0 && fpN(d.valueSpouse)===0){ d.baseCostSpouse=''; d.dateAcquiredSpouse=''; d.activeInvSpouse=''; }
+  return d;
+}
+// Live: show / hide the parts that apply, and the worked-out shares.
+function fpBizRecalc(){
+  var line = document.getElementById('fpBizCalcLine'); if(!line) return;
+  var d = fpBizFormData();
+  var c = DB.clients.find(function(x){ return String(x.ID)===String(FP_CLIENT_ID); });
+  var cn = fpClientLabel(c), sn = fpSpouseLabel(c);
+  var trust = fpIsTrust(d), worked = d.valMethod===FP_BIZ_WORKED;
+  var spHolds = fpN(d.pctHeldSpouse)>0 || fpN(d.valueSpouse)!==0;
+  function show(id, on){ var e=document.getElementById(id); if(e) e.style.display = on ? '' : 'none'; }
+  show('fpBizShareWrap', !trust);
+  show('fpBizCgtWrap', !trust);
+  show('fpBizGivenWrap', !trust && !worked);
+  show('fpBizSpCgtWrap', !trust && spHolds);
+  var ht = document.getElementById('fpHoldTitle'); if(ht) ht.textContent = trust ? 'What the trust holds (for information only)' : 'What the entity holds';
+  var w = fpBizWorked(d), calc = w.calc;
+  var navTxt = 'Assets '+fpR(calc.assets)+' less debts '+fpR(calc.debts)+' (shareholder loan accounts included) = net assets <strong>'+fpR(calc.nav)+'</strong>';
+  var h;
+  if(trust){
+    h = 'A trust has no shares. Only the loan accounts count in '+cn+'\'s'+(sn!=='Spouse'?' and '+sn+'\'s':'')+' estate. '+(calc.count?navTxt+' (the trust\'s, not in anyone\'s estate).':'');
+  } else if(worked){
+    if(!calc.count && calc.assets===0 && calc.debts===0) h = '<span style="color:#9a6a1f">⚠ Nothing entered under what the entity holds yet, so the shares work out to R 0.</span>';
+    else h = navTxt+(calc.nav<0&&fpBizFloors(d)?' (a share is never valued below nil)':'')+'.<br>'+cn+'\'s share: <strong>'+fpR(w.client)+'</strong>'+(spHolds?' · '+sn+'\'s share: <strong>'+fpR(w.spouse)+'</strong>':'');
+  } else {
+    h = 'Shares as typed: '+cn+' '+fpR(fpN(d.value))+(spHolds?' · '+sn+' '+fpR(fpN(d.valueSpouse)):'')+'.';
+    if(calc.count) h += '<br><span style="color:#667">For comparison, worked out from what it holds: '+cn+' '+fpR(w.client)+(spHolds?' · '+sn+' '+fpR(w.spouse):'')+' (net assets '+fpR(calc.nav)+').</span>';
+  }
+  var tot = fpN(d.pctHeld)+fpN(d.pctHeldSpouse);
+  if(!trust && tot>100) h += '<br><span style="color:var(--rose)">⚠ '+cn+' and '+sn+' together hold '+tot+'%, which is more than 100%.</span>';
+  line.innerHTML = h;
 }
 
 function collectFinPosForm(){
@@ -16220,6 +16643,7 @@ function collectFinPosForm(){
     d.interestRate = g('fpinterestRate');
     d.paymentPM = g('fppaymentPM');
     d.payOffDisab = fpChkVal('fppayOffDisab');
+    d.source = g('fpsource');
     return d;
   }
   if(FP_KIND==='income'){
@@ -16235,6 +16659,16 @@ function collectFinPosForm(){
     d.amountPM = g('fpamountPM');
     return d;
   }
+  if(FP_KIND==='business'){
+    // One row per entity (12 Oct 2026): client's and spouse's interest, holdings, source.
+    var bd = fpBizFormData();
+    Object.keys(bd).forEach(function(k){ d[k] = bd[k]; });
+    d.passesTo = g('fppassesTo');
+    d.passesToName = d.passesTo==='Named person' ? g('fppassesToName') : '';
+    d.soldDeath = fpChkVal('fpsoldDeath');
+    d.soldDisab = fpChkVal('fpsoldDisab');
+    return fpBizFinalize(d);
+  }
   d.value = g('fpvalue');
   d.valueDate = g('fpvalueDate');
   d.passesTo = g('fppassesTo');
@@ -16247,19 +16681,11 @@ function collectFinPosForm(){
     d.rentalPM = g('fprentalPM'); d.primaryRes = fpChkVal('fpprimaryRes');
   } else if(FP_KIND==='vehicle'){
     d.financeOut = g('fpfinanceOut'); d.financePM = g('fpfinancePM');
-  } else if(FP_KIND==='business'){
-    d.entityType = g('fpentityType');
-    d.pctHeld = g('fppctHeld').replace('%','').trim();
-    d.valBasis = g('fpvalBasis');
-    d.loanAcc = g('fploanAcc');
-    d.loanBal = (d.loanAcc==='Credit'||d.loanAcc==='Debit') ? g('fploanBal') : '';
-    d.buySell = fpChkVal('fpbuySell');
-    d.baseCost = g('fpbaseCost'); d.dateAcquired = g('fpdateAcquired');
-    d.mainUse = g('fpmainUse'); d.activeInv = g('fpactiveInv');
   } else {
     d.type = g('fptype');
     d.baseCost = g('fpbaseCost'); d.dateAcquired = g('fpdateAcquired');
   }
+  d.source = g('fpsource');
   return d;
 }
 
@@ -16273,6 +16699,11 @@ function saveFinPos(){
       var _e = document.getElementById('fpesc'); if(_e){ _e.focus(); _e.select(); }
       return;
     }
+  }
+  if(FP_KIND==='business'){
+    var _bd = fpBizFormData();
+    if(!fpIsTrust(_bd) && fpN(_bd.pctHeld)+fpN(_bd.pctHeldSpouse) > 100){ toast('The client and spouse together hold more than 100%. Please check the percentages.','err'); return; }
+    if(!fpIsTrust(_bd) && _bd.valMethod===FP_BIZ_WORKED && !_bd.holdings.length && !confirm('Nothing is entered under what the entity holds, so the shares will be saved as R 0.\n\nOK = save anyway.\nCancel = go back.')) return;
   }
   var now = new Date().toISOString().slice(0,16).replace('T',' ');
   var oldRow = FP_EDIT_ID ? DB.finpos.find(function(r){return String(r.ID)===String(FP_EDIT_ID);}) : null;
@@ -17705,6 +18136,1208 @@ function runPasteClaudeImport(){
     try{ if(res&&res.ok&&c._pendingSave) delete c._pendingSave; localStorage.setItem('du_db',JSON.stringify(DB)); }catch(e){}
   });
   toast((wasUpdate?'Updated ':'Created ')+c.Name,'ok');
+}
+
+// Duwalcoe Fact Find Workbook: shared spec (version 1.0, 12 Oct 2026).
+// The template builder (build_template.js) and the CRM (index.html, FF_SPEC) both use
+// this. Every typed fact has one home (a yellow cell) with a named range:
+//   FF_C_<key>   client field          FF_S_<key>   spouse field (CRM key in .s)
+//   FF_T_<tbl>   table body            FF_K_<tbl>   hidden row of column keys above it
+//   FF_B<n>_<k>  company / trust n     FF_W_<key>   will field     FF_M_<key> meta
+// Column keys are read from the workbook's own key row, so columns can move freely.
+var FF_SPEC = {
+  version: '1.0',
+  sheets: {
+    start: 'Start here', fam: 'Client and family', inc: 'Income and expenses', ast: 'Assets and debts',
+    biz: 'Companies and trusts', needs: 'Needs', will: 'Will', sum: 'Summary', lists: 'Lists'
+  },
+  // Value types: text, area (long text), id (SA ID / phone: kept as text), money, num, pct,
+  // date, yesno (CRM 'Yes'/'No', blank = No), yesnoBlank (blank stays blank), list:<name>,
+  // owner (client's name / spouse's name / Joint -> Client / Spouse / Joint), lead (Client/Lead -> IsLead No/Yes)
+  lists: {
+    titles: ['Mr.', 'Mrs.', 'Ms.', 'Miss', 'Dr.', 'Prof.', 'Rev.', 'Adv.'],
+    gender: ['Male', 'Female'],
+    yesno: ['Yes', 'No'],
+    lead: ['Client', 'Lead'],
+    marital: ['Single', 'Engaged', 'Married - ANC with accrual', 'Married - ANC without accrual', 'Married in COP', 'Life partner', 'Divorced', 'Widowed'],
+    edu: ['School - no matric', 'Matric', 'Diploma / Certificate', 'Degree', 'Post Graduate', 'Other'],
+    famRel: ['Child', 'Parent', 'Sibling', 'Dependant', 'Other'],
+    incType: ['Salary', 'Dividends', 'Rental Income', 'Business Income', 'State Pension (SASSA)', 'Annuity Income', 'Investment Income', 'Other'],
+    expCat: ['Living expenses', 'Bond repayment', 'Vehicle finance', 'School / university fees', 'Medical / medical aid', 'Insurance premiums', 'Entertainment', 'Maintenance / alimony', 'Other'],
+    liabType: ['Personal Loan', 'Credit Card', 'Vehicle Finance', 'Home Bond', 'Overdraft', 'Store Account', 'Tax Debt', 'Student Loan', 'Other'],
+    otherType: ['Cash / Savings', 'Fixed Deposit', 'Shares / Unit Trusts', 'Business Interest', 'Loan Account', 'Crypto', 'Art / Collectibles', 'Household Contents', 'Other'],
+    entityType: ['Pty Ltd', 'CC', 'Trust', 'Partnership', 'Sole Proprietor', 'Other'],
+    valBasis: ['Latest financials', 'Informal estimate', 'Other'],
+    mainUse: ['Active trading business', 'Mainly property to let', 'Mainly investments (shares, cash, loans)', 'Mixed (trading plus letting or investments)'],
+    loanAcc: ['None', 'Credit', 'Debit'],
+    holdKind: ['Property', 'Bond', 'Other asset', 'Other debt'],
+    source: ['Books', 'Statement', 'Valuation', 'Estimate'],
+    passes: ['Spouse', 'Estate', 'Named person'],
+    scenario: ['Death', 'Disability', 'Dread Disease', 'Retirement', 'Other'],
+    needType: ['Monthly income', 'Once-off capital'],
+    forWhom: ['Spouse', 'Estate', 'Named person']
+  },
+
+  // ── Client and family: one row per fact, client column and spouse column ──
+  person: [
+    {label: 'Title', c: 'Title', t: 'list:titles'},
+    {label: 'Full names', c: 'Name', s: 'SpouseName', t: 'text', req: true},
+    {label: 'Calling name (what we call you)', c: 'CallingName', t: 'text'},
+    {label: 'SA ID number', c: 'IDNumber', s: 'SpouseIDNumber', t: 'id'},
+    {label: 'Date of birth (only if no SA ID number)', c: 'DOB', s: 'SpouseDOB', t: 'date'},
+    {label: 'Gender (only if no SA ID number)', c: 'Gender', t: 'list:gender'},
+    {label: 'Smoker', c: 'Smoker', t: 'list:yesno'},
+    {label: 'Cell', c: 'Cell', s: 'SpouseCell', t: 'id'},
+    {label: 'Email', c: 'Email', s: 'SpouseEmail', t: 'text'},
+    {label: 'Home telephone', c: 'TelHome', t: 'id'},
+    {label: 'Work telephone', c: 'TelWork', t: 'id'},
+    {label: 'Physical address', c: 'Address', t: 'area'},
+    {label: 'Postal address', c: 'POBox', t: 'area'},
+    {label: 'Occupation', c: 'Occupation', s: 'SpouseOccupation', t: 'text'},
+    {label: 'Employer', c: 'Employer', t: 'text'},
+    {label: 'Gross income a month (R)', c: 'Income', s: 'SpouseIncome', t: 'money'},
+    {label: 'Working?', s: 'SpouseWorks', t: 'list:yesno'},
+    {label: 'Tax number', c: 'TaxNo', t: 'id'},
+    {label: 'Highest education', c: 'Education', t: 'list:edu'},
+    {label: 'Qualification', c: 'Qualification', t: 'text'},
+    {label: 'Marital status and regime', c: 'MaritalStatus', t: 'list:marital'},
+    {label: 'Wedding anniversary', c: 'Anniversary', t: 'date'},
+    {label: 'Lead or client', c: 'IsLead', t: 'lead'}
+  ],
+
+  // ── Repeating tables (one CRM row each; hidden ID column carries the CRM row ID) ──
+  tables: {
+    kids: {sheet: 'fam', rows: 8, title: '2. Children and other family members',
+      hint: 'Your children first, then anyone else in the family. Your spouse goes above, not here.',
+      cols: [
+        {k: 'Name', h: 'Full names', t: 'text', w: 34},
+        {k: 'IDNumber', h: 'SA ID number', t: 'id', w: 17},
+        {k: 'DOB', h: 'Date of birth (if no SA ID)', t: 'date', w: 14},
+        {k: 'Type', h: 'Relationship to you', t: 'list:famRel', w: 14},
+        {k: 'Dependent', h: 'Financially dependent on you?', t: 'list:yesno', w: 14}
+      ]},
+    income: {sheet: 'inc', rows: 10, title: '1. Income', kind: 'income',
+      hint: 'Every regular income, before tax. One row per source.',
+      cols: [
+        {k: 'desc', h: 'Description (e.g. Salary, ABC Ltd)', t: 'text', w: 34},
+        {k: 'owner', h: 'Whose income', t: 'owner', w: 14},
+        {k: 'incomeType', h: 'Type', t: 'list:incType', w: 18},
+        {k: 'amountPM', h: 'Gross amount a month (R)', t: 'money', w: 15, sum: true},
+        {k: 'bonus', h: 'Annual bonus (R)', t: 'money', w: 14},
+        {k: 'taxable', h: 'Taxable?', t: 'yesnoTax', w: 10},
+        {k: 'notes', h: 'Notes', t: 'text', w: 30}
+      ]},
+    expense: {sheet: 'inc', rows: 15, title: '2. Monthly expenses', kind: 'expense',
+      hint: 'What the household spends each month.',
+      cols: [
+        {k: 'desc', h: 'Description', t: 'text', w: 34},
+        {k: 'expCategory', h: 'Category', t: 'list:expCat', w: 18},
+        {k: 'amountPM', h: 'Amount a month (R)', t: 'money', w: 15, sum: true},
+        {k: 'notes', h: 'Notes', t: 'text', w: 30}
+      ]},
+    property: {sheet: 'ast', rows: 8, title: '1. Property in your own names', kind: 'property',
+      hint: 'Market value is what it would sell for today. Base cost is what it cost plus improvements, for capital gains tax. Property owned by a company or trust goes on the Companies and trusts sheet, not here.',
+      cols: [
+        {k: 'desc', h: 'Address and type of property', t: 'text', w: 34},
+        {k: 'owner', h: 'Owner', t: 'owner', w: 12},
+        {k: 'value', h: 'Market value today (R)', t: 'money', w: 14},
+        {k: 'valueDate', h: 'Value as at', t: 'date', w: 12},
+        {k: 'baseCost', h: 'Base cost incl. improvements (R)', t: 'money', w: 14},
+        {k: 'dateAcquired', h: 'Date bought', t: 'date', w: 12},
+        {k: 'bondOut', h: 'Bond owing (R)', t: 'money', w: 13},
+        {k: 'bondPM', h: 'Bond a month (R)', t: 'money', w: 12},
+        {k: 'rentalPM', h: 'Rent received a month (R)', t: 'money', w: 12},
+        {k: 'primaryRes', h: 'Main home?', t: 'yesno', w: 9},
+        {k: 'passesTo', h: 'Passes to at death', t: 'list:passes', w: 13},
+        {k: 'passesToName', h: 'Named person', t: 'text', w: 16},
+        {k: 'soldDeath', h: 'Sell at death?', t: 'yesno', w: 9},
+        {k: 'soldDisab', h: 'Sell if disabled?', t: 'yesno', w: 9},
+        {k: 'source', h: 'Source', t: 'list:source', w: 11},
+        {k: 'notes', h: 'Notes', t: 'text', w: 24}
+      ]},
+    vehicle: {sheet: 'ast', rows: 6, title: '2. Vehicles', kind: 'vehicle',
+      hint: 'Cars, bakkies, boats, caravans and trailers.',
+      cols: [
+        {k: 'desc', h: 'Make, model and year', t: 'text', w: 34},
+        {k: 'owner', h: 'Owner', t: 'owner', w: 12},
+        {k: 'value', h: 'Value today (R)', t: 'money', w: 14},
+        {k: 'financeOut', h: 'Finance owing (R)', t: 'money', w: 13},
+        {k: 'financePM', h: 'Finance a month (R)', t: 'money', w: 12},
+        {k: 'passesTo', h: 'Passes to at death', t: 'list:passes', w: 13},
+        {k: 'passesToName', h: 'Named person', t: 'text', w: 16},
+        {k: 'soldDeath', h: 'Sell at death?', t: 'yesno', w: 9},
+        {k: 'source', h: 'Source', t: 'list:source', w: 11},
+        {k: 'notes', h: 'Notes', t: 'text', w: 24}
+      ]},
+    other: {sheet: 'ast', rows: 15, title: '3. Bank accounts, investments and other assets', kind: 'other',
+      hint: 'Bank and savings accounts, shares and unit trusts held directly, money lent to family, household contents, jewellery, art, firearms, collections. Policies and investments arranged through Duwalcoe are already on our records.',
+      cols: [
+        {k: 'desc', h: 'Description', t: 'text', w: 34},
+        {k: 'owner', h: 'Owner', t: 'owner', w: 12},
+        {k: 'type', h: 'Type', t: 'list:otherType', w: 16},
+        {k: 'value', h: 'Value today (R)', t: 'money', w: 14},
+        {k: 'baseCost', h: 'Base cost (R)', t: 'money', w: 13},
+        {k: 'dateAcquired', h: 'Date acquired', t: 'date', w: 12},
+        {k: 'passesTo', h: 'Passes to at death', t: 'list:passes', w: 13},
+        {k: 'passesToName', h: 'Named person', t: 'text', w: 16},
+        {k: 'source', h: 'Source', t: 'list:source', w: 11},
+        {k: 'notes', h: 'Notes', t: 'text', w: 24}
+      ]},
+    liability: {sheet: 'ast', rows: 12, title: '4. Debts', kind: 'liability',
+      hint: 'Credit cards, overdrafts, personal loans, store accounts, loans from family, tax owed to SARS. Bonds and vehicle finance are entered above.',
+      cols: [
+        {k: 'desc', h: 'Lender and type of debt', t: 'text', w: 34},
+        {k: 'owner', h: 'Whose debt', t: 'owner', w: 12},
+        {k: 'liabType', h: 'Type', t: 'list:liabType', w: 16},
+        {k: 'balance', h: 'Balance owing (R)', t: 'money', w: 14},
+        {k: 'interestRate', h: 'Interest rate (% a year)', t: 'num', w: 12},
+        {k: 'paymentPM', h: 'Payment a month (R)', t: 'money', w: 12},
+        {k: 'payOffDisab', h: 'Pay off if disabled?', t: 'yesno', w: 10},
+        {k: 'source', h: 'Source', t: 'list:source', w: 11},
+        {k: 'notes', h: 'Notes', t: 'text', w: 24}
+      ]},
+    need: {sheet: 'needs', rows: 12, title: 'What you want provided for', kind: 'need',
+      hint: 'For each need: what happens (death, disability, dread disease, retirement), whether it is a monthly income or a once-off amount, and for whom (death only).',
+      cols: [
+        {k: 'desc', h: 'Description (e.g. Income for the family, Education)', t: 'text', w: 36},
+        {k: 'scenario', h: 'If this happens', t: 'list:scenario', w: 14},
+        {k: 'needType', h: 'Monthly income or once-off?', t: 'list:needType', w: 16},
+        {k: 'amount', h: 'Amount (R): a month, or the once-off total', t: 'money', w: 16},
+        {k: 'years', h: 'For how many years (income)', t: 'num', w: 12},
+        {k: 'esc', h: 'Increase % a year (blank = inflation)', t: 'num', w: 13},
+        {k: 'benTo', h: 'For whom (death only)', t: 'list:forWhom', w: 13},
+        {k: 'benName', h: 'Named person', t: 'text', w: 18},
+        {k: 'notes', h: 'Notes', t: 'text', w: 28}
+      ]}
+  },
+
+  // ── Companies and trusts: blocks of one entity each ──
+  biz: {
+    blocks: 4, holdRows: 10,
+    entity: [
+      {k: 'desc', label: 'Name of the company, CC or trust', t: 'text'},
+      {k: 'entityType', label: 'Type', t: 'list:entityType'},
+      {k: 'mainUse', label: 'Main use of the business', t: 'list:mainUse'},
+      {k: 'buySell', label: 'Buy and sell agreement in place?', t: 'yesno'},
+      {k: 'valBasis', label: 'Valuation basis', t: 'list:valBasis'},
+      {k: 'valueDate', label: 'Figures as at', t: 'date'},
+      {k: 'source', label: 'Source of the figures', t: 'list:source'},
+      {k: 'passesTo', label: 'Your share and loan account pass to at death', t: 'list:passes'},
+      {k: 'passesToName', label: 'Named person', t: 'text'},
+      {k: 'soldDeath', label: 'Sell your share at death?', t: 'yesno'},
+      {k: 'soldDisab', label: 'Sell your share if disabled?', t: 'yesno'},
+      {k: 'notes', label: 'Notes', t: 'text'}
+    ],
+    // one row each, client column and spouse column
+    person: [
+      {label: '% held (type 60 for 60%)', c: 'pctHeld', s: 'pctHeldSpouse', t: 'pct'},
+      {label: 'Loan account: Credit = the entity owes you, Debit = you owe it', c: 'loanAcc', s: 'loanAccSpouse', t: 'list:loanAcc'},
+      {label: 'Loan account balance (R)', c: 'loanBal', s: 'loanBalSpouse', t: 'money'},
+      {label: 'What your shares cost (R)', c: 'baseCost', s: 'baseCostSpouse', t: 'money'},
+      {label: 'Date you acquired the shares', c: 'dateAcquired', s: 'dateAcquiredSpouse', t: 'date'},
+      {label: 'Actively involved in running it?', c: 'activeInv', s: 'activeInvSpouse', t: 'list:yesno'},
+      {label: 'Accountant\'s value of your share (R), only if you have one', c: 'valueOverride', s: 'valueOverrideSpouse', t: 'money'}
+    ],
+    hold: [
+      {k: 'desc', h: 'What it holds', t: 'text', w: 34},
+      {k: 'kind', h: 'Kind', t: 'list:holdKind', w: 14},
+      {k: 'value', h: 'Market value or balance (R)', t: 'money', w: 16},
+      {k: 'baseCost', h: 'Base cost (R) (property)', t: 'money', w: 15},
+      {k: 'source', h: 'Source', t: 'list:source', w: 12},
+      {k: 'notes', h: 'Notes', t: 'text', w: 30}
+    ]
+  },
+
+  // ── Will: one row per question (keys and wording are the CRM will screen's) ──
+  // grey: shown from another sheet, not typed here. Office use is not in the workbook.
+  will: [
+    {sec: '1. You (the testator)'},
+    {grey: 'name'}, {grey: 'id'}, {grey: 'marital'},
+    {k: 't_placeofbirth', label: 'Place of birth', t: 'text'},
+    {k: 't_marital_date', label: 'If divorced or widowed: the date', t: 'text'},
+    {sec: '2. Your spouse or life partner'},
+    {grey: 'spouse'}, {grey: 'anniversary'},
+    {k: 's_marriage_place', label: 'Place of marriage', t: 'text'},
+    {k: 's_anc_note', label: 'Antenuptial contract and accrual: notes for the attorney', t: 'area'},
+    {sec: '3. Children and dependants'},
+    {kidsNotes: true},
+    {grey: 'dep_notes'},
+    {sec: '4. Existing will'},
+    {k: 'e_status', label: 'Current position', t: 'radio', opts: ['I do not have an existing will', 'I have an existing will', 'I have a codicil / amendment to a prior will']},
+    {k: 'e_date', label: 'Date of existing will', t: 'text'},
+    {k: 'e_drafted_by', label: 'Drafted by', t: 'text'},
+    {k: 'e_location', label: 'Where the existing will or codicil is kept', t: 'area'},
+    {k: 'e_revoke', label: 'Revoke all prior wills and codicils when the new will is signed?', t: 'check'},
+    {sec: '5. Guardian for minor children'},
+    {k: 'g_na', label: 'Not applicable (no minor children, or the other parent has full guardianship)?', t: 'check'},
+    {k: 'g_p_name', label: 'Primary guardian: full names', t: 'text'},
+    {k: 'g_p_id', label: 'Primary guardian: ID number', t: 'id'},
+    {k: 'g_p_rel', label: 'Primary guardian: relationship', t: 'text'},
+    {k: 'g_p_contact', label: 'Primary guardian: contact', t: 'id'},
+    {k: 'g_a_name', label: 'Alternate guardian: full names', t: 'text'},
+    {k: 'g_a_id', label: 'Alternate guardian: ID number', t: 'id'},
+    {k: 'g_a_rel', label: 'Alternate guardian: relationship', t: 'text'},
+    {k: 'g_a_contact', label: 'Alternate guardian: contact', t: 'id'},
+    {k: 'g_discussed', label: 'Discussed with the proposed guardian, and they have agreed?', t: 'check'},
+    {k: 'g_notes', label: 'Notes to the guardian (values, schooling preferences)', t: 'area'},
+    {sec: '6. Testamentary trust'},
+    {k: 'tr_choice', label: 'Establish a trust?', t: 'radio', opts: ['Yes — establish a testamentary trust', 'No — distribute directly', 'Only if beneficiaries are still minors at date of death']},
+    {k: 'tr1_name', label: 'Trustee 1: full names', t: 'text'}, {k: 'tr1_id', label: 'Trustee 1: ID number', t: 'id'},
+    {k: 'tr2_name', label: 'Trustee 2: full names', t: 'text'}, {k: 'tr2_id', label: 'Trustee 2: ID number', t: 'id'},
+    {k: 'tr3_name', label: 'Trustee 3: full names', t: 'text'}, {k: 'tr3_id', label: 'Trustee 3: ID number', t: 'id'},
+    {k: 'tr_term', label: 'When the trust ends', t: 'radio', opts: ['Terminates when beneficiary reaches a set age (below)', 'Trustees may pay capital sooner for education, medical, first home, etc.', 'Income distributed as needed; capital held until termination age']},
+    {k: 'tr_term_age', label: 'Termination / vesting age (commonly 21 or 25)', t: 'text'},
+    {k: 'tr_notes', label: 'Special trust instructions', t: 'area'},
+    {sec: '7. Specific bequests'},
+    {bequests: true},
+    {sec: '8. Residue of the estate (everything not specifically left to someone)'},
+    {k: 'res_choice', label: 'Residue distribution', t: 'radio', opts: ['Entire residue to my spouse / life partner', 'Entire residue to my children equally, per stirpes', 'Entire residue to my children equally, per capita', 'Split as follows (table below)']},
+    {residue: true},
+    {sec: '9. Special assets'},
+    {k: 'sa_rf', label: 'Retirement funds (s.37C)', t: 'radio', opts: ['I have reviewed my fund beneficiary nominations', 'I wish to update my fund nominations (attorney / adviser to assist)']},
+    {k: 'sa_lp', label: 'Life insurance policies', t: 'radio', opts: ['All life policies have current beneficiary nominations', 'Some policies pay into my estate (no nominated beneficiary)']},
+    {k: 'sa_lp_notes', label: 'Notes on policies', t: 'area'},
+    {k: 'sa_prop_list', label: 'Fixed property: address and holding structure (own name, trust or company)', t: 'area'},
+    {k: 'sa_prop', label: 'Fixed property instruction', t: 'radio', opts: ['Property to pass to surviving spouse (s.4(q) deduction)', 'Property to be sold and proceeds form part of residue', 'Specific property to a specific beneficiary (detail in section 7)']},
+    {k: 'sa_biz', label: 'Business interests', t: 'radio', opts: ['Not applicable', 'I am a shareholder / member (detail below)', 'A buy-and-sell agreement is in place', 'No buy-and-sell — business interest to pass to (below)']},
+    {k: 'sa_biz_detail', label: 'Business notes for the attorney (entity, % held, to whom)', t: 'text'},
+    {k: 'sa_off', label: 'Offshore assets', t: 'radio', opts: ['None', 'I hold assets offshore (a separate offshore will may be recommended)']},
+    {k: 'sa_off_detail', label: 'Country and nature of offshore assets', t: 'area'},
+    {k: 'sa_fire', label: 'Firearms', t: 'radio', opts: ['None', 'I own firearms (beneficiary must hold a valid licence)']},
+    {k: 'sa_fire_num', label: 'Number of firearms', t: 'text'},
+    {k: 'sa_fire_licensed', label: 'Firearms licensed to', t: 'text'},
+    {sec: '10. Living will and organ donation'},
+    {k: 'lw', label: 'Living will', t: 'radio', opts: ['Yes — I wish a living will to be drafted', 'No — I do not want a living will', 'I already have a living will (date below)']},
+    {k: 'lw_date', label: 'Date of existing living will', t: 'text'},
+    {k: 'organ', label: 'Organ donation', t: 'radio', opts: ['I wish to donate my organs and tissues where medically suitable', 'I do not wish to donate organs or tissues', 'I am already a registered organ donor']},
+    {k: 'cl_organ_reg', label: 'Register me as an organ donor (done on my behalf)?', t: 'check'},
+    {sec: '11. Funeral wishes'},
+    {k: 'fw', label: 'Preference', t: 'radio', opts: ['Burial', 'Cremation', 'No preference — leave to family']},
+    {k: 'fw_location', label: 'Location (cemetery, church, scattering of ashes)', t: 'area'},
+    {k: 'fw_requests', label: 'Specific requests (music, readings, dress code, faith practices)', t: 'area'},
+    {k: 'fw_cover', label: 'Funeral cover', t: 'radio', opts: ['I have a funeral policy (details below)', 'None']},
+    {k: 'fw_cover_provider', label: 'Funeral policy provider', t: 'text'},
+    {k: 'fw_cover_policy', label: 'Funeral policy number', t: 'id'},
+    {k: 'fw_cost', label: 'Estimated funeral cost (R)', t: 'text'},
+    {sec: '12. Digital assets and accounts'},
+    {k: 'da_letter', label: 'A sealed letter of instruction (accounts, access) is lodged?', t: 'check'},
+    {k: 'da_letter_with', label: 'Lodged with', t: 'text'},
+    {k: 'da_social', label: 'Social media accounts to be', t: 'radio', opts: ['Memorialised', 'Closed', 'Transferred']},
+    {k: 'da_crypto', label: 'Cryptocurrency holdings exist?', t: 'check'},
+    {k: 'da_crypto_loc', label: 'Where the seed phrases or keys are kept (not the keys themselves)', t: 'text'},
+    {sec: '13. Pets'},
+    {k: 'pet_na', label: 'Not applicable?', t: 'check'},
+    {k: 'pet_carer', label: 'Pets to be cared for by (name, relationship, contact)', t: 'text'},
+    {k: 'pet_bequest', label: 'Bequest to the carer for the pets\' upkeep (R)', t: 'text'},
+    {sec: '14. Letter of wishes'},
+    {k: 'lo', label: 'Letter of wishes (private, not binding)', t: 'radio', opts: ['Yes — a separate letter of wishes will be drafted', 'No']},
+    {sec: '15. Notes to the attorney'},
+    {k: 'add_notes', label: 'Additional instructions or notes to the attorney', t: 'area'},
+    {sec: '16. Executor'},
+    {k: 'ex_p_name', label: 'Primary executor: full names', t: 'text'},
+    {k: 'ex_p_id', label: 'Primary executor: ID or registration number', t: 'id'},
+    {k: 'ex_p_rel', label: 'Primary executor: relationship', t: 'text'},
+    {k: 'ex_p_contact', label: 'Primary executor: contact number', t: 'id'},
+    {k: 'ex_p_address', label: 'Primary executor: address', t: 'text'},
+    {k: 'ex_a_name', label: 'Alternate executor: full names', t: 'text'},
+    {k: 'ex_a_id', label: 'Alternate executor: ID or registration number', t: 'id'},
+    {k: 'ex_a_rel', label: 'Alternate executor: relationship', t: 'text'},
+    {k: 'ex_a_contact', label: 'Alternate executor: contact number', t: 'id'},
+    {k: 'ex_security', label: 'Security', t: 'radio', opts: ['Waive security (bond of security) — usual for a family executor', 'Require security']},
+    {k: 'ex_fee', label: 'Executor fee basis', t: 'radio', opts: ['Agreed reduced rate (below)', 'Full statutory rate of 3.5% + VAT']},
+    {k: 'ex_fee_rate', label: 'Agreed rate (%) plus VAT, if reduced', t: 'text'},
+    {k: 'ex_assume', label: 'Executor may assume a co-executor (e.g. a professional firm)?', t: 'check'},
+    {k: 'ex_notes', label: 'Other powers or special instructions to the executor', t: 'area'},
+    {sec: '17. Capital Legacy (only for a will drafted through Capital Legacy)'},
+    {k: 'cl_lang', label: 'Will language', t: 'radio', opts: ['English', 'Afrikaans', 'Other (below)']},
+    {k: 'cl_lang_other', label: 'Other language', t: 'text'},
+    {k: 'cl_wt', label: 'Establish a Widow\'s Trust?', t: 'radio', opts: ['Yes', 'No']},
+    {k: 'cl_wt_sp_inc', label: 'Widow\'s Trust: spouse as income beneficiary?', t: 'radio', opts: ['Yes', 'No']},
+    {k: 'cl_wt_kids_cap', label: 'Widow\'s Trust: children as capital beneficiaries?', t: 'radio', opts: ['Yes', 'No']},
+    {k: 'cl_wt_cap1_name', label: 'Widow\'s Trust other capital beneficiary 1: full names', t: 'text'},
+    {k: 'cl_wt_cap1_rel', label: 'Other capital beneficiary 1: relationship', t: 'text'},
+    {k: 'cl_wt_cap2_name', label: 'Widow\'s Trust other capital beneficiary 2: full names', t: 'text'},
+    {k: 'cl_wt_cap2_rel', label: 'Other capital beneficiary 2: relationship', t: 'text'},
+    {k: 'cl_wt_cap3_name', label: 'Widow\'s Trust other capital beneficiary 3: full names', t: 'text'},
+    {k: 'cl_wt_cap3_rel', label: 'Other capital beneficiary 3: relationship', t: 'text'},
+    {k: 'cl_pt_ben', label: 'Provider\'s Trust beneficiary: full names', t: 'text'},
+    {k: 'cl_pt_rel', label: 'Provider\'s Trust beneficiary: relationship', t: 'text'},
+    {k: 'cl_nok_name', label: 'Next of kin: full names', t: 'text'},
+    {k: 'cl_nok_rel', label: 'Next of kin: relationship', t: 'text'},
+    {k: 'cl_nok_cell', label: 'Next of kin: cell', t: 'id'},
+    {k: 'cl_nok_email', label: 'Next of kin: email', t: 'text'},
+    {k: 'cl_ct1_name', label: 'Co-trustee 1: full names', t: 'text'}, {k: 'cl_ct1_id', label: 'Co-trustee 1: ID number', t: 'id'}, {k: 'cl_ct1_rel', label: 'Co-trustee 1: relationship', t: 'text'},
+    {k: 'cl_ct2_name', label: 'Co-trustee 2: full names', t: 'text'}, {k: 'cl_ct2_id', label: 'Co-trustee 2: ID number', t: 'id'}, {k: 'cl_ct2_rel', label: 'Co-trustee 2: relationship', t: 'text'},
+    {k: 'cl_exec', label: 'Capital Legacy as executor?', t: 'radio', opts: ['Yes', 'No']},
+    {k: 'cl_ce1_name', label: 'Co-executor 1: full names', t: 'text'}, {k: 'cl_ce1_id', label: 'Co-executor 1: ID number', t: 'id'}, {k: 'cl_ce1_rel', label: 'Co-executor 1: relationship', t: 'text'},
+    {k: 'cl_ce2_name', label: 'Co-executor 2: full names', t: 'text'}, {k: 'cl_ce2_id', label: 'Co-executor 2: ID number', t: 'id'}, {k: 'cl_ce2_rel', label: 'Co-executor 2: relationship', t: 'text'},
+    {k: 'cl_collect', label: 'Use the will collection service?', t: 'radio', opts: ['Yes', 'No']}
+  ],
+  willTables: {
+    bq: {rows: 6, cols: [{k: 'item', h: 'Item or amount', w: 40}, {k: 'ben', h: 'To whom', w: 30}, {k: 'pre', h: 'If they die before you, to', w: 30}]},
+    rs: {rows: 5, cols: [{k: 'ben', h: 'Beneficiary', w: 40}, {k: 'pct', h: '% share', w: 12}, {k: 'pre', h: 'If they die before you, to', w: 30}]}
+  }
+};
+if (typeof module !== 'undefined') module.exports = FF_SPEC;
+
+// ══ FACT FIND WORKBOOK (Excel): export and import (12 Oct 2026, change log entry 78) ══
+// Spec: Duwalcoe_Fact_Find_Workbook_Spec_2026-10-12.md. The CRM stays the system of record;
+// the workbook is a capture tool. Export fills the master template (same folder as this
+// page) by named range; import reads it back by named range, shows every change for
+// review, and saves nothing until Clinton confirms. Rules:
+//  · rows with a hidden ID update that CRM row; rows without one are added; CRM rows not in
+//    the workbook are listed as "not in the spreadsheet" and never deleted;
+//  · a workbook exported for one client cannot be imported onto another (ID stamped in it);
+//  · a blank cell clears a CRM value ONLY in a workbook exported from that client; a blank
+//    template never clears anything;
+//  · a new row that looks like an existing one (same description / name) starts unticked;
+//  · every save is checked, and any that fail are listed (the rest are kept).
+// FF_SPEC (the shared spec) defines every sheet, field, list and named range.
+var WBK_TEMPLATE_URL = 'Duwalcoe_Fact_Find_Template.xlsx';
+var WBK_EXCELJS_URL  = 'https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js';
+var WBK = { cid:null, plan:null, busy:false };
+
+function wbkEsc(t){ return String(t==null?'':t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function wbkPad(n){ return (n<10?'0':'')+n; }
+function wbkISO(d){ return d.getUTCFullYear()+'-'+wbkPad(d.getUTCMonth()+1)+'-'+wbkPad(d.getUTCDate()); }
+function wbkNumStr(n){ if(!isFinite(n)) return ''; var s = String(Number(Number(n).toFixed(6))); return s; }
+function wbkColNum(L){ var n=0; for(var i=0;i<L.length;i++) n = n*26 + L.charCodeAt(i)-64; return n; }
+function wbkClient(cid){ return DB.clients.find(function(x){ return String(x.ID)===String(cid); }) || null; }
+
+function wbkWithExcelJS(cb){
+  if(window.ExcelJS){ cb(); return; }
+  var s = document.createElement('script');
+  s.src = WBK_EXCELJS_URL;
+  s.onload = function(){ cb(); };
+  s.onerror = function(){ WBK.busy=false; toast('Could not load the Excel library. Check the internet connection and try again.','err'); };
+  document.head.appendChild(s);
+}
+function wbkLoadTemplate(cb){
+  fetch(WBK_TEMPLATE_URL, {cache:'no-store'})
+    .then(function(r){ if(!r.ok) throw new Error('HTTP '+r.status); return r.arrayBuffer(); })
+    .then(function(buf){ var wb = new ExcelJS.Workbook(); return wb.xlsx.load(buf).then(function(){ cb(wb); }); })
+    .catch(function(e){ WBK.busy=false; console.error('Fact find template:', e); toast('The fact find template ('+WBK_TEMPLATE_URL+') was not found next to the CRM. Upload it to GitHub with index.html.','err'); });
+}
+
+// ── Named ranges ──
+function wbkParseRef(ref){
+  var m = String(ref).match(/^'?(.*?)'?!\$?([A-Z]+)\$?(\d+)(?::\$?([A-Z]+)\$?(\d+))?$/);
+  if(!m) return null;
+  return { sheet:m[1].replace(/''/g,"'"), c1:m[2], r1:+m[3], c2:m[4]||m[2], r2:+(m[5]||m[3]) };
+}
+function wbkNames(wb){
+  var N = {};
+  ((wb.definedNames && wb.definedNames.model) || []).forEach(function(d){ if(d && d.name && d.ranges && d.ranges.length){ var r = wbkParseRef(d.ranges[0]); if(r) N[d.name] = r; } });
+  return N;
+}
+function wbkCell(wb, R){ if(!R) return null; var ws = wb.getWorksheet(R.sheet); return ws ? ws.getCell(R.c1+R.r1) : null; }
+// Column keys of a table, from its hidden key row: {key: columnNumber}
+function wbkKeys(wb, R){
+  var ws = wb.getWorksheet(R.sheet), out = {};
+  for(var c=wbkColNum(R.c1); c<=wbkColNum(R.c2); c++){ var v = wbkRaw(ws.getCell(R.r1, c)); if(v!==null && String(v).trim()!=='') out[String(v).trim()] = c; }
+  return out;
+}
+
+// ── Cell values in and out ──
+function wbkRaw(cell){
+  if(!cell) return null;
+  var v = cell.value;
+  if(v===null || v===undefined) return null;
+  if(v instanceof Date) return v;
+  if(typeof v==='object'){
+    if(v.richText) return v.richText.map(function(t){ return t.text; }).join('');
+    if(v.text!==undefined) return (v.text && v.text.richText) ? v.text.richText.map(function(t){ return t.text; }).join('') : v.text;
+    if(v.result!==undefined) return v.result;
+    return null;   // formula without a result, error, shared formula
+  }
+  return v;
+}
+function wbkBlank(raw){ return raw===null || raw===undefined || (typeof raw==='string' && raw.trim()===''); }
+function wbkListOf(t){ var n = t.slice(5); return FF_SPEC.lists[n] || []; }
+// Workbook value -> CRM string. Returns undefined when it cannot be read (warn() says why).
+function wbkIn(t, raw, cell, warn, opts){
+  if(wbkBlank(raw)) return '';
+  if(t==='text' || t==='area'){ return (raw instanceof Date) ? wbkISO(raw) : String(raw).trim(); }
+  if(t==='id'){
+    if(typeof raw==='number'){ var s = String(Math.round(raw)); if(s.length===12 || s.length===9) s = '0'+s; return s; }
+    return String(raw).trim();
+  }
+  if(t==='money' || t==='num'){
+    if(typeof raw==='number') return wbkNumStr(raw);
+    var ms = String(raw).trim();
+    if(/^[R\s\d,.\-]+$/.test(ms) && /\d/.test(ms)) return wbkNumStr(crmNum(ms));
+    warn('"'+raw+'" is not a number'); return undefined;
+  }
+  if(t==='pct'){
+    var n;
+    if(typeof raw==='number'){ n = raw; if(cell && /%/.test(cell.numFmt||'') && n<=1) n = n*100; }
+    else { var ps = String(raw).replace('%','').trim(); if(!/^[\d\s,.]+$/.test(ps)){ warn('"'+raw+'" is not a percentage'); return undefined; } n = crmNum(ps); }
+    return wbkNumStr(n);
+  }
+  if(t==='date'){
+    if(raw instanceof Date) return wbkISO(raw);
+    if(typeof raw==='number'){ var d = new Date(Date.UTC(1899,11,30) + Math.round(raw)*86400000); return wbkISO(d); }
+    var ds = String(raw).trim(), m;
+    if((m = ds.match(/^(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})$/))) return m[1]+'-'+wbkPad(+m[2])+'-'+wbkPad(+m[3]);
+    if((m = ds.match(/^(\d{1,2})[-\/.](\d{1,2})[-\/.](\d{4})$/))) return m[3]+'-'+wbkPad(+m[2])+'-'+wbkPad(+m[1]);
+    warn('"'+raw+'" is not a date (use 2012-03-31)'); return undefined;
+  }
+  if(t==='yesno' || t==='yesnoTax' || t==='check'){
+    var y = String(raw).trim().toLowerCase();
+    if(y==='yes' || y==='y' || y==='true') return 'Yes';
+    if(y==='no' || y==='n' || y==='false') return 'No';
+    warn('"'+raw+'" is not Yes or No'); return undefined;
+  }
+  if(t==='lead'){
+    var l = String(raw).trim().toLowerCase();
+    if(l==='lead') return 'Yes'; if(l==='client') return 'No';
+    warn('"'+raw+'" is not Client or Lead'); return undefined;
+  }
+  if(t.indexOf('list:')===0 || t==='radio'){
+    var list = t==='radio' ? (opts||[]) : wbkListOf(t);
+    var want = String(raw).trim().toLowerCase();
+    for(var i=0;i<list.length;i++){ if(String(list[i]).toLowerCase()===want) return list[i]; }
+    warn('"'+raw+'" is not one of the CRM options'); return undefined;
+  }
+  return String(raw).trim();
+}
+// CRM value -> workbook value
+function wbkOut(t, v){
+  var s = String(v===undefined || v===null ? '' : v).trim();
+  if(s==='') return null;
+  if(t==='money' || t==='num' || t==='pct'){ return (/^[R\s\d,.\-%]+$/.test(s) && /\d/.test(s)) ? crmNum(s.replace('%','')) : s; }
+  if(t==='date'){ var m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/); return m ? new Date(Date.UTC(+m[1], +m[2]-1, +m[3])) : s; }
+  if(t==='lead') return s==='Yes' ? 'Lead' : 'Client';
+  return s;
+}
+// Are two CRM values the same, for this type?
+function wbkSame(t, a, b){
+  var x = String(a===undefined||a===null?'':a).trim(), y = String(b===undefined||b===null?'':b).trim();
+  if(x===y) return true;
+  if(t==='money' || t==='num' || t==='pct'){ if(x==='' || y==='') return false; return Math.abs(crmNum(x)-crmNum(y)) < 0.005; }
+  if(t==='yesno' || t==='check'){ return (x===''||x==='No') && (y===''||y==='No'); }
+  if(t==='yesnoTax'){ return (x===''||x==='Yes') && (y===''||y==='Yes'); }
+  // option lists match regardless of case; free text is compared exactly (a corrected spelling is a change)
+  if(t && (t.indexOf('list:')===0 || t==='radio' || t==='owner' || t==='lead')) return x.toLowerCase()===y.toLowerCase();
+  return false;
+}
+// Names in the owner drop-downs: exactly what the workbook's own formulas show.
+function wbkLabels(name, calling, spouseName){
+  function first(n){ n = String(n||'').trim(); return n ? n.split(/\s+/)[0] : ''; }
+  return { c: String(calling||'').trim() || first(name) || 'Client', s: first(spouseName) || 'Spouse' };
+}
+function wbkOwnerOut(v, L){ if(v==='Client') return L.c; if(v==='Spouse') return L.s; if(v==='Joint') return 'Joint'; return v ? String(v) : null; }
+function wbkOwnerIn(raw, L, warn){
+  if(wbkBlank(raw)) return '';
+  var s = String(raw).trim().toLowerCase();
+  var c = L.c.toLowerCase(), sp = L.s.toLowerCase();
+  if(s===c && s===sp){ warn('"'+raw+'" is both your name and your spouse\'s first name, so the owner cannot be told apart'); return undefined; }
+  if(s===c || s==='client') return 'Client';
+  if(s===sp || s==='spouse') return 'Spouse';
+  if(s==='joint') return 'Joint';
+  warn('owner "'+raw+'" is not '+L.c+', '+L.s+' or Joint'); return undefined;
+}
+function wbkFieldLabel(tbl, key){ var c = (FF_SPEC.tables[tbl]||{cols:[]}).cols.find(function(x){ return x.k===key; }); return c ? c.h : key; }
+
+// ══ Open: export / import choices ═══════════════════════════════════════════
+function wbkOpen(cid){
+  WBK.cid = cid || null; WBK.plan = null;
+  var c = cid ? wbkClient(cid) : null;
+  var btn = document.getElementById('wbkImportBtn'); if(btn) btn.style.display = 'none';
+  document.getElementById('wbkModT').textContent = '📗 Fact find workbook'+(c ? ' — '+(c.Name||'') : '');
+  var h = '<div style="font-size:13px;color:#556;line-height:1.6;margin-bottom:14px">The Excel fact find is filled in on the laptop (it works offline), on paper, or by the client and their accountant. '+
+    'Importing it shows every change for you to check first: <strong>nothing is saved until you confirm</strong>.</div>';
+  h += '<div style="display:flex;gap:12px;flex-wrap:wrap">';
+  if(c){
+    h += '<button class="btn b-nv sm" onclick="wbkExport(\''+wbkEsc(c.ID)+'\')">⬇ Export '+wbkEsc(String(c.Name||'').split(' ')[0])+'\'s fact find</button>';
+    h += '<button class="btn b-gd sm" onclick="wbkPick()">⬆ Import a completed workbook</button>';
+  } else {
+    h += '<button class="btn b-nv sm" onclick="wbkExport(null)">⬇ Download a blank fact find</button>';
+    h += '<button class="btn b-gd sm" onclick="wbkPick()">⬆ Import a completed workbook</button>';
+  }
+  h += '</div>';
+  h += '<div style="margin-top:12px;font-size:11.5px;color:#889;line-height:1.5">'+(c ?
+    'Export fills the workbook from '+wbkEsc(c.Name||'')+'\'s record. A workbook exported for this client cannot be imported onto anyone else.' :
+    'A blank workbook creates a new client (or lead) when imported. To update an existing client, export from their record instead, so nothing is entered twice.')+'</div>';
+  h += '<div id="wbkPreview"></div>';
+  document.getElementById('wbkModB').innerHTML = h;
+  document.getElementById('wbkMod').classList.add('open');
+}
+function wbkPick(){
+  var f = document.getElementById('wbkFile');
+  f.value = '';
+  f.onchange = function(){ if(f.files && f.files[0]) wbkImportFile(f.files[0]); };
+  f.click();
+}
+
+// ══ Export ══════════════════════════════════════════════════════════════════
+function wbkExport(cid){
+  if(WBK.busy) return;
+  var c = cid ? wbkClient(cid) : null;
+  if(c && c.ClientType==='Company'){ toast('The fact find workbook is for individuals, not company records.','err'); return; }
+  WBK.busy = true;
+  toast('Preparing the workbook…','ok');
+  wbkWithExcelJS(function(){ wbkLoadTemplate(function(wb){
+    try{
+      var warn = c ? wbkFill(wb, c) : [];
+      if(warn.length && !confirm('Some of '+(c.Name||'')+'\'s records do not fit in the workbook:\n\n'+warn.join('\n')+'\n\nThey stay in the CRM and will show as "not in the spreadsheet" when you import. Export anyway?')){ WBK.busy=false; return; }
+      var N = wbkNames(wb), set = function(n, v){ var cl = wbkCell(wb, N[n]); if(cl) cl.value = v; };
+      // ExcelJS drops manual page breaks when it reads the template; the template lists them.
+      try{ JSON.parse(String(wbkRaw(wbkCell(wb, N.FF_M_Breaks))||'[]')).forEach(function(b){ var ws = wb.getWorksheet(b[0]); if(ws) ws.getRow(+b[1]).addPageBreak(); }); }catch(e){ console.warn('Page breaks not restored', e); }
+      set('FF_M_ClientID', c ? String(c.ID) : null);
+      set('FF_M_ClientName', c ? (c.Name||'') : null);
+      set('FF_M_Version', FF_SPEC.version);
+      set('FF_M_ExportedAt', new Date().toISOString().slice(0,16).replace('T',' '));
+      set('FF_M_ExportedBy', (typeof userLabel==='function') ? userLabel(cu()) : cu());
+      wb.calcProperties = wb.calcProperties || {};
+      wb.calcProperties.fullCalcOnLoad = true;   // the template's grey cells recalculate when opened
+      wb.xlsx.writeBuffer().then(function(buf){
+        var today = localDateStr();
+        var nm = 'Blank_Fact_Find_'+today+'.xlsx';
+        if(c){
+          var parts = String(c.Name||'Client').trim().split(/\s+/), sur = parts[parts.length-1], fn = clean(c.CallingName) || parts[0];
+          nm = (sur+'_'+fn+'_Fact_Find_'+today+'.xlsx').replace(/[^A-Za-z0-9_.\-]/g,'');
+        }
+        var blob = new Blob([buf], {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+        var a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = nm;
+        document.body.appendChild(a); a.click();
+        setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); }, 4000);
+        WBK.busy = false;
+        toast('Downloaded '+nm,'ok');
+      }).catch(function(e){ WBK.busy=false; console.error(e); toast('Could not write the workbook: '+e.message,'err'); });
+    }catch(e){ WBK.busy=false; console.error(e); toast('Could not fill the workbook: '+e.message,'err'); }
+  }); });
+}
+// Rows on a client's record, as the workbook groups them.
+function wbkKids(cid){
+  return ((typeof famFor==='function') ? (famFor(cid)||[]) : []).filter(function(l){ return !isPartnerType(l.Type); });
+}
+function wbkRowsOf(cid, kind){ return finposFor(cid).filter(function(r){ return r.Kind===kind; }); }
+// Fill the template from the client's record. Returns warnings about rows that do not fit.
+function wbkFill(wb, c){
+  var N = wbkNames(wb), warn = [];
+  var L = wbkLabels(c.Name, c.CallingName, c.SpouseName);
+  function setN(n, v){ var cl = wbkCell(wb, N[n]); if(cl) cl.value = v; }
+  // client and spouse
+  FF_SPEC.person.forEach(function(p){
+    if(p.c) setN('FF_C_'+p.c, wbkOut(p.t, c[p.c]));
+    if(p.s) setN('FF_S_'+p.s, wbkOut(p.t, c[p.s]));
+  });
+  // tables
+  function fillTable(name, items, toRow){
+    var K = N['FF_K_'+name], T = N['FF_T_'+name]; if(!K || !T) return;
+    var keys = wbkKeys(wb, K), ws = wb.getWorksheet(T.sheet), cap = T.r2 - T.r1 + 1;
+    if(items.length > cap) warn.push('· '+(FF_SPEC.tables[name] ? FF_SPEC.tables[name].title.replace(/^\d+\.\s*/,'') : name)+': '+items.length+' rows, room for '+cap);
+    items.slice(0, cap).forEach(function(it, i){
+      var vals = toRow(it);
+      Object.keys(vals).forEach(function(k){ if(keys[k]) ws.getCell(T.r1+i, keys[k]).value = vals[k]; });
+    });
+  }
+  fillTable('kids', wbkKids(c.ID), function(l){
+    return {Name:l.Name||null, IDNumber:wbkOut('id', l.IDNumber), DOB:saIdValid(l.IDNumber) ? null : wbkOut('date', l.DOB), Type:l.Type||null, Dependent:l.Dependent||null, _id:String(l.ID)};
+  });
+  ['income','expense','property','vehicle','other','liability','need'].forEach(function(kind){
+    var spec = FF_SPEC.tables[kind];
+    fillTable(kind, wbkRowsOf(c.ID, kind), function(r){
+      var d = fpData(r), o = {_id:String(r.ID)};
+      spec.cols.forEach(function(col){ o[col.k] = col.t==='owner' ? wbkOwnerOut(d[col.k], L) : wbkOut(col.t, d[col.k]); });
+      return o;
+    });
+  });
+  // companies and trusts
+  var bizRows = wbkRowsOf(c.ID, 'business');
+  if(bizRows.length > FF_SPEC.biz.blocks) warn.push('· Companies and trusts: '+bizRows.length+', room for '+FF_SPEC.biz.blocks);
+  bizRows.slice(0, FF_SPEC.biz.blocks).forEach(function(r, i){
+    var d = fpData(r), p = 'FF_B'+(i+1)+'_';
+    setN(p+'_id', String(r.ID));
+    FF_SPEC.biz.entity.forEach(function(f){ setN(p+f.k, wbkOut(f.t, d[f.k])); });
+    FF_SPEC.biz.person.forEach(function(f){
+      if(f.c==='valueOverride'){
+        // The share value is worked out in the workbook from what the entity holds, unless a
+        // value was given; a given (or older, pre-holdings) value goes in the accountant's cell.
+        var given = d.valMethod!==FP_BIZ_WORKED && !fpIsTrust(d);
+        setN(p+f.c, given ? wbkOut('money', d.value) : null);
+        setN(p+f.s, given ? wbkOut('money', d.valueSpouse) : null);
+        return;
+      }
+      setN(p+f.c, wbkOut(f.t, d[f.c])); setN(p+f.s, wbkOut(f.t, d[f.s]));
+    });
+    var hs = fpHoldings(d);
+    fillTable('B'+(i+1)+'H', hs, function(x){
+      var o = {_id:String(x.id||'')}; FF_SPEC.biz.hold.forEach(function(col){ o[col.k] = wbkOut(col.t, x[col.k]); }); return o;
+    });
+    if(hs.length > FF_SPEC.biz.holdRows) warn.push('· '+(d.desc||'Company')+': '+hs.length+' holdings, room for '+FF_SPEC.biz.holdRows);
+  });
+  // will
+  var W = willData(c.ID);
+  FF_SPEC.will.forEach(function(x){ if(x.k) setN('FF_W_'+x.k, wbkOut(x.t==='check'?'yesno':'text', W[x.k])); });
+  setN('FF_W_dep_notes', wbkOut('text', W.dep_notes));
+  var KR = N.FF_T_WKids;
+  if(KR){ var kws = wb.getWorksheet(KR.sheet); wbkKids(c.ID).slice(0, KR.r2-KR.r1+1).forEach(function(l, i){ kws.getCell(KR.c1+(KR.r1+i)).value = wbkOut('text', W['cn_'+l.ID]); }); }
+  [['Bq','bq',6,['item','ben','pre']],['Rs','rs',5,['ben','pct','pre']]].forEach(function(t){
+    var K = N['FF_K_'+t[0]], T = N['FF_T_'+t[0]]; if(!K || !T) return;
+    var keys = wbkKeys(wb, K), ws = wb.getWorksheet(T.sheet);
+    for(var i=1; i<=t[2]; i++) t[3].forEach(function(k){ if(keys[k]) ws.getCell(T.r1+i-1, keys[k]).value = wbkOut(k==='pct'?'pct':'text', W[t[1]+i+'_'+k]); });
+  });
+  return warn;
+}
+
+// ══ Import: read ════════════════════════════════════════════════════════════
+function wbkImportFile(file){
+  if(WBK.busy) return;
+  WBK.busy = true;
+  var pv = document.getElementById('wbkPreview');
+  if(pv) pv.innerHTML = '<div style="margin-top:14px;font-size:13px;color:#667">Reading '+wbkEsc(file.name)+'…</div>';
+  wbkWithExcelJS(function(){
+    var fr = new FileReader();
+    fr.onload = function(){
+      var wb = new ExcelJS.Workbook();
+      wb.xlsx.load(fr.result).then(function(){
+        WBK.busy = false;
+        var plan;
+        try{ plan = wbkPlan(wb, WBK.cid, file.name); }
+        catch(e){ console.error(e); plan = {errors:['The workbook could not be read: '+e.message], warns:[]}; }
+        WBK.plan = plan;
+        wbkRenderPlan(plan);
+      }).catch(function(e){ WBK.busy=false; console.error(e); if(pv) pv.innerHTML = '<div class="wbk-err">This file could not be opened as an Excel workbook ('+wbkEsc(e.message)+').</div>'; });
+    };
+    fr.onerror = function(){ WBK.busy=false; toast('Could not read the file','err'); };
+    fr.readAsArrayBuffer(file);
+  });
+}
+// Read every named range into plain values.
+function wbkReadModel(wb){
+  var N = wbkNames(wb), M = {N:N, wb:wb};
+  function raw(n){ return N[n] ? wbkRaw(wbkCell(wb, N[n])) : null; }
+  function cell(n){ return N[n] ? wbkCell(wb, N[n]) : null; }
+  M.raw = raw; M.cell = cell;
+  M.meta = { clientId: String(raw('FF_M_ClientID')||'').trim(), version: String(raw('FF_M_TemplateVersion')||raw('FF_M_Version')||'').trim(), clientName: String(raw('FF_M_ClientName')||'').trim() };
+  M.table = function(name){
+    var K = N['FF_K_'+name], T = N['FF_T_'+name]; if(!K || !T) return null;
+    var keys = wbkKeys(wb, K), ws = wb.getWorksheet(T.sheet), rows = [];
+    for(var r=T.r1; r<=T.r2; r++){
+      var o = {_row:r, _cells:{}, _raw:{}}, used = false;
+      Object.keys(keys).forEach(function(k){
+        var cl = ws.getCell(r, keys[k]), v = wbkRaw(cl);
+        if(k==='_id'){ o._id = wbkBlank(v) ? '' : String(v).trim(); return; }
+        o._raw[k] = v; o._cells[k] = cl;
+        if(!wbkBlank(v)) used = true;
+      });
+      o._used = used; o._index = r - T.r1;
+      rows.push(o);
+    }
+    return rows;
+  };
+  return M;
+}
+
+// ══ Import: work out every change ═══════════════════════════════════════════
+function wbkPlan(wb, cidFrom, fileName){
+  var M = wbkReadModel(wb), P = {errors:[], warns:[], file:fileName, sections:[]};
+  if(!M.N.FF_C_Name || !M.N.FF_K_property){ P.errors.push('This is not a Duwalcoe fact find workbook (its named ranges are missing).'); return P; }
+  if(M.meta.version && String(M.meta.version).split('.')[0] !== String(FF_SPEC.version).split('.')[0]){
+    P.errors.push('This workbook is template version '+M.meta.version+'; this CRM reads version '+FF_SPEC.version+'. Export a fresh one.'); return P;
+  }
+  // ── Which client ──
+  var stampId = M.meta.clientId, target = null, mode = 'create';
+  if(stampId){
+    if(cidFrom && String(cidFrom)!==stampId){
+      var other = wbkClient(stampId);
+      P.errors.push('This workbook was exported for '+(other ? other.Name : (M.meta.clientName||'another client'))+', not for '+(wbkClient(cidFrom)||{}).Name+'. It cannot be imported here.');
+      return P;
+    }
+    target = wbkClient(stampId);
+    if(!target){ P.errors.push('This workbook was exported for '+(M.meta.clientName||'a client')+' (ID '+stampId+'), who is no longer in the CRM.'); return P; }
+    mode = 'update';
+  } else if(cidFrom){
+    target = wbkClient(cidFrom); mode = 'update';
+    P.warns.push('This workbook was not exported from the CRM. It will be added to '+target.Name+'\'s record. Blank cells will not clear anything, and rows that look like ones already on the record start unticked.');
+  }
+  if(target && target.ClientType==='Company'){ P.errors.push(target.Name+' is a company record. The fact find workbook is for individuals.'); return P; }
+  var stamped = !!stampId;
+  P.stamped = stamped;
+  // ── Client and spouse ──
+  var cur = target || {};
+  var next = target ? JSON.parse(JSON.stringify(target)) : {ID:'new_'+Date.now(), Name:'', IsLead:'Yes', ClientType:'Individual', Status:'Active', Adviser:cu(), Notes:'', BankDetails:'[]', Doctors:'[]'};
+  var cch = [];
+  FF_SPEC.person.forEach(function(p){
+    [['c', p.c], ['s', p.s]].forEach(function(side){
+      var key = side[1]; if(!key) return;
+      var nmn = (side[0]==='c' ? 'FF_C_' : 'FF_S_')+key;
+      var label = p.label+(side[0]==='s' && key!=='SpouseWorks' ? ' (spouse)' : '');
+      var v = wbkIn(p.t, M.raw(nmn), M.cell(nmn), function(msg){ P.warns.push('Client and family, '+label+': '+msg+'. '+(target ? 'Kept as it is.' : 'Left blank.')); });
+      if(v===undefined) return;
+      if(v==='' && (!stamped || p.req)) return;      // blank clears only in a workbook exported from this client
+      if(key==='IsLead' && v==='' ) return;
+      next[key] = v;
+    });
+  });
+  if(!target && !clean(next.Name)){ P.errors.push('There is no name for the client on the Client and family sheet.'); return P; }
+  // A blank workbook for someone already in the CRM (same SA ID, or exactly the same name):
+  // update that record instead of creating them twice (as the Paste from Claude import does).
+  if(!target){
+    var match = pcFindExisting(next);
+    if(match){
+      if(match.ClientType==='Company'){ P.errors.push(match.Name+' is a company record. The fact find workbook is for individuals.'); return P; }
+      P.warns.push('This person is already in the CRM as '+match.Name+' (same '+(saIdValid(next.IDNumber) && String(match.IDNumber||'').replace(/\D/g,'')===String(next.IDNumber).replace(/\D/g,'') ? 'ID number' : 'name')+'), so that record is updated. Blank cells will not clear anything, and rows that look like ones already on the record start unticked.');
+      target = match; mode = 'update'; cur = target;
+      var keep = next; next = JSON.parse(JSON.stringify(target));
+      Object.keys(keep).forEach(function(k){ if(FF_SPEC.person.some(function(p){ return p.c===k || p.s===k; }) && clean(keep[k])) next[k] = keep[k]; });
+      if(saIdValid(next.IDNumber)) next.DOB = dobFromID(String(next.IDNumber).replace(/\D/g,''));
+      if(saIdValid(next.SpouseIDNumber)) next.SpouseDOB = dobFromID(String(next.SpouseIDNumber).replace(/\D/g,''));
+    }
+  }
+  if(!target && !clean(next.IsLead)) next.IsLead = 'Yes';   // a new fact find starts as a lead, like the on-screen New Fact Find
+  // Worked out from the SA ID, as the CRM does everywhere
+  if(saIdValid(next.IDNumber)){ next.DOB = dobFromID(String(next.IDNumber).replace(/\D/g,'')); if(!clean(next.Gender)) next.Gender = (+String(next.IDNumber).replace(/\D/g,'').charAt(6) >= 5) ? 'Male' : 'Female'; }
+  if(saIdValid(next.SpouseIDNumber)) next.SpouseDOB = dobFromID(String(next.SpouseIDNumber).replace(/\D/g,''));
+  if(!clean(next.CallingName) && clean(next.Name)) next.CallingName = String(next.Name).split(' ')[0];
+  var CKEYS = [];
+  FF_SPEC.person.forEach(function(p){ if(p.c) CKEYS.push([p.c, p.label, p.t]); if(p.s) CKEYS.push([p.s, p.label+(p.s==='SpouseWorks'?'':' (spouse)'), p.t]); });
+  CKEYS.push(['DOB','Date of birth','date'], ['SpouseDOB','Date of birth (spouse)','date'], ['Gender','Gender','list:gender']);
+  var seenK = {};
+  CKEYS.forEach(function(k){
+    if(seenK[k[0]]) return; seenK[k[0]] = 1;
+    var a = cur[k[0]], b = next[k[0]];
+    cch.push({key:k[0], label:k[1], old:a, nw:b, same: wbkSame(k[2], a, b) || (String(a||'').trim()===String(b||'').trim())});
+  });
+  P.client = {target:target, mode:mode, next:next, rows:cch};
+  var L = wbkLabels(next.Name, next.CallingName, next.SpouseName);
+  var gen = { valDate: wbkIn('date', M.raw('FF_G_ValDate'), null, function(){}) || '', by: wbkIn('text', M.raw('FF_G_CompletedBy'), null, function(){}) || '', on: wbkIn('date', M.raw('FF_G_DateCompleted'), null, function(){}) || '' };
+  P.gen = gen;
+  var cid = next.ID;
+
+  // ── Children and family members ──
+  var kids = target ? wbkKids(cid) : [], seenLink = {}, K = {add:[], upd:[], gone:[]};
+  var depReady = window._famDepReady===true;
+  (M.table('kids')||[]).forEach(function(row){
+    if(!row._used && !row._id) return;
+    var where = 'Children and family, row '+(row._index+1);
+    var o = {}, isOld = !!(row._id && DB.links.some(function(l){ return String(l.ID)===row._id; }));
+    FF_SPEC.tables.kids.cols.forEach(function(col){
+      var v = wbkIn(col.t, row._raw[col.k], row._cells[col.k], function(msg){ P.warns.push(where+', '+col.h+': '+msg+'. '+(isOld ? 'Kept as it is.' : 'Left blank.')); });
+      if(v!==undefined) o[col.k] = v;
+    });
+    if(o.IDNumber && saIdValid(o.IDNumber)) o.DOB = dobFromID(String(o.IDNumber).replace(/\D/g,''));
+    var link = row._id ? DB.links.find(function(l){ return String(l.ID)===row._id; }) : null;
+    if(row._id && !link){ P.warns.push(where+': '+(o.Name||'this person')+' is no longer on the CRM record, so they will be added again.'); }
+    if(link){
+      seenLink[link.ID] = 1;
+      if(!row._used){ K.gone.push({link:link, why:'cleared in the workbook'}); return; }
+      if(link.IsClient==='Yes'){ P.warns.push(where+': '+link.Name+' is a client in their own right. Change their details on their own record.'); K.upd.push({link:link, index:row._index, ch:[], next:link}); return; }
+      var nl = Object.assign({}, link), ch = [];
+      FF_SPEC.tables.kids.cols.forEach(function(col){
+        if(o[col.k]===undefined) return;
+        if(col.k==='Dependent' && !depReady){ if(o[col.k]) P.warns.push(where+': "financially dependent" needs the database update (Familylinks_Dependent.sql) first. Not saved.'); return; }
+        if(o[col.k]==='' && (!stamped || col.k==='Name' || col.k==='Type')) return;
+        if(col.k==='DOB' && o.IDNumber && saIdValid(o.IDNumber)) { /* derived */ }
+        if(!wbkSame(col.t, link[col.k], o[col.k])){ ch.push({k:col.k, label:col.h, old:link[col.k], nw:o[col.k]}); nl[col.k] = o[col.k]; }
+      });
+      if(saIdValid(nl.IDNumber)){ var dd = dobFromID(String(nl.IDNumber).replace(/\D/g,'')); if(dd!==link.DOB && !ch.some(function(x){ return x.label===FF_SPEC.tables.kids.cols[2].h; })){ ch.push({k:'DOB', label:'Date of birth (from the ID)', old:link.DOB, nw:dd}); } nl.DOB = dd; }
+      K.upd.push({link:link, index:row._index, ch:ch, next:nl});
+    } else {
+      if(!row._used) return;
+      if(!o.Name){ P.warns.push(where+': there is no name, so the row is skipped.'); return; }
+      var dup = kids.find(function(l){ if(seenLink[l.ID]) return false; var g = famNameGrade(l.Name, o.Name); return g==='exact' || g==='initials'; });
+      K.add.push({index:row._index, data:o, take:!dup, dup:dup ? dup.Name : ''});
+    }
+  });
+  kids.forEach(function(l){ if(!seenLink[l.ID] && !K.gone.some(function(g){ return g.link===l; })) K.gone.push({link:l, why:'not in the workbook'}); });
+  P.kids = K;
+
+  // ── Financial position and needs ──
+  P.fp = {};
+  ['income','expense','property','vehicle','other','liability','need'].forEach(function(kind){
+    var spec = FF_SPEC.tables[kind], X = {add:[], upd:[], gone:[]}, seen = {};
+    var crm = target ? wbkRowsOf(cid, kind) : [];
+    (M.table(kind)||[]).forEach(function(row){
+      if(!row._used && !row._id) return;
+      var where = spec.title.replace(/^\d+\.\s*/,'')+', row '+(row._index+1);
+      var o = {}, isOld = !!(row._id && crm.some(function(r){ return String(r.ID)===row._id; }));
+      spec.cols.forEach(function(col){
+        var w = function(msg){ P.warns.push(where+', '+col.h+': '+msg+'. '+(isOld ? 'Kept as it is.' : 'Not used; the CRM default applies.')); };
+        var v = col.t==='owner' ? wbkOwnerIn(row._raw[col.k], L, w) : wbkIn(col.t, row._raw[col.k], row._cells[col.k], w);
+        if(v!==undefined) o[col.k] = v;
+      });
+      var fr = row._id ? crm.find(function(r){ return String(r.ID)===row._id; }) : null;
+      if(row._id && !fr) P.warns.push(where+': this row is no longer in the CRM, so it will be added again.');
+      if(fr){
+        seen[fr.ID] = 1;
+        if(!row._used){ X.gone.push({row:fr, why:'cleared in the workbook'}); return; }
+        var od = fpData(fr), nd = Object.assign({}, od), ch = [];
+        spec.cols.forEach(function(col){
+          if(o[col.k]===undefined) return;
+          if(o[col.k]==='' && (!stamped || col.k==='desc' || col.t==='owner')) return;
+          if(!wbkSame(col.t, od[col.k], o[col.k])){ ch.push({k:col.k, label:col.h, old:od[col.k], nw:o[col.k], t:col.t}); nd[col.k] = o[col.k]; }
+        });
+        wbkFixRow(kind, nd, gen, od, ch);
+        X.upd.push({row:fr, ch:ch, data:nd, stamp:fr.UpdatedAt});
+      } else {
+        if(!row._used) return;
+        if(!o.desc){ P.warns.push(where+': there are figures but no description, so the row is skipped.'); return; }
+        var nd2 = wbkNewRow(kind, o, gen);
+        var dup = crm.find(function(r){ return !seen[r.ID] && String(fpData(r).desc||'').trim().toLowerCase()===String(o.desc).trim().toLowerCase(); });
+        X.add.push({data:nd2, take:!dup, dup:dup ? fpData(dup).desc : ''});
+      }
+    });
+    crm.forEach(function(r){ if(!seen[r.ID] && !X.gone.some(function(g){ return g.row===r; })) X.gone.push({row:r, why:'not in the workbook'}); });
+    P.fp[kind] = X;
+  });
+
+  // ── Companies and trusts ──
+  var BZ = {add:[], upd:[], gone:[]}, bseen = {}, bcrm = target ? wbkRowsOf(cid, 'business') : [];
+  for(var n=1; n<=FF_SPEC.biz.blocks; n++){
+    var p = 'FF_B'+n+'_', where = 'Company or trust '+n;
+    var id = String(M.raw(p+'_id')||'').trim();
+    var bsuf = (id && bcrm.some(function(r){ return String(r.ID)===id; })) ? 'Kept as it is.' : 'Not used; the CRM default applies.';
+    var o = {}, any = false;
+    FF_SPEC.biz.entity.forEach(function(f){ var v = wbkIn(f.t, M.raw(p+f.k), M.cell(p+f.k), function(msg){ P.warns.push(where+', '+f.label+': '+msg+'. '+bsuf); }); if(v!==undefined){ o[f.k] = v; if(v!=='') any = true; } });
+    FF_SPEC.biz.person.forEach(function(f){ [f.c, f.s].forEach(function(k){ var v = wbkIn(f.t, M.raw(p+k), M.cell(p+k), function(msg){ P.warns.push(where+', '+f.label+': '+msg+'. '+bsuf); }); if(v!==undefined){ o[k] = v; if(v!=='') any = true; } }); });
+    var hrows = (M.table('B'+n+'H')||[]).filter(function(h){ return h._used || h._id; });
+    if(hrows.some(function(h){ return h._used; })) any = true;
+    var fr = id ? bcrm.find(function(r){ return String(r.ID)===id; }) : null;
+    if(id && !fr) P.warns.push(where+': '+(o.desc||'this entity')+' is no longer in the CRM, so it will be added again.');
+    if(!any && !fr) continue;
+    if(fr) bseen[fr.ID] = 1;
+    if(fr && !any){ BZ.gone.push({row:fr, why:'cleared in the workbook'}); continue; }
+    if(!o.desc && !fr){ P.warns.push(where+': there is no name, so it is skipped.'); continue; }
+    var od = fr ? fpData(fr) : {}, nd = Object.assign({}, od);
+    var ch = [];
+    function put(k, v, label, t){
+      if(v===undefined) return;
+      if(v==='' && fr && (!stamped || k==='desc')) return;
+      if(!wbkSame(t, od[k], v)){ ch.push({label:label, old:od[k], nw:v, t:t}); }
+      nd[k] = v;
+    }
+    FF_SPEC.biz.entity.forEach(function(f){ put(f.k, o[f.k], f.label, f.t); });
+    FF_SPEC.biz.person.forEach(function(f){ if(f.c==='valueOverride') return; put(f.c, o[f.c], f.label+' ('+L.c+')', f.t); put(f.s, o[f.s], f.label+' ('+L.s+')', f.t); });
+    // holdings: by id; holdings no longer in the workbook are kept and listed
+    var oldH = fpHoldings(od), newH = [], hch = [], hseen = {};
+    hrows.forEach(function(h){
+      var hw = where+', what it holds row '+(h._index+1);
+      var x = {};
+      FF_SPEC.biz.hold.forEach(function(col){ var v = wbkIn(col.t, h._raw[col.k], h._cells[col.k], function(msg){ P.warns.push(hw+', '+col.h+': '+msg+'. Kept as it is.'); }); if(v!==undefined) x[col.k] = v; });
+      var ex = h._id ? oldH.find(function(y){ return String(y.id)===h._id; }) : null;
+      if(ex){
+        hseen[ex.id] = 1;
+        if(!h._used){ newH.push(ex); hch.push('kept (cleared in the workbook): '+(ex.desc||ex.kind)); return; }
+        var y = Object.assign({}, ex), diffs = [];
+        FF_SPEC.biz.hold.forEach(function(col){ if(x[col.k]===undefined) return; if(x[col.k]==='' && (!stamped || col.k==='desc')) return; if(!wbkSame(col.t, ex[col.k], x[col.k])){ diffs.push(col.h+': '+wbkShow(col.t, ex[col.k])+' → '+wbkShow(col.t, x[col.k])); y[col.k] = x[col.k]; } });
+        if(diffs.length) hch.push((ex.desc||ex.kind)+': '+diffs.join('; '));
+        newH.push(y);
+      } else {
+        if(!h._used) return;
+        if(!x.desc && !x.value){ return; }
+        if(!x.kind){ x.kind = 'Other asset'; P.warns.push(hw+': no kind given, taken as Other asset.'); }
+        x.id = fpNewHoldId();
+        newH.push(x); hch.push('added: '+(x.desc||x.kind)+' ('+x.kind+', '+wbkShow('money', x.value)+')');
+      }
+    });
+    oldH.forEach(function(y){ if(!hseen[y.id]){ newH.push(y); hch.push('kept (not in the workbook): '+(y.desc||y.kind)); } });
+    nd.holdings = newH;
+    // how the shares are valued: the accountant's value if given, otherwise worked out
+    var ovC = o.valueOverride, ovS = o.valueOverrideSpouse;
+    if(nd.entityType!=='Trust'){
+      if(clean(ovC) || clean(ovS)){
+        if(nd.valMethod!==FP_BIZ_GIVEN && (nd.valMethod===FP_BIZ_WORKED || !fr)) nd.valMethod = FP_BIZ_GIVEN;
+        if(!fr && !nd.valMethod) nd.valMethod = FP_BIZ_GIVEN;
+        nd.value = clean(ovC) ? ovC : (fr && stamped ? '' : nd.value);
+        nd.valueSpouse = clean(ovS) ? ovS : (fr && stamped ? '' : nd.valueSpouse);
+      } else if(!fr || stamped){
+        nd.valMethod = FP_BIZ_WORKED;
+      }
+    }
+    if(!fr){ nd.passesTo = nd.passesTo || 'Estate'; nd.soldDeath = nd.soldDeath || 'No'; nd.soldDisab = nd.soldDisab || 'No'; nd.buySell = nd.buySell || 'No'; if(!nd.valueDate && gen.valDate) nd.valueDate = gen.valDate; }
+    nd.loanBal = (nd.loanAcc==='Credit'||nd.loanAcc==='Debit') ? nd.loanBal : '';
+    nd.loanBalSpouse = (nd.loanAccSpouse==='Credit'||nd.loanAccSpouse==='Debit') ? nd.loanBalSpouse : '';
+    fpBizFinalize(nd);
+    if(!fpIsTrust(nd) && fpN(nd.pctHeld)+fpN(nd.pctHeldSpouse) > 100) P.warns.push(where+': '+(nd.desc||'')+' adds up to more than 100% between you.');
+    if(nd.valMethod===FP_BIZ_WORKED && !fpHoldings(nd).length && !fpIsTrust(nd) && (fpN(nd.pctHeld)>0 || fpN(nd.pctHeldSpouse)>0)) P.warns.push(where+': nothing is entered under what '+(nd.desc||'it')+' holds, so the shares work out to R 0.');
+    // final values that changed as a result
+    [['valMethod','How the shares are valued','text'],['value','Value of '+L.c+'\'s share','money'],['valueSpouse','Value of '+L.s+'\'s share','money'],['owner','Owner','text']].forEach(function(k){
+      if(!wbkSame(k[2], od[k[0]], nd[k[0]]) && !ch.some(function(x){ return x.label===k[1]; })) ch.push({label:k[1], old:od[k[0]], nw:nd[k[0]], t:k[2]});
+    });
+    hch.filter(function(t){ return t.indexOf('kept')!==0; }).forEach(function(t){ ch.push({label:'What it holds', old:'', nw:t, t:'note'}); });
+    var keptH = hch.filter(function(t){ return t.indexOf('kept')===0; });
+    if(fr) BZ.upd.push({row:fr, ch:ch, data:nd, kept:keptH, stamp:fr.UpdatedAt});
+    else {
+      var dupb = bcrm.find(function(r){ return !bseen[r.ID] && String(fpData(r).desc||'').trim().toLowerCase()===String(nd.desc||'').trim().toLowerCase(); });
+      BZ.add.push({data:nd, take:!dupb, dup:dupb ? fpData(dupb).desc : ''});
+    }
+  }
+  bcrm.forEach(function(r){ if(!bseen[r.ID]) BZ.gone.push({row:r, why:'not in the workbook'}); });
+  P.fp.business = BZ;
+
+  // ── Will ──
+  var W0 = target ? willData(cid) : {}, W1 = Object.assign({}, W0), wch = [];
+  function wput(k, v, label, t){
+    if(v===undefined) return;
+    if(v==='' && !stamped) return;
+    if(!wbkSame(t, W0[k], v)){ wch.push({k:k, label:label, old:W0[k], nw:v, t:t}); W1[k] = v; }
+  }
+  FF_SPEC.will.forEach(function(x){
+    if(!x.k) return;
+    var t = x.t==='check' ? 'check' : (x.t==='radio' ? 'radio' : 'text');
+    var v = wbkIn(t==='text' ? (x.t==='id' ? 'id' : 'text') : t, M.raw('FF_W_'+x.k), M.cell('FF_W_'+x.k), function(msg){ P.warns.push('Will, '+x.label+': '+msg+'. Kept as it is.'); }, x.opts);
+    wput(x.k, v, x.label, t);
+  });
+  wput('dep_notes', wbkIn('area', M.raw('FF_W_dep_notes'), null, function(){}), 'Other dependants to provide for', 'text');
+  // bequests and residue: fixed slots
+  [['Bq','bq',FF_SPEC.willTables.bq],['Rs','rs',FF_SPEC.willTables.rs]].forEach(function(tb){
+    var rows = M.table(tb[0]) || [];
+    rows.forEach(function(row, i){
+      tb[2].cols.forEach(function(col){
+        var v = wbkIn(col.k==='pct' ? 'pct' : 'text', row._raw[col.k], row._cells[col.k], function(msg){ P.warns.push('Will, '+(tb[1]==='bq'?'bequest ':'residue ')+(i+1)+': '+msg+'. Kept as it is.'); });
+        wput(tb[1]+(i+1)+'_'+col.k, v, (tb[1]==='bq' ? 'Bequest '+(i+1) : 'Residue '+(i+1))+': '+col.h, col.k==='pct' ? 'pct' : 'text');
+      });
+    });
+  });
+  // notes on each child: rows line up with the children table
+  var KR = M.N.FF_T_WKids, knotes = [];
+  if(KR){ var kws = wb.getWorksheet(KR.sheet); for(var r=KR.r1; r<=KR.r2; r++) knotes.push(wbkIn('text', wbkRaw(kws.getCell(KR.c1+r)), null, function(){})); }
+  P.kidNotes = knotes;
+  K.upd.forEach(function(u){ var v = knotes[u.index]; if(v===undefined) return; wput('cn_'+u.link.ID, v, 'Notes for the attorney: '+u.link.Name, 'text'); });
+  K.add.forEach(function(a){ var v = knotes[a.index]; if(clean(v)) wch.push({k:null, newKid:a.index, label:'Notes for the attorney: '+a.data.Name+' (added above)', old:'', nw:v, t:'text'}); });
+  // one home for marital status and the wedding date: keep the will in step with the client record
+  var WMAP_REV = {'Single':'Single / never married','Married in COP':'Married in community of property (COP)','Married - ANC with accrual':'Married out of community of property (ANC) with accrual','Married - ANC without accrual':'Married out of community of property (ANC) without accrual','Divorced':'Divorced','Widowed':'Widowed','Life partner':'Life partner / cohabiting'};
+  if(clean(W0.t_marital) && !wbkSame('text', cur.MaritalStatus, next.MaritalStatus) && WMAP_REV[next.MaritalStatus]) wput('t_marital', WMAP_REV[next.MaritalStatus], 'Marital status / regime (will, kept in step with the client record)', 'text');
+  P.will = {ch:wch, next:W1, existed:!!(target && willFor(cid))};
+  P.cid = cid;
+  return P;
+}
+// New Financial Position row: the same defaults as the CRM's own form.
+function wbkNewRow(kind, o, gen){
+  var d = Object.assign({}, o);
+  if(['property','vehicle','other'].indexOf(kind)>=0){
+    d.owner = d.owner || 'Client'; d.passesTo = d.passesTo || 'Estate';
+    if(d.passesTo!=='Named person') d.passesToName = '';
+    d.soldDeath = d.soldDeath || 'No'; d.soldDisab = d.soldDisab || 'No';
+    if(kind==='property') d.primaryRes = d.primaryRes || 'No';
+    if(!d.valueDate && gen.valDate && clean(d.value)) d.valueDate = gen.valDate;
+  } else if(kind==='liability'){ d.owner = d.owner || 'Client'; d.payOffDisab = d.payOffDisab || 'No'; }
+  else if(kind==='income'){ d.owner = d.owner || 'Client'; d.taxable = d.taxable || 'Yes'; d.incomeType = d.incomeType || 'Other'; }
+  else if(kind==='expense'){ d.expCategory = d.expCategory || 'Other'; }
+  else if(kind==='need'){
+    d.scenario = d.scenario || 'Death'; d.needType = d.needType || 'Monthly income';
+    if(d.needType!=='Monthly income'){ d.years = ''; d.esc = ''; }
+    if(!needAsksForWhom(d.scenario)){ d.benTo = ''; d.benName = ''; }
+    else if(d.benTo!=='Named person') d.benName = '';
+  }
+  return d;
+}
+// Keep an updated row consistent (the CRM form's own rules), and date a changed value.
+function wbkFixRow(kind, d, gen, od, ch){
+  if(['vehicle','other'].indexOf(kind)>=0 && gen.valDate && ch.some(function(x){ return x.label===wbkFieldLabel(kind,'value'); }) && d.valueDate!==gen.valDate){
+    ch.push({label:'Value as at', old:od.valueDate, nw:gen.valDate, t:'date'}); d.valueDate = gen.valDate;
+  }
+  if(kind==='need'){
+    if(d.needType!=='Monthly income'){ d.years = ''; d.esc = ''; }
+    if(!needAsksForWhom(d.scenario)){ d.benTo = ''; d.benName = ''; }
+  }
+}
+function wbkShow(t, v){
+  var s = String(v===undefined||v===null?'':v).trim();
+  if(s==='') return '—';
+  if(t==='money') return fpR(fpN(s));
+  if(t==='pct') return s+'%';
+  return s;
+}
+// One line for a new row in the preview (the name is shown separately).
+function wbkRowSum(kind, d){
+  var b = [], m = function(v){ return fpR(fpN(v)); }, own = {Client:'yours', Spouse:'spouse\'s', Joint:'joint'};
+  if(kind==='income'){ b.push(m(d.amountPM)+' a month'); if(d.incomeType) b.push(d.incomeType); if(d.owner) b.push(own[d.owner]||d.owner); }
+  else if(kind==='expense'){ b.push(m(d.amountPM)+' a month'); if(d.expCategory) b.push(d.expCategory); }
+  else if(kind==='property' || kind==='vehicle' || kind==='other'){ if(d.type) b.push(d.type); if(clean(d.value)) b.push(m(d.value)); if(fpN(d.bondOut)) b.push('bond '+m(d.bondOut)); if(fpN(d.financeOut)) b.push('finance '+m(d.financeOut)); if(d.owner) b.push(own[d.owner]||d.owner); if(d.source) b.push(d.source); }
+  else if(kind==='liability'){ if(d.liabType) b.push(d.liabType); b.push(m(d.balance)); if(d.owner) b.push(own[d.owner]||d.owner); }
+  else if(kind==='business'){ if(d.entityType) b.push(d.entityType); if(fpIsTrust(d)){ if(d.loanAcc==='Credit'||d.loanAcc==='Debit') b.push('loan account '+m(d.loanBal)); } else { if(d.pctHeld) b.push(d.pctHeld+'%, share '+m(d.value)); if(fpN(d.pctHeldSpouse)>0) b.push('spouse '+d.pctHeldSpouse+'%, share '+m(d.valueSpouse)); } var hs = fpHoldings(d); if(hs.length) b.push(hs.length+' holding'+(hs.length===1?'':'s')); }
+  else if(kind==='need'){ b.push(d.scenario||''); b.push(d.needType==='Monthly income' ? m(d.amount)+' a month'+(d.years?' for '+d.years+' years':'') : m(d.amount)+' once-off'); if(d.benTo) b.push('for '+(d.benTo==='Named person' ? (d.benName||'a named person') : d.benTo)); }
+  return b.filter(Boolean).join(' · ');
+}
+function wbkChangeCount(P){
+  if(!P || P.errors.length) return 0;
+  var n = P.client.rows.filter(function(r){ return !r.same; }).length;
+  n += P.kids.add.filter(function(a){ return a.take; }).length + P.kids.upd.filter(function(u){ return u.ch.length; }).length;
+  Object.keys(P.fp).forEach(function(k){ n += P.fp[k].add.filter(function(a){ return a.take; }).length + P.fp[k].upd.filter(function(u){ return u.ch.length; }).length; });
+  n += P.will.ch.length;
+  return n;
+}
+
+// ══ Import: preview ═════════════════════════════════════════════════════════
+function wbkRenderPlan(P){
+  var pv = document.getElementById('wbkPreview'), btn = document.getElementById('wbkImportBtn');
+  btn.style.display = 'none';
+  var H = '<style>.wbk-t{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:6px}.wbk-t td,.wbk-t th{padding:5px 8px;border-top:1px solid var(--mist);text-align:left;vertical-align:top}.wbk-r td:first-child{width:26px}.wbk-t th{background:var(--smoke);color:var(--navy)}.wbk-h{margin-top:16px;font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:1px}.wbk-err{margin-top:12px;padding:12px 14px;background:#fde8e8;border-left:3px solid var(--rose);border-radius:8px;font-size:12.5px;color:#9e2a2b}.wbk-warn{margin-top:10px;padding:10px 14px;background:#fffbeb;border-left:3px solid #d97706;border-radius:8px;font-size:12.5px;color:#92400e}.wbk-ok{margin-top:12px;padding:10px 14px;background:#f0fdf4;border-left:3px solid #16a34a;border-radius:8px;font-size:12.5px;color:#065f46}.wbk-old{color:#999}.wbk-new{color:var(--navy);font-weight:600}.wbk-chg{background:#fffdf5}.wbk-clr{color:var(--rose);font-weight:600}.wbk-k{color:#889;font-size:12px}</style>';
+  if(P.errors.length){ H += P.errors.map(function(e){ return '<div class="wbk-err"><strong>Not imported.</strong> '+wbkEsc(e)+'</div>'; }).join(''); pv.innerHTML = H; return; }
+  var c = P.client;
+  H += '<div class="'+(c.mode==='update'?'wbk-warn':'wbk-ok')+'"><strong>'+(c.mode==='update' ? '⚠ Updating '+wbkEsc(c.target.Name) : '✓ New '+(c.next.IsLead==='Yes'?'lead':'client')+': '+wbkEsc(c.next.Name))+'</strong>'+
+    (P.gen.by||P.gen.on ? ' · completed by '+wbkEsc(P.gen.by||'—')+(P.gen.on?' on '+wbkEsc(P.gen.on):'') : '')+(P.gen.valDate ? ' · values as at '+wbkEsc(P.gen.valDate) : '')+'</div>';
+  if(P.warns.length) H += '<div class="wbk-warn"><strong>Please check ('+P.warns.length+'):</strong><ul style="margin:6px 0 0;padding-left:18px">'+P.warns.map(function(w){ return '<li>'+wbkEsc(w)+'</li>'; }).join('')+'</ul></div>';
+  var total = wbkChangeCount(P);
+  if(!total) H += '<div class="wbk-ok"><strong>No changes.</strong> Everything in the workbook already matches the CRM.</div>';
+  function cellTxt(t, v, isNew){ var s = String(v===undefined||v===null?'':v).trim(); if(s==='' && isNew) return '<span class="wbk-clr">cleared</span>'; return wbkEsc(wbkShow(t, v)); }
+  // client fields: every field, current against new
+  var chg = c.rows.filter(function(r){ return !r.same; });
+  H += '<div class="wbk-h">Client and spouse — '+(chg.length ? chg.length+' change'+(chg.length===1?'':'s') : 'no changes')+'</div>';
+  H += '<table class="wbk-t"><tr><th>Field</th>'+(c.mode==='update'?'<th>Current</th>':'')+'<th>'+(c.mode==='update'?'New':'Value')+'</th></tr>'+
+    c.rows.filter(function(r){ return c.mode==='update' || clean(r.nw); }).map(function(r){
+      return '<tr'+(r.same?'':' class="wbk-chg"')+'><td class="wbk-k">'+wbkEsc(r.label)+'</td>'+(c.mode==='update'?'<td class="wbk-old">'+wbkEsc(wbkShow('', r.old))+'</td>':'')+'<td class="'+(r.same?'wbk-old':'wbk-new')+'">'+(r.same ? wbkEsc(wbkShow('', r.nw)) : cellTxt('', r.nw, true)+' <span style="color:#d97706;font-size:11px">changed</span>')+'</td></tr>';
+    }).join('')+'</table>';
+  // rows
+  function rowSection(title, X, nameOf, sumOf, keyAttr){
+    var nAdd = X.add.length, nUpd = X.upd.filter(function(u){ return u.ch.length; }).length, nGone = X.gone.length;
+    if(!nAdd && !nUpd && !nGone) return '';
+    var h = '<div class="wbk-h">'+title+' — '+[nAdd?nAdd+' to add':'', nUpd?nUpd+' changed':'', nGone?nGone+' not in the spreadsheet':''].filter(Boolean).join(', ')+'</div><table class="wbk-t wbk-r">';
+    X.add.forEach(function(a, i){
+      h += '<tr class="wbk-chg"><td style="width:26px"><input type="checkbox" '+(a.take?'checked':'')+' onchange="wbkTake(\''+keyAttr+'\','+i+',this.checked)"></td><td><span class="wbk-new">＋ '+wbkEsc(nameOf(a.data))+'</span> <span class="wbk-k">'+wbkEsc(sumOf(a.data))+'</span>'+(a.dup?'<div style="color:#b45309;font-size:11.5px">Looks like "'+wbkEsc(a.dup)+'" already on the record, so it is not ticked. Tick to add it anyway.</div>':'')+'</td></tr>';
+    });
+    X.upd.filter(function(u){ return u.ch.length; }).forEach(function(u){
+      h += '<tr><td>✎</td><td><strong>'+wbkEsc(nameOf(u.data||u.next||fpData(u.row)))+'</strong><div style="margin-top:2px">'+u.ch.map(function(x){ return x.t==='note' ? '<div class="wbk-k">· '+wbkEsc(x.nw)+'</div>' : '<div class="wbk-k">'+wbkEsc(x.label)+': <span class="wbk-old">'+wbkEsc(wbkShow(x.t, x.old))+'</span> → '+cellTxt(x.t, x.nw, true)+'</div>'; }).join('')+'</div>'+((u.kept&&u.kept.length)?'<div class="wbk-k">'+u.kept.map(wbkEsc).join('<br>')+'</div>':'')+'</td></tr>';
+    });
+    X.gone.forEach(function(g){ var nm = g.link ? g.link.Name : (fpData(g.row).desc||''); h += '<tr><td>·</td><td class="wbk-old">'+wbkEsc(nm)+' — '+wbkEsc(g.why)+'. Kept in the CRM, not deleted.</td></tr>'; });
+    return h+'</table>';
+  }
+  H += rowSection('Children and family', P.kids, function(d){ return d.Name||''; }, function(d){ return [d.Type, d.IDNumber||d.DOB, d.Dependent==='Yes'?'dependent':''].filter(Boolean).join(' · '); }, 'kids');
+  var titles = {income:'Income', expense:'Expenses', property:'Property', vehicle:'Vehicles', other:'Bank accounts, investments and other assets', liability:'Debts', business:'Companies and trusts', need:'Needs'};
+  ['income','expense','property','vehicle','other','liability','business','need'].forEach(function(k){
+    H += rowSection(titles[k], P.fp[k], function(d){ return d.desc||''; }, function(d){ return wbkRowSum(k, d); }, 'fp.'+k);
+  });
+  if(P.will.ch.length){
+    H += '<div class="wbk-h">Will instructions — '+P.will.ch.length+' change'+(P.will.ch.length===1?'':'s')+'</div><table class="wbk-t"><tr><th>Question</th><th>Current</th><th>New</th></tr>'+
+      P.will.ch.map(function(x){ return '<tr class="wbk-chg"><td class="wbk-k">'+wbkEsc(x.label)+'</td><td class="wbk-old">'+wbkEsc(wbkShow(x.t, x.old))+'</td><td>'+cellTxt(x.t, x.nw, true)+'</td></tr>'; }).join('')+'</table>';
+  }
+  pv.innerHTML = H;
+  wbkUpdateBtn();
+}
+function wbkTake(key, i, on){
+  var P = WBK.plan; if(!P) return;
+  var X = key==='kids' ? P.kids : P.fp[key.split('.')[1]];
+  if(X && X.add[i]) X.add[i].take = !!on;
+  wbkUpdateBtn();
+}
+function wbkUpdateBtn(){
+  var btn = document.getElementById('wbkImportBtn'), n = wbkChangeCount(WBK.plan);
+  btn.style.display = n ? '' : 'none';
+  btn.textContent = '💾 Import '+n+' change'+(n===1?'':'s');
+}
+
+// ══ Import: save (every save checked) ═══════════════════════════════════════
+function wbkCommit(){
+  var P = WBK.plan; if(!P || P.errors.length || WBK.busy) return;
+  if(!wbkChangeCount(P)) return;
+  WBK.busy = true;
+  var btn = document.getElementById('wbkImportBtn'); btn.disabled = true; btn.textContent = 'Saving…';
+  var cid = P.client.next.ID, now = new Date().toISOString().slice(0,16).replace('T',' ');
+  // apply the changes onto the record as it is NOW (a sync may have refreshed it since the preview)
+  var live = wbkClient(cid), c;
+  if(live){ c = JSON.parse(JSON.stringify(live)); delete c._pendingSave; P.client.rows.forEach(function(r){ if(!r.same) c[r.key] = (r.nw===undefined||r.nw===null) ? '' : r.nw; }); }
+  else c = P.client.next;
+  P.client.next = c;
+  var results = {ok:0, fail:[]};
+  // 1. the client record first; nothing else is written if it fails
+  var clientChanged = P.client.mode==='create' || P.client.rows.some(function(r){ return !r.same; });
+  var line = 'Fact find workbook imported '+localDateStr()+(P.gen.by?' (completed by '+P.gen.by+(P.gen.on?' on '+P.gen.on:'')+')':'')+(P.gen.valDate?', values as at '+P.gen.valDate:'')+'.';
+  c.Notes = clean(c.Notes) ? String(c.Notes).replace(/\s+$/,'')+'\n\n'+line : line;
+  var i = DB.clients.findIndex(function(x){ return String(x.ID)===String(cid); });
+  if(i>=0) DB.clients[i] = c; else DB.clients.push(c);
+  c._pendingSave = true;
+  try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
+  post({action:'saveClient', client:c}, function(res){
+    if(!(res && res.ok)){
+      WBK.busy = false; btn.disabled = false; wbkUpdateBtn();
+      toast('The client record could not be saved, so nothing was imported. Check the connection and try again.','err');
+      return;
+    }
+    delete c._pendingSave; results.ok++;
+    try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
+    wbkCommitRest(P, cid, now, results, clientChanged);
+  });
+}
+function wbkCommitRest(P, cid, now, results, clientChanged){
+  var c = P.client.next, jobs = 0, launched = false;
+  function job(label){ jobs++; return function(res){ if(res && (res.ok===1 || res.ok===true)) results.ok++; else results.fail.push(label); if(--jobs===0 && launched) wbkFinish(P, cid, results); }; }
+  // spouse family link, kept in step with the client record (as saveClient / the paste import do)
+  if(clean(c.SpouseName)){
+    var spEx = partnerLinkFor(cid);
+    if(!spEx){
+      var spLink = {ID:'fam_sp_'+Date.now(), PrincipalID:cid, Name:c.SpouseName, IDNumber:c.SpouseIDNumber||'', DOB:c.SpouseDOB||'', Cell:c.SpouseCell||'', Email:c.SpouseEmail||'', Type:(c.MaritalStatus==='Life partner'?'Life Partner':'Spouse'), IsClient:'No', ClientID:''};
+      DB.links.push(spLink); post({action:'saveFamMember', member:spLink}, job('Spouse on the family card'));
+    } else if(spEx.IsClient!=='Yes' && (spEx.Name!==c.SpouseName || String(spEx.IDNumber||'')!==String(c.SpouseIDNumber||'') || String(spEx.Cell||'')!==String(c.SpouseCell||'') || String(spEx.Email||'')!==String(c.SpouseEmail||'') || String(spEx.DOB||'')!==String(c.SpouseDOB||''))){
+      spEx.Name = c.SpouseName; spEx.IDNumber = c.SpouseIDNumber||''; spEx.DOB = c.SpouseDOB||''; spEx.Cell = c.SpouseCell||''; spEx.Email = c.SpouseEmail||'';
+      post({action:'updateFamMember', member:spEx}, job('Spouse on the family card'));
+    }
+  }
+  // children and family members
+  var newLinkIds = {};
+  P.kids.upd.forEach(function(u){
+    if(!u.ch.length) return;
+    var l = DB.links.find(function(x){ return String(x.ID)===String(u.link.ID); }) || u.link;
+    u.ch.forEach(function(x){ if(x.k) l[x.k] = x.nw; });
+    post({action:'updateFamMember', member:l}, job('Family: '+l.Name));
+  });
+  P.kids.add.forEach(function(a, n){
+    if(!a.take) return;
+    var d = a.data, link = {ID:'fam_'+Date.now()+'_'+n, PrincipalID:cid, Name:d.Name, IDNumber:d.IDNumber||'', DOB:d.DOB||'', Cell:'', Email:'', Type:d.Type||'Child', IsClient:'No', ClientID:''};
+    if(window._famDepReady===true && d.Dependent) link.Dependent = d.Dependent;
+    DB.links.push(link); newLinkIds[a.index] = link.ID;
+    post({action:'saveFamMember', member:link}, job('Family: '+d.Name));
+  });
+  // financial position, companies and trusts, needs
+  var seq = 0;
+  function saveRow(row, label){
+    row._pendingSave = true;
+    var forServer = JSON.parse(JSON.stringify(row)); delete forServer._pendingSave;
+    var done = job(label);
+    post({action:'saveFinPos', item:forServer}, function(res){
+      if(res && res.ok===1){ var k = DB.finpos.findIndex(function(x){ return x.ID===row.ID; }); if(k>=0) DB.finpos[k] = forServer; }
+      done(res);
+    });
+  }
+  Object.keys(P.fp).forEach(function(kind){
+    var X = P.fp[kind];
+    X.upd.forEach(function(u){
+      if(!u.ch.length) return;
+      var cur = DB.finpos.find(function(x){ return x.ID===u.row.ID; });
+      if(!cur || cur.UpdatedAt!==u.stamp){ results.fail.push((kind==='business'?'Company or trust':kind)+': '+(u.data.desc||'')+' (changed in the CRM after the preview, so not overwritten)'); return; }
+      var row = {ID:u.row.ID, ClientID:cid, Kind:kind, Data:JSON.stringify(u.data), UpdatedAt:now};
+      var k = DB.finpos.findIndex(function(x){ return x.ID===u.row.ID; }); if(k>=0) DB.finpos[k] = row;
+      saveRow(row, (kind==='business'?'Company or trust':kind)+': '+(u.data.desc||''));
+    });
+    X.add.forEach(function(a){
+      if(!a.take) return;
+      var row = {ID:'fp_'+Date.now()+'_'+(seq++), ClientID:cid, Kind:kind, Data:JSON.stringify(a.data), UpdatedAt:now};
+      DB.finpos.push(row);
+      saveRow(row, (kind==='business'?'Company or trust':kind)+': '+(a.data.desc||''));
+    });
+  });
+  // will: notes on newly added family members line up with their rows
+  var W = willData(cid), wChanged = P.will.ch.length > 0;
+  P.will.ch.forEach(function(x){ if(x.k) W[x.k] = x.nw; });
+  Object.keys(newLinkIds).forEach(function(idx){ var v = P.kidNotes[idx]; if(clean(v)){ W['cn_'+newLinkIds[idx]] = v; wChanged = true; } });
+  if(!Object.keys(newLinkIds).length && !P.will.ch.some(function(x){ return x.k; })) wChanged = false;   // only notes for family members that were not ticked
+  if(wChanged){
+    var done = job('Will instructions');
+    saveWill(cid, W, function(ok){ done({ok: ok ? 1 : 0}); });
+  }
+  try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
+  launched = true;
+  if(jobs===0) wbkFinish(P, cid, results);
+}
+function wbkFinish(P, cid, results){
+  WBK.busy = false;
+  try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
+  closeAll();
+  openClient(cid);
+  var c = wbkClient(cid);
+  document.getElementById('wbkModT').textContent = '📗 Fact find imported — '+(c ? c.Name : '');
+  var h = results.fail.length ?
+    '<div class="wbk-err" style="margin-top:0"><strong>'+results.fail.length+' item'+(results.fail.length===1?'':'s')+' could not be saved:</strong><ul style="margin:6px 0 0;padding-left:18px">'+results.fail.map(function(f){ return '<li>'+wbkEsc(f)+'</li>'; }).join('')+'</ul>They are kept on this device. Press Sync, then import the workbook again: what was saved will show as unchanged.</div>' :
+    '<div class="wbk-ok" style="margin-top:0"><strong>All saved.</strong> '+results.ok+' record'+(results.ok===1?'':'s')+' written to the CRM.</div>';
+  h += '<div style="margin-top:12px;font-size:12.5px;color:#556;line-height:1.55">For any further changes, <strong>export a fresh workbook</strong> from '+wbkEsc(c ? c.Name : 'the client')+'\'s record, so the new rows carry their CRM IDs. The FNA Data Pack now includes everything imported.</div>';
+  document.getElementById('wbkModB').innerHTML = h;
+  var b = document.getElementById('wbkImportBtn'); b.style.display = 'none'; b.disabled = false;
+  document.getElementById('wbkMod').classList.add('open');
+  WBK.plan = null;
+  toast(results.fail.length ? 'Imported with '+results.fail.length+' failed save'+(results.fail.length===1?'':'s') : 'Fact find imported','ok');
 }
 
 // ══ FACT-FIND (fluid new-client / lead capture) ══════════════════════════════
@@ -20089,6 +21722,7 @@ document.addEventListener('click', function(e){
         case 'open-new-lead':  openClientModal(null, true); break;
         case 'paste-claude':   openPasteClaude(); break;
         case 'open-factfind':  openFactFind(); break;
+        case 'wbk-open':       wbkOpen(null); break;
         case 'id-dob-audit':   openIdAudit(); break;
         case 'id-audit-fix':   idAuditFix(el.getAttribute('data-fixkey')); break;
         case 'id-audit-fix-all': idAuditFixAll(); break;
