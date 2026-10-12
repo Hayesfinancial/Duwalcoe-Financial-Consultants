@@ -18138,7 +18138,9 @@ function runPasteClaudeImport(){
   toast((wasUpdate?'Updated ':'Created ')+c.Name,'ok');
 }
 
-// Duwalcoe Fact Find Workbook: shared spec (version 1.0, 12 Oct 2026).
+// Duwalcoe Fact Find Workbook: shared spec (version 1.1, 12 Oct 2026).
+// 1.1: the Will sheet no longer asks about policies, retirement funds, property or business
+// interests (they come from the policy schedule and the Assets / Companies sheets).
 // The template builder (build_template.js) and the CRM (index.html, FF_SPEC) both use
 // this. Every typed fact has one home (a yellow cell) with a named range:
 //   FF_C_<key>   client field          FF_S_<key>   spouse field (CRM key in .s)
@@ -18146,7 +18148,7 @@ function runPasteClaudeImport(){
 //   FF_B<n>_<k>  company / trust n     FF_W_<key>   will field     FF_M_<key> meta
 // Column keys are read from the workbook's own key row, so columns can move freely.
 var FF_SPEC = {
-  version: '1.0',
+  version: '1.1',
   sheets: {
     start: 'Start here', fam: 'Client and family', inc: 'Income and expenses', ast: 'Assets and debts',
     biz: 'Companies and trusts', needs: 'Needs', will: 'Will', sum: 'Summary', lists: 'Lists'
@@ -18394,13 +18396,7 @@ var FF_SPEC = {
     {k: 'res_choice', label: 'Residue distribution', t: 'radio', opts: ['Entire residue to my spouse / life partner', 'Entire residue to my children equally, per stirpes', 'Entire residue to my children equally, per capita', 'Split as follows (table below)']},
     {residue: true},
     {sec: '9. Special assets'},
-    {k: 'sa_rf', label: 'Retirement funds (s.37C)', t: 'radio', opts: ['I have reviewed my fund beneficiary nominations', 'I wish to update my fund nominations (attorney / adviser to assist)']},
-    {k: 'sa_lp', label: 'Life insurance policies', t: 'radio', opts: ['All life policies have current beneficiary nominations', 'Some policies pay into my estate (no nominated beneficiary)']},
-    {k: 'sa_lp_notes', label: 'Notes on policies', t: 'area'},
-    {k: 'sa_prop_list', label: 'Fixed property: address and holding structure (own name, trust or company)', t: 'area'},
-    {k: 'sa_prop', label: 'Fixed property instruction', t: 'radio', opts: ['Property to pass to surviving spouse (s.4(q) deduction)', 'Property to be sold and proceeds form part of residue', 'Specific property to a specific beneficiary (detail in section 7)']},
-    {k: 'sa_biz', label: 'Business interests', t: 'radio', opts: ['Not applicable', 'I am a shareholder / member (detail below)', 'A buy-and-sell agreement is in place', 'No buy-and-sell — business interest to pass to (below)']},
-    {k: 'sa_biz_detail', label: 'Business notes for the attorney (entity, % held, to whom)', t: 'text'},
+    {note: 'Your property and business interests, and who each one passes to, are taken from the Assets and debts and the Companies and trusts sheets. Life policies and retirement funds, with their beneficiaries, are on your policy schedule.'},
     {k: 'sa_off', label: 'Offshore assets', t: 'radio', opts: ['None', 'I hold assets offshore (a separate offshore will may be recommended)']},
     {k: 'sa_off_detail', label: 'Country and nature of offshore assets', t: 'area'},
     {k: 'sa_fire', label: 'Firearms', t: 'radio', opts: ['None', 'I own firearms (beneficiary must hold a valid licence)']},
@@ -18493,6 +18489,8 @@ if (typeof module !== 'undefined') module.exports = FF_SPEC;
 //  · a new row that looks like an existing one (same description / name) starts unticked;
 //  · every save is checked, and any that fail are listed (the rest are kept).
 // FF_SPEC (the shared spec) defines every sheet, field, list and named range.
+// A field whose named range is not in the workbook (an older or trimmed template) is left
+// exactly as it is in the CRM: missing is never read as blank (12 Oct 2026, template 1.1).
 var WBK_TEMPLATE_URL = 'Duwalcoe_Fact_Find_Template.xlsx';
 var WBK_EXCELJS_URL  = 'https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js';
 var WBK = { cid:null, plan:null, busy:false };
@@ -18864,6 +18862,7 @@ function wbkPlan(wb, cidFrom, fileName){
     [['c', p.c], ['s', p.s]].forEach(function(side){
       var key = side[1]; if(!key) return;
       var nmn = (side[0]==='c' ? 'FF_C_' : 'FF_S_')+key;
+      if(!M.N[nmn]) return;
       var label = p.label+(side[0]==='s' && key!=='SpouseWorks' ? ' (spouse)' : '');
       var v = wbkIn(p.t, M.raw(nmn), M.cell(nmn), function(msg){ P.warns.push('Client and family, '+label+': '+msg+'. '+(target ? 'Kept as it is.' : 'Left blank.')); });
       if(v===undefined) return;
@@ -18991,8 +18990,8 @@ function wbkPlan(wb, cidFrom, fileName){
     var id = String(M.raw(p+'_id')||'').trim();
     var bsuf = (id && bcrm.some(function(r){ return String(r.ID)===id; })) ? 'Kept as it is.' : 'Not used; the CRM default applies.';
     var o = {}, any = false;
-    FF_SPEC.biz.entity.forEach(function(f){ var v = wbkIn(f.t, M.raw(p+f.k), M.cell(p+f.k), function(msg){ P.warns.push(where+', '+f.label+': '+msg+'. '+bsuf); }); if(v!==undefined){ o[f.k] = v; if(v!=='') any = true; } });
-    FF_SPEC.biz.person.forEach(function(f){ [f.c, f.s].forEach(function(k){ var v = wbkIn(f.t, M.raw(p+k), M.cell(p+k), function(msg){ P.warns.push(where+', '+f.label+': '+msg+'. '+bsuf); }); if(v!==undefined){ o[k] = v; if(v!=='') any = true; } }); });
+    FF_SPEC.biz.entity.forEach(function(f){ if(!M.N[p+f.k]) return; var v = wbkIn(f.t, M.raw(p+f.k), M.cell(p+f.k), function(msg){ P.warns.push(where+', '+f.label+': '+msg+'. '+bsuf); }); if(v!==undefined){ o[f.k] = v; if(v!=='') any = true; } });
+    FF_SPEC.biz.person.forEach(function(f){ [f.c, f.s].forEach(function(k){ if(!M.N[p+k]) return; var v = wbkIn(f.t, M.raw(p+k), M.cell(p+k), function(msg){ P.warns.push(where+', '+f.label+': '+msg+'. '+bsuf); }); if(v!==undefined){ o[k] = v; if(v!=='') any = true; } }); });
     var hrows = (M.table('B'+n+'H')||[]).filter(function(h){ return h._used || h._id; });
     if(hrows.some(function(h){ return h._used; })) any = true;
     var fr = id ? bcrm.find(function(r){ return String(r.ID)===id; }) : null;
@@ -19076,12 +19075,12 @@ function wbkPlan(wb, cidFrom, fileName){
     if(!wbkSame(t, W0[k], v)){ wch.push({k:k, label:label, old:W0[k], nw:v, t:t}); W1[k] = v; }
   }
   FF_SPEC.will.forEach(function(x){
-    if(!x.k) return;
+    if(!x.k || !M.N['FF_W_'+x.k]) return;
     var t = x.t==='check' ? 'check' : (x.t==='radio' ? 'radio' : 'text');
     var v = wbkIn(t==='text' ? (x.t==='id' ? 'id' : 'text') : t, M.raw('FF_W_'+x.k), M.cell('FF_W_'+x.k), function(msg){ P.warns.push('Will, '+x.label+': '+msg+'. Kept as it is.'); }, x.opts);
     wput(x.k, v, x.label, t);
   });
-  wput('dep_notes', wbkIn('area', M.raw('FF_W_dep_notes'), null, function(){}), 'Other dependants to provide for', 'text');
+  if(M.N.FF_W_dep_notes) wput('dep_notes', wbkIn('area', M.raw('FF_W_dep_notes'), null, function(){}), 'Other dependants to provide for', 'text');
   // bequests and residue: fixed slots
   [['Bq','bq',FF_SPEC.willTables.bq],['Rs','rs',FF_SPEC.willTables.rs]].forEach(function(tb){
     var rows = M.table(tb[0]) || [];
