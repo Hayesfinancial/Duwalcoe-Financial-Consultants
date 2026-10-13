@@ -18138,6 +18138,8 @@ function runPasteClaudeImport(){
 // Duwalcoe Fact Find Workbook: shared spec (version 1.1, 12 Oct 2026).
 // 1.1: the Will sheet no longer asks about policies, retirement funds, property or business
 // interests (they come from the policy schedule and the Assets / Companies sheets).
+// 1.2 (13 Oct 2026): first names and surname asked separately; SA ID check; salaries are typed
+// only on the Income sheet (gross income on Client and family adds them up); Meeting notes sheet.
 // The template builder (build_template.js) and the CRM (index.html, FF_SPEC) both use
 // this. Every typed fact has one home (a yellow cell) with a named range:
 //   FF_C_<key>   client field          FF_S_<key>   spouse field (CRM key in .s)
@@ -18145,9 +18147,9 @@ function runPasteClaudeImport(){
 //   FF_B<n>_<k>  company / trust n     FF_W_<key>   will field     FF_M_<key> meta
 // Column keys are read from the workbook's own key row, so columns can move freely.
 var FF_SPEC = {
-  version: '1.1',
+  version: '1.2',
   sheets: {
-    start: 'Start here', fam: 'Client and family', inc: 'Income and expenses', ast: 'Assets and debts',
+    start: 'Start here', notes: 'Meeting notes', fam: 'Client and family', inc: 'Income and expenses', ast: 'Assets and debts',
     biz: 'Companies and trusts', needs: 'Needs', will: 'Will', sum: 'Summary', lists: 'Lists'
   },
   // Value types: text, area (long text), id (SA ID / phone: kept as text), money, num, pct,
@@ -18170,6 +18172,7 @@ var FF_SPEC = {
     mainUse: ['Active trading business', 'Mainly property to let', 'Mainly investments (shares, cash, loans)', 'Mixed (trading plus letting or investments)'],
     loanAcc: ['None', 'Credit', 'Debit'],
     holdKind: ['Property', 'Bond', 'Other asset', 'Other debt'],
+    earned: ['Salary', 'Business Income'],
     source: ['Books', 'Statement', 'Valuation', 'Estimate'],
     passes: ['Spouse', 'Estate', 'Named person'],
     scenario: ['Death', 'Disability', 'Dread Disease', 'Retirement', 'Other'],
@@ -18180,11 +18183,13 @@ var FF_SPEC = {
   // ── Client and family: one row per fact, client column and spouse column ──
   person: [
     {label: 'Title', c: 'Title', t: 'list:titles'},
-    {label: 'Full names', c: 'Name', s: 'SpouseName', t: 'text', req: true},
+    // First names and surname are joined into the CRM's one name field (Name / SpouseName).
+    {label: 'First names', c: 'FirstNames', s: 'SpouseFirstNames', t: 'text', name: 'first'},
+    {label: 'Surname', c: 'Surname', s: 'SpouseSurname', t: 'text', name: 'last'},
     {label: 'Calling name (what we call you)', c: 'CallingName', t: 'text'},
     {label: 'SA ID number', c: 'IDNumber', s: 'SpouseIDNumber', t: 'id'},
-    {label: 'Date of birth (only if no SA ID number)', c: 'DOB', s: 'SpouseDOB', t: 'date'},
-    {label: 'Gender (only if no SA ID number)', c: 'Gender', t: 'list:gender'},
+    {label: 'Date of birth (only if no valid SA ID number)', c: 'DOB', s: 'SpouseDOB', t: 'date'},
+    {label: 'Gender (only if no valid SA ID number)', c: 'Gender', t: 'list:gender'},
     {label: 'Smoker', c: 'Smoker', t: 'list:yesno'},
     {label: 'Cell', c: 'Cell', s: 'SpouseCell', t: 'id'},
     {label: 'Email', c: 'Email', s: 'SpouseEmail', t: 'text'},
@@ -18194,7 +18199,8 @@ var FF_SPEC = {
     {label: 'Postal address', c: 'POBox', t: 'area'},
     {label: 'Occupation', c: 'Occupation', s: 'SpouseOccupation', t: 'text'},
     {label: 'Employer', c: 'Employer', t: 'text'},
-    {label: 'Gross income a month (R)', c: 'Income', s: 'SpouseIncome', t: 'money'},
+    // grey: the salary and business income rows on the Income sheet, added up (one home)
+    {label: 'Gross income a month (R): salary and business income from the Income sheet', c: 'Income', s: 'SpouseIncome', t: 'money', grey: 'earned'},
     {label: 'Working?', s: 'SpouseWorks', t: 'list:yesno'},
     {label: 'Tax number', c: 'TaxNo', t: 'id'},
     {label: 'Highest education', c: 'Education', t: 'list:edu'},
@@ -18206,6 +18212,12 @@ var FF_SPEC = {
 
   // ── Repeating tables (one CRM row each; hidden ID column carries the CRM row ID) ──
   tables: {
+    notes: {sheet: 'notes', rows: 36, title: 'Notes', notesOnly: true,
+      hint: 'Type a note and press Enter to go to the next line. Tidy them into the other sheets afterwards, or leave them here: they are added to the client\'s notes in the CRM.',
+      cols: [
+        {k: 'note', h: 'Note', t: 'text', w: 92},
+        {k: 'topic', h: 'Topic (optional)', t: 'text', w: 16}
+      ]},
     kids: {sheet: 'fam', rows: 8, title: '2. Children and other family members',
       hint: 'Your children first, then anyone else in the family. Your spouse goes above, not here.',
       cols: [
@@ -18216,7 +18228,7 @@ var FF_SPEC = {
         {k: 'Dependent', h: 'Financially dependent on you?', t: 'list:yesno', w: 14}
       ]},
     income: {sheet: 'inc', rows: 10, title: '1. Income', kind: 'income',
-      hint: 'Every regular income, before tax. One row per source.',
+      hint: 'Every regular income before tax, one row per source, including your salary or business income. The gross income on the Client and family sheet adds up the Salary and Business Income rows.',
       cols: [
         {k: 'desc', h: 'Description (e.g. Salary, ABC Ltd)', t: 'text', w: 34},
         {k: 'owner', h: 'Whose income', t: 'owner', w: 14},
@@ -18632,6 +18644,23 @@ function wbkOwnerIn(raw, L, warn){
   if(s==='joint') return 'Joint';
   warn('owner "'+raw+'" is not '+L.c+', '+L.s+' or Joint'); return undefined;
 }
+// Split a CRM name into first names and surname for the workbook (template 1.2). The surname
+// keeps its particles (van, van der, du, de, le, Janse van ...). Joining the two always gives
+// back the stored name, so a round trip never changes it even when the split is imperfect.
+var WBK_PARTICLES = ['van','von','de','du','der','den','le','la','da','di','del','des','ter','te','ten','vd','v/d','la','dos','das'];
+function wbkSplitName(name){
+  var s = String(name||'').replace(/\s+/g,' ').trim();
+  if(!s) return {first:'', last:''};
+  var w = s.split(' ');
+  if(w.length===1) return {first:w[0], last:''};
+  var at = w.length-1;
+  for(var i=1; i<w.length-1; i++){ if(WBK_PARTICLES.indexOf(w[i].toLowerCase())>=0){ at = i; break; } }
+  if(at>1 && /^jans(e|en)$/i.test(w[at-1])) at = at-1;   // Janse van Rensburg
+  return {first:w.slice(0,at).join(' '), last:w.slice(at).join(' ')};
+}
+function wbkSameName(a, b){ return String(a||'').replace(/\s+/g,' ').trim().toLowerCase()===String(b||'').replace(/\s+/g,' ').trim().toLowerCase(); }
+function wbkEarned(d){ return (FF_SPEC.lists.earned||[]).indexOf(d.incomeType)>=0; }
+function wbkTplVer(M){ var v = parseFloat(M.meta.version); return isFinite(v) ? v : 1.0; }
 function wbkFieldLabel(tbl, key){ var c = (FF_SPEC.tables[tbl]||{cols:[]}).cols.find(function(x){ return x.k===key; }); return c ? c.h : key; }
 
 // ══ Open: export / import choices ═══════════════════════════════════════════
@@ -18715,9 +18744,18 @@ function wbkFill(wb, c){
   function setN(n, v){ var cl = wbkCell(wb, N[n]); if(cl) cl.value = v; }
   // client and spouse
   FF_SPEC.person.forEach(function(p){
+    if(p.grey) return;   // worked out in the workbook (gross income adds up the Income sheet)
+    if(p.name){
+      var cs = wbkSplitName(c.Name), ss = wbkSplitName(c.SpouseName);
+      setN('FF_C_'+p.c, (p.name==='first' ? cs.first : cs.last) || null);
+      setN('FF_S_'+p.s, (p.name==='first' ? ss.first : ss.last) || null);
+      return;
+    }
     if(p.c) setN('FF_C_'+p.c, wbkOut(p.t, c[p.c]));
     if(p.s) setN('FF_S_'+p.s, wbkOut(p.t, c[p.s]));
   });
+  if(N.FF_C_Name) setN('FF_C_Name', c.Name||null);                  // older template
+  if(N.FF_S_SpouseName) setN('FF_S_SpouseName', c.SpouseName||null);
   // tables
   function fillTable(name, items, toRow){
     var K = N['FF_K_'+name], T = N['FF_T_'+name]; if(!K || !T) return;
@@ -18733,7 +18771,16 @@ function wbkFill(wb, c){
   });
   ['income','expense','property','vehicle','other','liability','need'].forEach(function(kind){
     var spec = FF_SPEC.tables[kind];
-    fillTable(kind, wbkRowsOf(c.ID, kind), function(r){
+    var items = wbkRowsOf(c.ID, kind);
+    if(kind==='income'){
+      // Salaries live on the Income sheet (template 1.2). A gross income on the client record
+      // with no Salary / Business Income row for that person is put in as a row (no ID), so the
+      // workbook shows it once; importing adds the row to the CRM.
+      var hasEarned = function(who){ return items.some(function(r){ var d = fpData(r); return wbkEarned(d) && (d.owner||'Client')===who; }); };
+      if(fpN(c.Income)>0 && !hasEarned('Client')) items = items.concat([{ID:'', Data:JSON.stringify({desc:'Salary'+(clean(c.Employer)?', '+c.Employer:''), owner:'Client', incomeType:'Salary', amountPM:wbkNumStr(fpN(c.Income)), taxable:'Yes'})}]);
+      if(clean(c.SpouseName) && fpN(c.SpouseIncome)>0 && !hasEarned('Spouse')) items = items.concat([{ID:'', Data:JSON.stringify({desc:'Salary', owner:'Spouse', incomeType:'Salary', amountPM:wbkNumStr(fpN(c.SpouseIncome)), taxable:'Yes'})}]);
+    }
+    fillTable(kind, items, function(r){
       var d = fpData(r), o = {_id:String(r.ID)};
       spec.cols.forEach(function(col){ o[col.k] = col.t==='owner' ? wbkOwnerOut(d[col.k], L) : wbkOut(col.t, d[col.k]); });
       return o;
@@ -18829,7 +18876,7 @@ function wbkReadModel(wb){
 // ══ Import: work out every change ═══════════════════════════════════════════
 function wbkPlan(wb, cidFrom, fileName){
   var M = wbkReadModel(wb), P = {errors:[], warns:[], file:fileName, sections:[]};
-  if(!M.N.FF_C_Name || !M.N.FF_K_property){ P.errors.push('This is not a Duwalcoe fact find workbook (its named ranges are missing).'); return P; }
+  if(!(M.N.FF_C_Name || M.N.FF_C_FirstNames) || !M.N.FF_K_property){ P.errors.push('This is not a Duwalcoe fact find workbook (its named ranges are missing).'); return P; }
   if(M.meta.version && String(M.meta.version).split('.')[0] !== String(FF_SPEC.version).split('.')[0]){
     P.errors.push('This workbook is template version '+M.meta.version+'; this CRM reads version '+FF_SPEC.version+'. Export a fresh one.'); return P;
   }
@@ -18854,8 +18901,10 @@ function wbkPlan(wb, cidFrom, fileName){
   // ── Client and spouse ──
   var cur = target || {};
   var next = target ? JSON.parse(JSON.stringify(target)) : {ID:'new_'+Date.now(), Name:'', IsLead:'Yes', ClientType:'Individual', Status:'Active', Adviser:cu(), Notes:'', BankDetails:'[]', Doctors:'[]'};
-  var cch = [];
+  var cch = [], ver = wbkTplVer(M);
   FF_SPEC.person.forEach(function(p){
+    if(p.name) return;                        // first names / surname: joined below
+    if(p.grey && ver>=1.2) return;            // gross income: worked out from the Income sheet below
     [['c', p.c], ['s', p.s]].forEach(function(side){
       var key = side[1]; if(!key) return;
       var nmn = (side[0]==='c' ? 'FF_C_' : 'FF_S_')+key;
@@ -18868,6 +18917,24 @@ function wbkPlan(wb, cidFrom, fileName){
       next[key] = v;
     });
   });
+  // Names: template 1.2 asks first names and surname separately; the CRM keeps one field.
+  var nameParts = {};
+  [['c','Name','FF_C_FirstNames','FF_C_Surname','FF_C_Name'],['s','SpouseName','FF_S_SpouseFirstNames','FF_S_SpouseSurname','FF_S_SpouseName']].forEach(function(n){
+    if(!M.N[n[2]] && !M.N[n[3]]){
+      // older workbook (template 1.0 / 1.1): one full-name field
+      if(!M.N[n[4]]) return;
+      var full = (wbkIn('text', M.raw(n[4]), null, function(){}) || '').replace(/\s+/g,' ').trim();
+      if(!full){ if(n[0]==='s' && stamped) next[n[1]] = ''; return; }
+      if(!wbkSameName(full, cur[n[1]])) next[n[1]] = full;
+      return;
+    }
+    var fn = wbkIn('text', M.raw(n[2]), null, function(){}) || '', sn = wbkIn('text', M.raw(n[3]), null, function(){}) || '';
+    nameParts[n[1]] = {first:fn, last:sn};
+    var joined = (fn+' '+sn).replace(/\s+/g,' ').trim();
+    if(!joined){ if(n[0]==='s' && stamped) next[n[1]] = ''; return; }   // the client's own name is never cleared
+    if(!wbkSameName(joined, cur[n[1]])) next[n[1]] = joined;
+    if(!sn && !wbkSameName(joined, cur[n[1]])) P.warns.push('Client and family: no surname given for '+(n[0]==='c'?'the client':'the spouse')+' ('+joined+'). Add it in the CRM if it is missing.');
+  });
   if(!target && !clean(next.Name)){ P.errors.push('There is no name for the client on the Client and family sheet.'); return P; }
   // A blank workbook for someone already in the CRM (same SA ID, or exactly the same name):
   // update that record instead of creating them twice (as the Paste from Claude import does).
@@ -18878,7 +18945,7 @@ function wbkPlan(wb, cidFrom, fileName){
       P.warns.push('This person is already in the CRM as '+match.Name+' (same '+(saIdValid(next.IDNumber) && String(match.IDNumber||'').replace(/\D/g,'')===String(next.IDNumber).replace(/\D/g,'') ? 'ID number' : 'name')+'), so that record is updated. Blank cells will not clear anything, and rows that look like ones already on the record start unticked.');
       target = match; mode = 'update'; cur = target;
       var keep = next; next = JSON.parse(JSON.stringify(target));
-      Object.keys(keep).forEach(function(k){ if(FF_SPEC.person.some(function(p){ return p.c===k || p.s===k; }) && clean(keep[k])) next[k] = keep[k]; });
+      Object.keys(keep).forEach(function(k){ if((k==='Name' || k==='SpouseName' || FF_SPEC.person.some(function(p){ return !p.name && (p.c===k || p.s===k); })) && clean(keep[k])) next[k] = keep[k]; });
       if(saIdValid(next.IDNumber)) next.DOB = dobFromID(String(next.IDNumber).replace(/\D/g,''));
       if(saIdValid(next.SpouseIDNumber)) next.SpouseDOB = dobFromID(String(next.SpouseIDNumber).replace(/\D/g,''));
     }
@@ -18887,9 +18954,38 @@ function wbkPlan(wb, cidFrom, fileName){
   // Worked out from the SA ID, as the CRM does everywhere
   if(saIdValid(next.IDNumber)){ next.DOB = dobFromID(String(next.IDNumber).replace(/\D/g,'')); if(!clean(next.Gender)) next.Gender = (+String(next.IDNumber).replace(/\D/g,'').charAt(6) >= 5) ? 'Male' : 'Female'; }
   if(saIdValid(next.SpouseIDNumber)) next.SpouseDOB = dobFromID(String(next.SpouseIDNumber).replace(/\D/g,''));
+  // Calling name: the name the client goes by, never the surname (13 Oct 2026, Megan Wilmot)
+  var cnRaw = clean(next.CallingName) ? String(next.CallingName).trim() : '';
+  if(cnRaw && !wbkSameName(cnRaw, cur.CallingName)){
+    var cnl = cnRaw.toLowerCase(), np = nameParts.Name;
+    if(np && np.last && np.last.toLowerCase().split(' ').indexOf(cnl)>=0) P.warns.push('Client and family: the calling name "'+cnRaw+'" is the surname. The calling name is the first name the client goes by.');
+    else if(!np && String(next.Name||'').toLowerCase().split(/\s+/).indexOf(cnl)<0) P.warns.push('Client and family: the calling name "'+cnRaw+'" is not one of the names in "'+next.Name+'". Was the surname typed as the calling name?');
+  }
+  // SA ID numbers that fail the check: nothing is worked out from them, and Clinton is told
+  [['IDNumber','the client'],['SpouseIDNumber','the spouse']].forEach(function(x){
+    var v = clean(next[x[0]]) ? String(next[x[0]]).trim() : '';
+    if(v && !saIdValid(v)) P.warns.push('Client and family: the SA ID number for '+x[1]+' ('+v+') is not valid; a digit is probably wrong. Date of birth and gender are not worked out from it. Check it with the client.');
+  });
   if(!clean(next.CallingName) && clean(next.Name)) next.CallingName = String(next.Name).split(' ')[0];
-  var CKEYS = [];
-  FF_SPEC.person.forEach(function(p){ if(p.c) CKEYS.push([p.c, p.label, p.t]); if(p.s) CKEYS.push([p.s, p.label+(p.s==='SpouseWorks'?'':' (spouse)'), p.t]); });
+  var L = wbkLabels(next.Name, next.CallingName, next.SpouseName);
+  // Gross income (template 1.2): the Salary and Business Income rows on the Income sheet, added up
+  if(ver>=1.2){
+    var earnedSum = {Client:{n:0, t:0}, Spouse:{n:0, t:0}};
+    (M.table('income')||[]).forEach(function(row){
+      if(!row._used) return;
+      var ty = wbkIn('list:incType', row._raw.incomeType, null, function(){}), amt = wbkIn('money', row._raw.amountPM, null, function(){});
+      var ow = wbkOwnerIn(row._raw.owner, L, function(){});
+      if(!ty || FF_SPEC.lists.earned.indexOf(ty)<0 || amt===undefined || ow===undefined) return;
+      var who = (ow==='' || ow==='Client') ? 'Client' : (ow==='Spouse' ? 'Spouse' : '');
+      if(!who) return;
+      earnedSum[who].n++; earnedSum[who].t += crmNum(amt||'0');
+    });
+    if(earnedSum.Client.n) next.Income = wbkNumStr(earnedSum.Client.t);
+    if(earnedSum.Spouse.n) next.SpouseIncome = wbkNumStr(earnedSum.Spouse.t);
+  }
+  var CKEYS = [['Name','Full name','text']];
+  FF_SPEC.person.forEach(function(p){ if(p.name) return; if(p.c) CKEYS.push([p.c, p.label, p.t]); if(p.s) CKEYS.push([p.s, p.label+(p.s==='SpouseWorks'?'':' (spouse)'), p.t]); });
+  CKEYS.splice(1, 0, ['SpouseName','Full name (spouse)','text']);
   CKEYS.push(['DOB','Date of birth','date'], ['SpouseDOB','Date of birth (spouse)','date'], ['Gender','Gender','list:gender']);
   var seenK = {};
   CKEYS.forEach(function(k){
@@ -18898,7 +18994,6 @@ function wbkPlan(wb, cidFrom, fileName){
     cch.push({key:k[0], label:k[1], old:a, nw:b, same: wbkSame(k[2], a, b) || (String(a||'').trim()===String(b||'').trim())});
   });
   P.client = {target:target, mode:mode, next:next, rows:cch};
-  var L = wbkLabels(next.Name, next.CallingName, next.SpouseName);
   var gen = { valDate: wbkIn('date', M.raw('FF_G_ValDate'), null, function(){}) || '', by: wbkIn('text', M.raw('FF_G_CompletedBy'), null, function(){}) || '', on: wbkIn('date', M.raw('FF_G_DateCompleted'), null, function(){}) || '' };
   P.gen = gen;
   var cid = next.ID;
@@ -18915,6 +19010,7 @@ function wbkPlan(wb, cidFrom, fileName){
       if(v!==undefined) o[col.k] = v;
     });
     if(o.IDNumber && saIdValid(o.IDNumber)) o.DOB = dobFromID(String(o.IDNumber).replace(/\D/g,''));
+    else if(o.IDNumber) P.warns.push(where+': the SA ID number '+o.IDNumber+' is not valid; a digit is probably wrong. Check it.');
     var link = row._id ? DB.links.find(function(l){ return String(l.ID)===row._id; }) : null;
     if(row._id && !link){ P.warns.push(where+': '+(o.Name||'this person')+' is no longer on the CRM record, so they will be added again.'); }
     if(link){
@@ -18948,7 +19044,7 @@ function wbkPlan(wb, cidFrom, fileName){
     var crm = target ? wbkRowsOf(cid, kind) : [];
     (M.table(kind)||[]).forEach(function(row){
       if(!row._used && !row._id) return;
-      var where = spec.title.replace(/^\d+\.\s*/,'')+', row '+(row._index+1);
+      var where = (kind==='need' ? 'Needs' : spec.title.replace(/^\d+\.\s*/,''))+', row '+(row._index+1);
       var o = {}, isOld = !!(row._id && crm.some(function(r){ return String(r.ID)===row._id; }));
       spec.cols.forEach(function(col){
         var w = function(msg){ P.warns.push(where+', '+col.h+': '+msg+'. '+(isOld ? 'Kept as it is.' : 'Not used; the CRM default applies.')); };
@@ -18963,7 +19059,7 @@ function wbkPlan(wb, cidFrom, fileName){
         var od = fpData(fr), nd = Object.assign({}, od), ch = [];
         spec.cols.forEach(function(col){
           if(o[col.k]===undefined) return;
-          if(o[col.k]==='' && (!stamped || col.k==='desc' || col.t==='owner')) return;
+          if(o[col.k]==='' && (!stamped || col.k==='desc' || col.t==='owner' || col.k==='scenario' || col.k==='needType')) return;
           if(!wbkSame(col.t, od[col.k], o[col.k])){ ch.push({k:col.k, label:col.h, old:od[col.k], nw:o[col.k], t:col.t}); nd[col.k] = o[col.k]; }
         });
         wbkFixRow(kind, nd, gen, od, ch);
@@ -18971,7 +19067,7 @@ function wbkPlan(wb, cidFrom, fileName){
       } else {
         if(!row._used) return;
         if(!o.desc){ P.warns.push(where+': there are figures but no description, so the row is skipped.'); return; }
-        var nd2 = wbkNewRow(kind, o, gen);
+        var nd2 = wbkNewRow(kind, o, gen, {L:L, spouse:clean(next.SpouseName), warn:function(m){ P.warns.push(where+' ('+o.desc+'): '+m); }});
         var dup = crm.find(function(r){ return !seen[r.ID] && String(fpData(r).desc||'').trim().toLowerCase()===String(o.desc).trim().toLowerCase(); });
         X.add.push({data:nd2, take:!dup, dup:dup ? fpData(dup).desc : ''});
       }
@@ -19098,12 +19194,30 @@ function wbkPlan(wb, cidFrom, fileName){
   var WMAP_REV = {'Single':'Single / never married','Married in COP':'Married in community of property (COP)','Married - ANC with accrual':'Married out of community of property (ANC) with accrual','Married - ANC without accrual':'Married out of community of property (ANC) without accrual','Divorced':'Divorced','Widowed':'Widowed','Life partner':'Life partner / cohabiting'};
   if(clean(W0.t_marital) && !wbkSame('text', cur.MaritalStatus, next.MaritalStatus) && WMAP_REV[next.MaritalStatus]) wput('t_marital', WMAP_REV[next.MaritalStatus], 'Marital status / regime (will, kept in step with the client record)', 'text');
   P.will = {ch:wch, next:W1, existed:!!(target && willFor(cid))};
+  // ── Meeting notes (template 1.2): added to the client's notes, never twice ──
+  var nlines = [];
+  (M.table('notes')||[]).forEach(function(row){
+    var note = wbkIn('text', row._raw.note, null, function(){}) || '', topic = wbkIn('text', row._raw.topic, null, function(){}) || '';
+    if(note) nlines.push('• '+(topic ? '['+topic+'] ' : '')+note.replace(/\s*\n\s*/g,' '));
+  });
+  P.notes = null;
+  if(nlines.length){
+    var body = nlines.join('\n');
+    P.notes = {lines:nlines, body:body, dup: String(cur.Notes||'').indexOf(body)>=0};
+  }
   P.cid = cid;
   return P;
 }
 // New Financial Position row: the same defaults as the CRM's own form.
-function wbkNewRow(kind, o, gen){
+function wbkNewRow(kind, o, gen, ctx){
   var d = Object.assign({}, o);
+  ctx = ctx || {warn:function(){}};
+  // Defaults that matter for the FNA are never applied silently (13 Oct 2026)
+  if(['property','vehicle','other','liability','income'].indexOf(kind)>=0 && !d.owner && ctx.spouse) ctx.warn('owner left blank, so it is saved as '+(ctx.L ? ctx.L.c : 'the client')+'\'s.');
+  if(kind==='need'){
+    if(!d.scenario) ctx.warn('no "If this happens" chosen, so it is saved as Other. Set it on the Needs tab.');
+    if(!d.needType) ctx.warn('monthly income or once-off not chosen, so it is saved as a monthly income. Check it on the Needs tab.');
+  }
   if(['property','vehicle','other'].indexOf(kind)>=0){
     d.owner = d.owner || 'Client'; d.passesTo = d.passesTo || 'Estate';
     if(d.passesTo!=='Named person') d.passesToName = '';
@@ -19114,7 +19228,7 @@ function wbkNewRow(kind, o, gen){
   else if(kind==='income'){ d.owner = d.owner || 'Client'; d.taxable = d.taxable || 'Yes'; d.incomeType = d.incomeType || 'Other'; }
   else if(kind==='expense'){ d.expCategory = d.expCategory || 'Other'; }
   else if(kind==='need'){
-    d.scenario = d.scenario || 'Death'; d.needType = d.needType || 'Monthly income';
+    d.scenario = d.scenario || 'Other'; d.needType = d.needType || 'Monthly income';
     if(d.needType!=='Monthly income'){ d.years = ''; d.esc = ''; }
     if(!needAsksForWhom(d.scenario)){ d.benTo = ''; d.benName = ''; }
     else if(d.benTo!=='Named person') d.benName = '';
@@ -19146,7 +19260,7 @@ function wbkRowSum(kind, d){
   else if(kind==='property' || kind==='vehicle' || kind==='other'){ if(d.type) b.push(d.type); if(clean(d.value)) b.push(m(d.value)); if(fpN(d.bondOut)) b.push('bond '+m(d.bondOut)); if(fpN(d.financeOut)) b.push('finance '+m(d.financeOut)); if(d.owner) b.push(own[d.owner]||d.owner); if(d.source) b.push(d.source); }
   else if(kind==='liability'){ if(d.liabType) b.push(d.liabType); b.push(m(d.balance)); if(d.owner) b.push(own[d.owner]||d.owner); }
   else if(kind==='business'){ if(d.entityType) b.push(d.entityType); if(fpIsTrust(d)){ if(d.loanAcc==='Credit'||d.loanAcc==='Debit') b.push('loan account '+m(d.loanBal)); } else { if(d.pctHeld) b.push(d.pctHeld+'%, share '+m(d.value)); if(fpN(d.pctHeldSpouse)>0) b.push('spouse '+d.pctHeldSpouse+'%, share '+m(d.valueSpouse)); } var hs = fpHoldings(d); if(hs.length) b.push(hs.length+' holding'+(hs.length===1?'':'s')); }
-  else if(kind==='need'){ b.push(d.scenario||''); b.push(d.needType==='Monthly income' ? m(d.amount)+' a month'+(d.years?' for '+d.years+' years':'') : m(d.amount)+' once-off'); if(d.benTo) b.push('for '+(d.benTo==='Named person' ? (d.benName||'a named person') : d.benTo)); }
+  else if(kind==='need'){ b.push(d.scenario||''); if(d.needType==='Monthly income'){ b.push(m(d.amount)+' a month'); b.push(d.years ? 'for '+d.years+' years' : 'years not given'); b.push('increase: '+(clean(d.esc) ? d.esc+'% a year' : 'inflation')); } else b.push(m(d.amount)+' once-off'); if(d.benTo) b.push('for '+(d.benTo==='Named person' ? (d.benName||'a named person') : d.benTo)); }
   return b.filter(Boolean).join(' · ');
 }
 function wbkChangeCount(P){
@@ -19155,6 +19269,7 @@ function wbkChangeCount(P){
   n += P.kids.add.filter(function(a){ return a.take; }).length + P.kids.upd.filter(function(u){ return u.ch.length; }).length;
   Object.keys(P.fp).forEach(function(k){ n += P.fp[k].add.filter(function(a){ return a.take; }).length + P.fp[k].upd.filter(function(u){ return u.ch.length; }).length; });
   n += P.will.ch.length;
+  if(P.notes && !P.notes.dup) n++;
   return n;
 }
 
@@ -19197,6 +19312,10 @@ function wbkRenderPlan(P){
   ['income','expense','property','vehicle','other','liability','business','need'].forEach(function(k){
     H += rowSection(titles[k], P.fp[k], function(d){ return d.desc||''; }, function(d){ return wbkRowSum(k, d); }, 'fp.'+k);
   });
+  if(P.notes){
+    H += '<div class="wbk-h">Meeting notes — '+(P.notes.dup ? 'already in the client\'s notes, not added again' : P.notes.lines.length+' line'+(P.notes.lines.length===1?'':'s')+' added to the client\'s notes')+'</div>'+
+      '<div style="margin-top:6px;padding:8px 12px;background:var(--smoke);border-radius:8px;font-size:12.5px;line-height:1.55;white-space:pre-wrap;color:'+(P.notes.dup?'#999':'#334')+'">'+wbkEsc(P.notes.body)+'</div>';
+  }
   if(P.will.ch.length){
     H += '<div class="wbk-h">Will instructions — '+P.will.ch.length+' change'+(P.will.ch.length===1?'':'s')+'</div><table class="wbk-t"><tr><th>Question</th><th>Current</th><th>New</th></tr>'+
       P.will.ch.map(function(x){ return '<tr class="wbk-chg"><td class="wbk-k">'+wbkEsc(x.label)+'</td><td class="wbk-old">'+wbkEsc(wbkShow(x.t, x.old))+'</td><td>'+cellTxt(x.t, x.nw, true)+'</td></tr>'; }).join('')+'</table>';
@@ -19231,6 +19350,10 @@ function wbkCommit(){
   var results = {ok:0, fail:[]};
   // 1. the client record first; nothing else is written if it fails
   var clientChanged = P.client.mode==='create' || P.client.rows.some(function(r){ return !r.same; });
+  if(P.notes && !P.notes.dup){
+    var nb = 'Meeting notes (fact find'+(P.gen.on ? ' completed '+P.gen.on : ' imported '+localDateStr())+'):\n'+P.notes.body;
+    c.Notes = clean(c.Notes) ? String(c.Notes).replace(/\s+$/,'')+'\n\n'+nb : nb;
+  }
   var line = 'Fact find workbook imported '+localDateStr()+(P.gen.by?' (completed by '+P.gen.by+(P.gen.on?' on '+P.gen.on:'')+')':'')+(P.gen.valDate?', values as at '+P.gen.valDate:'')+'.';
   c.Notes = clean(c.Notes) ? String(c.Notes).replace(/\s+$/,'')+'\n\n'+line : line;
   var i = DB.clients.findIndex(function(x){ return String(x.ID)===String(cid); });
