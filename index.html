@@ -2938,6 +2938,7 @@ function renderProfile(){
     '<button class="btn b-gd sm" data-act="fna-capture" title="Guided FNA interview capture — walk through personal, family, income, assets and needs, confirm or update each item, then build the Data Pack.">📋 FNA Capture</button>'+
     '<button class="btn b-sk sm" style="background:#0e413a;color:#a8b938;border-color:#2a3a5e" onclick="copyFnaDataPack(\''+c.ID+'\')">📦 FNA Data Pack</button>'+
     (c.ClientType==='Company' ? '' : '<button class="btn b-sk sm" style="background:#0e413a;color:#a8b938;border-color:#2a3a5e" title="Export the Excel fact find filled from this record, or import a completed one" onclick="wbkOpen(\''+c.ID+'\')">📗 Excel Fact Find</button>')+
+    (c.ClientType==='Company' ? '' : '<button class="btn b-sk sm" style="background:#0e413a;color:#a8b938;border-color:#2a3a5e" title="Download the Quick FNA (cost of dying) filled from this record" onclick="qfnaExport(\''+c.ID+'\')">📊 Quick FNA</button>')+
     '<button class="btn b-sk sm" style="background:#0e413a;color:#d4af5a;border-color:#2a3a5e" onclick="printBrokerAuth(\''+c.ID+'\')">📄 Broker Auth</button>'+
     '<button class="btn b-sk sm" style="background:#0e413a;color:#d4af5a;border-color:#2a3a5e" onclick="printClientConsent(\''+c.ID+'\')">📄 Policy Consent</button>'+
     '<a href="https://drive.google.com/drive/search?q='+encodeURIComponent(c.Name)+'" target="_blank" style="text-decoration:none"><button class="btn b-gh sm" style="color:#fff;border-color:#334466">📁 Drive</button></a>'+
@@ -19488,6 +19489,318 @@ function wbkFinish(P, cid, results){
   document.getElementById('wbkMod').classList.add('open');
   WBK.plan = null;
   toast(results.fail.length ? 'Imported with '+results.fail.length+' failed save'+(results.fail.length===1?'':'s') : 'Fact find imported','ok');
+}
+
+// Duwalcoe Quick FNA: shared spec (version 1.0, 13 Oct 2026). Phase 1: cost of dying.
+// The template builder (build_qfna.js) and the CRM (index.html, QF_SPEC) both use this.
+// The CRM fills the Inputs sheet by named range (QF_<key> single cells, QF_T_<table> table
+// bodies). Everything else in the workbook is a formula. One way only: nothing comes back.
+var QF_SPEC = {
+  version: '1.0',
+  sheets: {inputs: 'Inputs', summary: 'Summary', quote: 'Figures for quoting', work: 'Workings', lists: 'Lists'},
+  lists: {
+    kind: ['Property', 'Cash and deposits', 'Shares and unit trusts', 'Other investment', 'Tax-free investment', 'Loan account', 'Vehicle or contents', 'Business interest'],
+    passes: ['Estate (residue)', 'Spouse', 'Named heir'],
+    paidTo: ['Estate', 'Spouse', 'Named person'],
+    yesno: ['Yes', 'No'],
+    residue: ['Heirs (people)', 'Spouse'],
+    marital: ['Single', 'Engaged', 'Married - ANC with accrual', 'Married - ANC without accrual', 'Married in COP', 'Life partner', 'Divorced', 'Widowed', 'Married', 'Civil Union', 'Co-Habitation']
+  },
+  // Kinds that carry capital gains tax on death (the rest do not: cash, tax-free, loan accounts, vehicles and contents)
+  cgtKinds: ['Property', 'Shares and unit trusts', 'Other investment', 'Business interest'],
+  // Single cells on Inputs: key, label, type
+  client: [
+    {k: 'Client', label: 'Client', t: 'text'},
+    {k: 'First', label: 'First name, for the wording', t: 'text'},
+    {k: 'Adviser', label: 'Prepared by', t: 'text'},
+    {k: 'Date', label: 'Date of this FNA', t: 'date'},
+    {k: 'AsAt', label: 'Values as at', t: 'date'},
+    {k: 'Marital', label: 'Marital status', t: 'list:marital'},
+    {k: 'Residue', label: 'Who inherits the residue', t: 'list:residue'},
+    {k: 'Wishes', label: 'Their wishes in one line (optional, starts the summary)', t: 'text'},
+    {k: 'TI', label: 'Taxable income for the year of death (R a year)', t: 'money'},
+    {k: 'TINote', label: 'Made up of', t: 'text'}
+  ],
+  tables: {
+    assets: {rows: 18, cols: [
+      {k: 'name', h: 'Asset', t: 'text'}, {k: 'kind', h: 'Kind', t: 'list:kind'}, {k: 'value', h: 'Value (R)', t: 'money'},
+      {k: 'base', h: 'Base cost (R)', t: 'money'}, {k: 'home', h: 'Main home?', t: 'list:yesno'}, {k: 'passes', h: 'Passes to', t: 'list:passes'},
+      {k: 'sold', h: 'Executor sells or cashes it?', t: 'list:yesno'}, {k: 'notes', h: 'Notes', t: 'text'}]},
+    debts: {rows: 10, cols: [{k: 'name', h: 'Debt', t: 'text'}, {k: 'amount', h: 'Amount (R)', t: 'money'}, {k: 'notes', h: 'Notes', t: 'text'}]},
+    cover: {rows: 12, cols: [
+      {k: 'name', h: 'Policy', t: 'text'}, {k: 'paidTo', h: 'Paid to', t: 'list:paidTo'}, {k: 'amount', h: 'Paid at death (R)', t: 'money'},
+      {k: 'counted', h: 'Counted for estate duty?', t: 'list:yesno'}, {k: 'notes', h: 'Notes', t: 'text'}]},
+    funds: {rows: 8, cols: [{k: 'name', h: 'Retirement fund or annuity', t: 'text'}, {k: 'value', h: 'Value (R)', t: 'money'}, {k: 'notes', h: 'Notes', t: 'text'}]},
+    checks: {rows: 14, cols: [{k: 'text', h: 'From the CRM', t: 'text'}]}
+  },
+  quote: [
+    {k: 'QuoteNo', label: 'Quote number', t: 'text'},
+    {k: 'CLFee', label: "Capital Legacy executor's fee, before VAT (%)", t: 'pct'},
+    {k: 'CLConv', label: 'Conveyancing estimate (R)', t: 'money'},
+    {k: 'CLPays', label: 'The plan pays (% of the fees)', t: 'pct'},
+    {k: 'CLLimit', label: 'Limit the plan pays today (R)', t: 'money'},
+    {k: 'CLPrem', label: 'Premium, first year (R a month)', t: 'money2'}
+  ],
+  assumptions: [
+    {k: 'ExecFee', label: "Executor's fee, before VAT (%)", t: 'pct', v: 3.5},
+    {k: 'VAT', label: 'VAT (%)', t: 'pct', v: 15},
+    {k: 'Master', label: "Master's fees (R)", t: 'money', v: 7000},
+    {k: 'Funeral', label: 'Funeral (R)', t: 'money', v: 50000},
+    {k: 'Sundries', label: 'Estate sundries (R)', t: 'money', v: 8000},
+    {k: 'PropCost', label: 'Property transfer costs (% of value)', t: 'pct', v: 1},
+    {k: 'Agent', label: "Agent's commission on a property sold, before VAT (%)", t: 'pct', v: 7.5},
+    {k: 'Abatement', label: 'Estate duty abatement (R)', t: 'money', v: 3500000},
+    {k: 'DutyRate', label: 'Estate duty rate (%)', t: 'pct', v: 20},
+    {k: 'DutyBand', label: 'Higher rate applies above (R)', t: 'money', v: 30000000},
+    {k: 'DutyHigh', label: 'Higher estate duty rate (%)', t: 'pct', v: 25},
+    {k: 'CGTExcl', label: 'Capital gains exclusion in the year of death (R)', t: 'money', v: 440000},
+    {k: 'Inclusion', label: 'Capital gains inclusion rate (%)', t: 'pct', v: 40},
+    {k: 'PRExcl', label: 'Primary residence exclusion (R)', t: 'money', v: 3000000}
+  ],
+  // Income tax table, 2027 tax year (Momentum Tax Guide 2026/2027): taxable income over, tax on
+  // that amount, rate on the amount over it (%). Tax before rebates: the rebates cancel out in
+  // capital gains tax, which is the tax with the gain less the tax without it.
+  taxTable: [[0, 0, 18], [245100, 44118, 26], [383100, 79998, 31], [530200, 125599, 36], [695800, 185215, 39], [887000, 259783, 41], [1878600, 666339, 45]]
+};
+if (typeof module !== 'undefined') module.exports = QF_SPEC;
+
+// ══ QUICK FNA (13 Oct 2026, phase 1: cost of dying) ══════════════════════════
+// Fills Duwalcoe_Quick_FNA_Template.xlsx (next to index.html) from the client's record and
+// downloads it. One way only: nothing is read back. The workbook does every calculation with
+// live formulas; this code only copies the record into the Inputs sheet and lists what the
+// Quick FNA does not cover ("✗ Full FNA: ...") or could not read ("✗ ..."), and notes ("• ...").
+var QF_TEMPLATE_URL = 'Duwalcoe_Quick_FNA_Template.xlsx';
+var QF_ADVISER = 'Clinton Hayes';
+var QF = { busy:false };
+
+function qfnaLoadTemplate(cb){
+  fetch(QF_TEMPLATE_URL, {cache:'no-store'})
+    .then(function(r){ if(!r.ok) throw new Error('HTTP '+r.status); return r.arrayBuffer(); })
+    .then(function(buf){ var wb = new ExcelJS.Workbook(); return wb.xlsx.load(buf).then(function(){ cb(wb); }); })
+    .catch(function(e){ QF.busy=false; console.error('Quick FNA template:', e); toast('The Quick FNA template ('+QF_TEMPLATE_URL+') was not found next to the CRM. Upload it to GitHub with index.html.','err'); });
+}
+function qfR2(n){ return 'R '+Number(n).toLocaleString('en-US',{minimumFractionDigits:2, maximumFractionDigits:2}); }
+function qfNum(v){ var s = String(v===undefined||v===null?'':v).trim(); return s==='' ? null : fpN(s); }
+function qfDate(s){ var m = String(s||'').match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? new Date(Date.UTC(+m[1], +m[2]-1, +m[3])) : null; }
+
+// The record, as Quick FNA input rows. Returns {single:{}, assets:[], debts:[], cover:[], funds:[], checks:[], assumptions:{}}.
+function qfnaData(c){
+  var out = { single:{}, assets:[], debts:[], cover:[], funds:[], checks:[], assumptions:{} };
+  var red = function(t){ out.checks.push('✗ Full FNA: '+t); };
+  var warn = function(t){ out.checks.push('✗ '+t); };
+  var note = function(t){ out.checks.push('• '+t); };
+  var rows = finposFor(c.ID).map(function(r){ return {kind:r.Kind, d:fpData(r)}; });
+  var pols = polsFor(c.ID).filter(function(p){ return !polIsGone(p); });
+  var wrow = (DB.willinstr||[]).find(function(x){ return String(x.ClientID)===String(c.ID); });
+  var W = {}; try{ W = wrow && wrow.Data ? JSON.parse(wrow.Data) : {}; }catch(e){ W = {}; }
+  var marital = clean(c.MaritalStatus) || 'Single';
+  var nm = String(c.Name||'').trim();
+
+  // ── Owner share: the client's own (all), joint (half), the spouse's (left out) ──
+  var spouseLeft = 0, jointSeen = 0;
+  function share(d){
+    var o = String(d.owner||'Client');
+    if(o==='Spouse'){ spouseLeft++; return 0; }
+    if(o==='Joint'){ jointSeen++; return 0.5; }
+    return 1;
+  }
+  function passes(d){ var p = String(d.passesTo||''); return p==='Spouse' ? 'Spouse' : (p==='Named person' ? 'Named heir' : 'Estate (residue)'); }
+  function heirNote(d){ return String(d.passesTo||'')==='Named person' && clean(d.passesToName) ? 'to '+d.passesToName : ''; }
+  function join(a){ return a.filter(function(x){ return x; }).join('; '); }
+  function amt(v, f){ var n = qfNum(v); return n===null ? null : Math.round(n*f*100)/100; }
+
+  // ── Properties ──
+  var rentalPM = 0;
+  rows.filter(function(r){ return r.kind==='property'; }).forEach(function(r){
+    var d = r.d, f = share(d); if(!f) return;
+    rentalPM += fpN(d.rentalPM)*f;
+    out.assets.push({name:clean(d.desc)||'Property', kind:'Property', value:amt(d.value,f), base:amt(d.baseCost,f),
+      home:(d.primaryRes==='Yes'?'Yes':'No'), passes:passes(d), sold:(d.soldDeath==='Yes'?'Yes':'No'),
+      notes:join([f<1?'half of a joint property':'', heirNote(d), clean(d.notes)])});
+    if(fpN(d.bondOut)>0) out.debts.push({name:'Bond: '+(clean(d.desc)||'property'), amount:amt(d.bondOut,f), notes:f<1?'half of the bond':''});
+  });
+  // ── Other assets ──
+  var OTHER_KIND = {'Cash / Savings':'Cash and deposits', 'Fixed Deposit':'Cash and deposits', 'Shares / Unit Trusts':'Shares and unit trusts',
+    'Crypto':'Other investment', 'Loan Account':'Loan account', 'Art / Collectibles':'Vehicle or contents', 'Household Contents':'Vehicle or contents',
+    'Business Interest':'Business interest', 'Other':'Other investment'};
+  rows.filter(function(r){ return r.kind==='other'; }).forEach(function(r){
+    var d = r.d, f = share(d); if(!f) return;
+    var k = OTHER_KIND[d.type] || 'Other investment';
+    if(k==='Business interest') red('a business interest ('+(clean(d.desc)||'business')+'): small business relief, buy-and-sell and loan accounts need the full FNA.');
+    // listed investments left to the estate are cashed in by the executor
+    var sold = (k==='Shares and unit trusts' && passes(d)==='Estate (residue)') ? 'Yes' : (d.soldDeath==='Yes' ? 'Yes' : 'No');
+    out.assets.push({name:clean(d.desc)||d.type||'Asset', kind:k, value:amt(d.value,f), base:(QF_SPEC.cgtKinds.indexOf(k)>=0 ? amt(d.baseCost,f) : null),
+      home:'', passes:passes(d), sold:(k==='Cash and deposits'?'':sold),
+      notes:join([f<1?'half of a joint asset':'', heirNote(d), d.type==='Crypto'?'crypto':'', clean(d.notes)])});
+  });
+  // ── Vehicles ──
+  rows.filter(function(r){ return r.kind==='vehicle'; }).forEach(function(r){
+    var d = r.d, f = share(d); if(!f) return;
+    out.assets.push({name:clean(d.desc)||'Vehicle', kind:'Vehicle or contents', value:amt(d.value,f), base:null, home:'', passes:passes(d),
+      sold:(d.soldDeath==='Yes'?'Yes':'No'), notes:join([f<1?'half of a joint vehicle':'', heirNote(d), clean(d.notes)])});
+    if(fpN(d.financeOut)>0) out.debts.push({name:'Vehicle finance: '+(clean(d.desc)||'vehicle'), amount:amt(d.financeOut,f), notes:''});
+  });
+  // ── Business interests ──
+  rows.filter(function(r){ return r.kind==='business'; }).forEach(function(r){
+    var d = r.d; red('a business interest ('+(clean(d.desc)||d.entityType||'business')+'): small business relief, buy-and-sell and loan accounts need the full FNA.');
+  });
+  // ── Debts ──
+  rows.filter(function(r){ return r.kind==='liability'; }).forEach(function(r){
+    var d = r.d, f = share(d); if(!f) return;
+    out.debts.push({name:clean(d.desc)||d.liabType||'Debt', amount:amt(d.balance,f), notes:join([f<1?'half of a joint debt':'', d.liabType||''])});
+  });
+
+  // ── Policies ──
+  var annuityPM = 0, today = new Date();
+  function bens(p){ try{ var b = JSON.parse(p.Beneficiaries||'[]'); return Array.isArray(b) ? b.filter(function(x){ return x && (clean(x.name)||clean(x.type)); }) : []; }catch(e){ return []; } }
+  function coverRows(p, label, amount, routing){
+    if(!(amount>0)) return;
+    var B = bens(p);
+    if(routing==='Estate' || !B.length){
+      out.cover.push({name:label, paidTo:'Estate', amount:Math.round(amount*100)/100, counted:'Yes', notes:B.length ? 'falls into the estate' : 'no beneficiary nominated: paid to the estate'}); return;
+    }
+    var used = 0, tot = B.reduce(function(s,b){ return s+fpN(b.pct); },0);
+    if(Math.abs(tot-100)>0.01) warn(label+': the beneficiary percentages add up to '+tot+'%, not 100%.');
+    B.forEach(function(b, i){
+      var a = (i===B.length-1) ? Math.round((amount-used)*100)/100 : Math.round(amount*fpN(b.pct)/100*100)/100; used = Math.round((used+a)*100)/100;
+      var t = String(b.type||''), to = (t==='Spouse'||t==='Life Partner') ? 'Spouse' : (t==='Estate' ? 'Estate' : 'Named person');
+      out.cover.push({name:label+(B.length>1?' ('+(clean(b.pct)||'')+'%)':''), paidTo:to, amount:a, counted:'Yes',
+        notes:join([clean(b.name) ? 'to '+b.name : '', t==='Trust' ? 'a trust' : ''])});
+    });
+  }
+  pols.forEach(function(p){
+    var t = p.Type||'', lbl = join([p.Insurer, clean(p.PolicyNo)]).replace(/; /g,' ') || t;
+    var routing = clean(p.EstateRouting) || ((['Flexible Investment','Unit Trust','Tax Free Savings','Offshore Flexible Investment'].indexOf(t)>=0) ? 'Estate' : 'Direct');
+    var fund = fpN(p.BenFundValue) || fpN(p.BenSurrenderValue);
+    if(t==='Business Assurance'){ red('business assurance on '+lbl+' needs the full FNA.'); return; }
+    if(t==='Offshore Endowment' || t==='Offshore Flexible Investment'){ red('an offshore investment ('+lbl+') needs the full FNA.'); return; }
+    if(t==='Living Annuity'){ red('a living annuity ('+lbl+'): estate duty is worked out both ways in the full FNA.'); return; }
+    if(t==='Medical Aid') return;
+    if(t==='Life Annuity'){
+      var start = qfDate(p.StartDate), gy = fpN(p.LifeAnnuityGuarYrs), inc = fpN(p.BenLifeAnnuityIncome);
+      annuityPM += inc;
+      var running = gy>0 && start && (new Date(Date.UTC(start.getUTCFullYear()+gy, start.getUTCMonth(), start.getUTCDate())) > today);
+      if(running) red('the life annuity '+lbl+' is still inside its guarantee period, so it pays out at death.');
+      else out.funds.push({name:'Life annuity '+lbl, value:null, notes:(gy>0 ? 'guarantee ended: ' : 'no guarantee: ')+'stops at death, pays nothing'});
+      return;
+    }
+    if(['Retirement Annuity','Pension Fund','Provident Fund','Pension Preservation','Provident Preservation'].indexOf(t)>=0){
+      out.funds.push({name:t+' '+lbl, value:(fund||fpN(p.BenRetirementValue)||null), notes:'paid out by the fund (s.37C); not in the estate'});
+      if(String(p.HasGroupRisk||'')==='Yes') warn('group life on '+lbl+' is not filled in: add it to section 4 (Counted for estate duty: No if it is approved).');
+      return;
+    }
+    var incRows = []; try{ incRows = JSON.parse(p.IncomeBenefits||'[]')||[]; }catch(e){}
+    if((incRows||[]).some(function(r){ return r && r.type==='Death Income' && !lumpOnOtherLife(r) && N(r.amount)>0; }) || fpN(p.BenDeathIncome)>0)
+      red('a death income benefit on '+lbl+' needs the full FNA.');
+    if(t==='Unit Trust' || t==='Flexible Investment' || t==='Tax Free Savings'){
+      if(routing==='Estate'){
+        var tf = t==='Tax Free Savings';
+        out.assets.push({name:clean(p.Product)||(t+' '+lbl), kind:(tf?'Tax-free investment':'Shares and unit trusts'), value:fund||null,
+          base:(tf?null:qfNum(p.BaseCost)), home:'', passes:'Estate (residue)', sold:'Yes', notes:join([lbl, 'cashed in by the executor'])});
+        if(!fund) warn((clean(p.Product)||lbl)+' has no fund value captured.');
+      } else coverRows(p, (clean(p.Product)||t)+' '+lbl, fund, 'Direct');
+      return;
+    }
+    if(t==='Endowment' || t==='Guaranteed Endowment'){
+      var ev = lumpSum(p,'Life Cover','BenDeath') || fund;
+      if(!ev) warn('the endowment '+lbl+' has no value captured.');
+      coverRows(p, 'Endowment '+lbl, ev, routing); return;
+    }
+    // life and funeral cover on the client's life
+    var dc = lumpSum(p,'Life Cover','BenDeath'), fc = lumpSum(p,'Funeral','');
+    coverRows(p, 'Life cover '+lbl, dc, 'Direct');
+    coverRows(p, 'Funeral benefit '+lbl, fc, 'Direct');
+    if(lumpOtherLives(p).length) note(lbl+' also covers someone else\'s life; that cover is left out.');
+  });
+
+  // ── Taxable income for the year of death ──
+  var incPM = 0, rentalRows = false, annuityRows = false;
+  rows.filter(function(r){ return r.kind==='income'; }).forEach(function(r){
+    var d = r.d, f = share(d); if(!f) return;
+    if(d.incomeType==='Dividends' || d.taxable==='No') return;
+    if(d.incomeType==='Rental Income') rentalRows = true;
+    if(d.incomeType==='Annuity Income') annuityRows = true;
+    incPM += fpN(d.amountPM)*f;
+    if(fpN(d.bonus)>0) incPM += fpN(d.bonus)*f/12;
+  });
+  if(rentalRows && rentalPM>0){ warn('rental income is on the property cards and on an income row: the taxable income counts both, so check it.'); }
+  if(annuityRows && annuityPM>0){ warn('annuity income is on a policy and on an income row: the taxable income counts both, so check it.'); }
+  var parts = [];
+  if(incPM>0) parts.push('income R '+Number(incPM).toLocaleString('en-US',{minimumFractionDigits:2, maximumFractionDigits:2}));
+  if(rentalPM>0) parts.push('rentals '+qfR2(rentalPM));
+  if(annuityPM>0) parts.push('annuities '+qfR2(annuityPM));
+  var TI = Math.round((incPM+rentalPM+annuityPM)*12*100)/100;
+
+  // ── Will capture ──
+  var residue = 'Heirs (people)';
+  if(wrow){
+    if(W.res_choice==='Entire residue to my spouse / life partner') residue = 'Spouse';
+    else if(W.res_choice==='Split as follows (table below)' && /Married|Life partner/.test(marital)) red('the residue is split, and part may go to the spouse.');
+    if(qfNum(W.fw_cost)!==null && qfNum(W.fw_cost)>0){ out.assumptions.Funeral = qfNum(W.fw_cost); note('Funeral R '+Number(qfNum(W.fw_cost)).toLocaleString('en-US')+' from the will capture.'); }
+    if(W.ex_fee==='Agreed reduced rate (below)'){
+      var er = qfNum(String(W.ex_fee_rate||'').replace('%',''));
+      if(er!==null && er>0){ out.assumptions.ExecFee = er; note('Executor\'s fee '+er+'% plus VAT, agreed in the will capture.'); }
+      else warn('the will capture says a reduced executor\'s fee was agreed, but not the rate: 3.5% plus VAT is used.');
+    }
+    if(/^Yes|^Only if/.test(W.tr_choice||'')) note('The will sets up a testamentary trust. It does not change the cost of dying; the children\'s needs belong in a death cover FNA.');
+    var nb = 0; for(var i=1;i<=6;i++){ if(clean(W['bq'+i+'_item'])) nb++; }
+    if(nb) note('The will capture has '+nb+' specific bequest'+(nb>1?'s':'')+': check "Passes to" on those assets (Named heir).');
+  } else note('No will captured: worst case, everything goes to heirs as people (no spouse deduction).');
+
+  if(spouseLeft) note(spouseLeft+' of the spouse\'s own asset'+(spouseLeft>1?'s and debts are':' or debt is')+' left out: only '+(clean(c.CallingName)||nm.split(' ')[0])+'\'s estate is costed.');
+  if(jointSeen) note('Joint assets and debts are entered at half; change them if the shares are not equal.');
+  if(!out.assets.length) warn('no assets are captured.');
+
+  var asAt = rows.map(function(r){ return String(r.d.valueDate||''); }).filter(function(s){ return /^\d{4}-\d{2}-\d{2}$/.test(s); }).sort().pop();
+  out.single = { Client:(clean(c.Title)?c.Title+' ':'')+nm, First:clean(c.CallingName)||nm.split(' ')[0], Adviser:QF_ADVISER,
+    Date:qfDate(localDateStr()), AsAt:asAt ? qfDate(asAt) : null, Marital:marital, Residue:residue, Wishes:null,
+    TI:TI, TINote:parts.length ? parts.join(' and ')+' a month' : 'no taxable income captured' };
+  return out;
+}
+
+function qfnaExport(cid){
+  if(QF.busy) return;
+  var c = wbkClient(cid);
+  if(!c){ toast('Client not found.','err'); return; }
+  if(c.ClientType==='Company'){ toast('The Quick FNA is for individuals, not company records.','err'); return; }
+  QF.busy = true;
+  toast('Preparing the Quick FNA…','ok');
+  wbkWithExcelJS(function(){ qfnaLoadTemplate(function(wb){
+    try{
+      var D = qfnaData(c), N = wbkNames(wb), errs = [];
+      var cell = function(n){ var x = wbkCell(wb, N[n]); if(!x) errs.push(n); return x; };
+      var set = function(n, v){ var x = cell(n); if(x) x.value = (v===undefined ? null : v); };
+      Object.keys(D.single).forEach(function(k){ set('QF_'+k, D.single[k]); });
+      Object.keys(D.assumptions).forEach(function(k){ set('QF_A_'+k, D.assumptions[k]); });
+      function fill(tbl, list, what){
+        var K = N['QF_K_'+tbl], T = N['QF_T_'+tbl];
+        if(!K || !T){ errs.push('QF_T_'+tbl); return; }
+        var keys = wbkKeys(wb, K), ws = wb.getWorksheet(T.sheet), cap = T.r2 - T.r1 + 1;
+        if(list.length > cap) D.checks.push('✗ Only '+cap+' '+what+' fit on the Inputs sheet; '+(list.length-cap)+' left out. Use the full FNA.');
+        list.slice(0, cap).forEach(function(row, i){
+          Object.keys(row).forEach(function(k){ if(keys[k]) ws.getCell(T.r1+i, keys[k]).value = (row[k]===undefined || row[k]==='' ? null : row[k]); });
+        });
+      }
+      fill('assets', D.assets, 'assets'); fill('debts', D.debts, 'debts'); fill('cover', D.cover, 'policies'); fill('funds', D.funds, 'retirement funds');
+      fill('checks', D.checks.map(function(t){ return {text:t}; }), 'check lines');
+      set('QF_M_ClientID', String(c.ID)); set('QF_M_ClientName', c.Name||''); set('QF_M_Version', QF_SPEC.version);
+      set('QF_M_ExportedAt', new Date().toISOString().slice(0,16).replace('T',' '));
+      set('QF_M_ExportedBy', (typeof userLabel==='function') ? userLabel(cu()) : cu());
+      if(errs.length){ QF.busy=false; toast('The Quick FNA template is missing '+errs.join(', ')+'. Upload the latest template.','err'); return; }
+      wb.calcProperties = wb.calcProperties || {}; wb.calcProperties.fullCalcOnLoad = true;
+      wb.xlsx.writeBuffer().then(function(buf){
+        var parts = String(c.Name||'Client').trim().split(/\s+/), sur = parts[parts.length-1], fn = clean(c.CallingName) || parts[0];
+        var fname = (sur+'_'+fn+'_Quick_FNA_Cost_of_Dying_'+localDateStr()+'.xlsx').replace(/[^A-Za-z0-9_.\-]/g,'');
+        var blob = new Blob([buf], {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+        var a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = fname;
+        document.body.appendChild(a); a.click();
+        setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); }, 4000);
+        QF.busy = false;
+        var reds = D.checks.filter(function(t){ return t.indexOf('✗ Full FNA')===0; }).length;
+        toast('Downloaded '+fname+(reds ? ' · '+reds+' item'+(reds>1?'s':'')+' need the full FNA (see Checks)' : ''), reds ? 'err' : 'ok');
+      }).catch(function(e){ QF.busy=false; console.error(e); toast('Could not write the Quick FNA: '+e.message,'err'); });
+    }catch(e){ QF.busy=false; console.error(e); toast('Could not fill the Quick FNA: '+e.message,'err'); }
+  }); });
 }
 
 // ══ FACT-FIND (fluid new-client / lead capture) ══════════════════════════════
