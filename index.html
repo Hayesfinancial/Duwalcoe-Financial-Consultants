@@ -2785,7 +2785,7 @@ function clientTable(list,mini,isLeads,isFamily){
     '</tr></thead><tbody>'+
     list.map(function(c){
       var rev=daysTo(c.ReviewDate);
-      var np=polsFor(c.ID).filter(function(p){return !polIsEnded(p);}).length;
+      var np=polsFor(c.ID).filter(function(p){return !polIsGone(p);}).length;
       var nt=DB.tasks.filter(function(t){return !isdone(t)&&sameClient(t.ClientName,c.Name);}).length;
       var em=clean(c.Email);
       var ag=ageOf(c);
@@ -2963,7 +2963,7 @@ function renderProfile(){
     })()+
     '<div class="tabs">'+
     '<div class="tab'+(CTAB==='overview'?' on':'')+'" data-act="tab" data-tab="overview">Overview</div>'+
-    '<div class="tab'+(CTAB==='policies'?' on':'')+'" data-act="tab" data-tab="policies">Policies ('+pols.filter(function(p){return !polIsEnded(p);}).length+')</div>'+
+    '<div class="tab'+(CTAB==='policies'?' on':'')+'" data-act="tab" data-tab="policies">Policies ('+pols.filter(function(p){return !polIsGone(p);}).length+')</div>'+
     (function(){var fp=finposFor(c.ID).filter(function(r){return FP_NOT_ITEM_KINDS.indexOf(r.Kind)<0;});return '<div class="tab'+(CTAB==='finpos'?' on':'')+'" data-act="tab" data-tab="finpos">Financial Position'+(fp.length?' ('+fp.length+')':'')+'</div>';})()+
     (function(){var nd=finposFor(c.ID).filter(function(r){return r.Kind==='need';});return '<div class="tab'+(CTAB==='needs'?' on':'')+'" data-act="tab" data-tab="needs">Needs'+(nd.length?' ('+nd.length+')':'')+'</div>';})()+
     (function(){var bks=[];try{bks=c.BankDetails?JSON.parse(c.BankDetails):[];}catch(e){}return '<div class="tab'+(CTAB==='banking'?' on':'')+'" data-act="tab" data-tab="banking">Banking'+(bks.length?' ('+bks.length+')':'')+'</div>';})()+
@@ -3757,7 +3757,7 @@ function renderOverview(c,pols,roas,ctasks){
     var f=p.Frequency||'Monthly';
     return f==='Once Off'||f==='Lump Sum'||f==='Annually'||f==='Quarterly';
   }
-  var activePols=pols.filter(function(p){return !polIsEnded(p);});
+  var activePols=pols.filter(function(p){return !polIsGone(p);});   // 13 Oct 2026: same rule as the schedule
   var recurringPers=activePols.filter(function(p){return !isNonMonthlyPrem(p) && p.Type!=='Business Assurance';});
   var recurringBiz=activePols.filter(function(p){return !isNonMonthlyPrem(p) && p.Type==='Business Assurance';});
   var nonMonthlyPols=activePols.filter(function(p){return isNonMonthlyPrem(p);});
@@ -3980,8 +3980,8 @@ function renderPolicies(c,pols){
     '<button class="btn b-gh sm" data-act="astute-import" data-cid="'+c.ID+'">📥 Import from Astute</button>'+
     '<button class="btn b-gd sm" data-act="open-new-policy" data-cid="'+c.ID+'">+ Add Policy</button></div></div>'+
     (function(){
-      var active=pols.filter(function(p){return !polIsEnded(p);});
-      var replaced=pols.filter(function(p){return polIsEnded(p);});
+      var active=pols.filter(function(p){return !polIsGone(p);});
+      var replaced=pols.filter(function(p){return polIsGone(p);});   // 13 Oct 2026: Cancelled and Lapsed fold away too
 
       // Category definitions — kept aligned with the schedule's grouping so the
       // CRM and the printed schedule are always visually consistent. Order here
@@ -4108,8 +4108,14 @@ function renderPolicies(c,pols){
       })();
       return (active.length===0?'<div class="empty cb">No policies yet</div>':polTableGrouped(active))+keyLifeHtml+
         (replaced.length?'<details style="margin-top:8px"><summary style="cursor:pointer;padding:10px 16px;font-size:12px;font-weight:700;color:#889;background:#f8f8f5">🔄 '+replaced.length+' '+
-          (function(){ var nr=replaced.filter(function(p){ return p.Status==='Retired'; }).length; return nr===replaced.length ? 'Retired' : (nr ? 'Replaced or Retired' : 'Replaced'); })()+
-          ' Polic'+(replaced.length===1?'y':'ies')+'</summary>'+polTableFlat(replaced,false)+'</details>':'');
+          (function(){
+            // 13 Oct 2026: names what is folded, e.g. "2 Cancelled Policies" or "3 Ended Policies (1 Replaced · 2 Cancelled)".
+            var by={}, order=['Replaced','Retired','Cancelled','Lapsed'];
+            replaced.forEach(function(p){ by[p.Status]=(by[p.Status]||0)+1; });
+            var kinds=order.filter(function(k){ return by[k]; });
+            var pl=' Polic'+(replaced.length===1?'y':'ies');
+            return kinds.length===1 ? kinds[0]+pl : 'Ended'+pl+' <span style="font-weight:400">('+kinds.map(function(k){ return by[k]+' '+k; }).join(' · ')+')</span>';
+          })()+'</summary>'+polTableFlat(replaced,false)+'</details>':'');
     })()+
     '</div>';
 }
@@ -12984,6 +12990,10 @@ function willIsDeadPolicy(p){ return p.Status==='Replaced' || p.Status==='Retire
 // Replaced, or Retired (the client retired from it into a new policy, e.g. a
 // pension fund into a living annuity; 11 Oct 2026). Both are history only.
 function polIsEnded(p){ return !!p && (p.Status==='Replaced' || p.Status==='Retired'); }
+// 13 Oct 2026: no longer in force (Replaced, Retired, Cancelled or Lapsed), the same rule as the
+// printed schedule. Folded away on the Policies tab and left out of counts and Overview totals;
+// kept for history. polIsEnded stays Replaced / Retired only (the replace workflow uses it).
+function polIsGone(p){ return !!p && willIsDeadPolicy(p); }
 function polEndedWord(p){ return p && p.Status==='Retired' ? 'retired into' : 'replaced by'; }
 // Family names for the beneficiary boxes in sections 7 and 8, as "Name (Relationship)".
 function willNameOptions(c){
