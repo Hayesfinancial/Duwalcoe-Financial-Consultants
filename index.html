@@ -6579,7 +6579,25 @@ function revOtherMonthCardHtml(R, ym, full){
   var note = '<div style="padding:6px 12px;background:#f7f8fa;font-size:11px;color:#556;border-top:1px solid var(--smoke)">'+
     (future ? 'Insurer letter in early? 📋 Start review here: the review is opened now, the letter goes into it, and the task is due on 1 '+escHtml(revYmLabel(ym))+'. The "not spoken to in a year" list is picked at the start of each month.'
             : 'What was due in '+escHtml(revYmLabel(ym))+'. Anything not done there is carried over to this month.')+'</div>';
-  var rows = list.map(function(x){
+  // 13 Oct 2026: finished ones (review complete or NTU, or ✓ Done) fold into one line each
+  // at the bottom, like "Done this month"; started-but-open reviews stay full rows.
+  var finished = function(x){ return x.ev ? (x.ev.Status === 'complete' || x.ev.Status === 'ntu') : !!x.tick; };
+  var fin = list.filter(finished);
+  var doneHtml = fin.length ? '<details style="border-top:1px solid var(--smoke)" ontoggle="window._revOthDoneOpen=this.open"'+(window._revOthDoneOpen ? ' open' : '')+'><summary style="padding:6px 12px;font-size:11px;font-weight:700;color:#2d7a3e;cursor:pointer">✓ Completed ('+fin.length+')</summary>'+
+    fin.map(function(x){
+      var id = escHtml(String(x.c.ID)), what;
+      if(x.ev){
+        var when = String(x.ev.CompletedAt || '').slice(0,10);
+        what = '🔄 '+(x.ev.Status === 'ntu' ? 'NTU' : 'complete')+(when ? ' '+escHtml(fdate(when)) : '')+(x.ev.ResponsibleUser ? ' · '+escHtml(userLabel(x.ev.ResponsibleUser)) : '');
+      } else {
+        what = '✓ Done '+escHtml(fdate(String(x.tick.at||'').slice(0,10)))+(x.tick.by ? ' · '+escHtml(userLabel(x.tick.by)) : '');
+      }
+      return '<div class="ri" style="padding:5px 12px;font-size:11.5px;display:flex;gap:8px;align-items:center;cursor:pointer" data-act="open-client" data-id="'+id+'">'+
+        '<span style="flex:1"><b>'+escHtml(x.c.Name||'')+'</b> <span style="color:#889">· '+what+'</span></span>'+
+        (x.ev ? '<button class="btn b-gh xs" style="font-size:10px;padding:2px 7px" onclick="event.stopPropagation();revOpenExistingReview(\''+escHtml(String(x.ev.ID))+'\',\''+id+'\')">Open</button>' : '')+
+        '</div>';
+    }).join('')+'</details>' : '';
+  var rows = list.filter(function(x){ return !finished(x); }).map(function(x){
     var c = x.c, id = escHtml(String(c.ID));
     var lines = x.ann.map(function(a){ return revAnnLine(a, ym, false); }).join('')+(x.rv ? '<div style="font-size:11.5px;color:#445">🗓 Annual review month · '+escHtml(revYmLabel(ym, true))+'</div>' : '');
     var st, bar;
@@ -6603,7 +6621,7 @@ function revOtherMonthCardHtml(R, ym, full){
       '<div style="display:flex;gap:6px;flex-shrink:0;align-items:center">'+st+'</div></div>';
   }).join('');
   return '<div class="card" style="padding:0;margin-bottom:12px">'+head+note+
-    '<div id="revScroll" style="'+(full?'':'max-height:420px;overflow-y:auto')+'">'+(rows || '<div class="empty" style="padding:14px">Nobody comes up in '+escHtml(revYmLabel(ym))+' yet</div>')+'</div></div>';
+    '<div id="revScroll" style="'+(full?'':'max-height:420px;overflow-y:auto')+'">'+(rows || (fin.length ? '<div class="empty" style="padding:14px">All done for '+escHtml(revYmLabel(ym))+' ✅</div>' : '<div class="empty" style="padding:14px">Nobody comes up in '+escHtml(revYmLabel(ym))+' yet</div>'))+doneHtml+'</div></div>';
 }
 // Is work_events.ReviewMonth there? (read from the loaded reviews; asked once if none were loaded)
 function revMonthEnsure(cb){
