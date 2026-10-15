@@ -6406,13 +6406,30 @@ function revHasOwnPolicy(polIdx, c){
 //    January letter filed in October) it closes only that month, not October's.
 //  · Otherwise (older events, + New Event): one dated on or after the 1st of ym
 //    closes ym and any month carried over before it.
+//  · 15 Oct 2026: ReviewMonth can list several months ("2026-10,2026-11") when another
+//    month's anniversaries were added to an open review (➕ Add to this review). Every
+//    month listed closes; the earliest one decides whether the review was started early.
 function revEventCloses(e, ym){
-  var d = String(e.EventDate||'').slice(0,10), dYm = d.slice(0,7), rm = clean(e.ReviewMonth);
-  if(rm){
-    if(rm === ym) return true;
-    if(rm > dYm) return false;              // an early review covers only its own month
+  var d = String(e.EventDate||'').slice(0,10), dYm = d.slice(0,7), rms = revMonthsOf(e);
+  if(rms.length){
+    if(rms.indexOf(ym) >= 0) return true;
+    if(rms[0] > dYm) return false;          // an early review covers only its own month(s)
   }
   return d >= ym+'-01';
+}
+// The months a review is for, earliest first (15 Oct 2026).
+function revMonthsOf(e){
+  var out = [];
+  String(clean(e && e.ReviewMonth) || '').split(',').forEach(function(x){ x = x.trim(); if(/^\d{4}-\d{2}$/.test(x) && out.indexOf(x) < 0) out.push(x); });
+  return out.sort();
+}
+// "October 2026", "October + November 2026", "December 2026 + January 2027".
+function revMonthsLabel(rm){
+  var ms = revMonthsOf({ReviewMonth:rm});
+  if(!ms.length) return '';
+  var oneYear = ms.every(function(m){ return m.slice(0,4) === ms[0].slice(0,4); });
+  return oneYear ? ms.map(function(m){ return MONTH_NAMES[revYmDate(m).getMonth()]; }).join(' + ')+' '+ms[0].slice(0,4)
+                 : ms.map(function(m){ return revYmLabel(m); }).join(' + ');
 }
 function revEventSince(cid, ym){
   var R = window._revEvents;
@@ -8898,7 +8915,14 @@ function renderEventDetail(ev, c, pols){
     html += '<div style="font-size:12px;color:#889;font-style:italic;margin:2px 0 4px">No case name yet. Use Edit Event to add one.</div>';
   }
   // The month an Annual Review is for (set by 📋 Start review, 6 Oct 2026).
-  if(clean(ev.ReviewMonth)) html += '<div style="font-size:12px;font-weight:700;color:#2d7a3e;margin:0 0 4px">🗓 Review for '+escHtml(revYmLabel(ev.ReviewMonth))+'</div>';
+  // 15 Oct 2026: a month added later (➕ Add to this review) has ✕ to take it off again.
+  if(clean(ev.ReviewMonth)){
+    var _rms = revMonthsOf(ev), _rmOrig = String(ev.ReviewMonth).split(',')[0].trim();
+    html += '<div style="font-size:12px;font-weight:700;color:#2d7a3e;margin:0 0 4px">🗓 Review for '+escHtml(revMonthsLabel(ev.ReviewMonth))+
+      (_rms.length > 1 ? _rms.filter(function(m){ return m !== _rmOrig; }).map(function(m){
+        return ' <button type="button" class="btn b-gh xs" style="font-size:10px;padding:1px 6px;color:#b23" title="Take '+escHtml(revYmLabel(m))+' off this review: its reminder comes back" onclick="revRemoveMonth(\''+escHtml(String(ev.ID))+'\',\''+m+'\')">✕ '+escHtml(revYmLabel(m, true))+'</button>';
+      }).join('') : '')+'</div>';
+  }
   // Notes in a clear yellow box (was faint italic text that staff missed).
   if(ev.Notes && String(ev.Notes).trim()){
     html += '<div style="margin:8px 0 4px;padding:8px 12px;background:#fff8dc;border-left:3px solid #e0b800;border-radius:4px">'+
@@ -10876,7 +10900,7 @@ function tevRender(tid, eid){
       '<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:.6px">'+(isRef ? '📎 Case you file into' : '📋 Work event')+'</div>'+
       '<span style="font-size:12.5px;font-weight:700;color:#0e413a">'+escHtml(eventTypeLabel(ev))+'</span>'+
       (ev.Outcome ? '<span style="font-size:12px;color:#445">· '+escHtml(ev.Outcome)+'</span>' : '')+
-      (clean(ev.ReviewMonth) ? '<span style="font-size:11px;font-weight:700;color:#2d7a3e">🗓 for '+escHtml(revYmLabel(ev.ReviewMonth))+'</span>' : '')+
+      (clean(ev.ReviewMonth) ? '<span style="font-size:11px;font-weight:700;color:#2d7a3e">🗓 for '+escHtml(revMonthsLabel(ev.ReviewMonth))+'</span>' : '')+
       '<span style="background:'+st.bg+';color:'+st.clr+';padding:1px 7px;border-radius:4px;font-size:10px;font-weight:700;text-transform:uppercase">'+escHtml(st.txt)+'</span>'+
       '<button class="btn b-gh xs" style="margin-left:auto;font-size:11px" data-act="tev-open" data-cid="'+escHtml(String(ev.ClientID))+'" data-eid="'+escHtml(String(ev.ID))+'" title="Open the work event on the client\'s Work Events tab">Open work event ↗</button>'+
     '</div>'+
@@ -11000,13 +11024,19 @@ function revStartReview(cid, forYm){
   var defName = items.length
     ? items.map(function(x){ return (x.pol.Insurer||x.pol.Type||'Policy')+(clean(x.pol.PolicyNo) ? ' '+x.pol.PolicyNo : ''); }).join(' + ')+' anniversary '+monthTxt
     : (r && r.feed ? 'Reconnect: not spoken to in a year' : 'Annual review '+monthTxt);
-  // Open reviews for the same month (or with no month recorded) are worth a warning.
-  var openRevs = ((window._revEvents && window._revEvents.allByClient && window._revEvents.allByClient[cid]) || []).filter(function(e){ return e.Status === 'in_progress' && (!clean(e.ReviewMonth) || e.ReviewMonth === target); });
+  // Any open review for this client, whatever month it is for (15 Oct 2026; was the same
+  // month only). ➕ Add to this review puts these policies and this month into it instead
+  // of starting a second review (revAddToReview).
+  var openRevs = ((window._revEvents && window._revEvents.allByClient && window._revEvents.allByClient[cid]) || []).filter(function(e){ return e.Status === 'in_progress'; });
+  var canAdd = window._revMonthReady === true;
+  var addMonths = monthsSeen.length ? monthsSeen.slice() : [target];
+  window._srCtx = {cid:String(cid), items:items, months:addMonths};
   var warn = openRevs.length ? '<div style="background:#fff8dc;border-left:3px solid #e0b800;border-radius:4px;padding:8px 10px;font-size:12px;color:#3d3300;margin-bottom:10px">'+
-      '<b>An Annual Review is already open for this client:</b>'+
-      openRevs.map(function(e){ return '<div style="display:flex;gap:8px;align-items:center;margin-top:4px"><span style="flex:1">'+escHtml(e.Outcome||eventTypeLabel(e))+' · opened '+escHtml(fdate(e.EventDate))+'</span>'+
+      '<b>'+(openRevs.length === 1 ? 'An Annual Review is' : openRevs.length+' Annual Reviews are')+' already open for this client:</b>'+
+      openRevs.map(function(e){ return '<div style="display:flex;gap:6px;align-items:center;margin-top:4px;flex-wrap:wrap"><span style="flex:1;min-width:180px">'+escHtml(e.Outcome||eventTypeLabel(e))+' · opened '+escHtml(fdate(e.EventDate))+(clean(e.ReviewMonth) ? ' · for '+escHtml(revMonthsLabel(e.ReviewMonth)) : '')+'</span>'+
+        (canAdd ? '<button type="button" class="btn b-nv xs" title="Link the ticked policies to this review and close '+escHtml(addMonths.map(function(m){ return revYmLabel(m); }).join(' and '))+' with it. No second task or work event." onclick="revAddToReview(\''+escHtml(String(e.ID))+'\')">➕ Add to this review</button>' : '')+
         '<button type="button" class="btn b-gh xs" onclick="revOpenExistingReview(\''+escHtml(String(e.ID))+'\',\''+escHtml(String(cid))+'\')">Open it</button></div>'; }).join('')+
-      '<div style="margin-top:4px;color:#667">Open that one instead, or start a new review below.</div></div>' : '';
+      '<div style="margin-top:4px;color:#667">'+(canAdd ? 'Add these policies to it (one review for them all), open it, or start a separate review below.' : 'Open that one instead, or start a new review below.')+'</div></div>' : '';
   var polHtml = items.length ? '<div class="fld"><label>Policies to link to the review</label>'+
       items.map(function(x, i){
         var p = x.pol;
@@ -11014,7 +11044,7 @@ function revStartReview(cid, forYm){
           '<input type="checkbox" data-pol="'+escHtml(String(p.ID))+'" checked style="margin-top:2px;width:15px;height:15px;accent-color:#0e413a">'+
           '<span>'+escHtml((p.Insurer||'Policy')+(p.Type?' · '+p.Type:'')+(clean(p.PolicyNo)?' · '+p.PolicyNo:''))+' <span style="color:#889">· '+x.day+' '+escHtml(revYmLabel(x.ym,true))+' · year '+x.years+(x.notMine?' · not your policy':'')+(clean(p.Status) && p.Status!=='Active'?' · '+escHtml(p.Status):'')+'</span></span></label>';
       }).join('')+'</div>' : '';
-  miniDialog('📋 Start review · '+escHtml(c.Name||''),
+  var _srDlg = miniDialog('📋 Start review · '+escHtml(c.Name||''),
     warn+
     '<div style="font-size:12.5px;color:#556;margin-bottom:10px">'+(early
       ? 'An early review for <b>'+escHtml(revYmLabel(target))+'</b>: the task and its Annual Review work event are made now (file the insurer\'s letter in it), the task is due on 1 '+escHtml(revYmLabel(target))+', and that month\'s reminder closes. This month\'s reminders are not touched.'
@@ -11051,12 +11081,101 @@ function revStartReview(cid, forYm){
       caseLinkCreate({ev:ev, task:task, links:pids.map(function(id){ return {PolicyID:id, Action:'reviewed'}; }), keepTaskOnFail:false,
         okMsg:'Review started: task for '+userLabel(who)+' ✓'}, function(){ delete TASK_BUSY['sr_'+cid]; var _s=captureScrolls(); render(); restoreScrolls(_s); });
     });
+  window._srCtx.box = _srDlg.box;   // ➕ Add to this review reads the ticked policies from here
 }
 function revOpenExistingReview(eid, cid){
   if(window._miniDialogClose) window._miniDialogClose();
   var t = taskForEvent(eid);
   if(t){ openTaskLogModal(t.ID); return; }
   openBoardCase(cid, eid);
+}
+// ── ➕ Add to this review (15 Oct 2026) ──
+// From the 📋 Start review dialog: the ticked policies are linked to an open review, the
+// month(s) are added to its ReviewMonth list (so their reminder closes), the policies are
+// added to its case name, and a line goes into its task. No second task or work event.
+var _revAddBusy = false;
+function revAddToReview(eid){
+  var ctx = window._srCtx; if(!ctx || _revAddBusy) return;
+  var box = ctx.box && ctx.box.isConnected ? ctx.box : null;
+  var pids = box ? Array.prototype.map.call(box.querySelectorAll('input[data-pol]:checked'), function(i){ return i.getAttribute('data-pol'); }) : [];
+  var picked = ctx.items.filter(function(x){ return pids.indexOf(String(x.pol.ID)) >= 0; });
+  _revAddBusy = true;
+  evFetch(eid, function(ev, err){
+    if(!ev || err){ _revAddBusy = false; alert('Could not read that review from the server, so nothing was changed. Please try again.'+(err ? '\n\n('+err+')' : '')); return; }
+    if(ev.Status !== 'in_progress'){ _revAddBusy = false; alert('That review has been closed in the meantime, so nothing was changed.'); return; }
+    sbFetch('GET','/rest/v1/work_event_policies?WorkEventID=eq.'+encodeURIComponent(eid)+'&select=PolicyID', null, function(lrows, lerr){
+      if(lerr){ _revAddBusy = false; alert('Could not read that review\'s policies, so nothing was changed. Please try again.\n\n('+lerr+')'); return; }
+      var have = (lrows||[]).map(function(r){ return String(r.PolicyID); });
+      var addPols = picked.filter(function(x){ return have.indexOf(String(x.pol.ID)) < 0; });
+      // Months: keep what it has (an older review with none counts for the month it was opened in).
+      var ms = revMonthsOf(ev);
+      if(!ms.length) ms = [String(ev.EventDate||'').slice(0,7)].filter(function(m){ return /^\d{4}-\d{2}$/.test(m); });
+      var orig = ms.slice();
+      var newMs = ctx.months.filter(function(m){ return ms.indexOf(m) < 0; });
+      ms = ms.concat(newMs).sort();
+      // Case name: the policies not named in it yet, with their month.
+      var name = String(ev.Outcome||'').trim();
+      var addTxt = addPols.filter(function(x){ return !(clean(x.pol.PolicyNo) && name.indexOf(String(x.pol.PolicyNo)) >= 0); }).map(function(x){
+        return (x.pol.Insurer||x.pol.Type||'Policy')+(clean(x.pol.PolicyNo) ? ' '+x.pol.PolicyNo : '')+' '+revYmLabel(x.ym, true);
+      });
+      if(addTxt.length) name = (name ? name+' + ' : '')+addTxt.join(' + ');
+      if(!newMs.length && !addPols.length){ _revAddBusy = false; alert('This review already covers '+ctx.months.map(function(m){ return revYmLabel(m); }).join(' and ')+' and these policies. Nothing to add.'); return; }
+      // The first month stays first, so ✕ is only offered on the added ones.
+      var stored = [orig[0] || ms[0]].concat(ms.filter(function(m){ return m !== (orig[0] || ms[0]); })).join(',');
+      var fields = {ReviewMonth:stored};
+      if(name !== String(ev.Outcome||'').trim()) fields.Outcome = name;
+      sbFetch('PATCH','/rest/v1/work_events?ID=eq.'+encodeURIComponent(eid), fields, function(r1, e1){
+        if(e1){ _revAddBusy = false; alert('Could not update the review, so nothing was changed. Please try again.\n\n('+e1+')'); return; }
+        Object.keys(fields).forEach(function(k){ ev[k] = fields[k]; });
+        revRowSync(ev);
+        var links = addPols.map(function(x){ return {WorkEventID:eid, PolicyID:String(x.pol.ID), Action:'reviewed'}; });
+        function finish(linkFail){
+          _revAddBusy = false;
+          var lines = picked.map(function(x){ var p = x.pol; return '• '+(p.Insurer||'Policy')+(p.Type?' '+p.Type:'')+(clean(p.PolicyNo)?' ('+p.PolicyNo+')':'')+': anniversary '+x.day+' '+revYmLabel(x.ym,true)+', year '+x.years+(have.indexOf(String(p.ID)) >= 0 ? ' (already linked)' : ''); });
+          var text = 'Added to this review from the Reviews list by '+userLabel(cu())+'.'+(lines.length ? '\n'+lines.join('\n') : '')+
+            (newMs.length ? '\n'+newMs.map(function(m){ return revYmLabel(m); }).join(' and ')+' reminder closed by this review.' : '')+
+            (linkFail ? '\n⚠ The policies could not be linked: link them on the work event.' : '');
+          var t = taskForEvent(eid);
+          if(t){
+            taskLogPush(t, text);
+            var tf = {Notes:t.Notes};
+            if(fields.Outcome){ t.Title = taskTitleForEvent(ev); tf.Title = t.Title; }
+            post({action:'patchTask', id:t.ID, fields:tf}, function(r){ if(!(r && r.ok)) toast('⚠️ Review updated, but the line in its task could not be saved.','err'); });
+            try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
+          }
+          if(window._miniDialogClose) window._miniDialogClose();
+          toast(linkFail ? '⚠️ Review updated, but its policies could not be linked. Link them on the work event.' : 'Added to the review'+(newMs.length ? ': '+newMs.map(function(m){ return revYmLabel(m, true); }).join('/')+' reminder closed' : '')+' ✓', linkFail ? 'err' : 'ok');
+          evAfterChange(ev.ClientID);
+          var _s=captureScrolls(); render(); restoreScrolls(_s);
+        }
+        if(!links.length){ finish(false); return; }
+        sbFetch('POST','/rest/v1/work_event_policies', links, function(r3, e3){ finish(!!e3); });
+      });
+    });
+  });
+}
+// Keep the Reviews list's copy of a review in step at once (before the next reload).
+function revRowSync(ev){
+  var R = window._revEvents; if(!R || !R.allByClient) return;
+  (R.allByClient[ev.ClientID] || []).forEach(function(x){ if(String(x.ID) === String(ev.ID)){ x.ReviewMonth = ev.ReviewMonth; x.Outcome = ev.Outcome; } });
+}
+// ✕ on an added month (work event screen): take it off the review, its reminder comes back.
+function revRemoveMonth(eid, ym){
+  var ev = evFindAny(eid); if(!ev) return;
+  var ms = String(clean(ev.ReviewMonth)||'').split(',').map(function(x){ return x.trim(); }).filter(Boolean);
+  if(ms.length < 2 || ms.indexOf(ym) < 0) return;
+  var c = DB.clients.find(function(x){ return String(x.ID) === String(ev.ClientID); });
+  if(!confirm('Take '+revYmLabel(ym)+' off this review?\n\n'+(ev.Outcome||eventTypeLabel(ev))+'\n\n'+(c && c.Name ? c.Name : 'The client')+' comes back on the Reviews list for '+revYmLabel(ym)+'. Linked policies and the case name are not changed (use Unlink and Edit Event for those).')) return;
+  var stored = ms.filter(function(m){ return m !== ym; }).join(',');
+  sbFetch('PATCH','/rest/v1/work_events?ID=eq.'+encodeURIComponent(eid), {ReviewMonth:stored}, function(r, err){
+    if(err){ alert('Could not change the review: '+err); return; }
+    ev.ReviewMonth = stored; revRowSync(ev);
+    var t = taskForEvent(eid);
+    if(t){ taskLogPush(t, revYmLabel(ym)+' taken off this review by '+userLabel(cu())+': its reminder is back on the Reviews list.'); post({action:'updateTaskNotes', id:t.ID, notes:t.Notes}, function(){}); }
+    toast(revYmLabel(ym)+' taken off the review ✓','ok');
+    evAfterChange(ev.ClientID);
+    var _s=captureScrolls(); render(); restoreScrolls(_s);
+  });
 }
 
 // TASKS PAGE
