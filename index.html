@@ -2965,7 +2965,7 @@ function renderProfile(){
     '<div class="tabs">'+
     '<div class="tab'+(CTAB==='overview'?' on':'')+'" data-act="tab" data-tab="overview">Overview</div>'+
     '<div class="tab'+(CTAB==='policies'?' on':'')+'" data-act="tab" data-tab="policies">Policies ('+pols.filter(function(p){return !polIsGone(p);}).length+')</div>'+
-    (function(){var fp=finposFor(c.ID).filter(function(r){return FP_NOT_ITEM_KINDS.indexOf(r.Kind)<0;});return '<div class="tab'+(CTAB==='finpos'?' on':'')+'" data-act="tab" data-tab="finpos">Financial Position'+(fp.length?' ('+fp.length+')':'')+'</div>';})()+
+    (function(){var fp=fpItemsFor(c.ID);return '<div class="tab'+(CTAB==='finpos'?' on':'')+'" data-act="tab" data-tab="finpos">Financial Position'+(fp.length?' ('+fp.length+')':'')+'</div>';})()+
     (function(){var nd=finposFor(c.ID).filter(function(r){return r.Kind==='need';});return '<div class="tab'+(CTAB==='needs'?' on':'')+'" data-act="tab" data-tab="needs">Needs'+(nd.length?' ('+nd.length+')':'')+'</div>';})()+
     (function(){var bks=[];try{bks=c.BankDetails?JSON.parse(c.BankDetails):[];}catch(e){}return '<div class="tab'+(CTAB==='banking'?' on':'')+'" data-act="tab" data-tab="banking">Banking'+(bks.length?' ('+bks.length+')':'')+'</div>';})()+
     '<div class="tab'+(CTAB==='docs'?' on':'')+'" data-act="tab" data-tab="docs">Documents</div>'+
@@ -4295,30 +4295,138 @@ function fpLoanTxt(acc, bal){
   return '';
 }
 
+// ── One home per item (15 Oct 2026, Clinton) ──
+// An item owned by the spouse lives on the spouse's own client record, when the spouse has one.
+// A joint item is stored once, on one of the two records, and shows on both cards; each card
+// counts half. A spouse with no client record of their own keeps their items on this card,
+// marked as theirs and left out of this card's totals. Business rows keep option A (one row per
+// entity, both shares on it) and are not moved; their totals count this card's share only.
+var FP_SHARED_KINDS = ['income','property','vehicle','other','liability'];
+function fpClientById(id){ return DB.clients.find(function(x){ return String(x.ID)===String(id); }) || null; }
+// The spouse's own client record, only if it is really there (a stale link counts as none).
+function fpPartnerOf(cid){ var pid = cid ? linkedSpouseClientId(cid) : null; return (pid && fpClientById(pid)) ? pid : null; }
+// Same item: same kind and the same description (spaces and case ignored).
+function fpDescKey(r){ return String(fpData(r).desc||'').replace(/\s+/g,' ').trim().toLowerCase(); }
+function fpSameItem(a, b){ return a.Kind===b.Kind && fpDescKey(a)!=='' && fpDescKey(a)===fpDescKey(b); }
+// Rows on the spouse's record that look like this row (for duplicate warnings).
+function fpPartnerTwin(r, pid, ownerWanted){
+  if(!pid) return null;
+  return finposFor(pid).find(function(x){ return String(x.ID)!==String(r.ID) && fpSameItem(x, r) && (!ownerWanted || (fpData(x).owner||'Client')===ownerWanted); }) || null;
+}
+// The partner's joint rows (held on the partner's record), shown on this card at half.
+// A joint item captured on both records (before one home per item) is listed once: this card's
+// own copy wins and is flagged so one copy can be deleted.
+function fpJointFromPartner(cid){
+  var pid = fpPartnerOf(cid); if(!pid) return [];
+  var ownJ = finposFor(cid).filter(function(r){ return FP_SHARED_KINDS.indexOf(r.Kind)>=0 && fpData(r).owner==='Joint'; });
+  return finposFor(pid).filter(function(r){
+    return FP_SHARED_KINDS.indexOf(r.Kind)>=0 && fpData(r).owner==='Joint' && !ownJ.some(function(o){ return fpSameItem(o, r); });
+  });
+}
+// This card's own items plus the partner's joint items.
+function fpItemsFor(cid){
+  return finposFor(cid).filter(function(r){ return FP_NOT_ITEM_KINDS.indexOf(r.Kind)<0; }).concat(fpJointFromPartner(cid));
+}
+// Share of a row that counts on cid's card: own 1, joint half, the spouse's own 0.
+function fpShareOf(r, cid){
+  if(FP_SHARED_KINDS.indexOf(r.Kind)<0) return 1;
+  var o = fpData(r).owner;
+  if(o==='Joint') return 0.5;
+  if(String(r.ClientID)!==String(cid)) return 0;
+  return o==='Spouse' ? 0 : 1;
+}
+// What a row adds to cid's totals. Business: this card's share and loan account only.
+function fpRowTotals(r, cid){
+  var d = fpData(r), t = {a:0, l:0, inc:0, exp:0};
+  if(r.Kind==='business'){
+    t.a = fpN(d.value);
+    if(d.loanAcc==='Credit') t.a += fpN(d.loanBal); else if(d.loanAcc==='Debit') t.l += fpN(d.loanBal);
+    return t;
+  }
+  if(r.Kind==='expense'){ t.exp = fpN(d.amountPM); return t; }
+  var f = fpShareOf(r, cid);
+  if(r.Kind==='liability') t.l = fpN(d.balance)*f;
+  else if(r.Kind==='income') t.inc = fpN(d.amountPM)*f;
+  else { t.a = fpN(d.value)*f; t.l = (fpN(d.bondOut)+fpN(d.financeOut))*f; }
+  return t;
+}
+// First names for the owner wording on cid's card.
+function fpNamesFor(cid){
+  var c = fpClientById(cid), pid = fpPartnerOf(cid), pc = pid ? fpClientById(pid) : null;
+  return {me: fpClientLabel(c), sp: pc ? fpClientLabel(pc) : fpSpouseLabel(c), pid: pid, pc: pc};
+}
+// Where a row belongs. home = the record it is being saved on, owner as seen from home.
+// The spouse's own item moves to the spouse's record (owned there as Client).
+function fpHomeFor(home, kind, owner){
+  if(owner==='Spouse' && FP_SHARED_KINDS.indexOf(kind)>=0){
+    var pid = fpPartnerOf(home);
+    if(pid) return {cid: pid, owner: 'Client', moved: true};
+  }
+  return {cid: home, owner: owner, moved: false};
+}
+// Owner wording for a row on cid's card: {text, counts, move}.
+function fpOwnerInfo(r, cid){
+  var d = fpData(r), N = fpNamesFor(cid), o = d.owner||'Client';
+  if(FP_SHARED_KINDS.indexOf(r.Kind)<0) return {text: d.owner||'', counts: true, move: false};
+  if(String(r.ClientID)!==String(cid)) return {text: 'Joint with '+N.sp+' · held on '+N.sp+'\'s record · half counts here', counts: true, move: false};
+  if(o==='Joint'){
+    var tw = N.pid ? fpPartnerTwin(r, N.pid, 'Joint') : null;
+    if(tw) return {text: 'Joint with '+N.sp+' · half counts here · ⚠ also captured on '+N.sp+'\'s record: delete one of the two', counts: true, move: false, twin: true};
+    return {text: 'Joint with '+N.sp+' · half counts here'+(N.pid ? ' · also on '+N.sp+'\'s card' : ''), counts: true, move: false};
+  }
+  if(o==='Spouse'){
+    if(N.pid) return {text: N.sp+'\'s · belongs on '+N.sp+'\'s own record · not in '+N.me+'\'s totals', counts: false, move: true};
+    return {text: N.sp+'\'s (no client record) · not in '+N.me+'\'s totals', counts: false, move: false};
+  }
+  return {text: N.me+'\'s', counts: true, move: false};
+}
+// Move the spouse's own item to the spouse's record (the button on such a row).
+function fpMoveToPartner(fpid){
+  var row = DB.finpos.find(function(r){ return String(r.ID)===String(fpid); });
+  if(!row){ toast('Cannot find the item','err'); return; }
+  var d = fpData(row), dest = fpHomeFor(String(row.ClientID), row.Kind, d.owner);
+  if(!dest.moved){ toast('This item is not the spouse\'s own, so it stays here.','err'); return; }
+  var pc = fpClientById(dest.cid), nm = pc ? fpClientLabel(pc) : 'the spouse';
+  var tw = fpPartnerTwin(row, dest.cid, null);
+  if(tw && !confirm(nm+'\'s record already has "'+(fpData(tw).desc||'')+'" ('+(fpData(tw).owner||'Client')+'). Moving this one there gives two.\n\nOK = move it anyway (then delete one).\nCancel = leave it here.')) return;
+  d.owner = dest.owner;
+  var upd = {ID: row.ID, ClientID: dest.cid, Kind: row.Kind, Data: JSON.stringify(d), UpdatedAt: new Date().toISOString().slice(0,16).replace('T',' ')};
+  upd._pendingSave = true;
+  var gi = DB.finpos.indexOf(row); if(gi>=0) DB.finpos[gi] = upd;
+  try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
+  render();
+  var send = JSON.parse(JSON.stringify(upd)); delete send._pendingSave;
+  post({action:'saveFinPos', item:send}, function(res){
+    if(res && res.ok===1){
+      var i = DB.finpos.findIndex(function(x){ return x.ID===upd.ID; }); if(i>=0) DB.finpos[i] = send;
+      try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
+      toast('Moved to '+nm+'\'s record ✓','ok');
+      render();
+    } else {
+      console.error('Financial Position item NOT moved on the server. Retained locally with _pendingSave flag. ID:', upd.ID);
+    }
+  });
+}
+
 function renderFinPos(c){
-  var rows = finposFor(c.ID).filter(function(r){ return FP_NOT_ITEM_KINDS.indexOf(r.Kind)<0; });
+  // This card's own items plus the spouse's joint items held on the spouse's record (15 Oct 2026)
+  var rows = fpItemsFor(c.ID);
   var byKind = {};
   FP_KINDS.forEach(function(k){ byKind[k.kind]=[]; });
   rows.forEach(function(r){ if(byKind[r.Kind]) byKind[r.Kind].push(r); });
 
-  // Totals — display arithmetic only
-  var totAssets=0, totLiabs=0, totIncomePM=0, totExpensePM=0;
+  // Totals — display arithmetic only. This person's share: own items in full, joint items at
+  // half, the spouse's own items left out (15 Oct 2026).
+  var totAssets=0, totLiabs=0, totIncomePM=0, totExpensePM=0, nJoint=0, nLeft=0;
   rows.forEach(function(r){
-    var d = fpData(r);
-    if(r.Kind==='liability'){ totLiabs += fpN(d.balance); }
-    else if(r.Kind==='income'){ totIncomePM += fpN(d.amountPM); }
-    else if(r.Kind==='expense'){ totExpensePM += fpN(d.amountPM); }
-    else if(r.Kind==='business'){
-      // Both shares, and each loan account on the side its direction puts it (12 Oct 2026)
-      var _bb = fpBizBalance(d);
-      totAssets += _bb.assets; totLiabs += _bb.liabs;
-    }
-    else {
-      totAssets += fpN(d.value);
-      totLiabs  += fpN(d.bondOut) + fpN(d.financeOut);
-    }
+    var t = fpRowTotals(r, c.ID);
+    totAssets += t.a; totLiabs += t.l; totIncomePM += t.inc; totExpensePM += t.exp;
+    if(FP_SHARED_KINDS.indexOf(r.Kind)>=0){ var f = fpShareOf(r, c.ID); if(f===0.5) nJoint++; else if(f===0) nLeft++; }
+    else if(r.Kind==='business' && (fpN(fpData(r).valueSpouse)!==0 || ['Credit','Debit'].indexOf(fpData(r).loanAccSpouse)>=0)) nLeft++;
   });
   var net = totAssets - totLiabs;
+  var _fpN = fpNamesFor(c.ID);
+  var shareNote = (nJoint || nLeft) ? '<div style="padding:0 16px 10px;font-size:11.5px;color:#667">Totals are '+wfEsc(_fpN.me)+'\'s share: own items in full'+(nJoint?', joint items at half ('+nJoint+')':'')+(nLeft?', '+wfEsc(_fpN.sp)+'\'s own items and shares left out ('+nLeft+')':'')+'.</div>' : '';
 
   var html =
     '<div style="margin-bottom:16px;display:flex;justify-content:space-between;align-items:center">'+
@@ -4331,7 +4439,7 @@ function renderFinPos(c){
     '<div><div style="font-size:10px;color:#999;text-transform:uppercase;letter-spacing:.4px">Net Position</div><div style="font-weight:700;font-size:17px;color:'+(net<0?'var(--rose)':'#2e7d5a')+'">'+fpR(net)+'</div></div>'+
     '<div><div style="font-size:10px;color:#999;text-transform:uppercase;letter-spacing:.4px">Income /pm</div><div style="font-weight:700;font-size:17px;color:#2e7d5a">'+(totIncomePM>0?fpR(totIncomePM):'—')+'</div></div>'+
     '<div><div style="font-size:10px;color:#999;text-transform:uppercase;letter-spacing:.4px">Expenses /pm</div><div style="font-weight:700;font-size:17px;color:var(--rose)">'+(totExpensePM>0?fpR(totExpensePM):'—')+'</div></div>'+
-    '</div></div>';
+    '</div>'+shareNote+'</div>';
 
   FP_KINDS.forEach(function(k){
     var items = byKind[k.kind];
@@ -4348,8 +4456,17 @@ function renderFinPos(c){
       var pending = r._pendingSave ? '<span style="background:#fde8e8;color:var(--rose);border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700">⚠️ Not saved to server yet</span>' : '';
       function cell(lbl,val){ return '<div><div style="font-size:10px;color:#999;text-transform:uppercase;letter-spacing:.3px">'+lbl+'</div><div style="font-weight:600;font-size:13px">'+(val||'—')+'</div></div>'; }
       function money(v){ var s=String(v===undefined||v===null?'':v).trim(); return s===''?'—':fpR(fpN(s)); }
-      var badges = '';
-      if(d.owner) badges += '<span style="background:var(--sky);color:#fff;border-radius:10px;padding:2px 10px;font-size:11px;font-weight:600">'+d.owner+'</span>';
+      var badges = '', _oi = fpOwnerInfo(r, c.ID), _away = String(r.ClientID)!==String(c.ID);
+      if(FP_SHARED_KINDS.indexOf(r.Kind)>=0){
+        // Owner by name, and what counts on this card (15 Oct 2026)
+        var _half = '';
+        if(fpShareOf(r, c.ID)===0.5){
+          var _hv = r.Kind==='liability' ? fpN(d.balance) : (r.Kind==='income' ? fpN(d.amountPM) : fpN(d.value));
+          _half = ' · '+fpR(_hv/2)+(r.Kind==='income'?' /pm':'');
+        }
+        badges += '<span style="background:'+(_oi.counts?'var(--sky);color:#fff':'#eceff3;color:#556')+';border-radius:10px;padding:2px 10px;font-size:11px;font-weight:600">'+wfEsc(_oi.text)+_half+'</span>';
+      }
+      else if(d.owner) badges += '<span style="background:var(--sky);color:#fff;border-radius:10px;padding:2px 10px;font-size:11px;font-weight:600">'+d.owner+'</span>';
       if(r.Kind==='property' && d.primaryRes==='Yes') badges += '<span style="background:#e8f5e9;color:#2e7d5a;border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700">Primary Residence</span>';
       if(r.Kind==='other' && d.type) badges += '<span style="background:var(--gold);color:var(--navy);border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700">'+d.type+'</span>';
       if(d.source) badges += '<span style="background:'+(d.source==='Estimate'?'#fff3e0;color:#9a6a1f':'#eef2f6;color:#556')+';border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700">'+(d.source==='Estimate'?'⚠ Estimate':'Source: '+d.source)+'</span>';
@@ -4425,7 +4542,7 @@ function renderFinPos(c){
                 cell('Interest Rate', d.interestRate?d.interestRate+'% p.a.':'—')+
                 cell('Payment /pm', money(d.paymentPM));
       }
-      return '<div class="card" style="margin-bottom:10px">'+
+      return '<div class="card" style="margin-bottom:10px'+(_away?';border-left:3px solid var(--sky)':(_oi.counts?'':';opacity:.8'))+'">'+
         '<div style="display:flex;justify-content:space-between;align-items:flex-start">'+
         '<div style="flex:1">'+
         '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">'+
@@ -4435,8 +4552,9 @@ function renderFinPos(c){
         extra+
         (d.notes?'<div style="margin-top:8px;font-size:12px;color:#667;font-style:italic">'+d.notes+'</div>':'')+
         '</div>'+
-        '<div style="flex-shrink:0;margin-left:12px">'+
+        '<div style="flex-shrink:0;margin-left:12px;display:flex;flex-direction:column;gap:6px;align-items:flex-end">'+
         '<button class="btn b-gh xs" data-act="edit-finpos" data-id="'+c.ID+'" data-fpid="'+r.ID+'">Edit</button>'+
+        (_oi.move?'<button class="btn b-gd xs" data-act="move-finpos" data-id="'+c.ID+'" data-fpid="'+r.ID+'">Move to '+wfEsc(fpNamesFor(c.ID).sp)+'\'s record</button>':'')+
         '</div>'+
         '</div></div>';
     }).join('');
@@ -12094,14 +12212,12 @@ function buildFnaDataPack(cid, includeSpouse){
   // ── Financial Position (reusable for the linked spouse appendix) ──
   function packFinpos(forCid, prefix){
     var fpRows = finposFor(forCid).filter(function(r){ return FP_NOT_ITEM_KINDS.indexOf(r.Kind)<0; });
-    line('── '+prefix+'FINANCIAL POSITION ('+fpRows.length+' items) ──');
-    if(!fpRows.length) line('  (none captured)');
-    var totA=0, totL=0, totIncPM=0, totExpPM=0;
-    FP_KINDS.forEach(function(k){
-      var items = fpRows.filter(function(r){ return r.Kind===k.kind; });
-      if(!items.length) return;
-      line('  ── '+k.label+' ──');
-      items.forEach(function(r){
+    // One home per item (15 Oct 2026): joint items held on the spouse's record are listed too
+    var pjRows = fpJointFromPartner(forCid), _pn = fpNamesFor(forCid);
+    line('── '+prefix+'FINANCIAL POSITION ('+fpRows.length+' items'+(pjRows.length?' + '+pjRows.length+' joint held on '+_pn.sp+'\'s record':'')+') ──');
+    if(!fpRows.length && !pjRows.length) line('  (none captured)');
+    var totA=0, totL=0, totIncPM=0, totExpPM=0, nJ=0, nOut=0;
+    function packItem(r){
         var d = fpData(r);
         line('  • '+(d.desc||'(no description)')+fnaStampTxt(r.UpdatedAt, fm));
         Object.keys(d).forEach(function(key){
@@ -12110,26 +12226,35 @@ function buildFnaDataPack(cid, includeSpouse){
           if(v===undefined || v===null || String(v).trim()==='') return;
           line('      '+key+': '+v);
         });
+        // Whose it is, and what counts in this person's figures (15 Oct 2026)
+        if(FP_SHARED_KINDS.indexOf(r.Kind)>=0){
+          var _sh = fpShareOf(r, forCid);
+          if(_sh===0.5){ nJ++; line('      counts here: HALF (joint with '+_pn.sp+(String(r.ClientID)!==String(forCid)?'; stored on '+_pn.sp+'\'s record and also listed in '+_pn.sp+'\'s own pack; passesTo and soldDeath are as captured there, so confirm them against '+_pn.me+'\'s will':'')+')'); }
+          else if(_sh===0){ nOut++; line('      counts here: NOTHING ('+_pn.sp+'\'s own item, not part of '+_pn.me+'\'s estate; '+(_pn.pid ? 'it belongs on '+_pn.sp+'\'s own record and should be moved there' : _pn.sp+' has no client record, so it is kept on this one')+')'); }
+        } else if(r.Kind==='business' && (fpN(d.valueSpouse)!==0 || d.loanAccSpouse==='Credit' || d.loanAccSpouse==='Debit')){
+          nOut++; line('      counts here: '+_pn.me+'\'s share and loan account only ('+_pn.sp+'\'s share and loan account are left out of the totals)');
+        }
         // Source of the figure (12 Oct 2026): an estimate is flagged, never read as a fact.
         if(d.source==='Estimate') line('      ⚠ ESTIMATE: the client\'s own figure, not from books, a statement or a valuation.');
         if(r.Kind==='business') packBizDetail(d, forCid);
         // CGT-on-death inputs left blank print explicitly, so the FNA flags them
         // instead of reading a blank as "not applicable" (Sep 2026).
         fpCgtMissing(r.Kind, d).forEach(function(m){ line('      '+m.key+': NOT CAPTURED'); });
-        if(r.Kind==='liability'){ totL += fpN(d.balance); }
-        else if(r.Kind==='income'){ totIncPM += fpN(d.amountPM); }
-        else if(r.Kind==='expense'){ totExpPM += fpN(d.amountPM); }
-        else if(r.Kind==='business'){
-          var _pb = fpBizBalance(d);
-          totA += _pb.assets; totL += _pb.liabs;
-        } else {
-          totA += fpN(d.value);
-          totL += fpN(d.bondOut) + fpN(d.financeOut);
-        }
-      });
+        var t = fpRowTotals(r, forCid);
+        totA += t.a; totL += t.l; totIncPM += t.inc; totExpPM += t.exp;
+    }
+    FP_KINDS.forEach(function(k){
+      var items = fpRows.filter(function(r){ return r.Kind===k.kind; });
+      if(!items.length) return;
+      line('  ── '+k.label+' ──');
+      items.forEach(packItem);
     });
-    if(fpRows.length){
-      line('  Balance sheet totals: Assets '+fpR(totA)+'  ·  Liabilities '+fpR(totL)+'  ·  Net '+fpR(totA-totL));
+    if(pjRows.length){
+      line('  ── Joint items held on '+_pn.sp+'\'s record (stored once, shown on both; half belongs to '+_pn.me+') ──');
+      pjRows.forEach(packItem);
+    }
+    if(fpRows.length || pjRows.length){
+      line('  Balance sheet totals ('+_pn.me+'\'s share: own items in full'+(nJ?', joint items at half':'')+(nOut?', '+_pn.sp+'\'s own items left out':'')+'): Assets '+fpR(totA)+'  ·  Liabilities '+fpR(totL)+'  ·  Net '+fpR(totA-totL));
       if(totIncPM>0 || totExpPM>0){
         line('  Monthly cash flow: Income '+fpR(totIncPM)+' /pm  ·  Expenses '+fpR(totExpPM)+' /pm'+(totIncPM>0&&totExpPM>0?'  ·  Surplus '+fpR(totIncPM-totExpPM)+' /pm':''));
       }
@@ -12610,7 +12735,7 @@ function fnaCapItem(r, meta){
     bits.push(isInc ? (money(d.amount)+' /pm'+(d.years?' × '+d.years+' yrs':'')+(d.esc?' @ '+d.esc+'%':' (CPI)')) : ('Capital '+money(d.amount)));
     if(d.benTo && needAsksForWhom(d.scenario||'Other')) bits.push('for: '+fpPassesToLabel({passesTo:d.benTo, passesToName:d.benName}));
   }
-  if(d.owner && r.Kind!=='need') bits.unshift(d.owner);
+  if(d.owner && r.Kind!=='need') bits.unshift(FP_SHARED_KINDS.indexOf(r.Kind)>=0 && FNA_CAP.cid ? fpOwnerInfo(r, FNA_CAP.cid).text : d.owner);
   var pending = r._pendingSave ? '<span class="fc-stamp stale">⚠ not saved to server yet</span>' : '';
   var cgtMiss = fpCgtMissing(r.Kind, d);
   var cgtChip = cgtMiss.length ? '<span class="fc-stamp stale">⚠ missing: '+fnaEsc(cgtMiss.map(function(m){ return m.label; }).join(', '))+'</span>' : '';
@@ -12626,7 +12751,7 @@ function fnaCapItem(r, meta){
     '</div></div>';
 }
 function fnaCapKindSection(cid, meta, kind, label, icon, addLabel){
-  var items = finposFor(cid).filter(function(r){ return r.Kind===kind; });
+  var items = finposFor(cid).concat(fpJointFromPartner(cid)).filter(function(r){ return r.Kind===kind; });
   var h = '<div class="fc-sec"><h4>'+icon+' '+label+(items.length?' ('+items.length+')':'')+'</h4>'+
     '<button class="btn b-gd xs" onclick="openFinPosModal(\''+cid+'\',\''+kind+'\')">'+addLabel+'</button></div>';
   if(!items.length) h += '<div class="fc-empty">Nothing captured yet. Ask, then add.</div>';
@@ -12748,7 +12873,7 @@ function fnaCapRender(){
   }
 
   else if(step.key==='finish'){
-    var rows = finposFor(cid).filter(function(r){ return r.Kind!=='need_notes' && r.Kind!=='fna_meta' && r.Kind!=='review_log'; });
+    var rows = finposFor(cid).concat(fpJointFromPartner(cid)).filter(function(r){ return r.Kind!=='need_notes' && r.Kind!=='fna_meta' && r.Kind!=='review_log'; });
     var famF = fnaCapFamily(c);
     var cnt = function(list, isFresh){ var f=list.filter(isFresh).length; return {t:list.length, f:f, s:list.length-f}; };
     var secs = [
@@ -13111,15 +13236,16 @@ function clearWill(cid){
 // shown at the top of the Will tab so they don't have to print or tab-hop.
 // Add/edit buttons write to Financial Position (the single source of truth).
 function renderWillRefPanel(c){
-  var rows = (typeof finposFor==='function') ? finposFor(c.ID) : [];
+  // One home per item (15 Oct 2026): joint items held on the spouse's record are listed too
+  var rows = (typeof finposFor==='function') ? finposFor(c.ID).concat(fpJointFromPartner(c.ID)) : [];
   var assets = rows.filter(function(r){ return ['property','vehicle','other','business'].indexOf(r.Kind)>=0; });
   var liabs  = rows.filter(function(r){ return r.Kind==='liability'; });
   var needs  = rows.filter(function(r){ return r.Kind==='need'; });
   var nnRow  = (typeof needNotesRowFor==='function') ? needNotesRowFor(c.ID) : null;
   var nnTxt  = nnRow ? (fpData(nnRow).text||'') : '';
   var assetTot=0, liabTot=0, aH='', lH='', nH='';
-  assets.forEach(function(r){ var d=fpData(r); var v=fpN(d.value); assetTot+=v; var meta=[]; if(r.Kind==='business'&&fpN(d.pctHeldSpouse)>0)meta.push('spouse\'s share '+fpR(fpN(d.valueSpouse))+' not included'); if(fpN(d.bondOut))meta.push('bond '+fpR(fpN(d.bondOut))); if(fpN(d.financeOut))meta.push('finance '+fpR(fpN(d.financeOut))); if(d.passesTo)meta.push('→ '+fpPassesToLabel(d)); aH+='<tr><td>'+wfEsc(d.desc||r.Kind)+'</td><td style="text-align:right;white-space:nowrap">'+fpR(v)+'</td><td style="color:#889;font-size:11px">'+wfEsc(meta.join(' · '))+'</td><td style="text-align:right;white-space:nowrap"><button class="btn b-gh xs" onclick="willEditFinpos(\''+c.ID+'\',\''+r.Kind+'\',\''+r.ID+'\')">edit</button></td></tr>'; });
-  liabs.forEach(function(r){ var d=fpData(r); var v=fpN(d.balance); liabTot+=v; lH+='<tr><td>'+wfEsc(d.desc||'Liability')+'</td><td style="text-align:right;white-space:nowrap">'+fpR(v)+'</td><td style="color:#889;font-size:11px">'+wfEsc(d.liabType||'')+'</td><td style="text-align:right;white-space:nowrap"><button class="btn b-gh xs" onclick="willEditFinpos(\''+c.ID+'\',\'liability\',\''+r.ID+'\')">edit</button></td></tr>'; });
+  assets.forEach(function(r){ var d=fpData(r); var v=fpN(d.value); var _sh=fpShareOf(r, c.ID); assetTot+=v*_sh; var meta=[]; if(_sh!==1) meta.push(fpOwnerInfo(r, c.ID).text); if(r.Kind==='business'&&fpN(d.pctHeldSpouse)>0)meta.push('spouse\'s share '+fpR(fpN(d.valueSpouse))+' not included'); if(fpN(d.bondOut))meta.push('bond '+fpR(fpN(d.bondOut))); if(fpN(d.financeOut))meta.push('finance '+fpR(fpN(d.financeOut))); if(d.passesTo)meta.push('→ '+fpPassesToLabel(d)); aH+='<tr><td>'+wfEsc(d.desc||r.Kind)+'</td><td style="text-align:right;white-space:nowrap">'+fpR(v)+'</td><td style="color:#889;font-size:11px">'+wfEsc(meta.join(' · '))+'</td><td style="text-align:right;white-space:nowrap"><button class="btn b-gh xs" onclick="willEditFinpos(\''+c.ID+'\',\''+r.Kind+'\',\''+r.ID+'\')">edit</button></td></tr>'; });
+  liabs.forEach(function(r){ var d=fpData(r); var v=fpN(d.balance); var _sh=fpShareOf(r, c.ID); liabTot+=v*_sh; lH+='<tr><td>'+wfEsc(d.desc||'Liability')+'</td><td style="text-align:right;white-space:nowrap">'+fpR(v)+'</td><td style="color:#889;font-size:11px">'+wfEsc([d.liabType||'', _sh!==1?fpOwnerInfo(r, c.ID).text:''].filter(Boolean).join(' · '))+'</td><td style="text-align:right;white-space:nowrap"><button class="btn b-gh xs" onclick="willEditFinpos(\''+c.ID+'\',\'liability\',\''+r.ID+'\')">edit</button></td></tr>'; });
   needs.forEach(function(r){ var d=fpData(r); var amt=fpN(d.amount); var inc=(d.needType==='Monthly income'); var at=inc?(fpR(amt)+' /pm'+(d.years?' × '+d.years+'yr':'')):fpR(amt); nH+='<tr><td>'+wfEsc(d.desc||d.scenario||'Need')+'</td><td>'+wfEsc(d.scenario||'')+'</td><td style="text-align:right;white-space:nowrap">'+at+'</td><td style="color:#667">'+wfEsc(fpPassesToLabel({passesTo:d.benTo,passesToName:d.benName}))+'</td></tr>'; });
 
   var addBar = '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:10px">'
@@ -13167,7 +13293,7 @@ function renderWillRefPanel(c){
 // Section 9: show the client's property or business rows from Financial Position (the
 // single source of truth), so they are not retyped. Add/edit goes to Financial Position.
 function willFinposList(c, kind){
-  var rows = ((typeof finposFor==='function') ? finposFor(c.ID) : []).filter(function(r){ return r.Kind===kind; });
+  var rows = ((typeof finposFor==='function') ? finposFor(c.ID).concat(fpJointFromPartner(c.ID)) : []).filter(function(r){ return r.Kind===kind; });
   var addBtn = '<button class="btn b-gh xs" onclick="willAddFinpos(\''+c.ID+'\',\''+kind+'\')">＋ '+(kind==='property'?'Property':'Business')+'</button>';
   if(!rows.length){
     return '<div class="wsub">No '+(kind==='property'?'property':'business interest')+' in Financial Position. '+addBtn+'</div>';
@@ -13175,7 +13301,8 @@ function willFinposList(c, kind){
   var h = '<div style="background:#f7f9fb;border:1px solid #e2e8ee;border-radius:7px;padding:6px 10px;margin:2px 0 8px;font-size:12px">';
   rows.forEach(function(r){
     var d = fpData(r), bits = [];
-    if(d.owner) bits.push(wfEsc(d.owner==='Client'?'own name':d.owner==='Joint'?'joint':d.owner));
+    if(FP_SHARED_KINDS.indexOf(kind)>=0 && (d.owner==='Joint' || d.owner==='Spouse' || String(r.ClientID)!==String(c.ID))) bits.push(wfEsc(fpOwnerInfo(r, c.ID).text));
+    else if(d.owner) bits.push(wfEsc(d.owner==='Client'?'own name':d.owner==='Joint'?'joint':d.owner));
     if(kind==='property'){
       if(d.primaryRes==='Yes') bits.push('primary residence');
       if(fpN(d.bondOut)) bits.push('bond '+fpR(fpN(d.bondOut)));
@@ -16289,12 +16416,16 @@ function fpChk(id,lbl,val){
 function fpChkVal(id){ var e=document.getElementById(id); return (e&&e.checked)?'Yes':'No'; }
 
 function openFinPosModal(cid, kind, fpid){
+  var openedFrom = cid;
   FP_CLIENT_ID = cid;
   FP_KIND = kind;
   FP_EDIT_ID = fpid || null;
   var row = FP_EDIT_ID ? DB.finpos.find(function(r){return String(r.ID)===String(FP_EDIT_ID);}) : null;
   if(FP_EDIT_ID && !row){ toast('Cannot find item to edit','err'); return; }
   if(row) FP_KIND = row.Kind; // kind comes from the row when editing
+  // One home per item (15 Oct 2026): a joint item held on the spouse's record is edited
+  // there, so the owner choices read from that record.
+  if(row && clean(row.ClientID)){ cid = String(row.ClientID); FP_CLIENT_ID = cid; }
   var d = row ? fpData(row) : {};
   var kindMeta = FP_KINDS.find(function(k){return k.kind===FP_KIND;}) || {label:'Item',icon:''};
   var isLiab = FP_KIND==='liability';
@@ -16449,7 +16580,7 @@ function openFinPosModal(cid, kind, fpid){
 
   var fpSingular = {property:'Property', vehicle:'Vehicle', other:'Other Asset', business:'Business Interest', liability:'Liability', need:'Need', income:'Income Source', expense:'Expense Category'}[FP_KIND] || 'Item';
   document.getElementById('fpModT').textContent = (FP_EDIT_ID?'Edit ':'Add ')+(FP_KIND==='need'?'🎯':kindMeta.icon)+' '+fpSingular;
-  document.getElementById('fpModB').innerHTML = html;
+  document.getElementById('fpModB').innerHTML = fpOwnerNoteHtml(cid, FP_KIND, row, openedFrom) + html;
   document.getElementById('delFpBtn').style.display = FP_EDIT_ID ? '' : 'none';
   // Toggle the named-person field when "Passes to at Death" changes
   var passSel = document.getElementById('fppassesTo');
@@ -16649,6 +16780,20 @@ function fpBizRecalc(){
   line.innerHTML = h;
 }
 
+// What Client / Spouse / Joint mean on this form, by name (15 Oct 2026).
+function fpOwnerNoteHtml(home, kind, row, openedFrom){
+  if(FP_SHARED_KINDS.indexOf(kind)<0) return '';
+  var N = fpNamesFor(home), h = '';
+  if(row && String(row.ClientID)!==String(openedFrom)){
+    var oc = fpClientById(openedFrom);
+    h += '<div style="margin-bottom:6px">This item is held on <strong>'+wfEsc(N.me)+'\'s</strong> record and shows on '+wfEsc(oc ? fpClientLabel(oc) : 'the other')+'\'s card at half. A change here shows on both cards.</div>';
+  }
+  h += '<div><strong>Owner:</strong> Client = '+wfEsc(N.me)+' · Spouse = '+wfEsc(N.sp)+
+    (N.pid ? ' (saved on '+wfEsc(N.sp)+'\'s own record, not this one)' : ' (no client record, so kept here and left out of '+wfEsc(N.me)+'\'s totals)')+
+    ' · Joint = both, half counts on '+(N.pid ? 'each card' : wfEsc(N.me)+'\'s card')+'.</div>';
+  return '<div style="background:#f3f7fb;border-left:3px solid var(--sky);border-radius:7px;padding:8px 12px;margin-bottom:12px;font-size:12px;color:#445;line-height:1.5">'+h+'</div>';
+}
+
 function collectFinPosForm(){
   var d = { desc:g('fpdesc'), owner:g('fpowner'), notes:g('fpnotes') };
   if(FP_KIND==='need'){
@@ -16733,11 +16878,25 @@ function saveFinPos(){
   }
   var now = new Date().toISOString().slice(0,16).replace('T',' ');
   var oldRow = FP_EDIT_ID ? DB.finpos.find(function(r){return String(r.ID)===String(FP_EDIT_ID);}) : null;
+  // One home per item (15 Oct 2026): the spouse's own item is saved on the spouse's record.
+  var _fd = collectFinPosForm();
+  var _dest = fpHomeFor(oldRow ? String(oldRow.ClientID) : String(FP_CLIENT_ID), FP_KIND, _fd.owner);
+  _fd.owner = (_dest.owner===undefined) ? _fd.owner : _dest.owner;
+  if(FP_KIND==='need') delete _fd.owner;
+  var _movedTo = _dest.moved ? fpClientById(_dest.cid) : null;
+  // Never make a second copy without asking: the spouse's record already has this item
+  var _probe = {ID: oldRow ? oldRow.ID : '', Kind: FP_KIND, Data: JSON.stringify(_fd)};
+  var _pidChk = FP_SHARED_KINDS.indexOf(FP_KIND)>=0 ? fpPartnerOf(oldRow ? String(oldRow.ClientID) : String(FP_CLIENT_ID)) : null;
+  var _twin = _movedTo ? fpPartnerTwin(_probe, _dest.cid, null) : ((_pidChk && _fd.owner==='Joint' && !(oldRow && fpData(oldRow).owner==='Joint')) ? fpPartnerTwin(_probe, _pidChk, 'Joint') : null);
+  if(_twin){
+    var _tn = fpClientById(_twin.ClientID);
+    if(!confirm((_tn ? fpClientLabel(_tn) : 'The spouse')+'\'s record already has "'+(fpData(_twin).desc||'')+'" ('+(fpData(_twin).owner||'Client')+'). Saving this gives two copies.\n\nOK = save anyway (then delete one).\nCancel = go back.')) return;
+  }
   var row = {
     ID: oldRow ? oldRow.ID : ('fp_'+Date.now()),
-    ClientID: FP_CLIENT_ID,
+    ClientID: _dest.cid,
     Kind: FP_KIND,
-    Data: JSON.stringify(collectFinPosForm()),
+    Data: JSON.stringify(_fd),
     UpdatedAt: now
   };
   // Mark pending so a refresh before the server confirms doesn't lose the item
@@ -16754,7 +16913,7 @@ function saveFinPos(){
       var _ci = DB.finpos.findIndex(function(x){return x.ID===row.ID;});
       if(_ci>=0) DB.finpos[_ci] = _rowForServer;
       try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
-      toast('Saved ✓','ok');
+      toast(_movedTo ? 'Saved on '+fpClientLabel(_movedTo)+'\'s own record ✓ (the spouse owns it)' : 'Saved ✓','ok');
       render(); // clear the "not saved yet" badge
     } else {
       // Server rejected — item stays in DB.finpos with _pendingSave:true, so the
@@ -18085,16 +18244,23 @@ function pcCommitFinpos(clientId, payload){
   var rows=pcFinposRows(payload);
   if(!rows.length) return 0;
   var now=new Date().toISOString().slice(0,16).replace('T',' ');
-  var existing=DB.finpos.filter(function(r){return String(r.ClientID)===String(clientId);});
+  // One home per item (15 Oct 2026): the spouse's own items go to the spouse's record, so the
+  // duplicate check looks there too.
+  var _pcPid=fpPartnerOf(clientId);
+  var existing=DB.finpos.filter(function(r){return String(r.ClientID)===String(clientId) || (_pcPid && String(r.ClientID)===String(_pcPid) && FP_SHARED_KINDS.indexOf(r.Kind)>=0);});
   var seq=0, made=0;
   rows.forEach(function(r){
+    var _home=fpHomeFor(String(clientId), r.Kind, r.Data.owner).cid;
     var dup=existing.find(function(x){
       if(String(x.Kind)!==String(r.Kind)) return false;
+      // compare with what is on the record it goes to (a joint item: either record, joint only)
+      if(String(x.ClientID)!==String(_home)){ var _xo=fpData(x).owner; if(!(r.Data.owner==='Joint' && _xo==='Joint')) return false; }
       var dd; try{dd=x.Data?JSON.parse(x.Data):{};}catch(e){dd={};}
       return String(dd.desc||'').toLowerCase().trim()===String(r.Data.desc||'').toLowerCase().trim();
     });
     if(dup) return;
-    var row={ ID:'fp_'+Date.now()+'_'+(seq++), ClientID:clientId, Kind:r.Kind, Data:JSON.stringify(r.Data), UpdatedAt:now };
+    var _pch=fpHomeFor(String(clientId), r.Kind, r.Data.owner); if(_pch.moved) r.Data.owner=_pch.owner;
+    var row={ ID:'fp_'+Date.now()+'_'+(seq++), ClientID:_pch.cid, Kind:r.Kind, Data:JSON.stringify(r.Data), UpdatedAt:now };
     DB.finpos.push(row); existing.push(row);
     post({action:'saveFinPos', item:JSON.parse(JSON.stringify(row))});
     made++;
@@ -18770,6 +18936,29 @@ function wbkKids(cid){
   return ((typeof famFor==='function') ? (famFor(cid)||[]) : []).filter(function(l){ return !isPartnerType(l.Type); });
 }
 function wbkRowsOf(cid, kind){ return finposFor(cid).filter(function(r){ return r.Kind===kind; }); }
+// One home per item (15 Oct 2026): the couple's fact find shows the spouse's items that live on
+// the spouse's own record too. They come in as copies with the owner seen from this client
+// (the spouse's Client becomes Spouse; Joint stays Joint), keeping the row ID, its stamp and
+// where it lives (_home), so an import updates the row where it is.
+function wbkFlipOwner(o){ return o==='Joint' ? 'Joint' : ((o==='Spouse') ? 'Client' : 'Spouse'); }
+function wbkCoupleRows(cid, kind){
+  var own = wbkRowsOf(cid, kind).map(function(r){ var x = Object.assign({}, r); x._home = String(r.ClientID); return x; });
+  if(FP_SHARED_KINDS.indexOf(kind)<0) return own;
+  var pid = fpPartnerOf(cid); if(!pid) return own;
+  return own.concat(wbkRowsOf(pid, kind).map(function(r){
+    var d = fpData(r); d.owner = wbkFlipOwner(d.owner||'Client');
+    return {ID:r.ID, ClientID:r.ClientID, Kind:r.Kind, Data:JSON.stringify(d), UpdatedAt:r.UpdatedAt, _home:String(r.ClientID)};
+  }));
+}
+// The owner as seen from the record a row stays on (it is in cid's frame).
+function wbkFlipBack(owner, cid, home){ return String(home)===String(cid) ? owner : wbkFlipOwner(owner||'Client'); }
+// Where an imported row is saved. owner is as seen from cid (the workbook's client).
+function wbkHomeFor(cid, kind, owner, curHome){
+  var pid = FP_SHARED_KINDS.indexOf(kind)>=0 ? fpPartnerOf(cid) : null;
+  if(pid && owner==='Spouse') return {cid:pid, owner:'Client'};
+  if(pid && owner==='Joint' && curHome && String(curHome)===String(pid)) return {cid:pid, owner:'Joint'};
+  return {cid:cid, owner:owner};
+}
 // Fill the template from the client's record. Returns warnings about rows that do not fit.
 function wbkFill(wb, c){
   var N = wbkNames(wb), warn = [];
@@ -18804,7 +18993,7 @@ function wbkFill(wb, c){
   });
   ['income','expense','property','vehicle','other','liability','need'].forEach(function(kind){
     var spec = FF_SPEC.tables[kind];
-    var items = wbkRowsOf(c.ID, kind);
+    var items = wbkCoupleRows(c.ID, kind);
     if(kind==='income'){
       // Salaries live on the Income sheet (template 1.2). A gross income on the client record
       // with no Salary / Business Income row for that person is put in as a row (no ID), so the
@@ -19074,7 +19263,7 @@ function wbkPlan(wb, cidFrom, fileName){
   P.fp = {};
   ['income','expense','property','vehicle','other','liability','need'].forEach(function(kind){
     var spec = FF_SPEC.tables[kind], X = {add:[], upd:[], gone:[]}, seen = {};
-    var crm = target ? wbkRowsOf(cid, kind) : [];
+    var crm = target ? wbkCoupleRows(cid, kind) : [];
     (M.table(kind)||[]).forEach(function(row){
       if(!row._used && !row._id) return;
       var where = (kind==='need' ? 'Needs' : spec.title.replace(/^\d+\.\s*/,''))+', row '+(row._index+1);
@@ -19096,12 +19285,19 @@ function wbkPlan(wb, cidFrom, fileName){
           if(!wbkSame(col.t, od[col.k], o[col.k])){ ch.push({k:col.k, label:col.h, old:od[col.k], nw:o[col.k], t:col.t}); nd[col.k] = o[col.k]; }
         });
         wbkFixRow(kind, nd, gen, od, ch);
-        X.upd.push({row:fr, ch:ch, data:nd, stamp:fr.UpdatedAt});
+        var _wh = wbkHomeFor(cid, kind, nd.owner, fr._home), _stay = false;
+        if(String(_wh.cid)!==String(fr._home)){
+          var _whc = wbkClient(_wh.cid), _whn = String(_wh.cid)===String(cid) ? L.c : (_whc ? fpClientLabel(_whc) : L.s);
+          var _tw = fpPartnerTwin(fr, _wh.cid, null);
+          if(_tw){ _stay = true; P.warns.push(where+' ('+(nd.desc||'')+'): '+_whn+'\'s record already has "'+(fpData(_tw).desc||'')+'", so this one stays where it is. Delete one of the two in the CRM.'); }
+          else ch.push({t:'note', nw:'Saved on '+_whn+'\'s own record from now on (one home for each item).'});
+        }
+        X.upd.push({row:fr, ch:ch, data:nd, stamp:fr.UpdatedAt, stay:_stay});
       } else {
         if(!row._used) return;
         if(!o.desc){ P.warns.push(where+': there are figures but no description, so the row is skipped.'); return; }
         var nd2 = wbkNewRow(kind, o, gen, {L:L, spouse:clean(next.SpouseName), warn:function(m){ P.warns.push(where+' ('+o.desc+'): '+m); }});
-        var dup = crm.find(function(r){ return !seen[r.ID] && String(fpData(r).desc||'').trim().toLowerCase()===String(o.desc).trim().toLowerCase(); });
+        var dup = crm.find(function(r){ return !seen[r.ID] && String(fpData(r).desc||'').trim().toLowerCase()===String(o.desc).trim().toLowerCase() && (String(r._home)===String(cid) || (fpData(r).owner||'')===(nd2.owner||'')); });
         X.add.push({data:nd2, take:!dup, dup:dup ? fpData(dup).desc : ''});
       }
     });
@@ -19450,13 +19646,17 @@ function wbkCommitRest(P, cid, now, results, clientChanged){
       if(!u.ch.length) return;
       var cur = DB.finpos.find(function(x){ return x.ID===u.row.ID; });
       if(!cur || cur.UpdatedAt!==u.stamp){ results.fail.push((kind==='business'?'Company or trust':kind)+': '+(u.data.desc||'')+' (changed in the CRM after the preview, so not overwritten)'); return; }
-      var row = {ID:u.row.ID, ClientID:cid, Kind:kind, Data:JSON.stringify(u.data), UpdatedAt:now};
+      var _ud = Object.assign({}, u.data), _uh = u.stay ? {cid: cur.ClientID, owner: wbkFlipBack(_ud.owner, cid, cur.ClientID)} : wbkHomeFor(cid, kind, _ud.owner, u.row._home || cur.ClientID);
+      if(_ud.owner!==undefined && String(_uh.cid)!==String(cid)) _ud.owner = _uh.owner;
+      var row = {ID:u.row.ID, ClientID:_uh.cid, Kind:kind, Data:JSON.stringify(_ud), UpdatedAt:now};
       var k = DB.finpos.findIndex(function(x){ return x.ID===u.row.ID; }); if(k>=0) DB.finpos[k] = row;
       saveRow(row, (kind==='business'?'Company or trust':kind)+': '+(u.data.desc||''));
     });
     X.add.forEach(function(a){
       if(!a.take) return;
-      var row = {ID:'fp_'+Date.now()+'_'+(seq++), ClientID:cid, Kind:kind, Data:JSON.stringify(a.data), UpdatedAt:now};
+      var _ad = Object.assign({}, a.data), _ah = wbkHomeFor(cid, kind, _ad.owner, null);
+      if(_ad.owner!==undefined) _ad.owner = _ah.owner;
+      var row = {ID:'fp_'+Date.now()+'_'+(seq++), ClientID:_ah.cid, Kind:kind, Data:JSON.stringify(_ad), UpdatedAt:now};
       DB.finpos.push(row);
       saveRow(row, (kind==='business'?'Company or trust':kind)+': '+(a.data.desc||''));
     });
@@ -19596,7 +19796,9 @@ function qfnaData(c){
   var red = function(t){ out.checks.push('✗ Full FNA: '+t); };
   var warn = function(t){ out.checks.push('✗ '+t); };
   var note = function(t){ out.checks.push('• '+t); };
-  var rows = finposFor(c.ID).map(function(r){ return {kind:r.Kind, d:fpData(r)}; });
+  // One home per item (15 Oct 2026): joint items held on the spouse's record count here at half too
+  var partnerJoint = (typeof fpJointFromPartner==='function') ? fpJointFromPartner(c.ID) : [];
+  var rows = finposFor(c.ID).concat(partnerJoint).map(function(r){ return {kind:r.Kind, d:fpData(r)}; });
   var pols = polsFor(c.ID).filter(function(p){ return !polIsGone(p); });
   var wrow = (DB.willinstr||[]).find(function(x){ return String(x.ClientID)===String(c.ID); });
   var W = {}; try{ W = wrow && wrow.Data ? JSON.parse(wrow.Data) : {}; }catch(e){ W = {}; }
@@ -19760,6 +19962,7 @@ function qfnaData(c){
   });
   if(spouseLeft) note(spouseLeft+' of the spouse\'s own asset'+(spouseLeft>1?'s and debts are':' or debt is')+' left out: only '+(clean(c.CallingName)||nm.split(' ')[0])+'\'s estate is costed.');
   if(jointSeen) note('Joint assets and debts are entered at half; change them if the shares are not equal.');
+  if(partnerJoint.length){ var _pc = DB.clients.find(function(x){ return String(x.ID)===String(partnerJoint[0].ClientID); }); note(partnerJoint.length+' joint item'+(partnerJoint.length>1?'s are':' is')+' held on '+((_pc && (clean(_pc.CallingName)||String(_pc.Name||'').split(' ')[0]))||'the spouse')+'\'s record and included here at half. "Passes to" and "sold at death" are as captured there: check they match '+(clean(c.CallingName)||nm.split(' ')[0])+'\'s will.'); }
   if(!out.assets.length) warn('no assets are captured.');
 
   var asAt = rows.map(function(r){ return String(r.d.valueDate||''); }).filter(function(s){ return /^\d{4}-\d{2}-\d{2}$/.test(s); }).sort().pop();
@@ -22245,6 +22448,7 @@ document.addEventListener('click', function(e){
         case 'add-bank':       openBankModal(id); break;
         case 'add-finpos':     openFinPosModal(id, el.getAttribute('data-kind')); break;
         case 'edit-finpos':    openFinPosModal(id, null, el.getAttribute('data-fpid')); break;
+        case 'move-finpos':    fpMoveToPartner(el.getAttribute('data-fpid')); break;
         case 'add-need':       openFinPosModal(id, 'need'); break;
         case 'save-need-notes':saveNeedNotes(id); break;
         case 'add-doctor':     openDoctorModal(id); break;
