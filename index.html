@@ -4295,6 +4295,11 @@ function fpLoanTxt(acc, bal){
   return '';
 }
 
+// Cash needs no selling at death or disability (15 Oct 2026, Clinton): the executor has it as it is.
+// "Cash" and "Savings" are older type names still on some records.
+function fpIsCashType(t){ return /^(cash \/ savings|fixed deposit|cash|savings)$/i.test(String(t||'').trim()); }
+function fpCashRow(r, d){ return r.Kind==='other' && fpIsCashType((d||fpData(r)).type); }
+
 // ── One home per item (15 Oct 2026, Clinton) ──
 // An item owned by the spouse lives on the spouse's own client record, when the spouse has one.
 // A joint item is stored once, on one of the two records, and shows on both cards; each card
@@ -4476,7 +4481,7 @@ function renderFinPos(c){
         else if(d.buySell==='Yes') badges += '<span style="background:#e8f5e9;color:#2e7d5a;border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700">Buy &amp; Sell in place</span>';
         else badges += '<span style="background:#fff3e0;color:#9a6a1f;border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700">No Buy &amp; Sell</span>';
       }
-      if(r.Kind!=='liability'){
+      if(r.Kind!=='liability' && !fpCashRow(r, d)){
         if(d.soldDeath==='Yes')  badges += '<span style="background:#fff3e0;color:#9a6a1f;border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700">Sold at death</span>';
         if(d.soldDisab==='Yes')  badges += '<span style="background:#fff3e0;color:#9a6a1f;border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700">Sold at disability</span>';
       } else if(d.payOffDisab==='Yes'){
@@ -12220,8 +12225,10 @@ function buildFnaDataPack(cid, includeSpouse){
     function packItem(r){
         var d = fpData(r);
         line('  • '+(d.desc||'(no description)')+fnaStampTxt(r.UpdatedAt, fm));
+        var _cashR = fpCashRow(r, d);
         Object.keys(d).forEach(function(key){
           if(key==='desc' || key==='holdings') return;
+          if(_cashR && (key==='soldDeath' || key==='soldDisab')) return;   // cash is not sold
           var v = d[key];
           if(v===undefined || v===null || String(v).trim()==='') return;
           line('      '+key+': '+v);
@@ -16438,6 +16445,9 @@ function openFinPosModal(cid, kind, fpid){
 
   var ownerOpts = ['Client','Spouse','Joint'];
   var otherTypeOpts = ['','Cash / Savings','Fixed Deposit','Shares / Unit Trusts','Business Interest','Loan Account','Crypto','Art / Collectibles','Household Contents','Other'];
+  // A type saved before the list changed stays on the list for this item, so saving never blanks it (15 Oct 2026)
+  if(clean(d.type) && !otherTypeOpts.some(function(o){ return o.toLowerCase()===String(d.type).trim().toLowerCase(); })) otherTypeOpts.push(String(d.type).trim());
+  var _cashNow = FP_KIND==='other' && fpIsCashType(d.type);
   var passOpts = ['Spouse','Estate','Named person'];
 
   var html = '';
@@ -16571,10 +16581,11 @@ function openFinPosModal(cid, kind, fpid){
       '<input type="text" id="fppassesToName" list="fpNameList" value="'+clean(d.passesToName||'')+'" autocomplete="off" placeholder="Choose from family or type a name">'+
       '</div>'+
       '</div>'+
-      '<div class="g2">'+
+      '<div class="g2" id="fpSoldWrap" style="display:'+(_cashNow?'none':'')+'">'+
       fpChk('fpsoldDeath','Sold at death',d.soldDeath)+
       fpChk('fpsoldDisab','Sold at disability',d.soldDisab)+
-      '</div>';
+      '</div>'+
+      (FP_KIND==='other' ? '<div id="fpCashNote" style="display:'+(_cashNow?'':'none')+';font-size:12px;color:#556;background:#f3f7fb;border-radius:7px;padding:7px 11px;margin:2px 0 10px">Cash: the executor has it as it is, so there is nothing to sell at death or disability.</div>' : '');
     html = top + mid + death + fld('fpnotes','Notes',d.notes||'','textarea') + dataList;
   }
 
@@ -16582,6 +16593,16 @@ function openFinPosModal(cid, kind, fpid){
   document.getElementById('fpModT').textContent = (FP_EDIT_ID?'Edit ':'Add ')+(FP_KIND==='need'?'🎯':kindMeta.icon)+' '+fpSingular;
   document.getElementById('fpModB').innerHTML = fpOwnerNoteHtml(cid, FP_KIND, row, openedFrom) + html;
   document.getElementById('delFpBtn').style.display = FP_EDIT_ID ? '' : 'none';
+  // Cash: no "sold at death / disability" boxes (15 Oct 2026)
+  var typeSel = document.getElementById('fptype');
+  if(typeSel && FP_KIND==='other'){
+    typeSel.addEventListener('change', function(){
+      var cash = fpIsCashType(typeSel.value);
+      var w = document.getElementById('fpSoldWrap'), n = document.getElementById('fpCashNote');
+      if(w) w.style.display = cash ? 'none' : '';
+      if(n) n.style.display = cash ? '' : 'none';
+    });
+  }
   // Toggle the named-person field when "Passes to at Death" changes
   var passSel = document.getElementById('fppassesTo');
   if(passSel){
@@ -16855,6 +16876,7 @@ function collectFinPosForm(){
   } else {
     d.type = g('fptype');
     d.baseCost = g('fpbaseCost'); d.dateAcquired = g('fpdateAcquired');
+    if(fpIsCashType(d.type)){ d.soldDeath = ''; d.soldDisab = ''; }   // cash is never sold (15 Oct 2026)
   }
   d.source = g('fpsource');
   return d;
@@ -19451,6 +19473,7 @@ function wbkNewRow(kind, o, gen, ctx){
     d.owner = d.owner || 'Client'; d.passesTo = d.passesTo || 'Estate';
     if(d.passesTo!=='Named person') d.passesToName = '';
     d.soldDeath = d.soldDeath || 'No'; d.soldDisab = d.soldDisab || 'No';
+    if(kind==='other' && fpIsCashType(d.type)){ d.soldDeath = ''; d.soldDisab = ''; }   // cash is not sold (15 Oct 2026)
     if(kind==='property') d.primaryRes = d.primaryRes || 'No';
     if(!d.valueDate && gen.valDate && clean(d.value)) d.valueDate = gen.valDate;
   } else if(kind==='liability'){ d.owner = d.owner || 'Client'; d.payOffDisab = d.payOffDisab || 'No'; }
@@ -19831,7 +19854,9 @@ function qfnaData(c){
   // ── Other assets ──
   var OTHER_KIND = {'Cash / Savings':'Cash and deposits', 'Fixed Deposit':'Cash and deposits', 'Shares / Unit Trusts':'Shares and unit trusts',
     'Crypto':'Other investment', 'Loan Account':'Loan account', 'Art / Collectibles':'Vehicle or contents', 'Household Contents':'Vehicle or contents',
-    'Business Interest':'Business interest', 'Other':'Other investment'};
+    'Business Interest':'Business interest', 'Other':'Other investment',
+    // older type names still on some records (15 Oct 2026)
+    'Cash':'Cash and deposits', 'Savings':'Cash and deposits', 'Tax-Free Investment':'Tax-free investment'};
   rows.filter(function(r){ return r.kind==='other'; }).forEach(function(r){
     var d = r.d, f = share(d); if(!f) return;
     var k = OTHER_KIND[d.type] || 'Other investment';
