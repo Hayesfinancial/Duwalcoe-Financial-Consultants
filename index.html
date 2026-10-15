@@ -19884,11 +19884,13 @@ function wbkFinish(P, cid, results){
 // and counted for estate duty at the insurer's value or, if blank, its value worked out at the return on capital.
 // The person it is for pays the duty on it, unless it goes to the spouse (s.4(q)). It is not cash for the
 // executor and carries no executor's fee.
+// 2.3 (15 Oct 2026): a company with a buy and sell is sold to the co-owners at death (the buy and sell policy is left out)
+// and a loan account in it is repaid in cash; a living annuity is taken in cash by its nominees (section 5).
 // The template builder (build_qfna.js) and the CRM (index.html, QF_SPEC) both use this.
 // The CRM fills the Inputs sheet by named range (QF_<key> single cells, QF_T_<table> table
 // bodies). Everything else in the workbook is a formula. One way only: nothing comes back.
 var QF_SPEC = {
-  version: '2.2',
+  version: '2.3',
   copyOffset: 25,                      // hidden copy of the CRM's values: column + 25 (B -> AA) on Inputs
   watched: ['assets', 'debts', 'cover', 'dinc', 'funds', 'deps'],   // tables whose changes turn orange (plus the client cells except Wishes)
   sheets: {inputs: 'Inputs', summary: 'Summary', quote: 'Figures for quoting', work: 'Workings', lists: 'Lists'},
@@ -19987,7 +19989,8 @@ var QF_SPEC = {
 if (typeof module !== 'undefined') module.exports = QF_SPEC;
 
 // ══ QUICK FNA (13 Oct 2026, phase 1: cost of dying; 15 Oct 2026, 2.0/2.1: the life cover need, simplified;
-//    2.2: death income benefits in section 4b, set against the need of the person they are for) ══
+//    2.2: death income benefits in section 4b, set against the need of the person they are for;
+//    2.3: a company with a buy and sell is sold at death (its policy left out), a living annuity is paid out in cash) ══
 // Fills Duwalcoe_Quick_FNA_Template.xlsx (next to index.html) from the client's record and
 // downloads it. One way only: nothing is read back. The workbook does every calculation with
 // live formulas; this code only copies the record into the Inputs sheet and lists what the
@@ -20090,7 +20093,7 @@ function qfnaData(c){
   rows.filter(function(r){ return r.kind==='other'; }).forEach(function(r){
     var d = r.d, f = share(d); if(!f) return;
     var k = OTHER_KIND[d.type] || 'Other investment';
-    if(k==='Business interest') red('a business interest ('+(clean(d.desc)||'business')+'): small business relief, buy-and-sell and loan accounts need the full FNA.');
+    if(k==='Business interest') red('a business interest ('+(clean(d.desc)||'business')+') is captured as an "Other" asset: capture it as a business on the record, so the Quick FNA can cost it (a buy and sell, loan account and small business relief are read from there).');
     // listed investments left to the estate are cashed in by the executor, unless the residue goes to the spouse:
     // then the answer on the record decides (kept and passed to the spouse rolls over for CGT; sold is taxed)
     var sold = (k==='Shares and unit trusts' && passes(d)==='Estate (residue)' && !residueToSpouse) ? 'Yes' : (d.soldDeath==='Yes' ? 'Yes' : 'No');
@@ -20106,23 +20109,45 @@ function qfnaData(c){
     if(fpN(d.financeOut)>0) out.debts.push({name:'Vehicle finance: '+(clean(d.desc)||'vehicle'), amount:amt(d.financeOut,f), notes:''});
   });
   // ── Business interests ──
+  var bsSeen = 0, bsLoan = 0;
   // A simple company is costed here (15 Oct 2026): a Pty Ltd or CC, the client's share valued, no buy-and-sell,
   // no loan account for the client, and small business relief cannot apply. Anything else needs the full FNA.
   rows.filter(function(r){ return r.kind==='business'; }).forEach(function(r){
     var d = r.d, bn = clean(d.desc)||d.entityType||'business', why = [];
     if(!fpBizClientHolds(d) && d.loanAcc!=='Credit' && d.loanAcc!=='Debit'){ note(bn+': only the spouse holds shares, so it is left out.'); return; }
     if(d.entityType!=='Pty Ltd' && d.entityType!=='CC') why.push(d.entityType==='Trust' ? 'it is a trust' : (clean(d.entityType) ? 'it is a '+String(d.entityType).toLowerCase() : 'the entity type is not captured'));
-    if(qfNum(d.value)===null && d.entityType!=='Trust') why.push('the client\'s share has no value');
-    if(d.buySell==='Yes') why.push('there is a buy-and-sell agreement');
-    if(d.loanAcc==='Credit' || d.loanAcc==='Debit') why.push('the client has a loan account with it');
+    var noShares = !fpBizClientHolds(d), loanOnly = d.buySell==='Yes' && noShares;     // 2.3: the client holds only a loan account in it
+    if(qfNum(d.value)===null && d.entityType!=='Trust' && !noShares) why.push('the client\'s share has no value');
+    // 2.3 (Clinton, 15 Oct 2026): with a buy and sell the co-owners buy the shares at death with their own policy, so the
+    // shares are sold and the estate receives the price in cash (with capital gains tax and estate duty as usual); the
+    // buy and sell policy is only the funding and is left out. A loan account in such a company is repaid in cash at death.
+    var bs = d.buySell==='Yes';
+    if(!bs && (d.loanAcc==='Credit' || d.loanAcc==='Debit')) why.push('the client has a loan account with it');
     var sbr = qfNoSbr(d);
-    if(!sbr) why.push('small business relief may apply'+(qfAcquired(d.dateAcquired) ? '' : ' (date acquired not captured)'));
+    if(!sbr && !bs && !noShares) why.push('small business relief may apply'+(qfAcquired(d.dateAcquired) ? '' : ' (date acquired not captured)'));
     if(why.length){ red('a business interest ('+bn+'): '+why.join('; ')+'.'); return; }
     var pct = fpN(d.pctHeld);
-    out.assets.push({name:bn+(pct>0 ? ', '+String(d.pctHeld).replace('%','')+'%' : ''), kind:'Business interest', value:amt(d.value,1), base:amt(d.baseCost,1),
-      home:'', passes:passes(d), sold:(d.soldDeath==='Yes'?'Yes':'No'), notes:join([d.entityType, heirNote(d), clean(d.notes)])});
-    note(bn+': small business relief does not apply ('+sbr+').');
+    // with a buy and sell the price is cash in the estate: it falls into the residue (a bequest of the shares becomes a bequest of the price)
+    var bsPass = passes(d);
+    if(bs && bsPass!=='Estate (residue)') warn(bn+': the record leaves the shares to '+(bsPass==='Spouse' ? 'the spouse' : (clean(d.passesToName)||'a named person'))+', but under the buy and sell they are sold, so the price is in the residue. If the will leaves the price to them, the Quick FNA does not show it: use the full FNA.');
+    if(!loanOnly) out.assets.push({name:bn+(pct>0 ? ', '+String(d.pctHeld).replace('%','')+'%' : ''), kind:'Business interest', value:amt(d.value,1), base:amt(d.baseCost,1),
+      home:'', passes:(bs ? 'Estate (residue)' : bsPass), sold:((bs || d.soldDeath==='Yes')?'Yes':'No'), notes:join([d.entityType, bs ? 'sold to the co-owners under the buy and sell' : '', bs ? '' : heirNote(d), clean(d.notes)])});
+    if(bs){
+      bsSeen++;
+      if(d.loanAcc==='Credit' || d.loanAcc==='Debit') bsLoan++;
+      if(!loanOnly && !(fpN(d.value)>0)) warn(bn+': the value of the client\'s shares is R 0, so the buy and sell brings in no cash. Check the value.');
+      if(loanOnly) note(bn+': only the spouse holds shares; the client\'s loan account is settled at death.');
+      else note(bn+': there is a buy and sell, so the shares are sold to the co-owners at death and the estate receives the price in cash. Their buy and sell policy only funds the price, so it is left out.');
+      if(d.loanAcc==='Credit' && fpN(d.loanBal)>0) out.assets.push({name:'Loan account: '+bn, kind:'Loan account', value:amt(d.loanBal,1), base:null, home:'', passes:'Estate (residue)', sold:'Yes', notes:'repaid in cash at death'});
+      if(d.loanAcc==='Debit' && fpN(d.loanBal)>0) out.debts.push({name:'Loan account owed to '+bn, amount:amt(d.loanBal,1), notes:'repaid by the estate at death'});
+      if((d.loanAcc==='Credit' || d.loanAcc==='Debit') && !(fpN(d.loanBal)>0)) warn(bn+': the loan account has no balance captured, so it is left out.');
+      if(loanOnly){}
+      else if(!sbr) note(bn+': small business relief may apply'+(qfAcquired(d.dateAcquired) ? '' : ' (date acquired not captured)')+'. The Quick FNA leaves it out, so the capital gains tax may be lower than shown.');
+      else note(bn+': small business relief does not apply ('+sbr+').');
+    } else note(bn+': small business relief does not apply ('+sbr+').');
   });
+  if(bsLoan && out.assets.some(function(a){ return a.kind==='Loan account' && !/^Loan account: /.test(a.name); }))
+    warn('a loan account is captured on a business with a buy and sell and also as an "Other" asset: check it is not counted twice (the one on the business is repaid in cash at death).');
   // ── Debts ──
   rows.filter(function(r){ return r.kind==='liability'; }).forEach(function(r){
     var d = r.d, f = share(d); if(!f) return;
@@ -20227,7 +20252,7 @@ function qfnaData(c){
     B.forEach(function(b, i){
       var a = (i===B.length-1) ? Math.round((amount-used)*100)/100 : Math.round(amount*fpN(b.pct)/100*100)/100; used = Math.round((used+a)*100)/100;
       var t = String(b.type||''), to = (t==='Spouse'||t==='Life Partner') ? 'Spouse' : (t==='Estate' ? 'Estate' : 'Named person');
-      out.cover.push({name:label+(B.length>1?' ('+(clean(b.pct)||'')+'%)':''), paidTo:to, amount:a, counted:'Yes', forWhom:(to==='Estate' ? null : (whomFor(b)||null)),
+      out.cover.push({name:label+(B.length>1?' ('+String(clean(b.pct)||'').replace('%','')+'%)':''), paidTo:to, amount:a, counted:'Yes', forWhom:(to==='Estate' ? null : (whomFor(b)||null)),
         notes:join([clean(b.name) ? 'to '+b.name : '', t==='Trust' ? 'a trust' : ''])});
     });
   }
@@ -20238,7 +20263,7 @@ function qfnaData(c){
   function depByLabel(s){ var h = out.deps.filter(function(x){ return sameName(x.name, s); }); return h.length===1 ? h[0].name : ''; }
   function dincRows(p, lbl, r){
     var nmI = (clean(r.label) || 'Death income')+' '+lbl, pm = fpN(r.amount), first = clean(c.CallingName) || nm.split(' ')[0];
-    if(String(r.taxable||'')==='Yes') red('the death income "'+nmI+'" is taxable: what reaches the family after tax needs the full FNA.');
+    if(String(r.taxable||'')==='Yes') warn('the death income "'+nmI+'" is marked taxable. A death income from a life policy is normally not taxed, and the Quick FNA treats it as tax free: check the policy and correct the record.');
     var term = String(clean(r.term)||''), mA = term.match(/^To age (\d+)/i), mY = term.match(/^(\d+)\s*years?$/i), months = null, tnote = '';
     if(mA){
       months = qfMonthsTo(clean(c.DOB), +mA[1], fnaDay);
@@ -20269,7 +20294,7 @@ function qfnaData(c){
           else note('the death income "'+nmI+'" goes to '+(who || 'someone')+', who is not in section 6: it is counted for estate duty, which they pay, and not set against anyone\'s need.');
         }
       }
-      out.dinc.push({name:nmI+(parts.length>1 ? ' ('+(clean(x.b.pct)||'')+'%)' : ''), paidTo:x.to, pm:a, esc:esc, months:months, forWhom:fw || null, value:null,
+      out.dinc.push({name:nmI+(parts.length>1 ? ' ('+String(clean(x.b.pct)||'').replace('%','')+'%)' : ''), paidTo:x.to, pm:a, esc:esc, months:months, forWhom:fw || null, value:null,
         notes:join([tnote, who ? 'to '+who : '', (fw && (x.to==='Estate' || isTrust)) ? 'for '+fw : ''])});
     });
   }
@@ -20277,9 +20302,47 @@ function qfnaData(c){
     var t = p.Type||'', lbl = join([p.Insurer, clean(p.PolicyNo)]).replace(/; /g,' ') || t;
     var routing = clean(p.EstateRouting) || ((['Flexible Investment','Unit Trust','Tax Free Savings','Offshore Flexible Investment'].indexOf(t)>=0) ? 'Estate' : 'Direct');
     var fund = fpN(p.BenFundValue) || fpN(p.BenSurrenderValue);
-    if(t==='Business Assurance'){ red('business assurance on '+lbl+' needs the full FNA.'); return; }
+    if(t==='Business Assurance'){
+      if(String(p.BizType||'')==='Buy & Sell'){
+        note('the buy and sell policy '+lbl+' is left out: it belongs to the co-owners and pays them, and only funds the price of the shares.');
+        if(!bsSeen) warn('there is a buy and sell policy ('+lbl+'), but no business on the record says it has a buy and sell: tick "Buy and sell" on the business so the shares are treated as sold.');
+        return;
+      }
+      red('business assurance on '+lbl+(clean(p.BizType) ? ' ('+p.BizType+')' : ' (type not captured)')+' needs the full FNA.'); return;
+    }
     if(t==='Offshore Endowment' || t==='Offshore Flexible Investment'){ red('an offshore investment ('+lbl+') needs the full FNA.'); return; }
-    if(t==='Living Annuity'){ red('a living annuity ('+lbl+'): estate duty is worked out both ways in the full FNA.'); return; }
+    // 2.3 (Clinton, 15 Oct 2026): a living annuity is taken in cash. It goes straight to its nominees (not s.37C), after
+    // the lump sum tax on death benefits on the total of all the retirement money, and carries no estate duty.
+    if(t==='Living Annuity'){
+      var lav = fpN(p.BenFundValue) || fpN(p.BenSurrenderValue) || null, LA0 = bens(p), LB = LA0.filter(function(b){ return String(b.type||'')!=='Estate'; });
+      if(!LB.length){ red('the living annuity '+lbl+(LA0.length ? ' is nominated only to the estate' : ' has no nominee')+', so it is paid into the estate in cash after tax (executor\'s fees, no estate duty).'); return; }
+      if(LB.length<LA0.length){ red('part of the living annuity '+lbl+' is nominated to the estate, so that part is paid into the estate in cash after tax.'); return; }
+      if(!lav) warn('the living annuity '+lbl+' has no fund value captured.');
+      var lnote = 'living annuity, taken in cash; not in the estate; nominated: '+LB.map(function(b){ return clean(b.name)||b.type; }).join(', ');
+      var ltot = LB.reduce(function(s2, b){ return s2+fpN(b.pct); }, 0), lused = 0;
+      if(Math.abs(ltot-100)>0.01) warn('the living annuity '+lbl+': the nominees\' percentages add up to '+ltot+'%, not 100%. It is shared as if they were the whole.');
+      // who it goes to: by name as well as type (a "Spouse" whose name is not the spouse's is not the spouse)
+      var spFull = String(clean(c.SpouseName)||'');
+      function laWho(b){
+        var t2 = String(b.type||''), bn2 = clean(b.name);
+        if(t2==='Trust') return TRUSTNAME;
+        var isSp = isPartnerType(t2) || t2==='Life Partner' || t2==='Spouse';
+        var w2 = words(bn2).join(' ');
+        var spMatch = !!bn2 && !!depSp && (w2===words(depSp.name).join(' ') || (!!spFull && w2===words(spFull).join(' ')));
+        if(isSp && depSp && (!bn2 || spMatch)) return depSp.name;
+        if(isSp && bn2 && !spMatch){ warn('the living annuity '+lbl+' names "'+bn2+'" as spouse, which is not the spouse on the record: it is not counted for the spouse. Check the nomination.'); return ''; }
+        if(!isSp && spMatch) return depSp.name;
+        return whomFor(b);
+      }
+      LB.forEach(function(b, i){
+        var w = laWho(b) || null;
+        var v = (LB.length===1 || !lav) ? lav : ((i===LB.length-1) ? Math.round((lav-lused)*100)/100 : Math.round(lav*(ltot>0 ? fpN(b.pct)/ltot : 1/LB.length)*100)/100);
+        if(lav) lused = Math.round((lused+(v||0))*100)/100;
+        if(!w) note('the living annuity '+lbl+' goes to '+(clean(b.name)||b.type)+', who is not in section 6, so it is not counted for anyone\'s need.');
+        out.funds.push({name:'Living annuity '+lbl+(LB.length>1 ? ' ('+String(clean(b.pct)||'').replace('%','')+'%)' : ''), value:v, creditTo:w, notes:lnote});
+      });
+      return;
+    }
     if(t==='Medical Aid') return;
     if(t==='Life Annuity'){
       var start = qfDate(p.StartDate), gy = fpN(p.LifeAnnuityGuarYrs), inc = fpN(p.BenLifeAnnuityIncome);
@@ -20380,6 +20443,10 @@ function qfnaData(c){
   // Offshore money captured as an ordinary asset or policy: the Quick FNA treats it as South African
   out.assets.concat(out.cover).concat(out.funds).forEach(function(a){
     if(/offshore/i.test(String(a.name||'')+' '+String(a.notes||''))) warn('"'+a.name+'" looks offshore. The Quick FNA treats it as South African money; use the full FNA if it is held offshore.');
+  });
+  // a bequest the executor sells: the workbook keeps the price in the residue but still treats the asset as left to them
+  out.assets.forEach(function(a){
+    if(a.sold==='Yes' && a.passes && a.passes!=='Estate (residue)') warn('"'+a.name+'" is left to '+(a.passes==='Spouse' ? 'the spouse' : 'a named heir')+' but marked "Executor sells: Yes". The Quick FNA does not follow the price to them: set "Executor sells" to No if they receive it as it is, or use the full FNA.');
   });
   if(spouseLeft) note(spouseLeft+' of the spouse\'s own asset'+(spouseLeft>1?'s and debts are':' or debt is')+' left out: only '+(clean(c.CallingName)||nm.split(' ')[0])+'\'s estate is costed.');
   if(jointSeen) note('Joint assets and debts are entered at half; change them if the shares are not equal.');
