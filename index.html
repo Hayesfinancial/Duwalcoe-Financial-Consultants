@@ -15909,7 +15909,7 @@ function renderIncomeRows(){
       '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:6px">'+
       '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Monthly Benefit</div><input type="text" value="'+(r.amount||'')+'" placeholder="R" onchange="POL_INCOME_ROWS['+i+'].amount=this.value" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
       '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Premium</div><input type="text" value="'+(r.prem||'')+'" placeholder="R" onchange="POL_INCOME_ROWS['+i+'].prem=this.value;riskPremAutoSum()" oninput="riskPremAutoSum()" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
-      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Waiting Period</div><select onchange="POL_INCOME_ROWS['+i+'].waiting=this.value" style="width:100%;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px">'+waitOpts.map(function(o){return '<option'+(r.waiting===o?' selected':'')+'>'+o+'</option>';}).join('')+'</select></div>'+
+      '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Waiting Period</div><select onchange="POL_INCOME_ROWS['+i+'].waiting=this.value" style="width:100%;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px">'+'<option value=""'+(!clean(r.waiting)?' selected':'')+'>None</option>'+waitOpts.map(function(o){return '<option'+(r.waiting===o?' selected':'')+'>'+o+'</option>';}).join('')+'</select></div>'+
       '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Benefit Period</div><select onchange="POL_INCOME_ROWS['+i+'].term=this.value" style="width:100%;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px">'+termOpts.map(function(o){return '<option'+(r.term===o?' selected':'')+'>'+o+'</option>';}).join('')+'</select></div>'+
       '</div>'+
       '<div style="background:#f0ede6;border-radius:6px;padding:8px 10px;margin-bottom:6px">'+
@@ -16052,9 +16052,22 @@ function incomeMax(p){
       var rows=JSON.parse(p.IncomeBenefits);
       if(rows && rows.length){
         var mx=0;
-        rows.forEach(function(r){ if(lumpOnOtherLife(r)) return; var a=N(r.amount); if(a>mx) mx=a; });   // income on another life is not the client's cover (10 Oct 2026)
+        rows.forEach(function(r){ if(lumpOnOtherLife(r)) return; if(r && r.type==='Death Income') return; var a=N(r.amount); if(a>mx) mx=a; });   // income on another life is not the client's cover (10 Oct 2026); death income is not income protection (15 Oct 2026)
         return mx;
       }
+    }catch(e){}
+  }
+  return 0;
+}
+// Monthly income paid to beneficiaries on the client's death (Death Income rows),
+// 15 Oct 2026. Rows add up (one per beneficiary stream, e.g. spouse and children),
+// unlike income protection phases. Rows on another person's life are left out.
+function deathIncomeSum(p){
+  if(p && p.IncomeBenefits){
+    try{
+      var rows=JSON.parse(p.IncomeBenefits), tot=0;
+      if(Array.isArray(rows)) rows.forEach(function(r){ if(r && r.type==='Death Income' && !lumpOnOtherLife(r)) tot+=N(r.amount); });
+      return tot;
     }catch(e){}
   }
   return 0;
@@ -17402,9 +17415,11 @@ function openPolicyView(cid,idx){
     var dis=lumpSum(p,'Capital Disability','BenDisability');
     var dd=lumpSum(p,'Dread Disease / Severe Illness','BenDreadDisease');
     var ipm=incomeMax(p);
+    var dim=deathIncomeSum(p);   // death income shown as its own line, not as income protection (15 Oct 2026)
     h+=sec('Risk Cover');
     var tot=grid([
       field('Death', cov(death)),
+      field('Death income', dim>0?cov(dim,tag('/pm')):''),
       field('Capital disability', cov(dis)),
       field('Dread disease', cov(dd)),
       field('Income protection', ipm>0?cov(ipm,tag('/pm')):''),
@@ -21212,6 +21227,25 @@ function astuteMapTerm(period, plan){
   if(both.indexOf('70')>=0) return 'To age 70';
   return 'To age 65';
 }
+// Income benefit types the policy card offers (renderIncomeRows typeOpts). Returns
+// the matching type for a paste-block incType (any case), or '' (15 Oct 2026).
+var INCOME_ROW_TYPES = ['Temporary IP','Income Protection','Death Income','Sickness Benefit','Hospital Income','Other'];
+function astuteIncomeTypeOf(v){
+  var s = String(v==null?'':v).trim().toLowerCase();
+  if(!s) return '';
+  for(var i=0;i<INCOME_ROW_TYPES.length;i++){ if(INCOME_ROW_TYPES[i].toLowerCase()===s) return INCOME_ROW_TYPES[i]; }
+  return '';
+}
+// A monthly income paid to beneficiaries when the life insured dies (Bidvest Life /
+// FMI "Life Income", "Death Income", "Family Income"). That is death cover paid
+// monthly, not income protection. Names that also say continuation / protection /
+// disability / temporary / sickness / hospital stay income protection, so a plan
+// name like "Discovery Life Income Continuation" is not caught (15 Oct 2026).
+function astuteIsDeathIncome(s){
+  s = String(s||'').toLowerCase();
+  if(/continuation|protect|disab|impair|temporary|sickness|salary|hospital|\bphi\b|\bip\b/.test(s)) return false;
+  return /\bdeath income\b|\blife income\b|\bincome on death\b|\bfamily income\b|\bsurvivor'?s? income\b|\bmonthly on death\b/.test(s);
+}
 // Split a holding's coverages into lump rows, income rows and a policy fee,
 // in the CRM's own row shapes. Fee riders ('Policy Fee') carry premium only
 // and go to the PolicyFee field; other premium-only riders (CashBack, waiver
@@ -21225,16 +21259,25 @@ function astuteClassifyCovers(covers){
       fee += N(cv.prem);
       return;
     }
-    var isIncome = /month/i.test(cv.mode||'') || N(cv.monthlyAmt) > 0;
+    // Income row type (15 Oct 2026): an explicit incType from the paste block wins;
+    // otherwise a benefit named as income paid on death (Bidvest Life / FMI "Life
+    // Income", "Death Income", "Family Income") is a Death Income row. Everything
+    // else keeps the old rule (Temporary IP for a 1, 2 or 5 year term, else Income
+    // Protection). Before this, every monthly benefit became Income Protection.
+    var incType = astuteIncomeTypeOf(cv.incType);
+    var isIncome = /month/i.test(cv.mode||'') || N(cv.monthlyAmt) > 0 || !!incType;
     if(isIncome){
       var amt = N(cv.monthlyAmt) ? cv.monthlyAmt : cv.amt;
       if(!N(amt)) return;
       var term = astuteMapTerm(cv.period, cv.plan);
       var fixedTerm = ['1 year','2 years','5 years'].indexOf(term)>=0;
+      if(!incType) incType = astuteIsDeathIncome(nameStr) ? 'Death Income' : (fixedTerm ? 'Temporary IP' : 'Income Protection');
       incomes.push({
-        type: fixedTerm ? 'Temporary IP' : 'Income Protection',
+        type: incType,
         label: cv.plan||'', amount: amt, prem: cv.prem||'',
-        waiting: astuteMapWaiting(cv.elim), term: term,
+        // A death income benefit has no waiting period: leave it blank rather than
+        // the 1-month default, which would print on the client's schedule.
+        waiting: (incType==='Death Income' ? (clean(cv.elim) ? astuteMapWaiting(cv.elim) : '') : astuteMapWaiting(cv.elim)), term: term,
         esc:'', premEscType:'Fixed %', premEsc:cv.premEsc||'', benEsc:cv.benEsc||'', claimEsc:cv.claimEsc||'',
         taxable:'No', convert:'No', life:cv.life||''
       });
@@ -21570,7 +21613,7 @@ function renderAstutePreview(){
             html += '• '+astuteEsc(L.type)+': '+(N(L.cover)?'R'+Number(L.cover).toLocaleString():'premium-only rider'+(N(L.prem)?' R'+L.prem+' p/m':''))+(L.label?' <span style="color:#889">('+astuteEsc(L.label)+')</span>':'')+
                     (lumpOnOtherLife(L)?' <span style="color:#b45309;font-weight:700">on the life of '+astuteEsc(L.life)+' — not counted as this client\'s cover</span>':'')+'<br>';
           });
-          cls.incomes.forEach(function(I){ html += '• '+astuteEsc(I.type)+' (income): R'+Number(I.amount).toLocaleString()+'/month, '+astuteEsc(I.waiting)+' waiting, '+astuteEsc(I.term)+(I.label?' <span style="color:#889">('+astuteEsc(I.label)+')</span>':'')+'<br>'; });
+          cls.incomes.forEach(function(I){ html += '• '+astuteEsc(I.type)+' (income): R'+Number(I.amount).toLocaleString()+'/month, '+(clean(I.waiting)?astuteEsc(I.waiting)+' waiting, ':'')+astuteEsc(I.term)+(I.label?' <span style="color:#889">('+astuteEsc(I.label)+')</span>':'')+'<br>'; });
           if(cls.fee || N(r.polFee)) html += '• Policy fee: R'+(Math.round((cls.fee+N(r.polFee))*100)/100)+' p/m<br>';
           if(cls.ddNotes.length) html += '• Dread disease options (no rand value in Astute): '+cls.ddNotes.map(astuteEsc).join(', ')+' — will be added to dread disease notes.<br>';
           html += '</div><div style="font-size:11.5px;color:#92400e">⚠ Risk benefits imported from Astute — verify amounts, waiting and benefit periods against the policy schedule.</div>';
@@ -21697,7 +21740,11 @@ function astuteFundsToNotes(r){
 //                has an amount and no benEsc of its own; on a Life Annuity it is
 //                the annual income escalation. Alias accepted: coverEsc.
 //     funds:[{name,value,alloc,units,price,asOf}],
-//     covers:[{plan,code,amt,prem,mode,monthlyAmt,period,elim,benEsc,premEsc,claimEsc,insured}],
+//     covers:[{plan,code,amt,prem,mode,monthlyAmt,period,elim,benEsc,premEsc,claimEsc,insured,incType}],
+//              ← incType (15 Oct 2026): income row type for a monthly benefit, one of
+//                Temporary IP / Income Protection / Death Income / Sickness Benefit /
+//                Hospital Income / Other. "Death Income" = monthly income paid to
+//                beneficiaries on death (e.g. Bidvest Life "Life Income").
 //              ← insured (10 Oct 2026): the benefit is on ANOTHER person's life (e.g. the
 //                spouse benefit on a Discovery Life Plan). Kept on the row as "life" and
 //                left out of the client's cover totals and FNA; its premium still counts.
@@ -21743,6 +21790,8 @@ function parseAstutePasteJSON(txt){
               prem:clean(cv.prem), mode:clean(cv.mode), monthlyAmt:clean(cv.monthlyAmt),
               period:clean(cv.period), elim:clean(cv.elim)||clean(cv.waiting), benEsc:clean(cv.benEsc),
               premEsc:clean(cv.premEsc), claimEsc:clean(cv.claimEsc), life:_cvLife,
+              // incType (15 Oct 2026): the income row type, e.g. "Death Income". Alias incomeType.
+              incType:clean(cv.incType)||clean(cv.incomeType),
               // group risk on a Pension / Provident fund (6 Oct 2026)
               approved:clean(cv.approved), nominee:clean(cv.nominee), basis:clean(cv.basis),
               annualPrem:clean(cv.annualPrem), notes:clean(cv.notes)};
@@ -21889,6 +21938,38 @@ function astuteCarryRowEsc(existing, fresh){
     try{ ex = JSON.parse(existing[key]||'[]'); fr = JSON.parse(fresh[key]||'[]'); }catch(e){ return; }
     if(!Array.isArray(ex) || !Array.isArray(fr) || !ex.length || !fr.length) return;
     var norm = function(v){ return String(v==null?'':v).toLowerCase().replace(/[^a-z0-9]/g,''); };
+    // Income row type set by hand (15 Oct 2026). The importer can only propose a
+    // type; when it proposes its plain default (Income Protection / Temporary IP) for
+    // a row the adviser had changed to another type (e.g. Death Income), keep the
+    // adviser's type. Matched on the same benefit label, or failing that on a monthly
+    // amount within -5%..+25% of the existing one (allows for a year or more of
+    // benefit increases), and only when that match is the single candidate and the
+    // fresh rows do not already hold a row of that type. Otherwise left as imported.
+    if(key==='IncomeBenefits'){
+      var _dflt = function(t){ return t==='Income Protection' || t==='Temporary IP'; };
+      var _claimed = [];
+      fr.forEach(function(x){
+        if(!x || !_dflt(x.type)) return;
+        var cand = [];
+        ex.forEach(function(e, i){ if(e && !_claimed[i] && !_dflt(e.type) && clean(e.type)) cand.push(i); });
+        var hit = -1;
+        cand.forEach(function(i){ if(hit<0 && norm(x.label) && norm(ex[i].label)===norm(x.label)) hit = i; });
+        if(hit<0){
+          var near = cand.filter(function(i){
+            var a = N(ex[i].amount), b = N(x.amount);
+            return a>0 && b>=a*0.95 && b<=a*1.25;
+          });
+          if(near.length===1) hit = near[0];
+        }
+        if(hit<0) return;
+        var t = ex[hit].type;
+        if(fr.some(function(y){ return y && y!==x && y.type===t; })) return;
+        _claimed[hit] = true;
+        x.type = t;
+        if(t==='Death Income') x.waiting = clean(ex[hit].waiting) || '';
+        changed = true;
+      });
+    }
     var used = [];
     var take = function(x, sameLabel){
       for(var i=0;i<ex.length;i++){
@@ -21905,7 +21986,9 @@ function astuteCarryRowEsc(existing, fresh){
       // life: whose life the benefit is on (10 Oct 2026). An Astute pull never states it,
       // so keep the marker already on the policy rather than let the refresh fold a
       // spouse benefit back into the client's cover.
-      ['premEsc','benEsc','life'].forEach(function(f){
+      // claimEsc (15 Oct 2026): a hand-entered in-claim increase survives a refresh
+      // that does not state one, like premEsc / benEsc.
+      ['premEsc','benEsc','life','claimEsc'].forEach(function(f){
         if(!clean(x[f]) && clean(e[f])){ x[f] = e[f]; changed = true; }
       });
     });
@@ -24400,6 +24483,9 @@ function openPolicySchedule(cid){
         var _t={'Life Cover':'Life cover','Capital Disability':'Disability','Dread Disease / Severe Illness':'Dread disease'}[r.type]||r.type||'Cover';
         fields.push({label:_t+' on '+escHtml(clean(r.life).trim()), value:_cov(N(r.cover))});
       });
+      // Death income (15 Oct 2026): monthly income to beneficiaries on death, its own line.
+      var dim=deathIncomeSum(p);
+      if(dim>0) fields.push({label:'Death income', value:(_rfx ? fxDual(dim,_rfx.coverRate,_rfx.ccy,0,'<span style="font-size:10px;font-weight:400;color:'+MUT+'"> /pm</span>') : R(dim)+'<span style="font-size:10px;font-weight:400;color:'+MUT+'"> /pm</span>')});
       var ipm=incomeMax(p);
       if(ipm>0) fields.push({label:'Income protection', value:(_rfx ? fxDual(ipm,_rfx.coverRate,_rfx.ccy,0,'<span style="font-size:10px;font-weight:400;color:'+MUT+'"> /pm</span>') : R(ipm)+'<span style="font-size:10px;font-weight:400;color:'+MUT+'"> /pm</span>')});
       if(N(p.Premium)>0){
