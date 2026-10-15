@@ -19879,13 +19879,18 @@ function wbkFinish(P, cid, results){
 // total. The cover column sizes the estate's cover and each person's cover together, and the headline is
 // their total. New cover for the spouse is nominated to her (no estate duty, s.4(q)) or to a trust for her
 // (a yellow cell). The capital gains roll-over to a spouse applies only to assets the executor does not sell.
+// 2.2 (15 Oct 2026): death income benefits (an income paid each month after death) in section 4b. Each is set
+// against the need of the person it is for, year by year while it pays (any excess in a year is not counted),
+// and counted for estate duty at the insurer's value or, if blank, its value worked out at the return on capital.
+// The person it is for pays the duty on it, unless it goes to the spouse (s.4(q)). It is not cash for the
+// executor and carries no executor's fee.
 // The template builder (build_qfna.js) and the CRM (index.html, QF_SPEC) both use this.
 // The CRM fills the Inputs sheet by named range (QF_<key> single cells, QF_T_<table> table
 // bodies). Everything else in the workbook is a formula. One way only: nothing comes back.
 var QF_SPEC = {
-  version: '2.1',
+  version: '2.2',
   copyOffset: 25,                      // hidden copy of the CRM's values: column + 25 (B -> AA) on Inputs
-  watched: ['assets', 'debts', 'cover', 'funds', 'deps'],   // tables whose changes turn orange (plus the client cells except Wishes)
+  watched: ['assets', 'debts', 'cover', 'dinc', 'funds', 'deps'],   // tables whose changes turn orange (plus the client cells except Wishes)
   sheets: {inputs: 'Inputs', summary: 'Summary', quote: 'Figures for quoting', work: 'Workings', lists: 'Lists'},
   lists: {
     kind: ['Property', 'Cash and deposits', 'Shares and unit trusts', 'Other investment', 'Tax-free investment', 'Loan account', 'Vehicle or contents', 'Business interest'],
@@ -19922,6 +19927,12 @@ var QF_SPEC = {
     cover: {rows: 12, cols: [
       {k: 'name', h: 'Policy', t: 'text'}, {k: 'paidTo', h: 'Paid to', t: 'list:paidTo'}, {k: 'amount', h: 'Paid at death (R)', t: 'money'},
       {k: 'counted', h: 'Counted for estate duty?', t: 'list:yesno'}, {k: 'forWhom', h: 'For whom', t: 'whom'}, {k: 'notes', h: 'Notes', t: 'text'}]},
+    // 2.2: death income benefits (one row per person it is paid to)
+    dinc: {rows: 6, cols: [
+      {k: 'name', h: 'Death income benefit', t: 'text'}, {k: 'paidTo', h: 'Paid to', t: 'list:paidTo'}, {k: 'pm', h: 'A month (R)', t: 'money'},
+      {k: 'esc', h: 'Rising each year once it pays (%)', t: 'pct'}, {k: 'months', h: 'Months it pays, from the death', t: 'months'},
+      {k: 'forWhom', h: 'For whom (a person in section 6)', t: 'dep'}, {k: 'value', h: 'Insurer\'s value for estate duty (R), if you have it', t: 'money'},
+      {k: 'notes', h: 'Notes', t: 'text'}]},
     funds: {rows: 8, cols: [{k: 'name', h: 'Retirement fund or annuity', t: 'text'}, {k: 'value', h: 'Value (R)', t: 'money'}, {k: 'creditTo', h: 'Credited to (s.37C)', t: 'whom'}, {k: 'notes', h: 'Notes', t: 'text'}]},
     deps: {rows: 6, cols: [
       {k: 'name', h: 'Name', t: 'text'}, {k: 'rel', h: 'Relationship', t: 'list:rel'}, {k: 'age', h: 'Age', t: 'int'},
@@ -19975,7 +19986,8 @@ var QF_SPEC = {
 };
 if (typeof module !== 'undefined') module.exports = QF_SPEC;
 
-// ══ QUICK FNA (13 Oct 2026, phase 1: cost of dying; 15 Oct 2026, 2.0/2.1: the life cover need, simplified) ══
+// ══ QUICK FNA (13 Oct 2026, phase 1: cost of dying; 15 Oct 2026, 2.0/2.1: the life cover need, simplified;
+//    2.2: death income benefits in section 4b, set against the need of the person they are for) ══
 // Fills Duwalcoe_Quick_FNA_Template.xlsx (next to index.html) from the client's record and
 // downloads it. One way only: nothing is read back. The workbook does every calculation with
 // live formulas; this code only copies the record into the Inputs sheet and lists what the
@@ -19993,6 +20005,19 @@ function qfnaLoadTemplate(cb){
 function qfR2(n){ return 'R '+Number(n).toLocaleString('en-US',{minimumFractionDigits:2, maximumFractionDigits:2}); }
 function qfNum(v){ var s = String(v===undefined||v===null?'':v).trim(); return s==='' ? null : fpN(s); }
 function qfDate(s){ var m = String(s||'').match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? new Date(Date.UTC(+m[1], +m[2]-1, +m[3])) : null; }
+// A policy's income benefit rows. Most records hold a list; a few captured before the current policy card hold
+// {v2:[...], ip:[...]}, where ip is the list in the same row shape (15 Oct 2026). Anything else: none.
+function qfIncRows(p){
+  try{ var x = JSON.parse((p && p.IncomeBenefits) || '[]'); if(Array.isArray(x)) return x; if(x && Array.isArray(x.ip)) return x.ip; }catch(e){}
+  return [];
+}
+// Monthly payments from the date "from" while the life insured is younger than "age" (the first one at "from"):
+// a death income "to age 70" pays until the month the life insured would have turned 70. null without a date of birth.
+function qfMonthsTo(dob, age, from){
+  var b = qfDate(dob); if(!b || !from) return null;
+  var diff = (b.getUTCFullYear()+age-from.getUTCFullYear())*12 + (b.getUTCMonth()-from.getUTCMonth());
+  return Math.max(0, b.getUTCDate() > from.getUTCDate() ? diff+1 : diff);
+}
 
 // When the client bought a business: {y, m, d} from "YYYY-MM-DD", or {y} from a year alone; null if not captured.
 function qfAcquired(s){
@@ -20017,9 +20042,9 @@ function qfNoSbr(d){
   return null;
 }
 
-// The record, as Quick FNA input rows. Returns {single:{}, assets:[], debts:[], cover:[], funds:[], deps:[], checks:[], assumptions:{}}.
+// The record, as Quick FNA input rows. Returns {single:{}, assets:[], debts:[], cover:[], dinc:[], funds:[], deps:[], checks:[], assumptions:{}}.
 function qfnaData(c){
-  var out = { single:{}, assets:[], debts:[], cover:[], funds:[], deps:[], checks:[], assumptions:{} };
+  var out = { single:{}, assets:[], debts:[], cover:[], dinc:[], funds:[], deps:[], checks:[], assumptions:{} };
   var red = function(t){ out.checks.push('✗ Full FNA: '+t); };
   var warn = function(t){ out.checks.push('✗ '+t); };
   var note = function(t){ out.checks.push('• '+t); };
@@ -20206,6 +20231,48 @@ function qfnaData(c){
         notes:join([clean(b.name) ? 'to '+b.name : '', t==='Trust' ? 'a trust' : ''])});
     });
   }
+  // 2.2: a death income benefit, one row per person it is paid to (split by the nominated shares). It is for the
+  // spouse when paid to the spouse; for a named dependant when nominated; paid to the estate or a trust, for the one
+  // person in section 6 its name matches ("Carter life income" is Carter's), else Clinton chooses (a red check).
+  var MON3 = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'], fnaDay = qfDate(localDateStr());
+  function depByLabel(s){ var h = out.deps.filter(function(x){ return sameName(x.name, s); }); return h.length===1 ? h[0].name : ''; }
+  function dincRows(p, lbl, r){
+    var nmI = (clean(r.label) || 'Death income')+' '+lbl, pm = fpN(r.amount), first = clean(c.CallingName) || nm.split(' ')[0];
+    if(String(r.taxable||'')==='Yes') red('the death income "'+nmI+'" is taxable: what reaches the family after tax needs the full FNA.');
+    var term = String(clean(r.term)||''), mA = term.match(/^To age (\d+)/i), mY = term.match(/^(\d+)\s*years?$/i), months = null, tnote = '';
+    if(mA){
+      months = qfMonthsTo(clean(c.DOB), +mA[1], fnaDay);
+      if(months===null) warn('the death income "'+nmI+'" pays to age '+mA[1]+', but there is no date of birth on the record: enter the months it pays in section 4b.');
+      else {
+        var b = qfDate(c.DOB); tnote = 'until '+first+' would turn '+mA[1]+' ('+b.getUTCDate()+' '+MON3[b.getUTCMonth()]+' '+(b.getUTCFullYear()+(+mA[1]))+')';
+        if(months===0) note('the death income "'+nmI+'" pays only until '+first+' would turn '+mA[1]+', which has passed, so it pays nothing.');
+      }
+    } else if(mY){ months = 12*(+mY[1]); tnote = 'for '+mY[1]+' year'+(+mY[1]===1 ? '' : 's'); }
+    else warn('the death income "'+nmI+'" has the benefit period "'+(term||'not captured')+'", which does not say how long it pays after a claim: enter the months it pays in section 4b'+(fpN(r.termYears)>0 ? ' (the record also says '+fpN(r.termYears)+' years)' : '')+'.');
+    var esc = qfNum(String(r.claimEsc===undefined || r.claimEsc===null ? '' : r.claimEsc).replace('%',''));
+    if(esc===null){ esc = 0; note('the death income "'+nmI+'" has no in-claim increase captured, so it is taken as level.'); }
+    var B = bens(p);
+    var parts = B.length ? B.map(function(b){ var t = String(b.type||''); return {to:((t==='Spouse'||t==='Life Partner') ? 'Spouse' : (t==='Estate' ? 'Estate' : 'Named person')), b:b, pct:fpN(b.pct)}; }) : [{to:'Estate', b:null, pct:100}];
+    var used = 0;
+    parts.forEach(function(x, i){
+      var a = parts.length===1 ? pm : ((i===parts.length-1) ? Math.round((pm-used)*100)/100 : Math.round(pm*x.pct/100*100)/100); used = Math.round((used+a)*100)/100;
+      var fw = '', isTrust = !!x.b && String(x.b.type||'')==='Trust', who = (x.b && clean(x.b.name)) || '';
+      if(x.to==='Spouse'){
+        fw = depSp ? depSp.name : '';
+        if(!fw) note('the death income "'+nmI+'" is paid to the spouse, but no death need is captured for them, so it is not set against a need (it carries no estate duty).');
+      } else {
+        fw = x.b ? whomFor(x.b) : '';
+        if(fw===TRUSTNAME) fw = '';
+        if(!fw) fw = depByLabel(r.label);
+        if(!fw){
+          if(x.to==='Estate' || isTrust) warn('the death income "'+nmI+'" is paid to '+(x.to==='Estate' ? 'the estate' : (who || 'a trust'))+' and its name matches no one in section 6: choose who it is for in section 4b (the child whose trust receives it, say).');
+          else note('the death income "'+nmI+'" goes to '+(who || 'someone')+', who is not in section 6: it is counted for estate duty, which they pay, and not set against anyone\'s need.');
+        }
+      }
+      out.dinc.push({name:nmI+(parts.length>1 ? ' ('+(clean(x.b.pct)||'')+'%)' : ''), paidTo:x.to, pm:a, esc:esc, months:months, forWhom:fw || null, value:null,
+        notes:join([tnote, who ? 'to '+who : '', (fw && (x.to==='Estate' || isTrust)) ? 'for '+fw : ''])});
+    });
+  }
   pols.forEach(function(p){
     var t = p.Type||'', lbl = join([p.Insurer, clean(p.PolicyNo)]).replace(/; /g,' ') || t;
     var routing = clean(p.EstateRouting) || ((['Flexible Investment','Unit Trust','Tax Free Savings','Offshore Flexible Investment'].indexOf(t)>=0) ? 'Estate' : 'Direct');
@@ -20243,9 +20310,10 @@ function qfnaData(c){
       if(String(p.HasGroupRisk||'')==='Yes') warn('group life on '+lbl+' is not filled in: add it to section 4 (Counted for estate duty: No if it is approved).');
       return;
     }
-    var incRows = []; try{ incRows = JSON.parse(p.IncomeBenefits||'[]')||[]; }catch(e){}
-    if((incRows||[]).some(function(r){ return r && r.type==='Death Income' && !lumpOnOtherLife(r) && N(r.amount)>0; }) || fpN(p.BenDeathIncome)>0)
-      red('a death income benefit on '+lbl+' needs the full FNA.');
+    // 2.2: death income benefits on the client's life go to section 4b (the old BenDeathIncome field, with no term, too)
+    var incRows = qfIncRows(p).filter(function(r){ return r && r.type==='Death Income' && !lumpOnOtherLife(r) && fpN(r.amount)>0; });
+    if(!incRows.length && fpN(p.BenDeathIncome)>0) incRows = [{type:'Death Income', label:'', amount:p.BenDeathIncome, term:''}];
+    incRows.forEach(function(r){ dincRows(p, lbl, r); });
     if(t==='Unit Trust' || t==='Flexible Investment' || t==='Tax Free Savings'){
       if(routing==='Estate'){
         var tf = t==='Tax Free Savings';
@@ -20366,7 +20434,7 @@ function qfnaExport(cid){
           });
         });
       }
-      fill('assets', D.assets, 'assets'); fill('debts', D.debts, 'debts'); fill('cover', D.cover, 'policies'); fill('funds', D.funds, 'retirement funds');
+      fill('assets', D.assets, 'assets'); fill('debts', D.debts, 'debts'); fill('cover', D.cover, 'policies'); fill('dinc', D.dinc, 'death income benefits'); fill('funds', D.funds, 'retirement funds');
       fill('deps', D.deps, 'dependants');
       fill('checks', D.checks.map(function(t){ return {text:t}; }), 'check lines');
       set('QF_M_ClientID', String(c.ID)); set('QF_M_ClientName', c.Name||''); set('QF_M_Version', QF_SPEC.version);
