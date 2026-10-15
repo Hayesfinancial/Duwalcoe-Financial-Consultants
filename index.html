@@ -19857,12 +19857,18 @@ function wbkFinish(P, cid, results){
 // 2.0 (15 Oct 2026, phase 2): the life cover need. The people who depend on the client, how the money
 // reaches them (the residue, policies "for whom", retirement funds "credited to"), the capital each needs
 // (unit trust tax basis, trustee fees), the cover to close each gap, and three live options. An ANC
-// marriage with accrual is costed when everything goes to the spouse.
+// marriage with accrual is costed when everything goes to the spouse. Once-off needs for a person (a house, an
+// education fund) are added to that person's capital need, in today's money.
+// 2.1 (15 Oct 2026, simplified at Clinton's request): no Options page, no family pot, no living annuity.
+// Retirement money reaches a dependant or the trust in cash, after the death benefit lump sum tax on the
+// total. The cover column sizes the estate's cover and each person's cover together, and the headline is
+// their total. New cover for the spouse is nominated to her (no estate duty, s.4(q)) or to a trust for her
+// (a yellow cell). The capital gains roll-over to a spouse applies only to assets the executor does not sell.
 // The template builder (build_qfna.js) and the CRM (index.html, QF_SPEC) both use this.
 // The CRM fills the Inputs sheet by named range (QF_<key> single cells, QF_T_<table> table
 // bodies). Everything else in the workbook is a formula. One way only: nothing comes back.
 var QF_SPEC = {
-  version: '2.0',
+  version: '2.1',
   copyOffset: 25,                      // hidden copy of the CRM's values: column + 25 (B -> AA) on Inputs
   watched: ['assets', 'debts', 'cover', 'funds', 'deps'],   // tables whose changes turn orange (plus the client cells except Wishes)
   sheets: {inputs: 'Inputs', summary: 'Summary', quote: 'Figures for quoting', work: 'Workings', lists: 'Lists'},
@@ -19873,9 +19879,8 @@ var QF_SPEC = {
     yesno: ['Yes', 'No'],
     residue: ['Heirs (people)', 'Spouse'],
     rel: ['Spouse', 'Child', 'Other'],
-    kidsShare: ['In equal shares', 'As one family pot', 'Not to the dependants'],
-    potShare: ['Equal shares', 'One family pot'],
-    closeWith: ['Nothing', 'New life cover', 'Part of a nomination', 'All of a nomination'],
+    kidsShare: ['In equal shares', 'Not to the dependants'],
+    spouseCover: ['The spouse', 'A trust for the spouse'],
     marital: ['Single', 'Engaged', 'Married - ANC with accrual', 'Married - ANC without accrual', 'Married in COP', 'Life partner', 'Divorced', 'Widowed', 'Married', 'Civil Union', 'Co-Habitation']
   },
   // Kinds that carry capital gains tax on death (the rest do not: cash, tax-free, loan accounts, vehicles and contents)
@@ -19907,7 +19912,8 @@ var QF_SPEC = {
       {k: 'name', h: 'Name', t: 'text'}, {k: 'rel', h: 'Relationship', t: 'list:rel'}, {k: 'age', h: 'Age', t: 'int'},
       {k: 'needPM', h: 'Needs a month from this money (R, after tax)', t: 'money'}, {k: 'years', h: 'For how many years', t: 'int'},
       {k: 'esc', h: 'Rising each year by (%, blank: inflation)', t: 'pct'}, {k: 'trust', h: 'Held in a trust?', t: 'list:yesno'},
-      {k: 'other', h: 'Their own taxable income (R a year)', t: 'money'}]},
+      {k: 'other', h: 'Their own taxable income (R a year)', t: 'money'},
+      {k: 'lump', h: 'Once-off needs (R, today\'s money)', t: 'money'}]},
     checks: {rows: 14, cols: [{k: 'text', h: 'From the CRM', t: 'text'}]}
   },
   quote: [
@@ -19942,11 +19948,6 @@ var QF_SPEC = {
     {k: 'Growth', label: 'Unit trust return: growth part (%)', t: 'pct', v: 36.25},
     {k: 'DivTax', label: 'Dividends tax (%)', t: 'pct', v: 20},
     {k: 'CPI', label: 'Inflation, when a need gives no increase (%)', t: 'pct', v: 4},
-    {k: 'LAMin', label: 'Living annuity: lowest drawdown (% a year)', t: 'pct', v: 2.5},
-    {k: 'LAMax', label: 'Living annuity: highest drawdown (% a year)', t: 'pct', v: 17.5},
-    {k: 'Rebate1', label: 'Primary rebate (R)', t: 'money', v: 17820},
-    {k: 'Rebate2', label: 'Secondary rebate, 65 and older (R)', t: 'money', v: 9765},
-    {k: 'Rebate3', label: 'Tertiary rebate, 75 and older (R)', t: 'money', v: 3249},
     {k: 'Thr65', label: 'Tax threshold, 65 to 74 (R)', t: 'money', v: 153250},
     {k: 'Thr75', label: 'Tax threshold, 75 and older (R)', t: 'money', v: 171300}
   ],
@@ -19959,7 +19960,7 @@ var QF_SPEC = {
 };
 if (typeof module !== 'undefined') module.exports = QF_SPEC;
 
-// ══ QUICK FNA (13 Oct 2026, phase 1: cost of dying; 15 Oct 2026, 2.0: the life cover need) ══
+// ══ QUICK FNA (13 Oct 2026, phase 1: cost of dying; 15 Oct 2026, 2.0/2.1: the life cover need, simplified) ══
 // Fills Duwalcoe_Quick_FNA_Template.xlsx (next to index.html) from the client's record and
 // downloads it. One way only: nothing is read back. The workbook does every calculation with
 // live formulas; this code only copies the record into the Inputs sheet and lists what the
@@ -20001,9 +20002,9 @@ function qfNoSbr(d){
   return null;
 }
 
-// The record, as Quick FNA input rows. Returns {single:{}, assets:[], debts:[], cover:[], funds:[], deps:[], options:{}, checks:[], assumptions:{}}.
+// The record, as Quick FNA input rows. Returns {single:{}, assets:[], debts:[], cover:[], funds:[], deps:[], checks:[], assumptions:{}}.
 function qfnaData(c){
-  var out = { single:{}, assets:[], debts:[], cover:[], funds:[], deps:[], options:{}, checks:[], assumptions:{} };
+  var out = { single:{}, assets:[], debts:[], cover:[], funds:[], deps:[], checks:[], assumptions:{} };
   var red = function(t){ out.checks.push('✗ Full FNA: '+t); };
   var warn = function(t){ out.checks.push('✗ '+t); };
   var note = function(t){ out.checks.push('• '+t); };
@@ -20015,6 +20016,7 @@ function qfnaData(c){
   var W = {}; try{ W = wrow && wrow.Data ? JSON.parse(wrow.Data) : {}; }catch(e){ W = {}; }
   var marital = clean(c.MaritalStatus) || 'Single';
   var nm = String(c.Name||'').trim();
+  var residueToSpouse = !!wrow && W.res_choice==='Entire residue to my spouse / life partner';
 
   // ── Owner share: the client's own (all), joint (half), the spouse's (left out) ──
   var spouseLeft = 0, jointSeen = 0;
@@ -20049,8 +20051,9 @@ function qfnaData(c){
     var d = r.d, f = share(d); if(!f) return;
     var k = OTHER_KIND[d.type] || 'Other investment';
     if(k==='Business interest') red('a business interest ('+(clean(d.desc)||'business')+'): small business relief, buy-and-sell and loan accounts need the full FNA.');
-    // listed investments left to the estate are cashed in by the executor
-    var sold = (k==='Shares and unit trusts' && passes(d)==='Estate (residue)') ? 'Yes' : (d.soldDeath==='Yes' ? 'Yes' : 'No');
+    // listed investments left to the estate are cashed in by the executor, unless the residue goes to the spouse:
+    // then the answer on the record decides (kept and passed to the spouse rolls over for CGT; sold is taxed)
+    var sold = (k==='Shares and unit trusts' && passes(d)==='Estate (residue)' && !residueToSpouse) ? 'Yes' : (d.soldDeath==='Yes' ? 'Yes' : 'No');
     out.assets.push({name:clean(d.desc)||d.type||'Asset', kind:k, value:amt(d.value,f), base:(QF_SPEC.cgtKinds.indexOf(k)>=0 ? amt(d.baseCost,f) : null),
       home:'', passes:passes(d), sold:(k==='Cash and deposits'?'':sold),
       notes:join([f<1?'half of a joint asset':'', heirNote(d), d.type==='Crypto'?'crypto':'', clean(d.notes)])});
@@ -20109,10 +20112,11 @@ function qfnaData(c){
     var d = r.d, scen = d.scenario||'Other';
     if(scen!=='Death') return;
     var lbl = clean(d.desc) || 'a death need';
-    if(d.needType!=='Monthly income'){
-      if(fpN(d.amount)>0) note('Once-off capital need "'+lbl+'" (R '+Number(fpN(d.amount)).toLocaleString('en-US')+') is not in the life cover need. If the estate must pay it, add it to the debts in section 2.');
-      return;
-    }
+    // A once-off need (a house for the spouse, an education fund) is added to that person's capital need, in
+    // today's money (15 Oct 2026). One for the estate is usually already a debt, so it is flagged, not added.
+    var once = d.needType!=='Monthly income', amt = fpN(d.amount);
+    if(once && !(amt>0)){ warn('the once-off death need "'+lbl+'" has no amount, so it is left out.'); return; }
+    if(once && d.benTo==='Estate'){ warn('the once-off death need "'+lbl+'" (R '+Number(amt).toLocaleString('en-US')+') is for the estate. If it is not already a debt in section 2, add it there; it is not added on its own, so nothing is counted twice.'); return; }
     var bn = d.benTo==='Named person' ? clean(d.benName) : '';
     if(d.benTo!=='Spouse' && !bn){ warn('the death need "'+lbl+'" says '+(d.benTo==='Estate' ? 'it is for the estate' : 'nobody under "For whom"')+', so it is left out. Add the person in section 6.'); return; }
     var P;
@@ -20123,13 +20127,20 @@ function qfnaData(c){
       else if(hits.length===1){ var t = hits[0].Type; P = {key:'l:'+hits[0].ID, name:first(bn), rel:(isPartnerType(t) ? 'Spouse' : (t==='Child' ? 'Child' : 'Other')), dob:clean(hits[0].DOB)}; if(P.rel==='Spouse') P.key = 'sp'; }
       else P = {key:'n:'+words(bn).join(' '), name:bn, rel:'', dob:'', why:(hits.length ? 'matches '+hits.length+' family members ('+hits.map(function(l){ return l.Name; }).join(', ')+')' : 'is not a family member on the record by that name')};
     }
-    if(!(fpN(d.amount)>0) || !(fpN(d.years)>0)) warn('the death need "'+lbl+'" for '+P.name+' has no amount a month or no years: fill them in section 6.');
     var esc = String(d.esc===undefined||d.esc===null?'':d.esc).trim();
-    P.needPM = fpN(d.amount)||null; P.years = fpN(d.years)||null; P.esc = (esc==='' ? null : fpN(esc)); P.lbl = lbl;
+    if(once){ P.lump = amt; P.inc = false; P.needPM = null; P.years = null; P.esc = null; }
+    else {
+      if(!(amt>0) || !(fpN(d.years)>0)) warn('the death need "'+lbl+'" for '+P.name+' has no amount a month or no years: fill them in section 6.');
+      P.lump = 0; P.inc = true; P.needPM = amt||null; P.years = fpN(d.years)||null; P.esc = (esc==='' ? null : fpN(esc));
+    }
+    P.lbl = lbl;
     var had = byKey[P.key];
     if(had){
-      if(had.years===P.years && had.esc===P.esc){ had.needPM = Math.round(((had.needPM||0)+(P.needPM||0))*100)/100; had.lbl += '" and "'+lbl; }
-      else warn('two death needs for '+had.name+' run for different periods or rise differently ("'+had.lbl+'" and "'+lbl+'"): only the first is in. Change section 6 by hand.');
+      if(once) had.lump = Math.round(((had.lump||0)+amt)*100)/100;
+      else if(!had.inc){ had.inc = true; had.needPM = P.needPM; had.years = P.years; had.esc = P.esc; }
+      else if(had.years===P.years && had.esc===P.esc) had.needPM = Math.round(((had.needPM||0)+(P.needPM||0))*100)/100;
+      else { warn('two death needs for '+had.name+' run for different periods or rise differently ("'+had.lbl+'" and "'+lbl+'"): only the first is in. Change section 6 by hand.'); return; }
+      had.lbl += '" and "'+lbl;
       return;
     }
     byKey[P.key] = P; depOrder.push(P);
@@ -20144,7 +20155,7 @@ function qfnaData(c){
       else if(/^Only if/.test(wTrust)){ trust = (age===null || age<18) ? 'Yes' : 'No'; if(age===null) note(p.name+': the will\'s trust is only for minors and the age is not known, so the trust is assumed.'); }
     }
     var other = (p.rel==='Spouse' && fpN(c.SpouseIncome)>0) ? Math.round(fpN(c.SpouseIncome)*12*100)/100 : null;
-    out.deps.push({name:p.name, rel:p.rel, age:age, needPM:p.needPM, years:p.years, esc:p.esc, trust:trust, other:other});
+    out.deps.push({name:p.name, rel:p.rel, age:age, needPM:p.needPM, years:p.years, esc:p.esc, trust:trust, other:other, lump:(p.lump>0 ? p.lump : null)});
   });
   out.deps.sort(function(a, b){
     var o = function(x){ return x.rel==='Spouse' ? 0 : (x.rel==='Child' ? 1 : (x.rel==='Other' ? 2 : 3)); };
@@ -20225,6 +20236,7 @@ function qfnaData(c){
         var tf = t==='Tax Free Savings';
         out.assets.push({name:clean(p.Product)||(t+' '+lbl), kind:(tf?'Tax-free investment':'Shares and unit trusts'), value:fund||null,
           base:(tf?null:qfNum(p.BaseCost)), home:'', passes:'Estate (residue)', sold:'Yes', notes:join([lbl, 'cashed in by the executor'])});
+        if(residueToSpouse && !tf) note((clean(p.Product)||lbl)+' is cashed in by the executor, so capital gains tax applies (no roll-over to the spouse). If it will pass to the spouse as it is, set "Executor sells" to No.');
         if(!fund) warn((clean(p.Product)||lbl)+' has no fund value captured.');
       } else coverRows(p, (clean(p.Product)||t)+' '+lbl, fund, 'Direct');
       return;
@@ -20291,23 +20303,18 @@ function qfnaData(c){
   if(partnerJoint.length){ var _pc = DB.clients.find(function(x){ return String(x.ID)===String(partnerJoint[0].ClientID); }); note(partnerJoint.length+' joint item'+(partnerJoint.length>1?'s are':' is')+' held on '+((_pc && (clean(_pc.CallingName)||String(_pc.Name||'').split(' ')[0]))||'the spouse')+'\'s record and included here at half. "Passes to" and "sold at death" are as captured there: check they match '+(clean(c.CallingName)||nm.split(' ')[0])+'\'s will.'); }
   if(!out.assets.length) warn('no assets are captured.');
 
-  // ── 2.0: how the residue reaches the children, and the three options ──
+  // ── 2.0: how the residue reaches the children; 2.1: new cover for the spouse is nominated to the spouse ──
   var kidsShare = 'In equal shares';
   if(residue!=='Spouse' && out.deps.some(function(x){ return x.rel==='Child'; })){
     if(!wrow){ kidsShare = 'Not to the dependants'; note('No will captured: the residue is not counted for the children (worst case). Change "How the residue reaches the children" in section 6 if they inherit it.'); }
     else if(!/^Entire residue to my children/.test(W.res_choice||'')){ kidsShare = 'Not to the dependants'; warn('the residue is not left to the children equally in the will capture, so it is not counted for them. Change "How the residue reaches the children" in section 6 if they inherit part of it.'); }
   }
-  // Option 2 moves part of the largest nomination to someone who is not a dependant (Option 1 has it ready too)
-  var noms = out.cover.filter(function(x){ return x.paidTo==='Named person' && !x.forWhom && x.amount>0; }).sort(function(a, b){ return b.amount-a.amount; });
-  if(noms.length){ out.options.O1_nom = noms[0].name; out.options.O2_nom = noms[0].name; }
-  else out.options.O2_close = 'Nothing';
-  if(!trustKids){ out.options.O1_dest = depSp ? depSp.name : (out.deps[0] ? out.deps[0].name : null); }
   if(!out.deps.length) note('No death needs paid as a monthly income on the Needs tab, so there are no dependants in section 6: the workbook shows the cost of dying only.');
 
   var asAt = rows.map(function(r){ return String(r.d.valueDate||''); }).filter(function(s){ return /^\d{4}-\d{2}-\d{2}$/.test(s); }).sort().pop();
   out.single = { Client:(clean(c.Title)?c.Title+' ':'')+nm, First:clean(c.CallingName)||nm.split(' ')[0], Adviser:QF_ADVISER,
     Date:qfDate(localDateStr()), AsAt:asAt ? qfDate(asAt) : null, Marital:marital, Residue:residue, Wishes:null,
-    TI:TI, TINote:parts.length ? parts.join(' and ')+' a month' : 'no taxable income captured', KidsShare:kidsShare };
+    TI:TI, TINote:parts.length ? parts.join(' and ')+' a month' : 'no taxable income captured', KidsShare:kidsShare, SpouseCover:'The spouse' };
   return out;
 }
 
@@ -20346,7 +20353,6 @@ function qfnaExport(cid){
       }
       fill('assets', D.assets, 'assets'); fill('debts', D.debts, 'debts'); fill('cover', D.cover, 'policies'); fill('funds', D.funds, 'retirement funds');
       fill('deps', D.deps, 'dependants');
-      Object.keys(D.options).forEach(function(k){ set('QF_'+k, D.options[k]); });
       fill('checks', D.checks.map(function(t){ return {text:t}; }), 'check lines');
       set('QF_M_ClientID', String(c.ID)); set('QF_M_ClientName', c.Name||''); set('QF_M_Version', QF_SPEC.version);
       set('QF_M_ExportedAt', new Date().toISOString().slice(0,16).replace('T',' '));
