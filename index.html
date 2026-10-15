@@ -9781,7 +9781,7 @@ function handleEventDocFiles(eventId, docKey, files){
     if(!file && !row) return;
     e.preventDefault();
     setHot(null);
-    if(!row){ toast('Drop files onto a document heading', 'err'); return; }
+    if(!row){ toast((e.target && e.target.closest && e.target.closest('#tMod')) ? 'Drop onto the attachments box or a document heading' : 'Drop files onto a document heading', 'err'); return; }
     if(row.hasAttribute('data-drop-na')){ toast('That heading is marked N/A for this case. Click ✓ Applicable first.', 'err'); return; }
     if(!file){ toast('No file received. Drag from Google Drive in File Explorer, not the Drive website.', 'err'); return; }
     // Folders are not supported: detect them before reading the file list.
@@ -9797,6 +9797,7 @@ function handleEventDocFiles(eventId, docKey, files){
     var kind = row.getAttribute('data-drop'), owner = row.getAttribute('data-drop-owner'), dk = row.getAttribute('data-drop-dk');
     if(kind === 'client') handleClientDocFiles(owner, dk, files);
     else if(kind === 'event') handleEventDocFiles(owner, dk, files);
+    else if(kind === 'task') handleTaskDocFiles(owner, files);
   });
 })();
 
@@ -10049,19 +10050,31 @@ function openTaskDocUpload(taskId){
   // Operational attachments: broader than Work Event docs. Accepts emails,
   // screenshots, common office formats, plain text.
   input.accept = '.pdf,.jpg,.jpeg,.png,.gif,.docx,.doc,.xlsx,.xls,.tiff,.tif,.msg,.eml,.txt,.csv';
+  input.multiple = true;   // 15 Oct 2026: several at once, like drag and drop
   input.style.display = 'none';
   input.addEventListener('change', function(){
-    var file = input.files && input.files[0];
+    var files = Array.prototype.slice.call(input.files || []);
     document.body.removeChild(input);
-    if(!file) return;
-    if(file.size > 50*1024*1024){ alert('File too large. Max 50 MB.'); return; }
-    uploadTaskDoc(taskId, file);
+    if(!files.length) return;
+    handleTaskDocFiles(taskId, files);
   });
   document.body.appendChild(input);
   input.click();
 }
 
-function uploadTaskDoc(taskId, file){
+// Files dropped on (or picked for) a task's attachments box (15 Oct 2026): same file
+// rules as work events, uploaded one after another with one summary.
+function handleTaskDocFiles(taskId, files){
+  var t = DB.tasks.find(function(x){ return String(x.ID)===String(taskId); });
+  if(!t){ toast('Task not found. Refresh and try again.', 'err'); return; }
+  var v = docValidateFiles(files);
+  if(v.bad.length) alert('These files were not attached to the task:\n\n• '+v.bad.join('\n• '));
+  if(!v.ok.length) return;
+  docRunBatch(v.ok, function(file, isFirst, done){ uploadTaskDoc(taskId, file, done); }, 'the task', function(){ loadTaskDocs(taskId); });
+}
+
+// done(ok, msg) (15 Oct 2026): when given, the batch reports and reloads instead.
+function uploadTaskDoc(taskId, file, done){
   var t = DB.tasks.find(function(x){ return String(x.ID)===String(taskId); });
   // Storage path: tasks/{ClientName-or-_unassigned}/{taskId}/{filename}
   // We use ClientName for human-browsability of the Supabase storage bucket;
@@ -10070,7 +10083,7 @@ function uploadTaskDoc(taskId, file){
   var safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
   var ts = Date.now();
   var path = 'tasks/'+clientFolder+'/'+taskId+'/'+ts+'_'+safeName;
-  toast('Uploading '+file.name+'…','ok');
+  if(!done) toast('Uploading '+file.name+'…','ok');
 
   fetch(SB_URL+'/storage/v1/object/client-documents/'+encodeURI(path), {
     method:'POST',
@@ -10095,12 +10108,14 @@ function uploadTaskDoc(taskId, file){
       Notes: ''
     };
     sbFetch('POST','/rest/v1/task_documents', [row], function(res, err){
+      if(done){ if(err) console.error(err); done(!err, err ? 'database save failed' : ''); return; }
       if(err){ toast('Database save failed','err'); console.error(err); }
       else { toast('✓ '+file.name+' attached','ok'); loadTaskDocs(taskId); }
     });
   }).catch(function(e){
-    toast('Upload failed: '+e.message,'err');
     console.error(e);
+    if(done){ done(false, e.message); return; }
+    toast('Upload failed: '+e.message,'err');
   });
 }
 
@@ -22193,9 +22208,10 @@ function openTaskLogModal(taskId){
     // 13 Oct 2026: every task keeps its own attachments, joined to a work event or not.
     // Correspondence and chase emails stay with the task; compliance documents go under
     // the work event's headings above.
-    '<div id="tlogDocsWrap" style="margin-bottom:12px">'+
+    // 15 Oct 2026: the box is a drop target too (files dropped here stay with the task).
+    '<div id="tlogDocsWrap"'+docDropAttrs('task', String(t.ID), '', 'Drop to attach to this task', false)+' style="margin-bottom:12px;border-radius:6px">'+
       '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">'+
-        '<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:.6px">📎 '+(_linked ? 'Task attachments' : 'Attachments')+'</div>'+
+        '<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:.6px">📎 '+(_linked ? 'Task attachments' : 'Attachments')+' <span style="text-transform:none;letter-spacing:0;font-weight:600;color:#0e413a;font-size:11px">· drag files here</span></div>'+
         '<button class="btn b-gh sm" data-act="task-doc-upload" data-tid="'+t.ID+'" style="padding:4px 12px;font-size:11px">+ Attach File</button>'+
       '</div>'+
       (_linked ? '<div style="font-size:11.5px;color:#667;margin:-2px 0 6px">Correspondence and chase emails. These stay with the task and are not part of the work event. Documents for the compliance file go under the work event headings above.</div>' : '')+
