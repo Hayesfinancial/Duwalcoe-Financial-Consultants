@@ -18172,6 +18172,7 @@ function runPasteClaudeImport(){
 // 1.3 (13 Oct 2026): the ID check no longer uses {1,3,5} position lists (Excel removed it as
 // unreadable); the full names and workbook details on the Lists sheet sit after the drop-down lists
 // instead of on top of three of them.
+// 1.4 (15 Oct 2026): room for 30 other assets (was 15) and 12 properties (was 8); Dev Moodley has 17.
 // The template builder (build_template.js) and the CRM (index.html, FF_SPEC) both use
 // this. Every typed fact has one home (a yellow cell) with a named range:
 //   FF_C_<key>   client field          FF_S_<key>   spouse field (CRM key in .s)
@@ -18179,7 +18180,7 @@ function runPasteClaudeImport(){
 //   FF_B<n>_<k>  company / trust n     FF_W_<key>   will field     FF_M_<key> meta
 // Column keys are read from the workbook's own key row, so columns can move freely.
 var FF_SPEC = {
-  version: '1.3',
+  version: '1.4',
   sheets: {
     start: 'Start here', notes: 'Meeting notes', fam: 'Client and family', inc: 'Income and expenses', ast: 'Assets and debts',
     biz: 'Companies and trusts', needs: 'Needs', will: 'Will', sum: 'Summary', lists: 'Lists'
@@ -18278,7 +18279,7 @@ var FF_SPEC = {
         {k: 'amountPM', h: 'Amount a month (R)', t: 'money', w: 15, sum: true},
         {k: 'notes', h: 'Notes', t: 'text', w: 30}
       ]},
-    property: {sheet: 'ast', rows: 8, title: '1. Property in your own names', kind: 'property',
+    property: {sheet: 'ast', rows: 12, title: '1. Property in your own names', kind: 'property',
       hint: 'Market value is what it would sell for today. Base cost is what it cost plus improvements, for capital gains tax. Property owned by a company or trust goes on the Companies and trusts sheet, not here.',
       cols: [
         {k: 'desc', h: 'Address and type of property', t: 'text', w: 34},
@@ -18312,7 +18313,7 @@ var FF_SPEC = {
         {k: 'source', h: 'Source', t: 'list:source', w: 11},
         {k: 'notes', h: 'Notes', t: 'text', w: 24}
       ]},
-    other: {sheet: 'ast', rows: 15, title: '3. Bank accounts, investments and other assets', kind: 'other',
+    other: {sheet: 'ast', rows: 30, title: '3. Bank accounts, investments and other assets', kind: 'other',
       hint: 'Bank and savings accounts, shares and unit trusts held directly, money lent to family, household contents, jewellery, art, firearms, collections. Policies and investments arranged through Duwalcoe are already on our records.',
       cols: [
         {k: 'desc', h: 'Description', t: 'text', w: 34},
@@ -19491,12 +19492,16 @@ function wbkFinish(P, cid, results){
   toast(results.fail.length ? 'Imported with '+results.fail.length+' failed save'+(results.fail.length===1?'':'s') : 'Fact find imported','ok');
 }
 
-// Duwalcoe Quick FNA: shared spec (version 1.0, 13 Oct 2026). Phase 1: cost of dying.
+// Duwalcoe Quick FNA: shared spec (version 1.1, 15 Oct 2026). Phase 1: cost of dying.
+// 1.1: cells changed from what the CRM put there turn orange (a hidden copy sits copyOffset columns to
+// the right on Inputs); an asset or policy described as offshore is flagged.
 // The template builder (build_qfna.js) and the CRM (index.html, QF_SPEC) both use this.
 // The CRM fills the Inputs sheet by named range (QF_<key> single cells, QF_T_<table> table
 // bodies). Everything else in the workbook is a formula. One way only: nothing comes back.
 var QF_SPEC = {
-  version: '1.0',
+  version: '1.1',
+  copyOffset: 25,                      // hidden copy of the CRM's values: column + 25 (B -> AA) on Inputs
+  watched: ['assets', 'debts', 'cover', 'funds'],   // tables whose changes turn orange (plus the client cells except Wishes)
   sheets: {inputs: 'Inputs', summary: 'Summary', quote: 'Figures for quoting', work: 'Workings', lists: 'Lists'},
   lists: {
     kind: ['Property', 'Cash and deposits', 'Shares and unit trusts', 'Other investment', 'Tax-free investment', 'Loan account', 'Vehicle or contents', 'Business interest'],
@@ -19747,6 +19752,10 @@ function qfnaData(c){
     if(nb) note('The will capture has '+nb+' specific bequest'+(nb>1?'s':'')+': check "Passes to" on those assets (Named heir).');
   } else note('No will captured: worst case, everything goes to heirs as people (no spouse deduction).');
 
+  // Offshore money captured as an ordinary asset or policy: the Quick FNA treats it as South African
+  out.assets.concat(out.cover).concat(out.funds).forEach(function(a){
+    if(/offshore/i.test(String(a.name||'')+' '+String(a.notes||''))) warn('"'+a.name+'" looks offshore. The Quick FNA treats it as South African money; use the full FNA if it is held offshore.');
+  });
   if(spouseLeft) note(spouseLeft+' of the spouse\'s own asset'+(spouseLeft>1?'s and debts are':' or debt is')+' left out: only '+(clean(c.CallingName)||nm.split(' ')[0])+'\'s estate is costed.');
   if(jointSeen) note('Joint assets and debts are entered at half; change them if the shares are not equal.');
   if(!out.assets.length) warn('no assets are captured.');
@@ -19770,7 +19779,12 @@ function qfnaExport(cid){
       var D = qfnaData(c), N = wbkNames(wb), errs = [];
       var cell = function(n){ var x = wbkCell(wb, N[n]); if(!x) errs.push(n); return x; };
       var set = function(n, v){ var x = cell(n); if(x) x.value = (v===undefined ? null : v); };
-      Object.keys(D.single).forEach(function(k){ set('QF_'+k, D.single[k]); });
+      // the hidden copy of what the CRM put there, QF_SPEC.copyOffset columns to the right (changed cells turn orange)
+      var copy = function(ws, row, col, v){ ws.getCell(row, col + QF_SPEC.copyOffset).value = (v===undefined || v==='' ? null : v); };
+      Object.keys(D.single).forEach(function(k){
+        set('QF_'+k, D.single[k]);
+        if(k!=='Wishes' && N['QF_'+k]){ var R = N['QF_'+k]; copy(wb.getWorksheet(R.sheet), R.r1, wbkColNum(R.c1), D.single[k]); }
+      });
       Object.keys(D.assumptions).forEach(function(k){ set('QF_A_'+k, D.assumptions[k]); });
       function fill(tbl, list, what){
         var K = N['QF_K_'+tbl], T = N['QF_T_'+tbl];
@@ -19778,7 +19792,12 @@ function qfnaExport(cid){
         var keys = wbkKeys(wb, K), ws = wb.getWorksheet(T.sheet), cap = T.r2 - T.r1 + 1;
         if(list.length > cap) D.checks.push('✗ Only '+cap+' '+what+' fit on the Inputs sheet; '+(list.length-cap)+' left out. Use the full FNA.');
         list.slice(0, cap).forEach(function(row, i){
-          Object.keys(row).forEach(function(k){ if(keys[k]) ws.getCell(T.r1+i, keys[k]).value = (row[k]===undefined || row[k]==='' ? null : row[k]); });
+          Object.keys(row).forEach(function(k){
+            if(!keys[k]) return;
+            var v = (row[k]===undefined || row[k]==='' ? null : row[k]);
+            ws.getCell(T.r1+i, keys[k]).value = v;
+            if(QF_SPEC.watched.indexOf(tbl)>=0) copy(ws, T.r1+i, keys[k], v);
+          });
         });
       }
       fill('assets', D.assets, 'assets'); fill('debts', D.debts, 'debts'); fill('cover', D.cover, 'policies'); fill('funds', D.funds, 'retirement funds');
