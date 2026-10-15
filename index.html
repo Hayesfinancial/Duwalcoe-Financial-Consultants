@@ -19947,6 +19947,29 @@ function qfR2(n){ return 'R '+Number(n).toLocaleString('en-US',{minimumFractionD
 function qfNum(v){ var s = String(v===undefined||v===null?'':v).trim(); return s==='' ? null : fpN(s); }
 function qfDate(s){ var m = String(s||'').match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? new Date(Date.UTC(+m[1], +m[2]-1, +m[3])) : null; }
 
+// When the client bought a business: {y, m, d} from "YYYY-MM-DD", or {y} from a year alone; null if not captured.
+function qfAcquired(s){
+  s = String(s||'').trim();
+  var m = s.match(/^(\d{4})-(\d{2})-(\d{2})/); if(m) return {y:+m[1], m:+m[2], d:+m[3]};
+  m = s.match(/^(\d{4})$/); return m ? {y:+m[1]} : null;
+}
+// Why small business relief (paragraph 57) cannot apply to a company, or null if it might. It needs the
+// interest held for five years, the client actively involved, and a business that is not mainly letting
+// property or holding investments; failing any one rules it out.
+function qfNoSbr(d){
+  if(d.activeInv==='No') return 'the client is not actively involved in running it';
+  if(d.mainUse==='Mainly property to let') return 'it mainly lets property';
+  if(d.mainUse==='Mainly investments (shares, cash, loans)') return 'it mainly holds investments';
+  var a = qfAcquired(d.dateAcquired), now = new Date();
+  var M = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  if(a && a.m){
+    if(new Date(Date.UTC(a.y+5, a.m-1, a.d)) > now) return 'owned since '+M[a.m-1]+' '+a.y+', less than five years';
+  } else if(a){
+    if(new Date(Date.UTC(a.y+5, 0, 1)) > now) return 'owned since '+a.y+', less than five years';
+  }
+  return null;
+}
+
 // The record, as Quick FNA input rows. Returns {single:{}, assets:[], debts:[], cover:[], funds:[], checks:[], assumptions:{}}.
 function qfnaData(c){
   var out = { single:{}, assets:[], debts:[], cover:[], funds:[], checks:[], assumptions:{} };
@@ -20009,8 +20032,22 @@ function qfnaData(c){
     if(fpN(d.financeOut)>0) out.debts.push({name:'Vehicle finance: '+(clean(d.desc)||'vehicle'), amount:amt(d.financeOut,f), notes:''});
   });
   // ── Business interests ──
+  // A simple company is costed here (15 Oct 2026): a Pty Ltd or CC, the client's share valued, no buy-and-sell,
+  // no loan account for the client, and small business relief cannot apply. Anything else needs the full FNA.
   rows.filter(function(r){ return r.kind==='business'; }).forEach(function(r){
-    var d = r.d; red('a business interest ('+(clean(d.desc)||d.entityType||'business')+'): small business relief, buy-and-sell and loan accounts need the full FNA.');
+    var d = r.d, bn = clean(d.desc)||d.entityType||'business', why = [];
+    if(!fpBizClientHolds(d) && d.loanAcc!=='Credit' && d.loanAcc!=='Debit'){ note(bn+': only the spouse holds shares, so it is left out.'); return; }
+    if(d.entityType!=='Pty Ltd' && d.entityType!=='CC') why.push(d.entityType==='Trust' ? 'it is a trust' : (clean(d.entityType) ? 'it is a '+String(d.entityType).toLowerCase() : 'the entity type is not captured'));
+    if(qfNum(d.value)===null && d.entityType!=='Trust') why.push('the client\'s share has no value');
+    if(d.buySell==='Yes') why.push('there is a buy-and-sell agreement');
+    if(d.loanAcc==='Credit' || d.loanAcc==='Debit') why.push('the client has a loan account with it');
+    var sbr = qfNoSbr(d);
+    if(!sbr) why.push('small business relief may apply'+(qfAcquired(d.dateAcquired) ? '' : ' (date acquired not captured)'));
+    if(why.length){ red('a business interest ('+bn+'): '+why.join('; ')+'.'); return; }
+    var pct = fpN(d.pctHeld);
+    out.assets.push({name:bn+(pct>0 ? ', '+String(d.pctHeld).replace('%','')+'%' : ''), kind:'Business interest', value:amt(d.value,1), base:amt(d.baseCost,1),
+      home:'', passes:passes(d), sold:(d.soldDeath==='Yes'?'Yes':'No'), notes:join([d.entityType, heirNote(d), clean(d.notes)])});
+    note(bn+': small business relief does not apply ('+sbr+').');
   });
   // ── Debts ──
   rows.filter(function(r){ return r.kind==='liability'; }).forEach(function(r){
@@ -20082,9 +20119,10 @@ function qfnaData(c){
   });
 
   // ── Taxable income for the year of death ──
-  var incPM = 0, rentalRows = false, annuityRows = false;
+  var incPM = 0, rentalRows = false, annuityRows = false, ownIncRows = 0;
   rows.filter(function(r){ return r.kind==='income'; }).forEach(function(r){
     var d = r.d, f = share(d); if(!f) return;
+    ownIncRows++;
     if(d.incomeType==='Dividends' || d.taxable==='No') return;
     if(d.incomeType==='Rental Income') rentalRows = true;
     if(d.incomeType==='Annuity Income') annuityRows = true;
@@ -20093,8 +20131,14 @@ function qfnaData(c){
   });
   if(rentalRows && rentalPM>0){ warn('rental income is on the property cards and on an income row: the taxable income counts both, so check it.'); }
   if(annuityRows && annuityPM>0){ warn('annuity income is on a policy and on an income row: the taxable income counts both, so check it.'); }
+  // No income lines of the client's own (15 Oct 2026): the gross income on the record, flagged
+  var incFromRecord = !ownIncRows && fpN(c.Income)>0;
+  if(incFromRecord){
+    incPM = fpN(c.Income);
+    warn('there are no income lines, so the taxable income is the gross income on the record (R '+Number(incPM).toLocaleString('en-US')+' a month). If part of it is dividends or not taxable, add income lines in the CRM or change it on Inputs.');
+  }
   var parts = [];
-  if(incPM>0) parts.push('income R '+Number(incPM).toLocaleString('en-US',{minimumFractionDigits:2, maximumFractionDigits:2}));
+  if(incPM>0) parts.push((incFromRecord ? 'gross income on the record R ' : 'income R ')+Number(incPM).toLocaleString('en-US',{minimumFractionDigits:2, maximumFractionDigits:2}));
   if(rentalPM>0) parts.push('rentals '+qfR2(rentalPM));
   if(annuityPM>0) parts.push('annuities '+qfR2(annuityPM));
   var TI = Math.round((incPM+rentalPM+annuityPM)*12*100)/100;
