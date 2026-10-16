@@ -15900,7 +15900,7 @@ function renderIncomeRows(){
   return POL_INCOME_ROWS.map(function(r,i){
     return '<div style="background:var(--smoke);border-radius:8px;padding:10px 12px;margin-bottom:8px">'+
       '<div style="display:flex;gap:6px;align-items:center;margin-bottom:8px">'+
-      '<select onchange="POL_INCOME_ROWS['+i+'].type=this.value" style="border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px;flex:1">'+
+      '<select onchange="POL_INCOME_ROWS['+i+'].type=this.value;document.getElementById(\'incomeRowsWrap\').innerHTML=renderIncomeRows()" style="border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px;flex:1">'+
       typeOpts.map(function(o){return '<option'+(r.type===o?' selected':'')+'>'+o+'</option>';}).join('')+
       '</select>'+
       '<input type="text" value="'+(r.label||'')+'" placeholder="Benefit label e.g. Income Protection Plus" onchange="POL_INCOME_ROWS['+i+'].label=this.value" style="flex:2;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px">'+
@@ -15927,7 +15927,16 @@ function renderIncomeRows(){
       '<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">'+
       '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Taxable</div><select onchange="POL_INCOME_ROWS['+i+'].taxable=this.value" style="width:100%;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"><option'+(r.taxable==='Yes'?' selected':'')+'>Yes</option><option'+(r.taxable!=='Yes'?' selected':'')+'>No</option></select></div>'+
       '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Lump Sum opt?</div><select onchange="POL_INCOME_ROWS['+i+'].convert=this.value" style="width:100%;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"><option'+(r.convert==='Yes'?' selected':'')+'>Yes</option><option'+(r.convert!=='Yes'?' selected':'')+'>No</option></select></div>'+
-      '</div></div>';
+      '</div>'+
+      // 16 Oct 2026: a death income can be nominated to someone other than the policy's beneficiaries (the lump sum)
+      (r.type==='Death Income' ?
+        '<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:6px">'+
+        '<div><div style="font-size:10px;color:#889;margin-bottom:3px">This income is paid to</div><select onchange="POL_INCOME_ROWS['+i+'].benType=this.value;document.getElementById(\'incomeRowsWrap\').innerHTML=renderIncomeRows()" style="width:100%;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px">'+
+        [['','Same as the policy\'s beneficiaries'],['Spouse','Spouse'],['Named person','A named person'],['Trust','A trust'],['Estate','The estate']].map(function(o){ return '<option value="'+o[0]+'"'+((r.benType||'')===o[0]?' selected':'')+'>'+o[1]+'</option>'; }).join('')+
+        '</select></div>'+
+        ((r.benType==='Named person'||r.benType==='Trust'||r.benType==='Spouse') ? '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Name</div><input type="text" value="'+escHtml(r.benName||'')+'" placeholder="'+(r.benType==='Trust'?'e.g. Smith Family Trust':'Full name')+'" onchange="POL_INCOME_ROWS['+i+'].benName=this.value" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>' : '<div></div>')+
+        '</div>' : '')+
+      '</div>';
   }).join('');
 }
 
@@ -19886,11 +19895,14 @@ function wbkFinish(P, cid, results){
 // executor and carries no executor's fee.
 // 2.3 (15 Oct 2026): a company with a buy and sell is sold to the co-owners at death (the buy and sell policy is left out)
 // and a loan account in it is repaid in cash; a living annuity is taken in cash by its nominees (section 5).
+// 2.4 (16 Oct 2026): Workings and Figures for quoting show policies and death income paid to the spouse on their own
+// line with the s.4(q) deduction under it; the gross dutiable estate holds only what can carry duty. The CRM reads a
+// death income row's own beneficiary when it has one (the income and the lump sum can go to different people).
 // The template builder (build_qfna.js) and the CRM (index.html, QF_SPEC) both use this.
 // The CRM fills the Inputs sheet by named range (QF_<key> single cells, QF_T_<table> table
 // bodies). Everything else in the workbook is a formula. One way only: nothing comes back.
 var QF_SPEC = {
-  version: '2.3',
+  version: '2.4',
   copyOffset: 25,                      // hidden copy of the CRM's values: column + 25 (B -> AA) on Inputs
   watched: ['assets', 'debts', 'cover', 'dinc', 'funds', 'deps'],   // tables whose changes turn orange (plus the client cells except Wishes)
   sheets: {inputs: 'Inputs', summary: 'Summary', quote: 'Figures for quoting', work: 'Workings', lists: 'Lists'},
@@ -20276,8 +20288,13 @@ function qfnaData(c){
     else warn('the death income "'+nmI+'" has the benefit period "'+(term||'not captured')+'", which does not say how long it pays after a claim: enter the months it pays in section 4b'+(fpN(r.termYears)>0 ? ' (the record also says '+fpN(r.termYears)+' years)' : '')+'.');
     var esc = qfNum(String(r.claimEsc===undefined || r.claimEsc===null ? '' : r.claimEsc).replace('%',''));
     if(esc===null){ esc = 0; note('the death income "'+nmI+'" has no in-claim increase captured, so it is taken as level.'); }
-    var B = bens(p);
-    var parts = B.length ? B.map(function(b){ var t = String(b.type||''); return {to:((t==='Spouse'||t==='Life Partner') ? 'Spouse' : (t==='Estate' ? 'Estate' : 'Named person')), b:b, pct:fpN(b.pct)}; }) : [{to:'Estate', b:null, pct:100}];
+    // 16 Oct 2026: the income row can name its own beneficiary (the income and the lump sum can go to different people)
+    var own = String(r.benType||''), B = bens(p);
+    if(own){
+      var ob = own==='Estate' ? null : {type:(own==='Named person' ? 'Other' : own), name:clean(r.benName)||(own==='Spouse' ? (clean(c.SpouseName)||'') : ''), pct:'100'};
+      B = ob ? [ob] : [];
+    }
+    var parts = (own==='Estate') ? [{to:'Estate', b:null, pct:100}] : B.length ? B.map(function(b){ var t = String(b.type||''); return {to:((t==='Spouse'||t==='Life Partner') ? 'Spouse' : (t==='Estate' ? 'Estate' : 'Named person')), b:b, pct:fpN(b.pct)}; }) : [{to:'Estate', b:null, pct:100}];
     var used = 0;
     parts.forEach(function(x, i){
       var a = parts.length===1 ? pm : ((i===parts.length-1) ? Math.round((pm-used)*100)/100 : Math.round(pm*x.pct/100*100)/100); used = Math.round((used+a)*100)/100;
@@ -22123,7 +22140,8 @@ function astuteCarryRowEsc(existing, fresh){
       // spouse benefit back into the client's cover.
       // claimEsc (15 Oct 2026): a hand-entered in-claim increase survives a refresh
       // that does not state one, like premEsc / benEsc.
-      ['premEsc','benEsc','life','claimEsc'].forEach(function(f){
+      // benType / benName (16 Oct 2026): a death income's own beneficiary, set by hand, survives a refresh too.
+      ['premEsc','benEsc','life','claimEsc','benType','benName'].forEach(function(f){
         if(!clean(x[f]) && clean(e[f])){ x[f] = e[f]; changed = true; }
       });
     });
