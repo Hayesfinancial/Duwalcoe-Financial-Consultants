@@ -24123,10 +24123,34 @@ function openPolicySchedule(cid){
   // additive). Income benefits: MAX of rows per policy (phases of one stream).
   // Reads directly from LumpBenefits/IncomeBenefits JSON via lumpSum/incomeMax
   // helpers — self-healing for any policy still carrying stale legacy fields.
-  var covDeath=0,covDis=0,covDD=0,covIP=0;
+  // Death income (16 Oct 2026, Clinton: the schedule ignored the life income and who it is paid to).
+  // deathIncomeRows: a policy's Death Income rows on the client's own life. deathIncomeTo: who a row is paid to,
+  // its own beneficiary when one is set on the policy card ("This income is paid to"; the income and the lump sum
+  // can go to different people), else the policy's beneficiaries.
+  function deathIncomeRows(p){
+    var rows=[]; try{ rows=JSON.parse(p.IncomeBenefits||'[]'); }catch(e){}
+    return Array.isArray(rows) ? rows.filter(function(r){ return r && r.type==='Death Income' && !lumpOnOtherLife(r) && N(r.amount)>0; }) : [];
+  }
+  function deathIncomeTo(r, polBens){
+    var own=String(r.benType||''), nm=clean(r.benName).trim();
+    if(!own) return polBens;
+    if(own==='Estate') return [{type:'Estate', name:'Estate', pct:'100'}];
+    if(own==='Spouse'){
+      if(!nm){ var sb=polBens.filter(function(b){ return b.type==='Spouse'||b.type==='Life Partner'; }); nm = sb.length===1 ? String(sb[0].name).trim() : (clean(c.SpouseName).trim()||'Spouse'); }
+      return [{type:'Spouse', name:nm, pct:'100'}];
+    }
+    if(own==='Trust') return [{type:'Trust', name:nm||'Trust', pct:'100'}];
+    return [{type:'Other', name:nm||'Name not captured', pct:'100'}];
+  }
+  function namedBens(p){
+    var b=[]; try{ b=p.Beneficiaries?JSON.parse(p.Beneficiaries):[]; }catch(e){}
+    return Array.isArray(b) ? b.filter(function(x){ return x && x.name && String(x.name).trim(); }) : [];
+  }
+  var covDeath=0,covDis=0,covDD=0,covIP=0,covDI=0;
   personalGroups.forEach(function(g){
     g.pols.forEach(function(p){
       covDeath += lumpSum(p,'Life Cover','BenDeath');
+      covDI    += deathIncomeRows(p).reduce(function(t,r){ return t+N(r.amount); },0);
       covDis   += lumpSum(p,'Capital Disability','BenDisability');
       covDD    += lumpSum(p,'Dread Disease / Severe Illness','BenDreadDisease');
       covIP    += incomeMax(p);
@@ -24224,6 +24248,29 @@ function openPolicySchedule(cid){
         if(isInvP)  entry.inv   += polFV    * pct;
         if(isRaP)   entry.ret   += polFV    * pct;
         entry.policyIds[p.ID||p.PolicyNo||(p.Insurer+'-'+p.Product)] = true;
+      });
+    });
+  });
+  // Death income per beneficiary (16 Oct 2026): the monthly income, in its own column. Split by the shares
+  // like the lump sum; a policy with nobody nominated stays off the roll-up, as its lump sum does.
+  var anyDInc=false;
+  personalGroups.forEach(function(g){
+    g.pols.forEach(function(p){
+      var t=p.Type||'';
+      if(!(t==='Life / Income Protector' || t==='')) return;
+      var pb=namedBens(p);
+      deathIncomeRows(p).forEach(function(r){
+        var to=deathIncomeTo(r, pb); if(!to.length) return;
+        var anyPct=to.some(function(b){ var x=N(b.pct); return x>0 && x<=100; });
+        to.forEach(function(b){
+          var pct = anyPct ? N(b.pct)/100 : 1/to.length; if(pct<0||pct>1) pct=0;
+          var key=normName(b.name);
+          if(!benMap[key]) benMap[key]={displayName:String(b.name).trim(), types:[], death:0, inv:0, ret:0, policyIds:{}};
+          var e=benMap[key], typ=b.type||'Other';
+          if(e.types.indexOf(typ)<0) e.types.push(typ);
+          e.dinc=(e.dinc||0)+N(r.amount)*pct; anyDInc=true;
+          e.policyIds[p.ID||p.PolicyNo||(p.Insurer+'-'+p.Product)]=true;
+        });
       });
     });
   });
@@ -24549,6 +24596,12 @@ function openPolicySchedule(cid){
       if(clean(r.waiting)) sub.push(escHtml(r.waiting)+' waiting period');
       if(clean(r.term)) sub.push(escHtml(r.term));
       if(escTxt(r.claimEsc)) sub.push('in-claim escalation '+escTxt(r.claimEsc));
+      // A death income with its own beneficiary (16 Oct 2026): say who, when it differs from the policy's.
+      if(r.type==='Death Income' && clean(r.benType)){
+        var _pb=namedBens(p), _to=deathIncomeTo(r, _pb);
+        var _k=function(a){ return a.map(function(b){ return normName(b.name); }).sort().join('|'); };
+        if(_k(_to)!==_k(_pb)) sub.push('paid to '+_to.map(function(b){ return b.type==='Estate' ? 'the estate' : escHtml(b.name); }).join(', '));
+      }
       rows+='<tr>'+nameCell(r.label, r.type).replace('</td>', (sub.length?'<div style="font-size:10px;color:'+MUT+';margin-top:1px">'+sub.join(' &middot; ')+'</div>':'')+lifeSub(r)+'</td>')+
         '<td>'+(N(r.amount)>0?(rfx?fxDual(r.amount,rfx.coverRate,rfx.ccy,0,'<span style="font-size:10px;color:'+MUT+'"> /pm</span>'):R(r.amount)+'<span style="font-size:10px;color:'+MUT+'"> /pm</span>'):dash)+'</td>'+
         '<td>'+(N(r.prem)>0?(rfx?fxDual(r.prem,rfx.premRate,rfx.ccy,2):R(r.prem)):dash)+'</td>'+
@@ -24871,14 +24924,17 @@ function openPolicySchedule(cid){
     if(otherPay>0) msub+=(msub?'<br>':'')+'+ R\u00a0'+Math.round(otherPay).toLocaleString('en-ZA')+' paid on your behalf';
     tiles.push(tile('Monthly contribution','R\u00a0'+Math.round(tPersM).toLocaleString('en-ZA'),msub));
   }
-  if(covDeath>0){
-    var riskPols=groups.personal.pols.filter(function(p){return lumpSum(p,'Life Cover','BenDeath')>0;});
+  if(covDeath>0 || covDI>0){
+    var riskPols=groups.personal.pols.filter(function(p){return lumpSum(p,'Life Cover','BenDeath')>0 || deathIncomeRows(p).length>0;});
     var csub = riskPols.length===1 ? (escHtml(riskPols[0].Insurer||'')+(riskPols[0].Product?' '+escHtml(riskPols[0].Product):'')) : (riskPols.length+' life policies');
     // Foreign cover inside the rand total is named, with its rate (27 Sep 2026).
     var _fxCov={};
     riskPols.forEach(function(p){ var f=riskFX(p); if(!f) return; var k=f.ccy+'|'+f.coverRate; _fxCov[k]=(_fxCov[k]||0)+lumpSum(p,'Life Cover','BenDeath')/N(f.coverRate); });
     Object.keys(_fxCov).forEach(function(k){ var kk=k.split('|'); csub+='<br>incl. '+fxNat(_fxCov[k],kk[0],0)+' @ R'+escHtml(kk[1]); });
-    tiles.push(tile('Life cover','R\u00a0'+Math.round(covDeath).toLocaleString('en-ZA'),csub));
+    // Death income (16 Oct 2026): a monthly income on death, shown with the lump sum, never added to it.
+    var _pm='<span style="font-size:13px;font-weight:400;color:'+MUT+'"> /pm</span>';
+    if(covDeath>0) tiles.push(tile('Life cover','R\u00a0'+Math.round(covDeath).toLocaleString('en-ZA'),(covDI>0?'plus R\u00a0'+Math.round(covDI).toLocaleString('en-ZA')+' /pm death income<br>':'')+csub));
+    else tiles.push(tile('Death income','R\u00a0'+Math.round(covDI).toLocaleString('en-ZA')+_pm,csub));
   }
   if(provNames.length){
     if(provNames.length===1){
@@ -24967,12 +25023,16 @@ function openPolicySchedule(cid){
   }
 
   // ── BENEFICIARIES — ON DEATH ──
+  // The closing disclaimer is kept in the same unbreakable block, so a PDF never ends on a page holding only the
+  // disclaimer (Jacques Oosthuyzen, 16 Oct 2026).
+  var _keepOpen=false;
   if(benList.length>0){
     // Heading, table and footnote are one block: never split across PDF pages
     // (27 Sep 2026, Clinton: "Beneficiaries on Death split between two pages").
     doc+='<div class="keep">';
     doc+='<div class="sect">Beneficiaries on Death</div>';
-    doc+='<table class="gtbl"><thead><tr><th>Beneficiary</th><th>Death cover</th><th>Investment value</th><th>Retirement value</th><th>Policies</th></tr></thead><tbody>';
+    var _L=' style="text-align:left"';
+    doc+='<table class="gtbl"><thead><tr><th>Beneficiary</th><th>Death cover</th>'+(anyDInc?'<th'+_L+'>Death income</th>':'')+'<th>Investment value</th><th>Retirement value</th><th>Policies</th></tr></thead><tbody>';
     benList.forEach(function(e){
       // One meaningful marker per beneficiary \u2014 never a joined list of the
       // relationship types captured across their policies (which produced the
@@ -24992,6 +25052,7 @@ function openPolicySchedule(cid){
       doc+='<tr>'+
         '<td><div style="font-weight:700;color:'+INK+'">'+escHtml(e.displayName)+'</div>'+(subTag?'<div style="font-size:9.5px;color:'+MUT+';margin-top:1px">'+escHtml(subTag)+'</div>':'')+'</td>'+
         '<td style="font-weight:600">'+(e.death>0?'R\u00a0'+Math.round(e.death).toLocaleString('en-ZA'):'<span style="color:#bbb">&mdash;</span>')+'</td>'+
+        (anyDInc ? '<td style="font-weight:600;text-align:left">'+((e.dinc||0)>0?'R\u00a0'+Math.round(e.dinc).toLocaleString('en-ZA')+'<span style="font-size:10px;font-weight:400;color:'+MUT+'"> /pm</span>':'<span style="color:#bbb">&mdash;</span>')+'</td>' : '')+
         '<td style="font-weight:600">'+(e.inv>0?'R\u00a0'+Math.round(e.inv).toLocaleString('en-ZA'):'<span style="color:#bbb">&mdash;</span>')+'</td>'+
         '<td style="font-weight:600">'+(e.ret>0?'R\u00a0'+Math.round(e.ret).toLocaleString('en-ZA'):'<span style="color:#bbb">&mdash;</span>')+'</td>'+
         '<td style="color:#555">'+e._policyCount+'</td></tr>';
@@ -25004,7 +25065,7 @@ function openPolicySchedule(cid){
     doc+='<div style="font-size:10px;color:'+MUT+';line-height:1.6;margin:8px 2px 4px">'+
       (_has37C?'<strong>&sect;37C:</strong> Retirement annuity, pension, provident and preservation fund proceeds are distributed by the fund trustees in terms of Section 37C of the Pension Funds Act; nominations are a guide for the trustees. ':'')+
       'Disability, Dread Disease and Income Protection benefits pay to the life insured, not to beneficiaries, and are not shown here.</div>';
-    doc+='</div>';   // end .keep (beneficiaries block)
+    _keepOpen=true;  // the .keep stays open: the totals band and the disclaimer close it (16 Oct 2026)
   }
 
   // ── TOTALS FOOTER ──
@@ -25015,9 +25076,11 @@ function openPolicySchedule(cid){
   // The band is only worth printing when it adds something the Monthly
   // contribution tile at the top does not already show (business or annual
   // premiums); on its own "Personal /pm" just repeated that tile.
+  if(!_keepOpen){ doc+='<div class="keep">'; _keepOpen=true; }
   if(footTiles.length && (tBizM>0 || totAnnual>0)) doc+='<div style="margin-top:16px;background:'+INK+';color:#fff;border-radius:9px;padding:14px 22px;display:flex;gap:36px;flex-wrap:wrap;page-break-inside:avoid;break-inside:avoid">'+footTiles.join('')+'</div>';
 
   doc+='<div style="margin-top:22px;font-size:9.5px;color:#aaa;border-top:1px solid '+LINE+';padding-top:11px;line-height:1.6">Portfolio schedule prepared by Clinton Hayes, Duwalcoe Financial Consultants CC (FSP No. 9978) on '+today+'. Based on information captured in the practice management system. All values are indicative and will fluctuate with market conditions. Please verify all details with the respective product providers before acting. This schedule is a summary of existing policies and does not constitute financial advice.</div>';
+  doc+='</div>';   // end .keep (beneficiaries, totals band and disclaimer)
   doc+='</div>';   // end #schedBody
 
   // Action buttons + Word export (portrait, matches the on-screen layout).
