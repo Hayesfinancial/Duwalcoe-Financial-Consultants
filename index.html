@@ -18519,6 +18519,9 @@ function runPasteClaudeImport(){
 // unreadable); the full names and workbook details on the Lists sheet sit after the drop-down lists
 // instead of on top of three of them.
 // 1.4 (15 Oct 2026): room for 30 other assets (was 15) and 12 properties (was 8); Dev Moodley has 17.
+// 1.5 (17 Oct 2026): forgiving dates: no stop box on date cells (a tip, and the cell turns red if it is not a
+// date); Start here: Completed by is always Clinton Hayes, Date completed and Values as at are stamped by the
+// CRM on export (live today in a blank template); the children's Age shows blank on a bad date.
 // The template builder (build_template.js) and the CRM (index.html, FF_SPEC) both use
 // this. Every typed fact has one home (a yellow cell) with a named range:
 //   FF_C_<key>   client field          FF_S_<key>   spouse field (CRM key in .s)
@@ -18526,7 +18529,7 @@ function runPasteClaudeImport(){
 //   FF_B<n>_<k>  company / trust n     FF_W_<key>   will field     FF_M_<key> meta
 // Column keys are read from the workbook's own key row, so columns can move freely.
 var FF_SPEC = {
-  version: '1.4',
+  version: '1.5',
   sheets: {
     start: 'Start here', notes: 'Meeting notes', fam: 'Client and family', inc: 'Income and expenses', ast: 'Assets and debts',
     biz: 'Companies and trusts', needs: 'Needs', will: 'Will', sum: 'Summary', lists: 'Lists'
@@ -18961,12 +18964,32 @@ function wbkIn(t, raw, cell, warn, opts){
     return wbkNumStr(n);
   }
   if(t==='date'){
-    if(raw instanceof Date) return wbkISO(raw);
-    if(typeof raw==='number'){ var d = new Date(Date.UTC(1899,11,30) + Math.round(raw)*86400000); return wbkISO(d); }
-    var ds = String(raw).trim(), m;
-    if((m = ds.match(/^(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})$/))) return m[1]+'-'+wbkPad(+m[2])+'-'+wbkPad(+m[3]);
-    if((m = ds.match(/^(\d{1,2})[-\/.](\d{1,2})[-\/.](\d{4})$/))) return m[3]+'-'+wbkPad(+m[2])+'-'+wbkPad(+m[1]);
-    warn('"'+raw+'" is not a date (use 2012-03-31)'); return undefined;
+    // 1.5: reads every sensible way of writing a date, but only returns a real date (1900 to 2100). Anything
+    // else is warned about and not used. A two digit year is never guessed. 17/10/2026 is day/month/year.
+    var dBad = function(){ warn('"'+raw+'" is not a date I can read (use a form like 2026-10-17 or 17 Oct 2026, with a four digit year)'); return undefined; };
+    var dOut = function(y, mo, da){
+      if(!(y>=1900 && y<=2100 && mo>=1 && mo<=12 && da>=1 && da<=new Date(Date.UTC(y, mo, 0)).getUTCDate())) return dBad();
+      return y+'-'+wbkPad(mo)+'-'+wbkPad(da);
+    };
+    if(raw instanceof Date) return isNaN(raw) ? dBad() : dOut(raw.getUTCFullYear(), raw.getUTCMonth()+1, raw.getUTCDate());
+    if(typeof raw==='number'){
+      if(!(raw>=1 && raw<=73415)) return dBad();
+      var d = new Date(Date.UTC(1899,11,30) + Math.round(raw)*86400000); return wbkISO(d);
+    }
+    var ds = String(raw).trim().replace(/\s+/g,' ').replace(/[T ]\d{1,2}:\d{2}(:\d{2})?(\.\d+)?Z?$/,''), m;
+    var monNo = function(w){
+      w = String(w).toLowerCase(); if(w.length<3) return 0;
+      var names = [['january','januarie'],['february','februarie'],['march','maart','mrt'],['april'],['may','mei'],['june','junie'],['july','julie'],['august','augustus'],['september'],['october','oktober'],['november'],['december','desember']];
+      for(var i=0;i<12;i++){ for(var j=0;j<names[i].length;j++){ if(names[i][j].indexOf(w)===0 || w===names[i][j]) return i+1; } }
+      return 0;
+    };
+    if((m = ds.match(/^(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})$/))) return dOut(+m[1], +m[2], +m[3]);
+    if((m = ds.match(/^(\d{1,2})[-\/.](\d{1,2})[-\/.](\d{4})$/))) return dOut(+m[3], +m[2], +m[1]);
+    if((m = ds.match(/^(\d{8})$/))){ return (+ds.slice(0,4) >= 1900) ? dOut(+ds.slice(0,4), +ds.slice(4,6), +ds.slice(6,8)) : dOut(+ds.slice(4,8), +ds.slice(2,4), +ds.slice(0,2)); }
+    if((m = ds.match(/^(\d{1,2})(?:st|nd|rd|th)?[ \-\/.,]*([A-Za-z]+)\.?[ \-\/.,]*(\d{4})$/))){ var mn1 = monNo(m[2]); if(mn1) return dOut(+m[3], mn1, +m[1]); }
+    if((m = ds.match(/^([A-Za-z]+)\.? (\d{1,2})(?:st|nd|rd|th)?,? (\d{4})$/))){ var mn2 = monNo(m[1]); if(mn2) return dOut(+m[3], mn2, +m[2]); }
+    if((m = ds.match(/^(\d{4})[ \-\/.,]*([A-Za-z]+)\.?[ \-\/.,]*(\d{1,2})$/))){ var mn3 = monNo(m[2]); if(mn3) return dOut(+m[1], mn3, +m[3]); }
+    return dBad();
   }
   if(t==='yesno' || t==='yesnoTax' || t==='check'){
     var y = String(raw).trim().toLowerCase();
@@ -19092,6 +19115,9 @@ function wbkExport(cid){
       set('FF_M_Version', FF_SPEC.version);
       set('FF_M_ExportedAt', new Date().toISOString().slice(0,16).replace('T',' '));
       set('FF_M_ExportedBy', (typeof userLabel==='function') ? userLabel(cu()) : cu());
+      // 1.5: Start here fills itself in: today's date (stamped, so it stays fixed when the file is reopened) and Clinton's name
+      var tdy = new Date(), tdyUtc = new Date(Date.UTC(tdy.getFullYear(), tdy.getMonth(), tdy.getDate()));
+      set('FF_G_ValDate', tdyUtc); set('FF_G_DateCompleted', tdyUtc); set('FF_G_CompletedBy', 'Clinton Hayes');
       wb.calcProperties = wb.calcProperties || {};
       wb.calcProperties.fullCalcOnLoad = true;   // the template's grey cells recalculate when opened
       wb.xlsx.writeBuffer().then(function(buf){
