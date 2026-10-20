@@ -3075,7 +3075,21 @@ function famDepToggle(){
   if(w && r) w.style.display = isPartnerType(r.value) ? 'none' : '';
 }
 
+// One door per family job (20 Oct 2026): the spouse is captured on the client form (the full spouse
+// box), or on her own record when she is a client in her own right. Every spouse button lands here.
+function editSpouse(cid){
+  var spCid = linkedSpouseClientId(cid);
+  var her = spCid ? DB.clients.find(function(x){ return String(x.ID)===String(spCid); }) : null;
+  if(her){ openClientModal(her.ID); return; }
+  var c = DB.clients.find(function(x){ return String(x.ID)===String(cid); });
+  if(!c) return;
+  openClientModal(c.ID);
+  setTimeout(function(){ var el = document.getElementById('fspname'); if(el){ el.scrollIntoView({block:'center'}); try{ el.focus(); }catch(e){} } }, 60);
+}
 function openFamModal(cid, type, linkId){
+  // the spouse has one door: the client form (editSpouse); this small form is for children and other family
+  var _lk = linkId ? DB.links.find(function(l){ return String(l.ID)===String(linkId); }) : null;
+  if(_lk ? isPartnerType(_lk.Type) : isPartnerType(type || 'Spouse')){ editSpouse(cid); return; }
   FAM_CLIENT = cid;
   FAM_TYPE = type || 'Spouse';
   FAM_EDIT_ID = linkId || null;
@@ -3118,7 +3132,7 @@ function openFamModal(cid, type, linkId){
   // Default to the existing row's stored type, else the type the modal opened in.
   var curType = (existing && clean(existing.Type)) ? existing.Type : FAM_TYPE;
   document.getElementById('famModB').innerHTML =
-    fs('fam_rel', 'Relationship', ['Spouse','Life Partner','Child','Parent','Sibling','Other'], curType)+
+    fs('fam_rel', 'Relationship', ['Child','Parent','Sibling','Other'], curType)+
     '<div class="g2">'+
     fld('fam_name', 'Full Name *', preN)+
     fld('fam_id', 'ID Number', preId, 'text', 'data-autdob="1" data-dobfield="fam_dob"')+
@@ -11638,21 +11652,45 @@ function removeChild(cid){
   refreshChildRows();
 }
 
+// New client intake only (20 Oct 2026): the same questions as the family card (relationship, financially
+// dependent). What was typed is kept when a row is added or removed (the rows used to come back empty).
 function refreshChildRows(){
   var wrap = document.getElementById('childRows');
   if(!wrap) return;
+  NEW_CHILDREN.forEach(function(ch){
+    [['name','chname_'],['dob','chdob_'],['idn','chid_'],['rel','chrel_'],['dep','chdep_']].forEach(function(f){ var el = document.getElementById(f[1]+ch.id); if(el) ch[f[0]] = el.value; });
+  });
   if(!NEW_CHILDREN.length){
-    wrap.innerHTML = '<div style="color:#aaa;font-size:12px;padding:4px 0">No children added</div>';
+    wrap.innerHTML = '<div style="color:#aaa;font-size:12px;padding:4px 0">No children or family added</div>';
     return;
   }
+  var inp = 'border:1.5px solid var(--mist);border-radius:7px;padding:8px 11px;font-size:13px;width:100%';
+  var depOn = window._famDepReady===true;
   wrap.innerHTML = NEW_CHILDREN.map(function(ch,i){
-    return '<div style="display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:8px;align-items:end;margin-bottom:8px">'+
-      '<div class="fld"><label>Child '+(i+1)+' Name</label><input type="text" id="chname_'+ch.id+'" placeholder="Full name" style="border:1.5px solid var(--mist);border-radius:7px;padding:8px 11px;font-size:13px;width:100%"></div>'+
-      fdp('chdob_'+ch.id, 'Date of Birth', '')+
-      '<div class="fld"><label>ID Number</label><input type="text" id="chid_'+ch.id+'" placeholder="Optional" style="border:1.5px solid var(--mist);border-radius:7px;padding:8px 11px;font-size:13px;width:100%"></div>'+
+    return '<div style="display:grid;grid-template-columns:1.4fr 1fr 1fr .9fr'+(depOn?' .9fr':'')+' auto;gap:8px;align-items:end;margin-bottom:8px">'+
+      '<div class="fld"><label>'+(i+1)+'. Full name</label><input type="text" id="chname_'+ch.id+'" placeholder="Full name" value="'+escHtml(ch.name||'')+'" style="'+inp+'"></div>'+
+      '<div class="fld"><label>ID Number</label><input type="text" id="chid_'+ch.id+'" placeholder="Optional" value="'+escHtml(ch.idn||'')+'" data-autdob="1" data-dobfield="chdob_'+ch.id+'" style="'+inp+'"></div>'+
+      fdp('chdob_'+ch.id, 'Date of Birth', ch.dob||'')+
+      fs('chrel_'+ch.id, 'Relationship', ['Child','Parent','Sibling','Other'], ch.rel||'Child')+
+      (depOn ? fs('chdep_'+ch.id, 'Dependent?', ['','Yes','No'], ch.dep||'') : '')+
       '<button class="btn b-rd xs" data-act="remove-child" data-id="'+ch.id+'" style="margin-bottom:2px">✕</button>'+
       '</div>';
   }).join('');
+}
+// Edit Client, existing client (20 Oct 2026): the family on file, read only. Adding and changing is done
+// on the family card, so there is one place for it.
+function editClientFamilyList(cid){
+  var fam = (typeof famFor==='function' ? (famFor(cid)||[]) : []).filter(function(m){ return !isPartnerType(m.Type); });
+  var h = '<div style="font-size:12px;color:#667;margin-bottom:8px">Add or change children and other family on the <strong>family card</strong> on the client page (+ Child, or ✏️ next to a name).</div>';
+  if(!fam.length) return h+'<div style="color:#aaa;font-size:12px;padding:4px 0">No children or family on file.</div>';
+  h += '<table style="width:100%;border-collapse:collapse;font-size:12.5px">';
+  fam.forEach(function(m){
+    var dob = clean(m.DOB) ? m.DOB : (saIdValid(m.IDNumber) ? dobFromID(String(m.IDNumber).replace(/\D/g,'')) : '');
+    var a = clean(dob) ? calcAge(dob) : null;
+    var dep = m.Dependent==='Yes' ? 'dependent' : (m.Dependent==='No' ? 'not dependent' : '');
+    h += '<tr style="border-bottom:1px solid #eef1f4"><td style="padding:5px 4px;font-weight:600">'+escHtml(m.Name||'')+'</td><td style="padding:5px 4px;color:#556">'+escHtml(m.Type||'')+'</td><td style="padding:5px 4px;color:#556">'+(a!==null ? 'age '+a : '')+'</td><td style="padding:5px 4px;color:#556">'+dep+'</td></tr>';
+  });
+  return h+'</table>';
 }
 
 function openClientModal(id, isLead){
@@ -11843,9 +11881,10 @@ function openClientModal(id, isLead){
     : '')+
 
     // SECTION: Children
-    '<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:1px;padding:4px 0 8px;border-bottom:2px solid var(--gold);margin:18px 0 14px">Children</div>'+
-    '<div id="childRows"><div style="color:#aaa;font-size:12px;padding:4px 0">No children added</div></div>'+
-    '<button class="btn b-gh sm" data-act="add-child-row" style="margin-top:8px">+ Add Child</button>'+
+    '<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:1px;padding:4px 0 8px;border-bottom:2px solid var(--gold);margin:18px 0 14px">Children and other family</div>'+
+    (id ? editClientFamilyList(id)
+        : '<div id="childRows"><div style="color:#aaa;font-size:12px;padding:4px 0">No children or family added</div></div>'+
+          '<button class="btn b-gh sm" data-act="add-child-row" style="margin-top:8px">+ Add Child or family member</button>')+
     '</div>'+
     // SECTION: Address
     '<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:1px;padding:4px 0 8px;border-bottom:2px solid var(--gold);margin:18px 0 14px">Address & Other</div>'+
@@ -14719,10 +14758,14 @@ function saveClient(openFNA){
       var chname = document.getElementById('chname_'+ch.id);
       var chdob = document.getElementById('chdob_'+ch.id);
       var chid = document.getElementById('chid_'+ch.id);
+      var chrel = document.getElementById('chrel_'+ch.id), chdep = document.getElementById('chdep_'+ch.id);
       if(chname && chname.value.trim()){
+        var _chId = chid ? chid.value.trim() : '', _chDob = chdob ? chdob.value : '';
+        if(saIdValid(_chId)) _chDob = dobFromID(_chId.replace(/\D/g,''));   // a valid SA ID governs the date of birth
         var link = {ID:'fam_'+Date.now()+'_'+ch.id, PrincipalID:id,
-          Name:chname.value.trim(), IDNumber:chid?chid.value:'',
-          DOB:chdob?chdob.value:'', Cell:'', Email:'', Type:'Child', IsClient:'No', ClientID:''};
+          Name:chname.value.trim(), IDNumber:_chId,
+          DOB:_chDob, Cell:'', Email:'', Type:(chrel && chrel.value) ? chrel.value : 'Child', IsClient:'No', ClientID:''};
+        if(window._famDepReady===true && chdep && chdep.value) link.Dependent = chdep.value;
         DB.links.push(link);
         post({action:'saveFamMember', member:link});
       }
@@ -14736,7 +14779,7 @@ function saveClient(openFNA){
     if(!existing){
       var spLink = {ID:'fam_sp_'+Date.now(), PrincipalID:id,
         Name:g('fspname'), IDNumber:g('fspid')||'', DOB:c.SpouseDOB,
-        Cell:g('fspcell'), Email:g('fspemail'), Type:'Spouse', IsClient:'No', ClientID:''};
+        Cell:g('fspcell'), Email:g('fspemail'), Type:(c.MaritalStatus==='Life partner' ? 'Life Partner' : 'Spouse'), IsClient:'No', ClientID:''};
       DB.links.push(spLink);
       post({action:'saveFamMember', member:spLink});
     } else {
