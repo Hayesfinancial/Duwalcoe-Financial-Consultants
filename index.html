@@ -12455,7 +12455,7 @@ function buildFnaDataPack(cid, includeSpouse){
     else line('  Specific bequests: none captured');
     // Residue
     // 1.6: who inherits, in Capital Legacy's wording, when it was captured; the older residue answer otherwise
-    if(willHasChain(W)){ line('  Who inherits: '+willChainText(W)); wk('Residue, as the cost of dying reads it', W.res_choice); }
+    if(willHasChain(W)){ line('  Who inherits: '+willChainText(W)); wk('Residue, as the cost of dying reads it', willResidueSaid(W.res_choice)); }
     else wk('Residue', W.res_choice);
     var rs = [];
     for(var ri=1; ri<=5; ri++){ var rb=W['rs'+ri+'_ben'], rp=W['rs'+ri+'_pct']; if(clean(rb)||clean(rp)) rs.push('    • '+(rb||'(beneficiary not stated)')+(clean(rp)?' — '+String(rp).replace('%','')+'%':'')+(clean(W['rs'+ri+'_pre'])?'  [if predeceased: '+W['rs'+ri+'_pre']+']':'')); }
@@ -13479,7 +13479,9 @@ function willFinposList(c, kind){
 // Everything else sits under "More detail for the attorney". Who inherits is captured as up to three
 // "failing which" steps (in1_ to in3_); the residue answer the cost of dying reads (res_choice, rs) is
 // worked out from them on every save (willDerive), so there is one home for each fact.
-var WILL_SPOUSE_REL = ['wife', 'husband', 'life partner', 'partner', 'fiance', 'fiancee'];
+// 20 Oct 2026 (review): a spouse for the cost of dying is a husband, wife or permanent life partner (s.4(q)).
+// Capital Legacy's looser "Partner" counts only when the client record says Life partner; a fiance(e) never does.
+var WILL_SPOUSE_REL = ['wife', 'husband', 'life partner'];
 var WILL_CHILD_REL = ['son', 'daughter', 'my children (equally)'];
 var WILL_ENTITY_REL = ['inter vivos trust', 'living trust', 'company', 'estate'];
 var WILL_STEPS = 3, WILL_STEP_ROWS = 4;
@@ -13521,16 +13523,41 @@ function willStepRows(D, s){
   return out;
 }
 function willHasChain(D){ return willStepRows(D||{}, 1).length > 0; }
+// What the residue rules need to know about the client: the marriage regime, the spouse's name and the
+// children's names. From the CRM record; the workbook import passes its own (X) while the client or the
+// children are not saved yet, so the review shows what the save will store.
+function willCtx(cid, X){
+  var c = cid ? wbkClient(cid) : null;
+  var kids = (X && X.kids) ? X.kids : (cid ? ((typeof famFor==='function') ? (famFor(cid)||[]) : []).filter(function(l){ return l.Type==='Child'; }).map(function(l){ return l.Name; }) : []);
+  return { marital: (X && X.marital!==undefined) ? String(X.marital||'') : String((c && c.MaritalStatus)||''),
+           spouse: (X && X.spouse!==undefined) ? String(X.spouse||'') : String((c && c.SpouseName)||''),
+           kids: kids.filter(function(n){ return clean(n); }) };
+}
 // spouse / child / other, from the relationship, or from the name when no relationship was chosen
-function willRelKind(r, cid){
+function willRelKind(r, X){
   var rl = String(r.rel||'').toLowerCase();
   if(WILL_SPOUSE_REL.indexOf(rl)>=0) return 'spouse';
+  if(rl==='partner') return X.marital==='Life partner' ? 'spouse' : 'other';
   if(WILL_CHILD_REL.indexOf(rl)>=0) return 'child';
   if(rl) return 'other';
-  var c = cid ? wbkClient(cid) : null, nm = willNorm(r.name);
-  if(c && nm && willNorm(c.SpouseName)===nm) return 'spouse';
-  if(cid && nm && ((typeof famFor==='function') ? (famFor(cid)||[]) : []).some(function(l){ return l.Type==='Child' && willNorm(l.Name)===nm; })) return 'child';
+  var nm = willNorm(r.name);
+  if(nm && willNorm(X.spouse)===nm) return 'spouse';
+  if(nm && X.kids.some(function(n){ return willNorm(n)===nm; })) return 'child';
   return 'other';
+}
+// Children on the family card that a step naming the children one by one leaves out ("My children
+// (equally)" covers them all, including any born later)
+function willKidsMissing(rows, X){
+  if(rows.some(function(r){ return String(r.rel||'').toLowerCase()==='my children (equally)'; })) return [];
+  var named = rows.map(function(r){ return willNorm(r.name); });
+  return X.kids.filter(function(n){ return named.indexOf(willNorm(n))<0; });
+}
+// The residue as the cost of dying reads it, in words (Will tab and FNA Data Pack). The stored option's
+// "per stirpes" is never shown: the capture does not ask it.
+function willResidueSaid(v){
+  return ({'Entire residue to my spouse / life partner':'the spouse',
+           'Entire residue to my children equally, per stirpes':'the children, equally',
+           'Split as follows (table below)':'split between the people in the first step'})[v] || '';
 }
 function willPersonText(r){
   var rl = String(r.rel||''), low = rl.toLowerCase(), nm = String(r.name||'').trim();
@@ -13569,7 +13596,8 @@ function willStepCheck(rows){
 }
 // Fills years of birth from the CRM and works out the residue answer the cost of dying reads.
 // With no who-inherits rows the older residue question stands exactly as it was captured.
-function willDerive(D, cid){
+// X (optional): the workbook import's own client facts, see willCtx.
+function willDerive(D, cid, X){
   D = D || {};
   for(var s=1;s<=WILL_STEPS;s++){ for(var i=1;i<=WILL_STEP_ROWS;i++){
     var p = 'in'+s+'_'+i+'_';
@@ -13577,21 +13605,23 @@ function willDerive(D, cid){
   } }
   var r1 = willStepRows(D, 1);
   if(!r1.length) return D;
-  var kinds = r1.map(function(r){ return willRelKind(r, cid); });
+  var C = willCtx(cid, X);
+  var kinds = r1.map(function(r){ return willRelKind(r, C); });
   var pcts = r1.map(function(r){ return r.pct==='' ? null : crmNum(r.pct); });
   var equal = pcts.every(function(p){ return p===null; }) || pcts.every(function(p){ return p!==null && Math.abs(p-pcts[0])<0.001; });
   var toSpouse = r1.length===1 && kinds[0]==='spouse' && (pcts[0]===null || Math.abs(pcts[0]-100)<0.001);
-  var toKids = kinds.every(function(k){ return k==='child'; }) && equal;
+  // children equally only when every child on the family card shares (worst case otherwise: a split)
+  var toKids = kinds.every(function(k){ return k==='child'; }) && equal && !willKidsMissing(r1, C).length;
   for(var j=1;j<=5;j++){ delete D['rs'+j+'_ben']; delete D['rs'+j+'_pct']; delete D['rs'+j+'_pre']; }
   if(toSpouse) D.res_choice = 'Entire residue to my spouse / life partner';
   // Stored for the cost of dying, which only needs "to the children equally". Per stirpes is the CRM's
-  // stored option, never printed: the will sheet, data pack and Capital Legacy text print the steps.
+  // stored option and is never shown (willResidueSaid); the will sheet and Capital Legacy text print the steps.
   else if(toKids) D.res_choice = 'Entire residue to my children equally, per stirpes';
   else {
     D.res_choice = 'Split as follows (table below)';
     var nxt = willStepText(willStepRows(D, 2));
     r1.slice(0,5).forEach(function(r, k){
-      D['rs'+(k+1)+'_ben'] = r.name+(r.rel ? ' ('+r.rel+')' : '');
+      D['rs'+(k+1)+'_ben'] = r.name ? r.name+(r.rel ? ' ('+r.rel+')' : '') : r.rel;
       D['rs'+(k+1)+'_pct'] = r.pct!=='' ? r.pct : (equal ? wbkNumStr(Math.round(10000/r1.length)/100) : '');
       D['rs'+(k+1)+'_pre'] = nxt;
     });
@@ -13678,9 +13708,24 @@ function willChainPreview(cid){
   var rn = document.getElementById('willResNow');
   if(rn){
     var Dd = willDerive(JSON.parse(JSON.stringify(D)), cid);
-    rn.textContent = willHasChain(D) ? ({'Entire residue to my spouse / life partner':'the spouse', 'Entire residue to my children equally, per stirpes':'the children, equally', 'Split as follows (table below)':'split between the people in the first step'}[Dd.res_choice]||'') : '';
+    rn.textContent = willHasChain(D) ? willResidueSaid(Dd.res_choice) : '';
     rn.parentNode.style.display = willHasChain(D) ? 'block' : 'none';
+    var rh = document.getElementById('willResHint'); if(rh) rh.textContent = willHasChain(D) ? willResidueHint(D, cid) : '';
   }
+}
+// Why step 1 did not come out as the spouse or the children equally, when it looks as if it should
+function willResidueHint(D, cid){
+  var r1 = willStepRows(D, 1), C = willCtx(cid), out = [];
+  r1.forEach(function(r){
+    var rl = String(r.rel||'').toLowerCase();
+    if(rl==='fiance' || rl==='fiancee') out.push('A fiancé(e) is not a spouse for estate duty, so this is read as a split.');
+    else if(rl==='partner' && C.marital!=='Life partner') out.push('“Partner” counts as the spouse only when the client record says Life partner. If the partner is a permanent life partner, choose Life Partner.');
+  });
+  if(r1.length && r1.every(function(r){ return willRelKind(r, C)==='child'; })){
+    var miss = willKidsMissing(r1, C);
+    if(miss.length) out.push('Not every child on the family card is named ('+miss.join(', ')+'), so this is read as a split. Name them all, or choose “My children (equally)”.');
+  }
+  return out.join(' ');
 }
 function willCopyText(id){
   var el = document.getElementById(id); if(!el) return;
@@ -13839,7 +13884,7 @@ function renderWill(c){
   }
   h += '<div style="font-size:10.5px;color:#556;font-weight:600;margin:10px 0 3px">For Section B of the Capital Legacy form</div>';
   h += '<div style="display:flex;gap:8px;align-items:flex-start"><div class="wchain" id="willChainText" style="flex:1"></div><button class="btn b-gh xs" onclick="willCopyText(\'willChainText\')">Copy</button></div>';
-  h += '<div style="font-size:11px;color:#667;margin-top:4px;display:none">Cost of dying reads the residue as going to <strong id="willResNow"></strong>.</div>';
+  h += '<div style="font-size:11px;color:#667;margin-top:4px;display:none">The cost of dying reads the residue as going to: <strong id="willResNow"></strong>. <span id="willResHint" style="color:#9e2a2b"></span></div>';
   h += '<div class="wsh2">Something specific to someone (optional)</div>';
   h += '<table class="wtbl"><thead><tr><th style="width:42%">Item or amount</th><th style="width:30%">To whom</th><th>If they die before the client, to</th></tr></thead><tbody>';
   for(var bi=1; bi<=6; bi++){ h += '<tr><td>'+wfT(D,'bq'+bi+'_item')+'</td><td>'+wfTL(D,'bq'+bi+'_ben','willNameList')+'</td><td>'+wfTL(D,'bq'+bi+'_pre','willNameList')+'</td></tr>'; }
@@ -19946,7 +19991,11 @@ function wbkPlan(wb, cidFrom, fileName){
   // 1.6: years of birth found in the CRM, and the residue answer the cost of dying reads, worked out from
   // who inherits; listed with the other changes so they can be seen before saving
   if(willHasChain(W1)){
-    var Wd = willDerive(JSON.parse(JSON.stringify(W1)), target ? cid : null);
+    // the client and children as they will be once this import is saved (the save reads them from the CRM)
+    var kidsAfter = [];
+    if(target) wbkKids(cid).forEach(function(l){ var u = P.kids.upd.find(function(x){ return x.link===l || String(x.link.ID)===String(l.ID); }); var n = u ? u.next : l; if(n.Type==='Child') kidsAfter.push(n.Name); });
+    P.kids.add.forEach(function(a){ if(a.take && (a.data.Type||'Child')==='Child') kidsAfter.push(a.data.Name); });
+    var Wd = willDerive(JSON.parse(JSON.stringify(W1)), target ? cid : null, {marital: next.MaritalStatus, spouse: next.SpouseName, kids: kidsAfter});
     var dk = {}; Object.keys(Wd).concat(Object.keys(W1)).forEach(function(k){ dk[k] = 1; });
     Object.keys(dk).forEach(function(k){
       if(wbkSame('text', W1[k], Wd[k])) return;
