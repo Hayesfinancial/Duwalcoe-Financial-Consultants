@@ -12445,13 +12445,18 @@ function buildFnaDataPack(cid, includeSpouse){
     wk('Trust termination', W.tr_term);
     wk('Trust termination age', W.tr_term_age);
     wk('Trust instructions', W.tr_notes);
+    // Guardians (1.6)
+    var _gd = [W.g_p_name, W.g_a_name].filter(function(x){ return clean(x); });
+    if(_gd.length) line('  Guardians: '+_gd.join('; ')+(_gd.length>1 && W.g_mode ? ' ('+W.g_mode+')' : ''));
     // Specific bequests
     var bq = [];
     for(var bi=1; bi<=6; bi++){ var it=W['bq'+bi+'_item'], bb=W['bq'+bi+'_ben']; if(clean(it)||clean(bb)) bq.push('    • '+(it||'(item not stated)')+' → '+(bb||'(beneficiary not stated)')+(clean(W['bq'+bi+'_pre'])?'  [if predeceased: '+W['bq'+bi+'_pre']+']':'')); }
     if(bq.length){ line('  Specific bequests (before residue):'); bq.forEach(function(s){ line(s); }); }
     else line('  Specific bequests: none captured');
     // Residue
-    wk('Residue', W.res_choice);
+    // 1.6: who inherits, in Capital Legacy's wording, when it was captured; the older residue answer otherwise
+    if(willHasChain(W)){ line('  Who inherits: '+willChainText(W)); wk('Residue, as the cost of dying reads it', W.res_choice); }
+    else wk('Residue', W.res_choice);
     var rs = [];
     for(var ri=1; ri<=5; ri++){ var rb=W['rs'+ri+'_ben'], rp=W['rs'+ri+'_pct']; if(clean(rb)||clean(rp)) rs.push('    • '+(rb||'(beneficiary not stated)')+(clean(rp)?' — '+String(rp).replace('%','')+'%':'')+(clean(W['rs'+ri+'_pre'])?'  [if predeceased: '+W['rs'+ri+'_pre']+']':'')); }
     if(rs.length){ line('  Residue split:'); rs.forEach(function(s){ line(s); }); }
@@ -13469,13 +13474,301 @@ function willFinposList(c, kind){
   return h;
 }
 
+// ══ Will tab, 1.6 (20 Oct 2026): in the order of the Capital Legacy application form ══
+// The questions Capital Legacy asks come first, sections A to I, so the answers copy straight across.
+// Everything else sits under "More detail for the attorney". Who inherits is captured as up to three
+// "failing which" steps (in1_ to in3_); the residue answer the cost of dying reads (res_choice, rs) is
+// worked out from them on every save (willDerive), so there is one home for each fact.
+var WILL_SPOUSE_REL = ['wife', 'husband', 'life partner', 'partner', 'fiance', 'fiancee'];
+var WILL_CHILD_REL = ['son', 'daughter', 'my children (equally)'];
+var WILL_ENTITY_REL = ['inter vivos trust', 'living trust', 'company', 'estate'];
+var WILL_STEPS = 3, WILL_STEP_ROWS = 4;
+function willSpec(k){ for(var i=0;i<FF_SPEC.will.length;i++){ if(FF_SPEC.will[i].k===k) return FF_SPEC.will[i]; } return null; }
+function willNorm(n){ return String(n||'').replace(/\s+/g,' ').trim().toLowerCase(); }
+
+// ── People already in the CRM, found by full name (for IDs, contact numbers and years of birth) ──
+function willPersonMatch(name, cid){
+  var want = willNorm(name); if(!want) return null;
+  var hits = [];
+  function add(o){ if(willNorm(o.name)===want) hits.push(o); }
+  var c = cid ? wbkClient(cid) : null;
+  if(c && clean(c.SpouseName)) add({name:c.SpouseName, id:c.SpouseIDNumber, dob:c.SpouseDOB, cell:c.SpouseCell, email:c.SpouseEmail});
+  (DB.clients||[]).forEach(function(x){ if(x.ClientType==='Company') return; add({name:x.Name, id:x.IDNumber, dob:x.DOB, cell:x.Cell, email:x.Email}); });
+  (DB.links||[]).forEach(function(l){ add({name:l.Name, id:l.IDNumber, dob:l.DOB, cell:l.Cell, email:l.Email}); });
+  if(!hits.length) return null;
+  // one person may be on file more than once (a client and a family link): same ID number, or no ID at all
+  var ids = {}; hits.forEach(function(h){ var d = String(h.id||'').replace(/\D/g,''); if(d) ids[d] = 1; });
+  if(Object.keys(ids).length > 1) return {ambiguous:true, count:Object.keys(ids).length};
+  var out = {name:hits[0].name, id:'', dob:'', cell:'', email:''};
+  hits.forEach(function(h){
+    if(!out.id && clean(h.id)) out.id = String(h.id).trim();
+    if(!out.dob && clean(h.dob)) out.dob = String(h.dob).trim();
+    if(!out.cell && clean(h.cell)) out.cell = String(h.cell).trim();
+    if(!out.email && clean(h.email)) out.email = String(h.email).trim();
+  });
+  if(!out.dob && saIdValid(out.id)) out.dob = dobFromID(String(out.id).replace(/\D/g,''));
+  return out;
+}
+
+// ── Who inherits ──
+function willStepRows(D, s){
+  var out = [];
+  for(var i=1;i<=WILL_STEP_ROWS;i++){
+    var p = 'in'+s+'_'+i+'_';
+    var r = {name:String(clean(D[p+'name'])).trim(), rel:String(clean(D[p+'rel'])).trim(), yob:String(clean(D[p+'yob'])).trim(), pct:String(clean(D[p+'pct'])).replace('%','').trim()};
+    if(r.name || r.rel) out.push(r);
+  }
+  return out;
+}
+function willHasChain(D){ return willStepRows(D||{}, 1).length > 0; }
+// spouse / child / other, from the relationship, or from the name when no relationship was chosen
+function willRelKind(r, cid){
+  var rl = String(r.rel||'').toLowerCase();
+  if(WILL_SPOUSE_REL.indexOf(rl)>=0) return 'spouse';
+  if(WILL_CHILD_REL.indexOf(rl)>=0) return 'child';
+  if(rl) return 'other';
+  var c = cid ? wbkClient(cid) : null, nm = willNorm(r.name);
+  if(c && nm && willNorm(c.SpouseName)===nm) return 'spouse';
+  if(cid && nm && ((typeof famFor==='function') ? (famFor(cid)||[]) : []).some(function(l){ return l.Type==='Child' && willNorm(l.Name)===nm; })) return 'child';
+  return 'other';
+}
+function willPersonText(r){
+  var rl = String(r.rel||''), low = rl.toLowerCase(), nm = String(r.name||'').trim();
+  var born = r.yob ? ' (born '+r.yob+')' : '';
+  if(low==='my children (equally)') return 'my children'+(nm && !/^(my |our |all )*(the )?children/i.test(nm) ? ', '+nm : '')+born;
+  if(WILL_ENTITY_REL.indexOf(low)>=0) return (nm||rl)+(nm ? ' ('+low+')' : '');
+  if(!rl) return (nm||'')+born;
+  return 'my '+low+(nm ? ', '+nm : '')+born;
+}
+function willJoin(a){ if(a.length<=1) return a.join(''); return a.slice(0,-1).join(', ')+' and '+a[a.length-1]; }
+function willStepText(rows){
+  if(!rows.length) return '';
+  var anyPct = rows.some(function(r){ return r.pct!==''; });
+  if(!anyPct){
+    if(rows.length===1) return (String(rows[0].rel).toLowerCase()==='my children (equally)' ? 'in equal shares to ' : '100% to ')+willPersonText(rows[0]);
+    return 'in equal shares to '+willJoin(rows.map(willPersonText));
+  }
+  return willJoin(rows.map(function(r){ return (r.pct!=='' ? r.pct+'% to ' : '')+willPersonText(r); }));
+}
+// The answer for Section B of the Capital Legacy form
+function willChainText(D){
+  var parts = [];
+  for(var s=1;s<=WILL_STEPS;s++){ var t = willStepText(willStepRows(D, s)); if(t) parts.push(t); }
+  if(!parts.length) return '';
+  var out = parts.join(', failing which, ')+'.';
+  return out.charAt(0).toUpperCase()+out.slice(1);
+}
+// Shares in a step that do not add up to 100% (equal shares, all blank, are fine)
+function willStepCheck(rows){
+  if(!rows.length) return '';
+  var given = rows.filter(function(r){ return r.pct!==''; });
+  if(!given.length) return '';
+  if(given.length < rows.length) return 'Some shares are blank and some are not.';
+  var sum = given.reduce(function(a, r){ return a + crmNum(r.pct); }, 0);
+  return Math.abs(sum-100) > 0.01 ? 'The shares add up to '+wbkNumStr(sum)+'%, not 100%.' : '';
+}
+// Fills years of birth from the CRM and works out the residue answer the cost of dying reads.
+// With no who-inherits rows the older residue question stands exactly as it was captured.
+function willDerive(D, cid){
+  D = D || {};
+  for(var s=1;s<=WILL_STEPS;s++){ for(var i=1;i<=WILL_STEP_ROWS;i++){
+    var p = 'in'+s+'_'+i+'_';
+    if(clean(D[p+'name']) && !clean(D[p+'yob'])){ var m = willPersonMatch(D[p+'name'], cid); if(m && !m.ambiguous && m.dob) D[p+'yob'] = String(m.dob).slice(0,4); }
+  } }
+  var r1 = willStepRows(D, 1);
+  if(!r1.length) return D;
+  var kinds = r1.map(function(r){ return willRelKind(r, cid); });
+  var pcts = r1.map(function(r){ return r.pct==='' ? null : crmNum(r.pct); });
+  var equal = pcts.every(function(p){ return p===null; }) || pcts.every(function(p){ return p!==null && Math.abs(p-pcts[0])<0.001; });
+  var toSpouse = r1.length===1 && kinds[0]==='spouse' && (pcts[0]===null || Math.abs(pcts[0]-100)<0.001);
+  var toKids = kinds.every(function(k){ return k==='child'; }) && equal;
+  for(var j=1;j<=5;j++){ delete D['rs'+j+'_ben']; delete D['rs'+j+'_pct']; delete D['rs'+j+'_pre']; }
+  if(toSpouse) D.res_choice = 'Entire residue to my spouse / life partner';
+  // Stored for the cost of dying, which only needs "to the children equally". Per stirpes is the CRM's
+  // stored option, never printed: the will sheet, data pack and Capital Legacy text print the steps.
+  else if(toKids) D.res_choice = 'Entire residue to my children equally, per stirpes';
+  else {
+    D.res_choice = 'Split as follows (table below)';
+    var nxt = willStepText(willStepRows(D, 2));
+    r1.slice(0,5).forEach(function(r, k){
+      D['rs'+(k+1)+'_ben'] = r.name+(r.rel ? ' ('+r.rel+')' : '');
+      D['rs'+(k+1)+'_pct'] = r.pct!=='' ? r.pct : (equal ? wbkNumStr(Math.round(10000/r1.length)/100) : '');
+      D['rs'+(k+1)+'_pre'] = nxt;
+    });
+  }
+  return D;
+}
+
+// ── Form controls ──
+// Radios from the spec: the workbook's short wording on screen, the CRM's own value stored
+function wfRS(D, k, inline){
+  var x = willSpec(k), opts = x ? x.opts : [], labs = (x && x.xl) || opts, v = D[k]||'';
+  var h = '<div class="wropts"'+(inline!==false ? ' style="display:flex;flex-direction:row;gap:4px 22px;flex-wrap:wrap"' : '')+'>';
+  for(var i=0;i<opts.length;i++){ h += '<label class="wopt"><input type="radio" name="wr_'+k+'" data-wfr="'+k+'" value="'+wfEsc(opts[i])+'"'+(v===opts[i]?' checked':'')+'> <span>'+wfEsc(labs[i])+'</span></label>'; }
+  return h+'</div>';
+}
+// Relationship drop-down (Capital Legacy's list). A value typed earlier that is not in the list is kept.
+function wfRel(D, k, extra){
+  var v = String(D[k]||''), opts = FF_SPEC.lists.willRel.slice();
+  if(v && opts.indexOf(v)<0) opts.unshift(v);
+  var o = '<option value="">relationship</option>';
+  opts.forEach(function(x){ o += '<option'+(x===v?' selected':'')+'>'+wfEsc(x)+'</option>'; });
+  return '<select class="wfi" data-wf="'+k+'"'+(extra||'')+'>'+o+'</select>';
+}
+// A name box: family names offered, and a lookup in the CRM when it changes
+function wfName(D, k, cid, ph){
+  return '<input class="wfi" data-wf="'+k+'" list="willNameList" autocomplete="off" value="'+wfEsc(D[k]||'')+'"'+(ph?' placeholder="'+wfEsc(ph)+'"':'')+' onchange="willNameChanged(this,\''+cid+'\')">'
+    +'<div class="wfound" data-found="'+k+'"></div>';
+}
+function wfPair(label, nameCtrl, relCtrl){ return '<div style="margin-bottom:8px"><div style="font-size:10.5px;color:#556;font-weight:600;margin-bottom:3px">'+label+'</div><div style="display:grid;grid-template-columns:3fr 2fr;gap:10px">'+'<div>'+nameCtrl+'</div><div>'+relCtrl+'</div></div></div>'; }
+
+// Where a name's details go when the person is found in the CRM
+var WILL_FILL = {
+  g_p_name:{id:'g_p_id', cell:'g_p_contact'}, g_a_name:{id:'g_a_id', cell:'g_a_contact'},
+  cl_ct1_name:{id:'cl_ct1_id'}, cl_ct2_name:{id:'cl_ct2_id'}, cl_ce1_name:{id:'cl_ce1_id'}, cl_ce2_name:{id:'cl_ce2_id'},
+  cl_nok_name:{cell:'cl_nok_cell', email:'cl_nok_email'},
+  ex_p_name:{id:'ex_p_id', cell:'ex_p_contact'}, ex_a_name:{id:'ex_a_id', cell:'ex_a_contact'},
+  tr1_name:{id:'tr1_id'}, tr2_name:{id:'tr2_id'}, tr3_name:{id:'tr3_id'}
+};
+function willFillTargets(k){
+  if(WILL_FILL[k]) return WILL_FILL[k];
+  var m = String(k).match(/^(in\d_\d_)name$/); if(m) return {yob:m[1]+'yob'};
+  return null;
+}
+// Fills only empty boxes, so nothing typed by hand is overwritten. Returns a short note for the screen.
+function willFillOne(el, cid){
+  var root = document.getElementById('willFormRoot'); if(!root || !el) return '';
+  var k = el.getAttribute('data-wf'), T = willFillTargets(k), nm = String(el.value||'').trim();
+  var out = '';
+  if(T && nm){
+    var m = willPersonMatch(nm, cid);
+    if(m && m.ambiguous) out = '<span style="color:#9e2a2b">'+m.count+' people in the CRM have this name: fill the details by hand.</span>';
+    else if(m){
+      var put = [], kept = [];
+      [['id','ID'],['cell','cell'],['email','email'],['yob','year of birth']].forEach(function(f){
+        var tk = T[f[0]]; if(!tk) return;
+        var val = f[0]==='yob' ? String(m.dob||'').slice(0,4) : m[f[0]];
+        if(!clean(val)) return;
+        var box = root.querySelector('[data-wf="'+tk+'"]'); if(!box) return;
+        if(!String(box.value||'').trim()){ box.value = val; put.push(f[1]); }
+        else if(String(box.value).trim()!==String(val).trim()) kept.push(f[1]);
+      });
+      out = '<span style="color:#2e7d5a">✓ In the CRM'+(put.length ? ': '+put.join(', ')+' filled in' : '')+'</span>'+(kept.length ? ' <span style="color:#889">('+kept.join(', ')+' already typed, kept)</span>' : '');
+    }
+  }
+  var f = root.querySelector('[data-found="'+k+'"]'); if(f) f.innerHTML = out;
+  return out;
+}
+function willNameChanged(el, cid){ willFillOne(el, cid); willChainPreview(cid); }
+function willFillAllFromCRM(cid){
+  var root = document.getElementById('willFormRoot'); if(!root) return;
+  var n = 0;
+  root.querySelectorAll('[data-wf]').forEach(function(el){ if(willFillTargets(el.getAttribute('data-wf')) && String(el.value||'').trim()){ if(willFillOne(el, cid).indexOf('filled in')>=0) n++; } });
+  willChainPreview(cid);
+  toast(n ? 'Filled in from the CRM for '+n+' name'+(n===1?'':'s')+'. Check them, then save.' : 'Nothing new to fill in: the names are not in the CRM, or their details are already typed.', 'ok');
+}
+// Live: the Section B sentence and a check that the shares add up
+function willChainPreview(cid){
+  var root = document.getElementById('willFormRoot'); if(!root) return;
+  var D = collectWill();
+  var p = document.getElementById('willChainText');
+  if(p){ var t = willChainText(D); p.innerHTML = t ? wfEsc(t) : '<span style="color:#99a">Fill in who inherits and the Capital Legacy wording appears here.</span>'; }
+  for(var s=1;s<=WILL_STEPS;s++){ var w = document.getElementById('willStepWarn'+s); if(w) w.textContent = willStepCheck(willStepRows(D, s)); }
+  var rs = document.getElementById('willResLegacy'); if(rs) rs.style.display = willHasChain(D) ? 'none' : 'block';
+  var rn = document.getElementById('willResNow');
+  if(rn){
+    var Dd = willDerive(JSON.parse(JSON.stringify(D)), cid);
+    rn.textContent = willHasChain(D) ? ({'Entire residue to my spouse / life partner':'the spouse', 'Entire residue to my children equally, per stirpes':'the children, equally', 'Split as follows (table below)':'split between the people in the first step'}[Dd.res_choice]||'') : '';
+    rn.parentNode.style.display = willHasChain(D) ? 'block' : 'none';
+  }
+}
+function willCopyText(id){
+  var el = document.getElementById(id); if(!el) return;
+  var t = el.value!==undefined && el.tagName==='TEXTAREA' ? el.value : el.textContent;
+  var ok = function(){ toast('Copied','ok'); };
+  if(navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(t).then(ok, function(){ el.select && el.select(); document.execCommand('copy'); ok(); });
+  else { if(el.select) el.select(); document.execCommand('copy'); ok(); }
+}
+// The whole Capital Legacy answer set as plain text, in the form's order
+function willCLText(D, c){
+  var L = [], yn = function(v){ return v==='Yes' ? 'Yes' : (v==='No' ? 'No' : ''); };
+  function put(label, v){ if(clean(v)) L.push(label+': '+v); }
+  function opt(k){ var x = willSpec(k), v = D[k]||''; if(!x || !v) return v; var i = x.opts.indexOf(v); return (i>=0 && x.xl) ? x.xl[i] : v; }
+  function pr(nk, rk){ return clean(D[nk]) ? D[nk]+(clean(D[rk]) ? ' ('+D[rk]+')' : '') : ''; }
+  L.push('CAPITAL LEGACY APPLICATION: '+(c.Name||''));
+  L.push('');
+  L.push('Client information');
+  put('Title and full names', ((c.Title||'')+' '+(c.Name||'')).trim());
+  put('Identity number', c.IDNumber);
+  put('Date of birth', c.DOB);
+  put('Email', c.Email); put('Cell', c.Cell);
+  var inc = Math.max(fpN(c.Income), fpN(c.SpouseIncome)); if(inc>0) put('Monthly income (higher of own or spouse)', 'R '+Number(inc).toLocaleString('en-US'));
+  put('Smoking status', c.Smoker==='Yes' ? 'Smoking' : (c.Smoker==='No' ? 'Non-smoking' : ''));
+  put('Highest education', c.Education);
+  L.push('');
+  L.push('A. Will information');
+  put('Will language', D.cl_lang==='Other (below)' ? (D.cl_lang_other||'Other') : D.cl_lang);
+  put('Worldwide assets', D.sa_off ? (D.sa_off==='None' ? 'No' : 'Yes') : '');
+  L.push('');
+  L.push('B. Distribution of the estate');
+  put('Who inherits', willChainText(D));
+  var bq = []; for(var i=1;i<=6;i++){ if(clean(D['bq'+i+'_item'])||clean(D['bq'+i+'_ben'])) bq.push((D['bq'+i+'_item']||'(item)')+' to '+(D['bq'+i+'_ben']||'(not stated)')+(clean(D['bq'+i+'_pre']) ? ', failing whom to '+D['bq'+i+'_pre'] : '')); }
+  put('Something specific', bq.join('; '));
+  L.push('');
+  L.push('C. Last wishes');
+  put('Funeral', {Burial:'Buried', Cremation:'Cremated'}[D.fw] || (D.fw ? 'Not specified' : ''));
+  put('Living will', D.lw ? (/^Yes/.test(D.lw) ? 'Yes' : (/^I already/.test(D.lw) ? 'Already has one' : 'No')) : '');
+  L.push('');
+  L.push('D. Trust and inheritance protection');
+  if(/^Yes|^Only if/.test(D.tr_choice||'')) put('Children\'s trust vesting age', D.tr_term_age || '(not given)');
+  else if(D.tr_choice) put('Children\'s trust', 'No');
+  if(D.cl_wt){ put('Widow\'s trust', D.cl_wt); if(D.cl_wt==='Yes'){ put('Income beneficiary (spouse)', c.SpouseName); put('Children as capital owners', D.cl_wt_kids_cap); [1,2,3].forEach(function(j){ put('Capital beneficiary '+j, pr('cl_wt_cap'+j+'_name','cl_wt_cap'+j+'_rel')); }); } }
+  put('Provider\'s trust', pr('cl_pt_ben','cl_pt_rel'));
+  L.push('');
+  L.push('E. Organ donor');
+  if(D.organ){ put('Organ donor', /^I do not/.test(D.organ) ? 'No' : 'Yes'); if(/^I am already/.test(D.organ)) put('Registered before', 'Yes'); }
+  if(D.organ && !/^I do not/.test(D.organ)) put('Register on my behalf', yn(D.cl_organ_reg));
+  L.push('');
+  L.push('F. Next of kin');
+  put('Next of kin', pr('cl_nok_name','cl_nok_rel')); put('Email', D.cl_nok_email); put('Cell', D.cl_nok_cell);
+  L.push('');
+  L.push('G. Guardians, trustees and executor');
+  put('Guardian 1', pr('g_p_name','g_p_rel')); put('Guardian 2', pr('g_a_name','g_a_rel'));
+  if(clean(D.g_a_name)) put('Two guardians', opt('g_mode'));
+  put('Co-trustee 1', pr('cl_ct1_name','cl_ct1_rel')); put('Co-trustee 2', pr('cl_ct2_name','cl_ct2_rel'));
+  put('Capital Legacy as executor', D.cl_exec);
+  put('Co-executor 1', pr('cl_ce1_name','cl_ce1_rel')); put('Co-executor 2', pr('cl_ce2_name','cl_ce2_rel'));
+  L.push('');
+  L.push('H. Will collection service');
+  put('Use it', D.cl_collect);
+  if(clean(D.sa_off_detail)){ L.push(''); L.push('I. Worldwide assets'); L.push(String(D.sa_off_detail)); }
+  // a section heading with nothing under it says so, so a gap is seen before it reaches Capital Legacy
+  var out = [];
+  for(var i=0;i<L.length;i++){
+    out.push(L[i]);
+    if(/^[A-I]\. /.test(L[i]) && (i+1>=L.length || L[i+1]==='' )) out.push('(not captured yet)');
+  }
+  return out.join('\n').replace(/\n{3,}/g, '\n\n');
+}
+// A short check of the marriage regime against the attorney note (Rob Ackermann, 20 Oct 2026: the record
+// said with accrual and the note said without)
+function willRegimeWarn(c, D){
+  var m = String(c.MaritalStatus||''), n = String(D.s_anc_note||'').toLowerCase();
+  var noteWithout = /without\s+(the\s+)?accrual|no\s+accrual|excluding\s+(the\s+)?accrual|excl\.?\s+accrual/.test(n);
+  var noteWith = !noteWithout && /with\s+(the\s+)?accrual/.test(n);
+  if(m==='Married - ANC with accrual' && noteWithout) return 'The client record says ANC with accrual, but the antenuptial note says without accrual. Check the ANC and correct the client record: the cost of dying uses the record.';
+  if(m==='Married - ANC without accrual' && noteWith) return 'The client record says ANC without accrual, but the antenuptial note says with accrual. Check the ANC and correct the client record: the cost of dying uses the record.';
+  if(m==='Married in COP' && (noteWith || noteWithout)) return 'The client record says married in community of property, but the antenuptial note mentions an ANC. Check which is right.';
+  return '';
+}
+
 function renderWill(c){
   var D = willData(c.ID);
   var row = willFor(c.ID);
   var fam = (typeof famFor==='function') ? (famFor(c.ID)||[]) : [];
   var kids = fam.filter(function(l){ return l.Type==='Child'; });
   var spouseName = c.SpouseName || (fam.filter(function(l){return l.Type==='Spouse'||l.Type==='Life Partner';})[0]||{}).Name || '';
-
+  var cid = String(c.ID).replace(/'/g, "\\'");
   var MARITAL = ['Single / never married','Married in community of property (COP)','Married out of community of property (ANC) with accrual','Married out of community of property (ANC) without accrual','Divorced','Widowed','Life partner / cohabiting'];
 
   var h = '<style>'
@@ -13489,115 +13782,163 @@ function renderWill(c){
     +'.wg2{display:grid;grid-template-columns:1fr 1fr;gap:14px}'
     +'.wsub{font-size:11px;color:#889;margin:1px 0 8px;line-height:1.5}'
     +'.wsh{font-size:13px;font-weight:700;color:#0e413a;background:#eef1ea;padding:7px 11px;border-left:3px solid var(--gold,#a8b938);margin:20px 0 10px;border-radius:0 5px 5px 0}'
+    +'.wsh2{font-size:12.5px;font-weight:700;color:#445;margin:16px 0 8px;border-bottom:1px solid #e2e8ee;padding-bottom:3px}'
     +'.wprefill{background:#f0f7f4;border:1px solid #cfe6da;border-radius:8px;padding:9px 13px;font-size:12px;color:#2e5e4e;margin-bottom:6px}'
+    +'.wwarn{background:#fdecec;border:1px solid #e8b4b4;border-radius:7px;padding:8px 12px;font-size:12px;color:#8a1f1f;margin:6px 0}'
     +'.wtbl{width:100%;border-collapse:collapse;font-size:12px;margin:4px 0 6px}'
     +'.wtbl th{background:#0e413a;color:#fff;padding:5px 6px;text-align:left;font-weight:600;font-size:11px}'
-    +'.wtbl td{border:1px solid #dde;padding:3px}'
+    +'.wtbl td{border:1px solid #dde;padding:3px;vertical-align:top}'
     +'.wtbl .wfi{border:none;padding:5px 6px}'
+    +'.wfound{font-size:11px;margin-top:2px;min-height:0}'
+    +'.wstep{font-weight:700;font-size:12px;color:#0e413a;margin:10px 0 2px}'
+    +'.wchain{background:#f7f9fb;border:1px solid #dfe6ec;border-radius:8px;padding:9px 12px;font-size:12.5px;color:#223;line-height:1.55}'
+    +'.wmore>summary{cursor:pointer;font-weight:700;color:var(--navy,#0e413a);font-size:14px;padding:8px 0;margin-top:18px;border-top:2px solid #e2e8ee}'
     +'@media(max-width:640px){.wg2{grid-template-columns:1fr}}'
     +'</style>';
 
   h += '<div class="willwrap">';
-
-  // Header + actions
   h += '<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:6px">';
   h += '<div><h2 style="font-family:\'DM Serif Display\',serif;color:var(--navy);font-size:19px">📜 Will Instruction Sheet</h2>';
   h += '<div style="font-size:12px;color:#889">'+(row&&row.UpdatedAt?'Last saved '+wfEsc(row.UpdatedAt):'Not yet captured')+'</div></div>';
-  h += '<div style="display:flex;gap:8px">';
-  h += '<button class="btn b-gd sm" onclick="saveWill(\''+c.ID+'\')">💾 Save</button>';
-  h += '<button class="btn b-nv sm" onclick="printWillSheet(\''+c.ID+'\')">📄 Generate Sheet (PDF)</button>';
-  h += '<button class="btn b-gh sm" onclick="clearWill(\''+c.ID+'\')" title="Re-doing the will? Clear the captured data for a fresh start. Does not affect status, assets, family, or any signed will on file.">🔄 Start new will</button>';
+  h += '<div style="display:flex;gap:8px;flex-wrap:wrap">';
+  h += '<button class="btn b-gd sm" onclick="saveWill(\''+cid+'\')">💾 Save</button>';
+  h += '<button class="btn b-nv sm" onclick="printWillSheet(\''+cid+'\')">📄 Generate Sheet (PDF)</button>';
+  h += '<button class="btn b-gh sm" onclick="clearWill(\''+cid+'\')" title="Re-doing the will? Clear the captured data for a fresh start. Does not affect status, assets, family, or any signed will on file.">🔄 Start new will</button>';
   h += '</div></div>';
-
   h += '<div style="background:#fff8e1;border:1px solid #e6c547;border-radius:7px;padding:9px 13px;font-size:12px;color:#6b5500;margin-bottom:14px">'
-    +'<strong>This is not a will.</strong> It records the client\'s wishes for a qualified attorney to draft a valid Last Will &amp; Testament (Wills Act 7 of 1953). Capture it here, then generate the sheet to send the attorney. Saving does not change the client\'s will status — that flips to “Will (mine)” only when you enter the signed date in the Office-use section at the bottom.</div>';
+    +'<strong>This is not a will.</strong> It records the client\'s wishes for the will to be drafted (Wills Act 7 of 1953). Sections A to I follow the Capital Legacy application form, so the answers copy straight across. Saving does not change the client\'s will status: that flips to “Will (mine)” only when you enter the signed date in Office use at the bottom.</div>';
 
   h += renderWillRefPanel(c);
+  h += '<datalist id="willNameList">'+willNameOptions(c).map(function(n){ return '<option value="'+wfEsc(String(n).replace(/\s*\([^)]*\)\s*$/,''))+'">'; }).join('')+'</datalist>';
+  h += '<div id="willFormRoot" oninput="willChainPreview(\''+cid+'\')" onchange="willChainPreview(\''+cid+'\')">';
 
-  h += '<div id="willFormRoot">';
+  // ── Before you start ──
+  h += '<div class="wsh">Before you start (not on the Capital Legacy form)</div>';
+  h += '<div class="wprefill">'+wfEsc(c.Name||'')+(c.IDNumber?' · ID '+wfEsc(c.IDNumber):'')+(c.DOB?' · born '+wfEsc(c.DOB):'')+'<br>Marriage regime on the record: <strong>'+wfEsc(c.MaritalStatus||'not given')+'</strong>'+(spouseName?' · spouse '+wfEsc(spouseName):'')+'</div>';
+  var rw = willRegimeWarn(c, D); if(rw) h += '<div class="wwarn">⚠ '+wfEsc(rw)+'</div>';
+  h += wfF('Existing will', wfRS(D,'e_status'));
+  h += wfG2( wfF('Date of the existing will', wfT(D,'e_date', c.WillDate||'')), wfF('Drafted by', wfT(D,'e_drafted_by', c.WillAttorney||'')) );
 
-  // ── 1. Testator ──
-  h += wfH('1','Testator (client details)');
-  h += '<div class="wprefill">Pulled from the record: <strong>'+wfEsc(c.Name||'')+'</strong>'
-    + (c.IDNumber?' · ID '+wfEsc(c.IDNumber):'')
-    + (c.DOB?' · DOB '+wfEsc(c.DOB):'')
-    + (c.Cell?' · '+wfEsc(c.Cell):'')
-    + '<br>'+wfEsc(c.Address||'(no address on file)')+'</div>';
+  // ── A ──
+  h += wfH('A','Will information');
+  h += wfG2( wfF('Will language', wfRS(D,'cl_lang')), wfF('If other, which language', wfT(D,'cl_lang_other')) );
+  h += wfF('Any worldwide (offshore) assets? List them in section I', wfRS(D,'sa_off'));
+
+  // ── B ──
+  h += wfH('B','Who inherits the estate');
+  h += wfNote('Everything not left to someone specifically. Leave the % blank for equal shares. “Failing which” is who inherits if everyone in the step above has died. A name already in the CRM fills in the year of birth.');
+  var stepTitle = ['First to','Failing which, to','Failing which, to'];
+  for(var s=1;s<=WILL_STEPS;s++){
+    h += '<div class="wstep">'+(s)+'. '+stepTitle[s-1]+'</div>';
+    h += '<table class="wtbl"><thead><tr><th style="width:44%">Full names and surname</th><th style="width:28%">Relationship</th><th style="width:13%">Year of birth</th><th>% share</th></tr></thead><tbody>';
+    for(var i=1;i<=WILL_STEP_ROWS;i++){
+      var p = 'in'+s+'_'+i+'_';
+      h += '<tr><td>'+wfName(D, p+'name', cid)+'</td><td>'+wfRel(D, p+'rel')+'</td><td>'+wfT(D, p+'yob')+'</td><td>'+wfT(D, p+'pct', 'equal')+'</td></tr>';
+    }
+    h += '</tbody></table><div id="willStepWarn'+s+'" style="font-size:11px;color:#9e2a2b"></div>';
+  }
+  h += '<div style="font-size:10.5px;color:#556;font-weight:600;margin:10px 0 3px">For Section B of the Capital Legacy form</div>';
+  h += '<div style="display:flex;gap:8px;align-items:flex-start"><div class="wchain" id="willChainText" style="flex:1"></div><button class="btn b-gh xs" onclick="willCopyText(\'willChainText\')">Copy</button></div>';
+  h += '<div style="font-size:11px;color:#667;margin-top:4px;display:none">Cost of dying reads the residue as going to <strong id="willResNow"></strong>.</div>';
+  h += '<div class="wsh2">Something specific to someone (optional)</div>';
+  h += '<table class="wtbl"><thead><tr><th style="width:42%">Item or amount</th><th style="width:30%">To whom</th><th>If they die before the client, to</th></tr></thead><tbody>';
+  for(var bi=1; bi<=6; bi++){ h += '<tr><td>'+wfT(D,'bq'+bi+'_item')+'</td><td>'+wfTL(D,'bq'+bi+'_ben','willNameList')+'</td><td>'+wfTL(D,'bq'+bi+'_pre','willNameList')+'</td></tr>'; }
+  h += '</tbody></table>';
+
+  // ── C ──
+  h += wfH('C','Last wishes');
+  h += wfG2( wfF('Buried or cremated', wfRS(D,'fw')), wfF('Living will', wfRS(D,'lw')) );
+  h += wfG2( wfF('Funeral cost for the cost of dying (R)', wfT(D,'fw_cost','Blank = standard R50,000 allowance')), '' );
+
+  // ── D ──
+  h += wfH('D','Trust and inheritance protection');
+  h += wfG2( wfF('Children\'s trust (needed if minor children could inherit)', wfRS(D,'tr_choice')), wfF('Vesting age (18 or older; Capital Legacy recommends 25)', wfT(D,'tr_term_age')) );
+  h += wfG2( wfF('Widow\'s trust for the spouse?', wfRS(D,'cl_wt')), wfF('Widow\'s trust: children own the capital?', wfRS(D,'cl_wt_kids_cap')) );
+  [1,2,3].forEach(function(j){ h += wfPair(j===1 ? 'If not the children: capital beneficiary 1' : 'Capital beneficiary '+j, wfName(D,'cl_wt_cap'+j+'_name',cid), wfRel(D,'cl_wt_cap'+j+'_rel')); });
+  h += wfPair('Provider\'s trust: a dependant with special needs', wfName(D,'cl_pt_ben',cid), wfRel(D,'cl_pt_rel'));
+
+  // ── E ──
+  h += wfH('E','Organ donor');
+  h += wfF('Organ donor', wfRS(D,'organ'));
+  h += wfC(D,'cl_organ_reg','Register the client as a donor (Capital Legacy does it).');
+
+  // ── F ──
+  h += wfH('F','Next of kin');
+  h += wfPair('Next of kin', wfName(D,'cl_nok_name',cid), wfRel(D,'cl_nok_rel'));
+  h += wfG2( wfF('Cell', wfT(D,'cl_nok_cell')), wfF('Email', wfT(D,'cl_nok_email')) );
+
+  // ── G ──
+  h += wfH('G','Guardians, trustees and executor');
+  h += '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">'+wfNote('Guardians look after minor children if both parents have died. A name already in the CRM fills in the ID and contact details (under More detail).')
+    +'<button class="btn b-gh xs" onclick="willFillAllFromCRM(\''+cid+'\')">🔎 Fill details from the CRM</button></div>';
+  h += wfPair('Guardian 1', wfName(D,'g_p_name',cid), wfRel(D,'g_p_rel'));
+  h += wfPair('Guardian 2', wfName(D,'g_a_name',cid), wfRel(D,'g_a_rel'));
+  h += wfF('If there are two guardians', wfRS(D,'g_mode'));
+  h += wfC(D,'g_discussed','They have been asked and have agreed.');
+  h += wfPair('Co-trustee 1 (with Capital Legacy)', wfName(D,'cl_ct1_name',cid), wfRel(D,'cl_ct1_rel'));
+  h += wfPair('Co-trustee 2', wfName(D,'cl_ct2_name',cid), wfRel(D,'cl_ct2_rel'));
+  h += wfF('Capital Legacy as executor?', wfRS(D,'cl_exec'));
+  h += wfPair('Co-executor 1', wfName(D,'cl_ce1_name',cid), wfRel(D,'cl_ce1_rel'));
+  h += wfPair('Co-executor 2', wfName(D,'cl_ce2_name',cid), wfRel(D,'cl_ce2_rel'));
+
+  // ── H, I ──
+  h += wfH('H','Will collection');
+  h += wfF('Use the free will collection service?', wfRS(D,'cl_collect'));
+  h += wfH('I','Worldwide assets');
+  h += wfF('Each offshore asset and its country, one per line', wfA(D,'sa_off_detail',3));
+
+  // ── Copy for Capital Legacy ──
+  h += '<div style="margin-top:18px;border:1px solid #cfe6da;background:#f0f7f4;border-radius:9px;padding:11px 14px">'
+    +'<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div style="font-weight:700;color:#0e413a;font-size:13px">📋 Answers for the Capital Legacy form</div>'
+    +'<div style="display:flex;gap:6px"><button class="btn b-gh xs" onclick="willShowCL(\''+cid+'\')">Show</button><button class="btn b-gh xs" onclick="willShowCL(\''+cid+'\');willCopyText(\'willCLText\')">Copy all</button></div></div>'
+    +'<textarea id="willCLText" class="wfi" rows="14" readonly style="display:none;margin-top:8px;font-size:12px;background:#fff"></textarea></div>';
+
+  // ── More detail for the attorney ──
+  h += '<details class="wmore"><summary>More detail for the attorney (not on the Capital Legacy form)</summary>';
+  h += wfH('1','The client');
   h += wfG2( wfF('Place of birth', wfT(D,'t_placeofbirth')), wfF('Occupation', wfT(D,'t_occupation', c.Occupation||'')) );
-  h += wfF('Marital status / regime', wfR(D, 't_marital', MARITAL));
+  h += wfF('Marital status / regime, for the attorney (the client record is what the cost of dying uses)', wfR(D, 't_marital', MARITAL));
   h += wfF('If divorced/widowed — date', wfT(D,'t_marital_date'));
-
-  // ── 2. Spouse / life partner ──
-  h += wfH('2','Spouse / life partner (if applicable)');
+  h += wfH('2','Spouse / life partner');
   if(spouseName){ h += '<div class="wprefill">Spouse on record: <strong>'+wfEsc(spouseName)+'</strong>'+(c.SpouseIDNumber?' · ID '+wfEsc(c.SpouseIDNumber):'')+(c.SpouseDOB?' · DOB '+wfEsc(c.SpouseDOB):'')+'</div>'; }
   else { h += wfNote('No spouse on record. Add one in the Family tab if applicable.'); }
   h += wfG2( wfF('Date of marriage', wfT(D,'s_marriage_date')), wfF('Place of marriage', wfT(D,'s_marriage_place')) );
   h += wfF('ANC / accrual notes for the attorney', wfA(D,'s_anc_note',2));
-
-  // ── 3. Children & dependants ──
   h += wfH('3','Children and dependants');
   if(kids.length){
     h += '<table class="wtbl"><thead><tr><th style="width:34%">Child (from record)</th><th style="width:22%">ID / DOB</th><th style="width:10%">Minor?</th><th>Special needs / notes</th></tr></thead><tbody>';
     kids.forEach(function(kd){
       var age=_willAge(kd.DOB); var minor=(age!=null)?(age<18?'Yes':'No'):'';
-      h += '<tr><td style="padding:6px;font-weight:600">'+wfEsc(kd.Name||'')+'</td>'
-        +'<td style="padding:6px">'+wfEsc(kd.IDNumber||kd.DOB||'')+'</td>'
-        +'<td style="padding:6px;text-align:center">'+minor+'</td>'
-        +'<td>'+wfT(D,'cn_'+kd.ID)+'</td></tr>';
+      h += '<tr><td style="padding:6px;font-weight:600">'+wfEsc(kd.Name||'')+'</td><td style="padding:6px">'+wfEsc(kd.IDNumber||kd.DOB||'')+'</td><td style="padding:6px;text-align:center">'+minor+'</td><td>'+wfT(D,'cn_'+kd.ID)+'</td></tr>';
     });
     h += '</tbody></table>';
   } else { h += wfNote('No children on record. Add them in the Family tab so they carry through to the will sheet.'); }
   h += wfF('Other dependants to provide for (e.g. elderly parent, disabled sibling)', wfA(D,'dep_notes',2));
-
-  // ── 4. Existing will ──
-  h += wfH('4','Existing will');
-  h += wfF('Current position', wfR(D,'e_status',['I do not have an existing will','I have an existing will','I have a codicil / amendment to a prior will']));
-  h += wfG2( wfF('Date of existing will', wfT(D,'e_date', c.WillDate||'')), wfF('Drafted by', wfT(D,'e_drafted_by', c.WillAttorney||'')) );
+  h += wfH('4','Existing will: details');
   h += wfF('Location of the existing will / codicil', wfA(D,'e_location',2));
   h += wfC(D,'e_revoke','Revoke all prior wills and codicils when this new will is signed.');
-
-  // ── 5. Guardian ──
-  h += wfH('5','Guardian for minor children');
+  h += wfH('5','Guardians: details');
   h += wfC(D,'g_na','Not applicable — no minor children, or the other parent has full guardianship.');
-  h += '<div style="font-weight:700;font-size:12px;margin:8px 0 3px;color:#445">Primary guardian</div>';
-  h += wfG2( wfF('Full names', wfT(D,'g_p_name')), wfF('ID number', wfT(D,'g_p_id')) );
-  h += wfG2( wfF('Relationship', wfT(D,'g_p_rel')), wfF('Contact', wfT(D,'g_p_contact')) );
-  h += '<div style="font-weight:700;font-size:12px;margin:8px 0 3px;color:#445">Alternate guardian</div>';
-  h += wfG2( wfF('Full names', wfT(D,'g_a_name')), wfF('ID number', wfT(D,'g_a_id')) );
-  h += wfG2( wfF('Relationship', wfT(D,'g_a_rel')), wfF('Contact', wfT(D,'g_a_contact')) );
-  h += wfC(D,'g_discussed','This nomination has been discussed with the proposed guardian and they have agreed.');
+  h += wfG2( wfF('Guardian 1: ID number', wfT(D,'g_p_id')), wfF('Guardian 1: contact', wfT(D,'g_p_contact')) );
+  h += wfG2( wfF('Guardian 2: ID number', wfT(D,'g_a_id')), wfF('Guardian 2: contact', wfT(D,'g_a_contact')) );
   h += wfF('Notes to guardian (values, schooling preferences, etc.)', wfA(D,'g_notes',2));
-
-  // ── 6. Testamentary trust ──
-  h += wfH('6','Testamentary trust (for minor or vulnerable beneficiaries)');
-  h += wfF('Establish a trust?', wfR(D,'tr_choice',['Yes — establish a testamentary trust','No — distribute directly','Only if beneficiaries are still minors at date of death']));
-  h += '<div style="font-weight:700;font-size:12px;margin:8px 0 3px;color:#445">Trustees (min. 2 recommended, incl. one independent)</div>';
-  h += wfG2( wfF('Trustee 1 — full names', wfT(D,'tr1_name')), wfF('ID number', wfT(D,'tr1_id')) );
-  h += wfG2( wfF('Trustee 2 — full names', wfT(D,'tr2_name')), wfF('ID number', wfT(D,'tr2_id')) );
-  h += wfG2( wfF('Trustee 3 — full names', wfT(D,'tr3_name')), wfF('ID number', wfT(D,'tr3_id')) );
+  h += wfH('6','Trust: details');
+  h += wfG2( wfF('Co-trustee 1: ID number', wfT(D,'cl_ct1_id')), wfF('Co-trustee 2: ID number', wfT(D,'cl_ct2_id')) );
+  h += wfNote('Trustees below are for a will that Capital Legacy does not draft (min. 2 recommended, incl. one independent).');
+  h += wfG2( wfF('Trustee 1 — full names', wfName(D,'tr1_name',cid)), wfF('ID number', wfT(D,'tr1_id')) );
+  h += wfG2( wfF('Trustee 2 — full names', wfName(D,'tr2_name',cid)), wfF('ID number', wfT(D,'tr2_id')) );
+  h += wfG2( wfF('Trustee 3 — full names', wfName(D,'tr3_name',cid)), wfF('ID number', wfT(D,'tr3_id')) );
   h += wfF('Termination', wfR(D,'tr_term',['Terminates when beneficiary reaches a set age (below)','Trustees may pay capital sooner for education, medical, first home, etc.','Income distributed as needed; capital held until termination age']));
-  h += wfG2( wfF('Termination / vesting age (commonly 21 or 25)', wfT(D,'tr_term_age')), '' );
   h += wfF('Special trust instructions', wfA(D,'tr_notes',2));
-
-  // ── 7. Specific bequests ──
-  h += wfH('7','Specific bequests (named items or amounts)');
-  h += wfNote('Distributed before the residue. Items (jewellery, vehicles, firearms), specific sums, or specific investments to named people or charities.');
-  // Family names offered as suggestions in the beneficiary boxes (sections 7 and 8)
-  h += '<datalist id="willNameList">'+willNameOptions(c).map(function(n){ return '<option value="'+wfEsc(n)+'">'; }).join('')+'</datalist>';
-  h += '<table class="wtbl"><thead><tr><th style="width:42%">Item / amount</th><th style="width:38%">Beneficiary (names + relationship)</th><th>If beneficiary predeceases?</th></tr></thead><tbody>';
-  for(var bi=1; bi<=6; bi++){ h += '<tr><td>'+wfT(D,'bq'+bi+'_item')+'</td><td>'+wfTL(D,'bq'+bi+'_ben','willNameList')+'</td><td>'+wfTL(D,'bq'+bi+'_pre','willNameList')+'</td></tr>'; }
-  h += '</tbody></table>';
-
-  // ── 8. Residue ──
-  h += wfH('8','Residue of estate (everything not specifically bequeathed)');
-  h += wfNote('Per stirpes — if a beneficiary dies before you, their share passes down to their own descendants (their children). Per capita — a deceased beneficiary\'s share is instead re-divided equally among the surviving beneficiaries.');
+  // The older residue question: shown only while who inherits (B) is empty; kept on the page so it is saved
+  h += '<div id="willResLegacy" style="display:'+(willHasChain(D)?'none':'block')+'">';
+  h += wfH('7','Residue (older capture)');
+  h += wfNote('Captured before section B existed. Fill in who inherits in section B and this is worked out from it instead.');
   h += wfF('Residue distribution', wfR(D,'res_choice',['Entire residue to my spouse / life partner','Entire residue to my children equally, per stirpes','Entire residue to my children equally, per capita','Split as follows (table below)']));
   h += '<table class="wtbl"><thead><tr><th style="width:48%">Beneficiary (names + relationship)</th><th style="width:14%">% share</th><th>If predeceases, share goes to</th></tr></thead><tbody>';
   for(var ri=1; ri<=5; ri++){ h += '<tr><td>'+wfTL(D,'rs'+ri+'_ben','willNameList')+'</td><td>'+wfT(D,'rs'+ri+'_pct')+'</td><td>'+wfTL(D,'rs'+ri+'_pre','willNameList')+'</td></tr>'; }
-  h += '</tbody></table>';
-
-  // ── 9. Special assets ──
-  h += wfH('9','Special assets requiring attention');
+  h += '</tbody></table></div>';
+  h += wfH('8','Special assets requiring attention');
   h += '<div style="font-weight:700;font-size:12px;margin:6px 0 2px;color:#445">Retirement funds (s.37C)</div>';
   h += wfNote('Fund trustees decide the death benefit under s.37C — nominations are a guide only.');
   h += wfR(D,'sa_rf',['I have reviewed my fund beneficiary nominations','I wish to update my fund nominations (attorney / adviser to assist)']);
@@ -13612,95 +13953,47 @@ function renderWill(c){
   h += willFinposList(c, 'business');
   h += wfR(D,'sa_biz',['Not applicable','I am a shareholder / member (detail below)','A buy-and-sell agreement is in place','No buy-and-sell — business interest to pass to (below)']);
   h += wfF('Business notes for the attorney (entity, % held, to whom)', wfT(D,'sa_biz_detail'));
-  h += '<div style="font-weight:700;font-size:12px;margin:8px 0 2px;color:#445">Offshore assets</div>';
-  h += wfR(D,'sa_off',['None','I hold assets offshore (a separate offshore will may be recommended)']);
-  h += wfF('Country/ies and nature of offshore assets', wfA(D,'sa_off_detail',2));
   h += '<div style="font-weight:700;font-size:12px;margin:8px 0 2px;color:#445">Firearms</div>';
   h += wfR(D,'sa_fire',['None','I own firearms (beneficiary must hold a valid licence)']);
   h += wfG2( wfF('Number of firearms', wfT(D,'sa_fire_num')), wfF('Licensed to', wfT(D,'sa_fire_licensed')) );
-
-  // ── 10. Living will / advance directive ──
-  h += wfH('10','Living will / advance medical directive');
-  h += wfR(D,'lw',['Yes — I wish a living will to be drafted','No — I do not want a living will','I already have a living will (date below)']);
-  h += wfG2( wfF('Date of existing living will', wfT(D,'lw_date')), '' );
-  h += '<div style="font-weight:700;font-size:12px;margin:8px 0 2px;color:#445">Organ donation</div>';
-  h += wfR(D,'organ',['I wish to donate my organs and tissues where medically suitable','I do not wish to donate organs or tissues','I am already a registered organ donor']);
-  h += wfC(D,'cl_organ_reg','Register me as an organ donor (done on my behalf).');
-
-  // ── 11. Funeral wishes ──
-  h += wfH('11','Funeral wishes');
-  h += wfF('Preference', wfR(D,'fw',['Burial','Cremation','No preference — leave to family']));
+  h += wfH('9','Funeral and living will: details');
   h += wfF('Location (cemetery, church, scattering of ashes, etc.)', wfA(D,'fw_location',2));
   h += wfF('Specific requests (music, readings, dress code, faith practices)', wfA(D,'fw_requests',2));
-  h += '<div style="font-weight:700;font-size:12px;margin:8px 0 2px;color:#445">Funeral cover</div>';
   h += wfR(D,'fw_cover',['I have a funeral policy (details below)','None']);
-  h += wfG2( wfF('Provider', wfT(D,'fw_cover_provider')), wfF('Policy no.', wfT(D,'fw_cover_policy')) );
-  h += wfG2( wfF('Estimated funeral cost (R) — for the cost-of-dying calculation', wfT(D,'fw_cost','Blank = standard R50,000 allowance')), '' );
-
-  // ── 12. Digital assets ──
-  h += wfH('12','Digital assets and accounts');
+  h += wfG2( wfF('Funeral policy provider', wfT(D,'fw_cover_provider')), wfF('Policy no.', wfT(D,'fw_cover_policy')) );
+  h += wfG2( wfF('Date of an existing living will', wfT(D,'lw_date')), '' );
+  h += wfH('10','Digital assets and accounts');
   h += wfNote('Passwords must never go in the will (it becomes public). A separate sealed letter of instruction is preferred.');
   h += wfC(D,'da_letter','A sealed letter of instruction (accounts, access) is lodged.');
   h += wfF('Lodged with', wfT(D,'da_letter_with'));
   h += wfF('Social media accounts to be', wfR(D,'da_social',['Memorialised','Closed','Transferred']));
   h += wfC(D,'da_crypto','Cryptocurrency holdings exist.');
   h += wfF('Location of seed phrases / keys (not the keys themselves)', wfT(D,'da_crypto_loc'));
-
-  // ── 13. Pets ──
-  h += wfH('13','Pets');
+  h += wfH('11','Pets');
   h += wfC(D,'pet_na','Not applicable.');
   h += wfF('Pet(s) to be cared for by (name, relationship, contact)', wfT(D,'pet_carer'));
   h += wfF('Bequest to the carer for the pet\'s upkeep (R)', wfT(D,'pet_bequest'));
-
-  // ── 14. Letter of wishes ──
-  h += wfH('14','Letter of wishes (private, non-binding)');
+  h += wfH('12','Letter of wishes (private, non-binding)');
   h += wfR(D,'lo',['Yes — a separate letter of wishes will be drafted','No']);
-
-  // ── 15. Additional instructions ──
-  h += wfH('15','Additional instructions or notes to the attorney');
-  h += wfA(D,'add_notes',5);
-
-  // ── 16. Executor (moved to end) ──
-  h += wfH('16','Executor nomination');
-  h += wfNote('Executor fees are capped at 3.5% + VAT of gross estate. A reduced rate is often agreed, especially with a family co-executor.');
+  h += wfH('13','Executor: details');
+  h += wfG2( wfF('Co-executor 1: ID number', wfT(D,'cl_ce1_id')), wfF('Co-executor 2: ID number', wfT(D,'cl_ce2_id')) );
+  h += wfNote('Executors below are for a will where Capital Legacy is not the executor. Executor fees are capped at 3.5% + VAT of gross estate; a reduced rate is often agreed.');
   h += '<div style="font-weight:700;font-size:12px;margin:6px 0 3px;color:#445">Primary executor</div>';
-  h += wfG2( wfF('Full names', wfT(D,'ex_p_name')), wfF('ID / Reg number', wfT(D,'ex_p_id')) );
+  h += wfG2( wfF('Full names', wfName(D,'ex_p_name',cid)), wfF('ID / Reg number', wfT(D,'ex_p_id')) );
   h += wfG2( wfF('Relationship', wfT(D,'ex_p_rel')), wfF('Contact number', wfT(D,'ex_p_contact')) );
   h += wfF('Address', wfT(D,'ex_p_address'));
   h += '<div style="font-weight:700;font-size:12px;margin:8px 0 3px;color:#445">Alternate executor</div>';
-  h += wfG2( wfF('Full names', wfT(D,'ex_a_name')), wfF('ID / Reg number', wfT(D,'ex_a_id')) );
+  h += wfG2( wfF('Full names', wfName(D,'ex_a_name',cid)), wfF('ID / Reg number', wfT(D,'ex_a_id')) );
   h += wfG2( wfF('Relationship', wfT(D,'ex_a_rel')), wfF('Contact number', wfT(D,'ex_a_contact')) );
-  h += '<div style="font-weight:700;font-size:12px;margin:8px 0 3px;color:#445">Powers &amp; fees</div>';
   h += wfF('Security', wfR(D,'ex_security',['Waive security (bond of security) — usual for a family executor','Require security']));
   h += wfF('Fee basis', wfR(D,'ex_fee',['Agreed reduced rate (below)','Full statutory rate of 3.5% + VAT']));
   h += wfG2( wfF('Agreed rate (%) + VAT, if reduced', wfT(D,'ex_fee_rate')), '' );
   h += wfC(D,'ex_assume','Executor may assume a co-executor (e.g. a professional firm).');
   h += wfF('Other powers / special instructions to executor', wfA(D,'ex_notes',2));
-
-  // ── 17. Capital Legacy (12 Oct 2026) ──
-  // The questions on the Capital Legacy will form that the sections above do not already ask.
-  // Trust vesting age is the termination age in section 6; organ donor registration is in section 10.
-  h += wfH('17','Capital Legacy instructions');
-  h += wfNote('Only for a will drafted through Capital Legacy. Plan, medical, premium and debit order questions are not captured here.');
-  h += wfF('Will language', wfRI(D,'cl_lang',['English','Afrikaans','Other (below)']));
-  h += wfG2( wfF('Other language', wfT(D,'cl_lang_other')), '' );
-  h += '<div style="font-weight:700;font-size:12px;margin:8px 0 3px;color:#445">Widow\'s Trust</div>';
-  h += wfF('Establish a Widow\'s Trust?', wfRI(D,'cl_wt',['Yes','No']));
-  h += wfF('Spouse as income beneficiary?', wfRI(D,'cl_wt_sp_inc',['Yes','No']));
-  h += wfF('Children as capital beneficiaries?', wfRI(D,'cl_wt_kids_cap',['Yes','No']));
-  [1,2,3].forEach(function(i){ h += wfG2( wfF('Other capital beneficiary '+i+' — full names', wfT(D,'cl_wt_cap'+i+'_name')), wfF('Relationship', wfT(D,'cl_wt_cap'+i+'_rel')) ); });
-  h += '<div style="font-weight:700;font-size:12px;margin:8px 0 3px;color:#445">Provider\'s Trust</div>';
-  h += wfG2( wfF('Beneficiary — full names', wfT(D,'cl_pt_ben')), wfF('Relationship', wfT(D,'cl_pt_rel')) );
-  h += '<div style="font-weight:700;font-size:12px;margin:8px 0 3px;color:#445">Next of kin</div>';
-  h += wfG2( wfF('Full names', wfT(D,'cl_nok_name')), wfF('Relationship', wfT(D,'cl_nok_rel')) );
-  h += wfG2( wfF('Cell', wfT(D,'cl_nok_cell')), wfF('Email', wfT(D,'cl_nok_email')) );
-  h += '<div style="font-weight:700;font-size:12px;margin:8px 0 3px;color:#445">Co-trustees</div>';
-  [1,2].forEach(function(i){ h += wfG2( wfF('Co-trustee '+i+' — full names', wfT(D,'cl_ct'+i+'_name')), wfF('ID number', wfT(D,'cl_ct'+i+'_id')) ) + wfG2( wfF('Relationship', wfT(D,'cl_ct'+i+'_rel')), '' ); });
-  h += '<div style="font-weight:700;font-size:12px;margin:8px 0 3px;color:#445">Executor</div>';
-  h += wfF('Capital Legacy as executor?', wfRI(D,'cl_exec',['Yes','No']));
-  [1,2].forEach(function(i){ h += wfG2( wfF('Co-executor '+i+' — full names', wfT(D,'cl_ce'+i+'_name')), wfF('ID number', wfT(D,'cl_ce'+i+'_id')) ) + wfG2( wfF('Relationship', wfT(D,'cl_ce'+i+'_rel')), '' ); });
-  h += '<div style="font-weight:700;font-size:12px;margin:8px 0 3px;color:#445">Will collection</div>';
-  h += wfF('Use the will collection service?', wfRI(D,'cl_collect',['Yes','No']));
+  h += wfH('14','Other');
+  h += wfF('Widow\'s trust: spouse as income beneficiary?', wfRS(D,'cl_wt_sp_inc'));
+  h += wfF('Additional instructions or notes to the attorney', wfA(D,'add_notes',4));
+  h += '</details>';
 
   // ── Office use ──
   h += wfH('★','Office use — forwarding &amp; completion');
@@ -13710,21 +14003,28 @@ function renderWill(c){
   h += wfG2( wfF('Will drafted &amp; signed on', wfT(D,'signed_date')), wfF('Original stored at', wfT(D,'ou_stored')) );
 
   h += '</div>'; // #willFormRoot
-
   h += '<div style="display:flex;gap:8px;margin-top:16px">';
-  h += '<button class="btn b-gd" onclick="saveWill(\''+c.ID+'\')">💾 Save will details</button>';
-  h += '<button class="btn b-nv" onclick="printWillSheet(\''+c.ID+'\')">📄 Generate Will Instruction Sheet (PDF)</button>';
+  h += '<button class="btn b-gd" onclick="saveWill(\''+cid+'\')">💾 Save will details</button>';
+  h += '<button class="btn b-nv" onclick="printWillSheet(\''+cid+'\')">📄 Generate Will Instruction Sheet (PDF)</button>';
   h += '</div>';
-
   h += '</div>'; // .willwrap
+  setTimeout(function(){ try{ willChainPreview(cid); }catch(e){} }, 0);
   return h;
+}
+function willShowCL(cid){
+  var c = wbkClient(cid); if(!c) return;
+  var D = willDerive(Object.assign({}, willData(cid), collectWill()), cid);
+  var t = document.getElementById('willCLText'); if(!t) return;
+  t.value = willCLText(D, c); t.style.display = 'block';
 }
 
 // Save the will instruction sheet — deterministic one-row-per-client (like saveNeedNotes).
 function saveWill(cid, Dgiven, cb){
   // Dgiven / cb (12 Oct 2026): the fact find workbook import saves will data it has merged
   // itself and needs to know whether the server accepted it. Screen saves pass neither.
-  var D = Dgiven || collectWill();
+  // 1.6: what is on screen is laid over what is stored, so a key the screen does not show is never lost,
+  // and the residue answer the cost of dying reads is worked out from who inherits (willDerive).
+  var D = willDerive(Dgiven || Object.assign({}, willData(cid), collectWill()), cid);
   var now = new Date().toISOString().slice(0,16).replace('T',' ');
   var existing = willFor(cid);
   var rowObj = { ID: existing ? existing.ID : ('will_'+cid), ClientID: cid, Data: JSON.stringify(D), UpdatedAt: now };
@@ -13768,20 +14068,23 @@ function maybeFlipWillStatus(cid, D){
   post({action:'patchClientFields', id:c.ID, fields:f}, function(){});
 }
 
-// Generate the attorney-ready, pre-filled Will Instruction Sheet (mirrors forms.html).
+// Generate the will instruction sheet (1.6, 20 Oct 2026): part 1 follows the Capital Legacy form (A to I),
+// part 2 carries whatever else was captured for the attorney. Empty optional sections are left out.
 function printWillSheet(cid){
   var c = DB.clients.find(function(x){ return String(x.ID)===String(cid); });
   if(!c){ alert('Client not found.'); return; }
   var live = document.getElementById('willFormRoot');
-  var D = live ? collectWill() : willData(cid);
+  var D = willDerive(live ? Object.assign({}, willData(cid), collectWill()) : willData(cid), cid);
   if(live) saveWill(cid); // persist what is on screen before printing
   var e = wfEsc;
   var fam = (typeof famFor==='function') ? (famFor(cid)||[]) : [];
   var kids = fam.filter(function(l){ return l.Type==='Child'; });
   var spouseName = c.SpouseName || (fam.filter(function(l){return l.Type==='Spouse'||l.Type==='Life Partner';})[0]||{}).Name || '';
   var marital = D.t_marital || c.MaritalStatus || '';
+  function lab(k){ var x = willSpec(k), v = D[k]||''; if(!x || !v) return v; var i = x.opts.indexOf(v); return (i>=0 && x.xl) ? x.xl[i] : v; }
+  function pr(nk, rk){ return clean(D[nk]) ? D[nk]+(clean(D[rk]) ? ' ('+D[rk]+')' : '') : ''; }
+  function has(){ for(var i=0;i<arguments.length;i++){ var v = D[arguments[i]]; if(clean(v) && v!=='No') return true; } return false; }
 
-  // rendering helpers for the printed sheet
   function box(on){ return '<span style="font-family:Arial;font-size:12px">'+(on?'☑':'☐')+'</span>'; }
   function opt(sel, val){ return '<div style="margin:2px 0;font-size:10.5px">'+box(sel===val)+' '+val+'</div>'; }
   function chk(v, label){ return '<div style="margin:2px 0;font-size:10.5px">'+box(v==='Yes')+' '+label+'</div>'; }
@@ -13792,202 +14095,152 @@ function printWillSheet(cid){
   function one(l,v){ return '<div style="margin-bottom:8px"><div style="font-size:9.5px;color:#555">'+l+'</div><div style="border-bottom:1px solid #333;padding-bottom:2px;min-height:18px;font-weight:'+(v?'700':'400')+'">'+(e(v)||'&nbsp;')+'</div></div>'; }
   function note(l,v){ return '<div style="margin-bottom:8px"><div style="font-size:9.5px;color:#555">'+l+'</div><div style="border:1px solid #ccc;border-radius:4px;min-height:34px;padding:5px 7px;font-size:10.5px;white-space:pre-wrap">'+(e(v)||'&nbsp;')+'</div></div>'; }
   function sh(t){ return '<div style="font-size:11.5px;font-weight:700;color:#0e413a;background:#f4f4f0;padding:6px 10px;border-left:3px solid #a8b938;margin:16px 0 9px">'+t+'</div>'; }
+  function part(t){ return '<div style="font-size:13px;font-weight:700;color:#0e413a;border-bottom:2px solid #a8b938;padding-bottom:3px;margin:20px 0 4px">'+t+'</div>'; }
 
   var h = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Will Instruction Sheet — '+e(c.Name||'')+'</title>';
   h += _brokerDocCSS();
   h += '<style>.wq td,.wq th{border:1px solid #bbb;padding:5px 6px;font-size:10px;vertical-align:top}.wq th{background:#0e413a;color:#fff;text-align:left}.wq{width:100%;border-collapse:collapse;margin:6px 0 10px}</style>';
   h += '</head><body><div class="page">';
   h += _brokerLetterhead();
-
   h += '<div class="title">WILL INSTRUCTION SHEET</div>';
   h += '<div style="background:#fff8e1;border:1px solid #e6c547;border-radius:5px;padding:9px 12px;margin-bottom:14px;font-size:10px;color:#6b5500"><strong>This document is not a will.</strong> It records the client\'s testamentary wishes for a qualified attorney to draft a valid Last Will &amp; Testament (Wills Act 7 of 1953), signed by the testator before two competent witnesses.</div>';
 
-  // 1. Testator
-  h += sh('1. Testator (the client)');
+  // The testator and family
+  h += sh('The client');
   h += two('Full names', c.Name, 'ID number', c.IDNumber);
   h += two('Date of birth', c.DOB, 'Place of birth', D.t_placeofbirth);
   h += one('Residential address', c.Address);
   h += two('Cell', c.Cell, 'Email', c.Email);
-  h += one('Occupation', D.t_occupation||c.Occupation);
-  h += '<div style="font-size:10px;font-weight:700;margin:6px 0 2px">Marital status / regime</div>';
-  ['Single / never married','Married in community of property (COP)','Married out of community of property (ANC) with accrual','Married out of community of property (ANC) without accrual','Divorced','Widowed','Life partner / cohabiting'].forEach(function(o){ h+=opt(marital,o); });
+  h += two('Marital status / regime', marital, 'Spouse / life partner', spouseName);
   if(D.t_marital_date) h += one('Date of divorce / spouse passing', D.t_marital_date);
-
-  // 2. Spouse
-  h += sh('2. Spouse / life partner');
-  h += two('Full names', spouseName, 'ID number', c.SpouseIDNumber);
-  h += two('Date of birth', c.SpouseDOB, 'Date of marriage', D.s_marriage_date);
-  h += one('Place of marriage', D.s_marriage_place);
+  if(spouseName) h += two('Date of marriage', D.s_marriage_date, 'Place of marriage', D.s_marriage_place);
   if(D.s_anc_note) h += note('ANC / accrual notes for the attorney', D.s_anc_note);
-
-  // 3. Children & dependants
-  h += sh('3. Children and dependants');
-  h += '<table class="wq"><thead><tr><th style="width:32%">Full names</th><th style="width:22%">ID / DOB</th><th style="width:10%">Minor?</th><th>Special needs / notes</th></tr></thead><tbody>';
+  h += '<table class="wq"><thead><tr><th style="width:32%">Children</th><th style="width:22%">ID / DOB</th><th style="width:10%">Minor?</th><th>Special needs / notes</th></tr></thead><tbody>';
   if(kids.length){ kids.forEach(function(kd){ var age=_willAge(kd.DOB); var minor=(age!=null)?(age<18?'Yes':'No'):''; h+='<tr><td>'+e(kd.Name||'')+'</td><td>'+e(kd.IDNumber||kd.DOB||'')+'</td><td style="text-align:center">'+minor+'</td><td>'+e(D['cn_'+kd.ID]||'')+'</td></tr>'; }); }
-  else { h+='<tr><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td></tr><tr><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td></tr>'; }
+  else { h+='<tr><td>None on record</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td></tr>'; }
   h += '</tbody></table>';
   if(D.dep_notes) h += note('Other dependants to provide for', D.dep_notes);
-
-  // 4. Existing will
-  h += sh('4. Existing will');
-  ['I do not have an existing will','I have an existing will','I have a codicil / amendment to a prior will'].forEach(function(o){ h+=opt(D.e_status,o); });
-  h += two('Date of existing will', D.e_date||c.WillDate, 'Drafted by', D.e_drafted_by||c.WillAttorney);
+  h += two('Existing will', lab('e_status'), 'Dated / drafted by', [D.e_date||c.WillDate, D.e_drafted_by||c.WillAttorney].filter(function(x){ return clean(x); }).join(', '));
   if(D.e_location) h += note('Location of the existing will / codicil', D.e_location);
-  h += chk(D.e_revoke,'Revoke all prior wills and codicils when this new will is signed.');
+  if(D.e_revoke==='Yes') h += chk('Yes','Revoke all prior wills and codicils when this new will is signed.');
 
-  // 5. Guardian
-  h += sh('5. Guardian for minor children');
-  h += chk(D.g_na,'Not applicable — no minor children, or the other parent has full guardianship.');
-  h += '<div style="font-size:10px;font-weight:700;margin:6px 0 2px">Primary guardian</div>';
-  h += two('Full names', D.g_p_name, 'ID number', D.g_p_id);
-  h += two('Relationship', D.g_p_rel, 'Contact', D.g_p_contact);
-  h += '<div style="font-size:10px;font-weight:700;margin:6px 0 2px">Alternate guardian</div>';
-  h += two('Full names', D.g_a_name, 'ID number', D.g_a_id);
-  h += two('Relationship', D.g_a_rel, 'Contact', D.g_a_contact);
-  h += chk(D.g_discussed,'Discussed with the proposed guardian and they have agreed.');
+  h += part('Part 1: the will, in the order of the Capital Legacy application form');
+  h += sh('A. Will information');
+  h += two('Will language', D.cl_lang==='Other (below)' ? (D.cl_lang_other||'Other') : D.cl_lang, 'Worldwide assets', D.sa_off ? (D.sa_off==='None' ? 'No' : 'Yes (section I)') : '');
+
+  h += sh('B. Distribution of the estate');
+  if(willHasChain(D)){
+    h += note('Who inherits', willChainText(D));
+    var stT = ['First to','Failing which, to','Failing which, to'];
+    var tb = '';
+    for(var s=1;s<=WILL_STEPS;s++){ willStepRows(D, s).forEach(function(r, i){ tb += '<tr><td>'+(i===0 ? stT[s-1] : '')+'</td><td>'+e(r.name)+'</td><td>'+e(r.rel)+'</td><td style="text-align:center">'+e(r.yob)+'</td><td style="text-align:center">'+(r.pct!=='' ? e(r.pct)+'%' : 'equal')+'</td></tr>'; }); }
+    h += '<table class="wq"><thead><tr><th style="width:18%">Step</th><th style="width:36%">Full names</th><th style="width:20%">Relationship</th><th style="width:12%">Born</th><th>Share</th></tr></thead><tbody>'+tb+'</tbody></table>';
+  } else if(D.res_choice){
+    h += one('Residue (older capture)', D.res_choice);
+    var rsT = ''; for(var ri=1; ri<=5; ri++){ var rb=D['rs'+ri+'_ben']; if(rb||D['rs'+ri+'_pct']) rsT+='<tr><td>'+e(rb||'')+'</td><td style="text-align:center">'+e(D['rs'+ri+'_pct']||'')+'</td><td>'+e(D['rs'+ri+'_pre']||'')+'</td></tr>'; }
+    if(rsT) h += '<table class="wq"><thead><tr><th style="width:48%">Beneficiary</th><th style="width:14%">% share</th><th>If predeceases, to</th></tr></thead><tbody>'+rsT+'</tbody></table>';
+  } else h += note('Who inherits', '');
+  var bqT = ''; for(var bi=1; bi<=6; bi++){ var it=D['bq'+bi+'_item']; if(it||D['bq'+bi+'_ben']) bqT+='<tr><td>'+e(it||'')+'</td><td>'+e(D['bq'+bi+'_ben']||'')+'</td><td>'+e(D['bq'+bi+'_pre']||'')+'</td></tr>'; }
+  h += '<div style="font-size:9.5px;color:#555;margin-top:6px">Something specific to someone</div>';
+  h += bqT ? '<table class="wq"><thead><tr><th style="width:42%">Item / amount</th><th style="width:30%">To whom</th><th>If they die before the client, to</th></tr></thead><tbody>'+bqT+'</tbody></table>' : '<div style="font-size:10.5px;margin-bottom:8px">None</div>';
+
+  h += sh('C. Last wishes');
+  h += two('Buried or cremated', lab('fw'), 'Living will', lab('lw')+(D.lw_date ? ' (dated '+D.lw_date+')' : ''));
+
+  h += sh('D. Trust and inheritance protection');
+  h += two('Children\'s trust', lab('tr_choice'), 'Vesting age', D.tr_term_age);
+  if(has('cl_wt')){
+    h += two('Widow\'s trust', D.cl_wt, 'Children own the capital', D.cl_wt_kids_cap);
+    [1,2,3].forEach(function(i){ if(clean(D['cl_wt_cap'+i+'_name'])) h += one('Capital beneficiary '+i, pr('cl_wt_cap'+i+'_name','cl_wt_cap'+i+'_rel')); });
+  }
+  if(clean(D.cl_pt_ben)) h += one('Provider\'s trust beneficiary', pr('cl_pt_ben','cl_pt_rel'));
+
+  h += sh('E. Organ donor');
+  h += two('Organ donor', lab('organ'), 'Register on the client\'s behalf', (D.organ && !/^I do not/.test(D.organ)) ? (D.cl_organ_reg==='Yes' ? 'Yes' : (D.cl_organ_reg==='No' ? 'No' : '')) : '');
+
+  h += sh('F. Next of kin');
+  h += one('Next of kin', pr('cl_nok_name','cl_nok_rel'));
+  h += two('Cell', D.cl_nok_cell, 'Email', D.cl_nok_email);
+
+  h += sh('G. Guardians, trustees and executor');
+  h += two('Guardian 1', pr('g_p_name','g_p_rel'), 'ID number / contact', [D.g_p_id, D.g_p_contact].filter(function(x){ return clean(x); }).join(' · '));
+  h += two('Guardian 2', pr('g_a_name','g_a_rel'), 'ID number / contact', [D.g_a_id, D.g_a_contact].filter(function(x){ return clean(x); }).join(' · '));
+  if(clean(D.g_a_name) && D.g_mode) h += one('Two guardians', lab('g_mode'));
+  h += chk(D.g_discussed,'The proposed guardians have been asked and have agreed.');
+  if(D.g_na==='Yes') h += chk('Yes','Not applicable — no minor children, or the other parent has full guardianship.');
   if(D.g_notes) h += note('Notes to guardian', D.g_notes);
+  [1,2].forEach(function(i){ if(clean(D['cl_ct'+i+'_name'])) h += two('Co-trustee '+i, pr('cl_ct'+i+'_name','cl_ct'+i+'_rel'), 'ID number', D['cl_ct'+i+'_id']); });
+  h += one('Capital Legacy as executor', D.cl_exec);
+  [1,2].forEach(function(i){ if(clean(D['cl_ce'+i+'_name'])) h += two('Co-executor '+i, pr('cl_ce'+i+'_name','cl_ce'+i+'_rel'), 'ID number', D['cl_ce'+i+'_id']); });
 
-  // 6. Trust
-  h += sh('6. Testamentary trust');
-  ['Yes — establish a testamentary trust','No — distribute directly','Only if beneficiaries are still minors at date of death'].forEach(function(o){ h+=opt(D.tr_choice,o); });
-  if(D.tr1_name||D.tr2_name||D.tr3_name){
-    h += '<div style="font-size:10px;font-weight:700;margin:6px 0 2px">Trustees</div>';
-    if(D.tr1_name) h += two('Trustee 1', D.tr1_name, 'ID number', D.tr1_id);
-    if(D.tr2_name) h += two('Trustee 2', D.tr2_name, 'ID number', D.tr2_id);
-    if(D.tr3_name) h += two('Trustee 3', D.tr3_name, 'ID number', D.tr3_id);
+  h += sh('H. Will collection service');
+  h += one('Use the will collection service', D.cl_collect);
+  if(clean(D.sa_off_detail)){ h += sh('I. Worldwide assets'); h += note('Offshore assets and countries', D.sa_off_detail); }
+
+  // Part 2: only what was captured
+  var p2 = '';
+  if(has('tr1_name','tr2_name','tr3_name','tr_term','tr_notes')){
+    p2 += sh('Testamentary trust (a will Capital Legacy does not draft)');
+    if(D.tr1_name) p2 += two('Trustee 1', D.tr1_name, 'ID number', D.tr1_id);
+    if(D.tr2_name) p2 += two('Trustee 2', D.tr2_name, 'ID number', D.tr2_id);
+    if(D.tr3_name) p2 += two('Trustee 3', D.tr3_name, 'ID number', D.tr3_id);
+    if(D.tr_term) p2 += one('Termination', D.tr_term);
+    if(D.tr_notes) p2 += note('Special trust instructions', D.tr_notes);
   }
-  ['Terminates when beneficiary reaches a set age (below)','Trustees may pay capital sooner for education, medical, first home, etc.','Income distributed as needed; capital held until termination age'].forEach(function(o){ h+=opt(D.tr_term,o); });
-  if(D.tr_term_age) h += one('Termination / vesting age', D.tr_term_age);
-  if(D.tr_notes) h += note('Special trust instructions', D.tr_notes);
-
-  // 7. Bequests
-  h += sh('7. Specific bequests');
-  h += '<table class="wq"><thead><tr><th style="width:42%">Item / amount</th><th style="width:38%">Beneficiary</th><th>If predeceases?</th></tr></thead><tbody>';
-  var anyBq=false;
-  for(var bi=1; bi<=6; bi++){ var it=D['bq'+bi+'_item']; if(it||D['bq'+bi+'_ben']){ anyBq=true; h+='<tr><td>'+e(it||'')+'</td><td>'+e(D['bq'+bi+'_ben']||'')+'</td><td>'+e(D['bq'+bi+'_pre']||'')+'</td></tr>'; } }
-  if(!anyBq) h += '<tr><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td></tr>';
-  h += '</tbody></table>';
-
-  // 8. Residue
-  h += sh('8. Residue of estate');
-  h += '<div style="font-size:9.5px;color:#555;margin:2px 0 6px">Per stirpes — a deceased beneficiary\'s share passes to their descendants (their children). Per capita — it is re-divided equally among the surviving beneficiaries.</div>';
-  ['Entire residue to my spouse / life partner','Entire residue to my children equally, per stirpes','Entire residue to my children equally, per capita','Split as follows (table below)'].forEach(function(o){ h+=opt(D.res_choice,o); });
-  var anyRs=false; var rsTbl='<table class="wq"><thead><tr><th style="width:48%">Beneficiary</th><th style="width:14%">% share</th><th>If predeceases, to</th></tr></thead><tbody>';
-  for(var ri=1; ri<=5; ri++){ var rb=D['rs'+ri+'_ben']; if(rb||D['rs'+ri+'_pct']){ anyRs=true; rsTbl+='<tr><td>'+e(rb||'')+'</td><td style="text-align:center">'+e(D['rs'+ri+'_pct']||'')+'</td><td>'+e(D['rs'+ri+'_pre']||'')+'</td></tr>'; } }
-  rsTbl+='</tbody></table>';
-  if(anyRs) h += rsTbl;
-
-  // 9. Special assets
-  h += sh('9. Special assets requiring attention');
-  h += '<div style="font-size:10px;font-weight:700;margin:4px 0 2px">Retirement funds (s.37C)</div>';
-  ['I have reviewed my fund beneficiary nominations','I wish to update my fund nominations (attorney / adviser to assist)'].forEach(function(o){ h+=opt(D.sa_rf,o); });
-  h += '<div style="font-size:10px;font-weight:700;margin:6px 0 2px">Life insurance policies</div>';
-  ['All life policies have current beneficiary nominations','Some policies pay into my estate (no nominated beneficiary)'].forEach(function(o){ h+=opt(D.sa_lp,o); });
-  if(D.sa_lp_notes) h += note('Notes on policies', D.sa_lp_notes);
-  h += '<div style="font-size:10px;font-weight:700;margin:6px 0 2px">Fixed property</div>';
-  if(D.sa_prop_list) h += note('Properties: address and holding structure', D.sa_prop_list);
-  [WILL_SA_PROP_NEW,'Property to be sold and proceeds form part of residue','Specific property to a specific beneficiary (detail in section 7)'].forEach(function(o){ h+=opt(D.sa_prop,o); });
-  h += '<div style="font-size:10px;font-weight:700;margin:6px 0 2px">Business interests</div>';
-  ['Not applicable','I am a shareholder / member (detail below)','A buy-and-sell agreement is in place','No buy-and-sell — business interest to pass to (below)'].forEach(function(o){ h+=opt(D.sa_biz,o); });
-  if(D.sa_biz_detail) h += one('Business detail', D.sa_biz_detail);
-  h += '<div style="font-size:10px;font-weight:700;margin:6px 0 2px">Offshore assets</div>';
-  ['None','I hold assets offshore (a separate offshore will may be recommended)'].forEach(function(o){ h+=opt(D.sa_off,o); });
-  if(D.sa_off_detail) h += note('Country/ies and nature of offshore assets', D.sa_off_detail);
-  h += '<div style="font-size:10px;font-weight:700;margin:6px 0 2px">Firearms</div>';
-  ['None','I own firearms (beneficiary must hold a valid licence)'].forEach(function(o){ h+=opt(D.sa_fire,o); });
-  if(D.sa_fire_num||D.sa_fire_licensed) h += two('Number of firearms', D.sa_fire_num, 'Licensed to', D.sa_fire_licensed);
-
-  // 10. Living will
-  h += sh('10. Living will / advance medical directive');
-  ['Yes — I wish a living will to be drafted','No — I do not want a living will','I already have a living will (date below)'].forEach(function(o){ h+=opt(D.lw,o); });
-  if(D.lw_date) h += one('Date of existing living will', D.lw_date);
-  h += '<div style="font-size:10px;font-weight:700;margin:6px 0 2px">Organ donation</div>';
-  ['I wish to donate my organs and tissues where medically suitable','I do not wish to donate organs or tissues','I am already a registered organ donor'].forEach(function(o){ h+=opt(D.organ,o); });
-  if(D.cl_organ_reg==='Yes') h += chk(D.cl_organ_reg,'Register me as an organ donor (done on my behalf).');
-
-  // 11. Funeral
-  h += sh('11. Funeral wishes');
-  ['Burial','Cremation','No preference — leave to family'].forEach(function(o){ h+=opt(D.fw,o); });
-  if(D.fw_location) h += note('Location', D.fw_location);
-  if(D.fw_requests) h += note('Specific requests', D.fw_requests);
-  h += '<div style="font-size:10px;font-weight:700;margin:6px 0 2px">Funeral cover</div>';
-  ['I have a funeral policy (details below)','None'].forEach(function(o){ h+=opt(D.fw_cover,o); });
-  if(D.fw_cover_provider||D.fw_cover_policy) h += two('Provider', D.fw_cover_provider, 'Policy no.', D.fw_cover_policy);
-
-  // 12. Digital
-  h += sh('12. Digital assets and accounts');
-  h += chk(D.da_letter,'A sealed letter of instruction is lodged'+(D.da_letter_with?' with '+e(D.da_letter_with):'')+'.');
-  if(D.da_social) h += one('Social media accounts to be', D.da_social);
-  h += chk(D.da_crypto,'Cryptocurrency holdings exist'+(D.da_crypto_loc?' — location of keys: '+e(D.da_crypto_loc):'')+'.');
-
-  // 13. Pets
-  h += sh('13. Pets');
-  h += chk(D.pet_na,'Not applicable.');
-  if(D.pet_carer) h += one('Pet(s) to be cared for by', D.pet_carer);
-  if(D.pet_bequest) h += one('Bequest to carer for upkeep (R)', D.pet_bequest);
-
-  // 14. Letter of wishes
-  h += sh('14. Letter of wishes (private, non-binding)');
-  ['Yes — a separate letter of wishes will be drafted','No'].forEach(function(o){ h+=opt(D.lo,o); });
-
-  // 15. Additional
-  h += sh('15. Additional instructions to the attorney');
-  h += note('', D.add_notes);
-
-  // 16. Executor (moved to end)
-  h += sh('16. Executor nomination');
-  h += '<div style="font-size:10px;font-weight:700;margin:4px 0 2px">Primary executor</div>';
-  h += two('Full names', D.ex_p_name, 'ID / Reg number', D.ex_p_id);
-  h += two('Relationship', D.ex_p_rel, 'Contact number', D.ex_p_contact);
-  h += one('Address', D.ex_p_address);
-  h += '<div style="font-size:10px;font-weight:700;margin:6px 0 2px">Alternate executor</div>';
-  h += two('Full names', D.ex_a_name, 'ID / Reg number', D.ex_a_id);
-  h += two('Relationship', D.ex_a_rel, 'Contact number', D.ex_a_contact);
-  h += '<div style="font-size:10px;font-weight:700;margin:6px 0 2px">Powers &amp; fees</div>';
-  ['Waive security (bond of security) — usual for a family executor','Require security'].forEach(function(o){ h+=opt(D.ex_security,o); });
-  ['Agreed reduced rate (below)','Full statutory rate of 3.5% + VAT'].forEach(function(o){ h+=opt(D.ex_fee,o); });
-  if(D.ex_fee_rate) h += one('Agreed rate (%) + VAT', D.ex_fee_rate);
-  h += chk(D.ex_assume,'Executor may assume a co-executor (e.g. a professional firm).');
-  if(D.ex_notes) h += note('Other powers / special instructions', D.ex_notes);
-
-  // 17. Capital Legacy (12 Oct 2026) — printed only when something was captured
-  var _clKeys = Object.keys(D).filter(function(k){ return k.indexOf('cl_')===0 && k!=='cl_organ_reg' && clean(D[k]) && D[k]!=='No'; });
-  if(_clKeys.length){
-    h += sh('17. Capital Legacy instructions');
-    if(D.cl_lang) h += one('Will language', D.cl_lang==='Other (below)' ? (D.cl_lang_other||'Other') : D.cl_lang);
-    if(D.cl_wt||D.cl_wt_sp_inc||D.cl_wt_kids_cap){
-      h += '<div style="font-size:10px;font-weight:700;margin:6px 0 2px">Widow\'s Trust</div>';
-      h += two('Establish a Widow\'s Trust', D.cl_wt, 'Spouse as income beneficiary', D.cl_wt_sp_inc);
-      h += one('Children as capital beneficiaries', D.cl_wt_kids_cap);
-    }
-    [1,2,3].forEach(function(i){ if(D['cl_wt_cap'+i+'_name']) h += two('Other capital beneficiary '+i, D['cl_wt_cap'+i+'_name'], 'Relationship', D['cl_wt_cap'+i+'_rel']); });
-    if(D.cl_pt_ben) h += two('Provider\'s Trust beneficiary', D.cl_pt_ben, 'Relationship', D.cl_pt_rel);
-    if(D.cl_nok_name){ h += two('Next of kin', D.cl_nok_name, 'Relationship', D.cl_nok_rel); h += two('Cell', D.cl_nok_cell, 'Email', D.cl_nok_email); }
-    [1,2].forEach(function(i){ if(D['cl_ct'+i+'_name']) h += two('Co-trustee '+i, D['cl_ct'+i+'_name']+(D['cl_ct'+i+'_rel']?' ('+D['cl_ct'+i+'_rel']+')':''), 'ID number', D['cl_ct'+i+'_id']); });
-    if(D.cl_exec) h += one('Capital Legacy as executor', D.cl_exec);
-    [1,2].forEach(function(i){ if(D['cl_ce'+i+'_name']) h += two('Co-executor '+i, D['cl_ce'+i+'_name']+(D['cl_ce'+i+'_rel']?' ('+D['cl_ce'+i+'_rel']+')':''), 'ID number', D['cl_ce'+i+'_id']); });
-    if(D.cl_collect) h += one('Will collection service', D.cl_collect);
+  if(has('ex_p_name','ex_a_name','ex_security','ex_fee','ex_fee_rate','ex_assume','ex_notes')){
+    p2 += sh('Executor (where Capital Legacy is not the executor)');
+    if(D.ex_p_name){ p2 += two('Primary executor', D.ex_p_name+(D.ex_p_rel?' ('+D.ex_p_rel+')':''), 'ID / Reg number', D.ex_p_id); p2 += two('Contact number', D.ex_p_contact, 'Address', D.ex_p_address); }
+    if(D.ex_a_name){ p2 += two('Alternate executor', D.ex_a_name+(D.ex_a_rel?' ('+D.ex_a_rel+')':''), 'ID / Reg number', D.ex_a_id); if(D.ex_a_contact) p2 += one('Contact number', D.ex_a_contact); }
+    if(D.ex_security) p2 += one('Security', D.ex_security);
+    if(D.ex_fee) p2 += one('Fee basis', D.ex_fee+(D.ex_fee_rate ? ': '+D.ex_fee_rate+'% plus VAT' : ''));
+    if(D.ex_assume==='Yes') p2 += chk('Yes','Executor may assume a co-executor (e.g. a professional firm).');
+    if(D.ex_notes) p2 += note('Other powers / special instructions', D.ex_notes);
   }
+  if(has('sa_rf','sa_lp','sa_lp_notes','sa_prop_list','sa_prop','sa_biz','sa_biz_detail','sa_fire')){
+    p2 += sh('Special assets');
+    if(D.sa_rf) p2 += one('Retirement funds (s.37C)', D.sa_rf);
+    if(D.sa_lp) p2 += one('Life insurance policies', D.sa_lp);
+    if(D.sa_lp_notes) p2 += note('Notes on policies', D.sa_lp_notes);
+    if(D.sa_prop_list) p2 += note('Properties: address and holding structure', D.sa_prop_list);
+    if(D.sa_prop) p2 += one('Fixed property', D.sa_prop);
+    if(D.sa_biz) p2 += one('Business interests', D.sa_biz);
+    if(D.sa_biz_detail) p2 += one('Business detail', D.sa_biz_detail);
+    if(D.sa_fire) p2 += one('Firearms', D.sa_fire+(D.sa_fire_num ? ': '+D.sa_fire_num : '')+(D.sa_fire_licensed ? ', licensed to '+D.sa_fire_licensed : ''));
+  }
+  if(has('fw_location','fw_requests','fw_cover','fw_cover_provider','fw_cover_policy')){
+    p2 += sh('Funeral details');
+    if(D.fw_location) p2 += note('Location', D.fw_location);
+    if(D.fw_requests) p2 += note('Specific requests', D.fw_requests);
+    if(D.fw_cover) p2 += one('Funeral cover', D.fw_cover);
+    if(D.fw_cover_provider||D.fw_cover_policy) p2 += two('Provider', D.fw_cover_provider, 'Policy no.', D.fw_cover_policy);
+  }
+  if(has('da_letter','da_social','da_crypto','da_letter_with','da_crypto_loc')){
+    p2 += sh('Digital assets and accounts');
+    if(D.da_letter==='Yes') p2 += chk('Yes','A sealed letter of instruction is lodged'+(D.da_letter_with?' with '+e(D.da_letter_with):'')+'.');
+    if(D.da_social) p2 += one('Social media accounts to be', D.da_social);
+    if(D.da_crypto==='Yes') p2 += chk('Yes','Cryptocurrency holdings exist'+(D.da_crypto_loc?' — location of keys: '+e(D.da_crypto_loc):'')+'.');
+  }
+  if(has('pet_carer','pet_bequest')){ p2 += sh('Pets'); if(D.pet_carer) p2 += one('Pet(s) to be cared for by', D.pet_carer); if(D.pet_bequest) p2 += one('Bequest to carer for upkeep (R)', D.pet_bequest); }
+  if(D.lo) p2 += sh('Letter of wishes')+one('A separate letter of wishes', lab('lo'));
+  if(D.cl_wt_sp_inc) p2 += sh('Widow\'s trust')+one('Spouse as income beneficiary', D.cl_wt_sp_inc);
+  if(D.add_notes) p2 += sh('Additional instructions to the attorney')+note('', D.add_notes);
+  if(p2) h += part('Part 2: further instructions for the attorney')+p2;
 
   // Declaration
   h += sh('Client declaration');
   h += '<div style="font-size:10px;color:#333;margin-bottom:12px">I, <span style="font-weight:700">'+e(c.Name||'')+'</span>, confirm that the information above represents my current testamentary wishes. I understand that this document is <strong>not a will</strong> and that a valid Last Will &amp; Testament must be drafted by a qualified attorney and signed by me before two competent witnesses (Wills Act 7 of 1953). Duwalcoe Financial Consultants CC is not providing legal advice in collecting this information.</div>';
   h += '<div class="sig-grid"><div><div class="sig-line">Client signature</div></div><div><div class="sig-line">Date</div></div></div>';
   h += '<div class="sig-grid" style="margin-top:16px"><div><div class="sig-line">Adviser signature (Clinton Hayes)</div></div><div><div class="sig-line">Date</div></div></div>';
-
   h += '<div style="margin-top:20px;padding:11px 13px;background:#f4f4f0;border-radius:5px;font-size:10px;color:#333"><strong>Office use — forwarded to:</strong><br>';
   h += 'Attorney / firm: '+fv(D.ou_attorney)+'<br>';
   h += 'Date sent: '+fv(D.ou_sent_date)+' &nbsp;&nbsp; Method: '+(D.ou_method?e(D.ou_method):'Email / Post / Hand delivery')+'<br>';
   h += 'Will drafted &amp; signed on: '+fv(D.signed_date)+' &nbsp;&nbsp; Original stored at: '+fv(D.ou_stored)+'</div>';
-
   h += '<div class="footer">T: 031 763 5194 &nbsp;|&nbsp; C: 082 449 6545 &nbsp;|&nbsp; E: clinton@duwalcoe.co.za &nbsp;|&nbsp; W: www.duwalcoe.co.za<br>Members: DW Dekker, WD Dekker &nbsp;|&nbsp; CK 1992/030699/23</div>';
-
   h += '<div class="noprint" id="willActions" style="position:fixed;bottom:16px;right:16px;display:flex;gap:8px">';
   h += '<button onclick="window.print()" style="background:#0e413a;color:#fff;border:none;padding:10px 20px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:700">Print / Save PDF</button>';
   h += '<button onclick="window.close()" style="background:#888;color:#fff;border:none;padding:10px 16px;border-radius:6px;cursor:pointer;font-size:13px">Close</button>';
   h += '</div>';
   h += '<script>(function(){var a=document.getElementById("willActions");if(!a)return;window.addEventListener("beforeprint",function(){a.style.display="none";});window.addEventListener("afterprint",function(){a.style.display="flex";});})();<' + '/script>';
-
   h += '</div></body></html>';
   var win = window.open('','_blank');
   if(win){ win.document.write(h); win.document.close(); }
@@ -18522,6 +18775,8 @@ function runPasteClaudeImport(){
 // 1.5 (17 Oct 2026): forgiving dates: no stop box on date cells (a tip, and the cell turns red if it is not a
 // date); Start here: Completed by is always Clinton Hayes, Date completed and Values as at are stamped by the
 // CRM on export (live today in a blank template); the children's Age shows blank on a bad date.
+// 1.6 (20 Oct 2026): the Will sheet follows the Capital Legacy application form (sections A to I), with who
+// inherits as three "failing which" steps; what Capital Legacy does not ask moved to a new Will extras sheet.
 // The template builder (build_template.js) and the CRM (index.html, FF_SPEC) both use
 // this. Every typed fact has one home (a yellow cell) with a named range:
 //   FF_C_<key>   client field          FF_S_<key>   spouse field (CRM key in .s)
@@ -18529,7 +18784,7 @@ function runPasteClaudeImport(){
 //   FF_B<n>_<k>  company / trust n     FF_W_<key>   will field     FF_M_<key> meta
 // Column keys are read from the workbook's own key row, so columns can move freely.
 var FF_SPEC = {
-  version: '1.5',
+  version: '1.6',
   sheets: {
     start: 'Start here', notes: 'Meeting notes', fam: 'Client and family', inc: 'Income and expenses', ast: 'Assets and debts',
     biz: 'Companies and trusts', needs: 'Needs', will: 'Will', sum: 'Summary', lists: 'Lists'
@@ -18559,7 +18814,10 @@ var FF_SPEC = {
     passes: ['Spouse', 'Estate', 'Named person'],
     scenario: ['Death', 'Disability', 'Dread Disease', 'Retirement', 'Other'],
     needType: ['Monthly income', 'Once-off capital'],
-    forWhom: ['Spouse', 'Estate', 'Named person']
+    forWhom: ['Spouse', 'Estate', 'Named person'],
+    // 1.6: Capital Legacy's relationship list (its application form), plus "My children (equally)" for a step that
+    // leaves everything to the children, including any born later
+    willRel: ['My children (equally)', 'Wife', 'Husband', 'Life Partner', 'Partner', 'Fiance', 'Fiancee', 'Son', 'Daughter', 'Mother', 'Father', 'Brother', 'Sister', 'Mother-in-law', 'Father-in-law', 'Brother-in-law', 'Sister-in-law', 'Son-in-law', 'Daughter-in-law', 'Grandmother', 'Grandfather', 'Grandson', 'Granddaughter', 'Aunt', 'Uncle', 'Nephew', 'Niece', 'Cousin', 'Cousin (female)', 'Cousin (male)', 'Stepmother', 'Stepfather', 'Stepson', 'Stepdaughter', 'Stepbrother', 'Stepsister', 'Godson', 'Goddaughter', 'Friend (Female)', 'Friend (Male)', 'Business Partner', 'Financial Advisor', 'Ex-husband', 'Ex-wife', 'Inter Vivos Trust', 'Living Trust', 'Company', 'Estate']
   },
 
   // ── Client and family: one row per fact, client column and spouse column ──
@@ -18741,130 +18999,172 @@ var FF_SPEC = {
     ]
   },
 
-  // ── Will: one row per question (keys and wording are the CRM will screen's) ──
+  // ── Will: one row per question (keys are the CRM will screen's) ──
+  // 1.6 (20 Oct 2026): the Will sheet follows the Capital Legacy application form, section by section, so
+  // Clinton can copy straight across. What the form does not ask is on the Will extras sheet (sh: 'extra').
+  // xl: the short wording shown in the workbook drop-down, in the same order as opts (the stored CRM value).
+  // beside: true puts the field in column E of the row above it (a name and its relationship side by side).
+  // wl: the workbook's row label when it differs from label (label is what the import review shows).
   // grey: shown from another sheet, not typed here. Office use is not in the workbook.
   will: [
-    {sec: '1. You (the testator)'},
-    {grey: 'name'}, {grey: 'id'}, {grey: 'marital'},
-    {k: 't_placeofbirth', label: 'Place of birth', t: 'text'},
-    {k: 't_marital_date', label: 'If divorced or widowed: the date', t: 'text'},
-    {sec: '2. Your spouse or life partner'},
-    {grey: 'spouse'}, {grey: 'anniversary'},
-    {k: 's_marriage_place', label: 'Place of marriage', t: 'text'},
-    {k: 's_anc_note', label: 'Antenuptial contract and accrual: notes for the attorney', t: 'area'},
-    {sec: '3. Children and dependants'},
-    {kidsNotes: true},
-    {grey: 'dep_notes'},
-    {sec: '4. Existing will'},
-    {k: 'e_status', label: 'Current position', t: 'radio', opts: ['I do not have an existing will', 'I have an existing will', 'I have a codicil / amendment to a prior will']},
-    {k: 'e_date', label: 'Date of existing will', t: 'text'},
-    {k: 'e_drafted_by', label: 'Drafted by', t: 'text'},
-    {k: 'e_location', label: 'Where the existing will or codicil is kept', t: 'area'},
-    {k: 'e_revoke', label: 'Revoke all prior wills and codicils when the new will is signed?', t: 'check'},
-    {sec: '5. Guardian for minor children'},
-    {k: 'g_na', label: 'Not applicable (no minor children, or the other parent has full guardianship)?', t: 'check'},
-    {k: 'g_p_name', label: 'Primary guardian: full names', t: 'text'},
-    {k: 'g_p_id', label: 'Primary guardian: ID number', t: 'id'},
-    {k: 'g_p_rel', label: 'Primary guardian: relationship', t: 'text'},
-    {k: 'g_p_contact', label: 'Primary guardian: contact', t: 'id'},
-    {k: 'g_a_name', label: 'Alternate guardian: full names', t: 'text'},
-    {k: 'g_a_id', label: 'Alternate guardian: ID number', t: 'id'},
-    {k: 'g_a_rel', label: 'Alternate guardian: relationship', t: 'text'},
-    {k: 'g_a_contact', label: 'Alternate guardian: contact', t: 'id'},
-    {k: 'g_discussed', label: 'Discussed with the proposed guardian, and they have agreed?', t: 'check'},
-    {k: 'g_notes', label: 'Notes to the guardian (values, schooling preferences)', t: 'area'},
-    {sec: '6. Testamentary trust'},
-    {k: 'tr_choice', label: 'Establish a trust?', t: 'radio', opts: ['Yes — establish a testamentary trust', 'No — distribute directly', 'Only if beneficiaries are still minors at date of death']},
-    {k: 'tr1_name', label: 'Trustee 1: full names', t: 'text'}, {k: 'tr1_id', label: 'Trustee 1: ID number', t: 'id'},
-    {k: 'tr2_name', label: 'Trustee 2: full names', t: 'text'}, {k: 'tr2_id', label: 'Trustee 2: ID number', t: 'id'},
-    {k: 'tr3_name', label: 'Trustee 3: full names', t: 'text'}, {k: 'tr3_id', label: 'Trustee 3: ID number', t: 'id'},
-    {k: 'tr_term', label: 'When the trust ends', t: 'radio', opts: ['Terminates when beneficiary reaches a set age (below)', 'Trustees may pay capital sooner for education, medical, first home, etc.', 'Income distributed as needed; capital held until termination age']},
-    {k: 'tr_term_age', label: 'Termination / vesting age (commonly 21 or 25)', t: 'text'},
-    {k: 'tr_notes', label: 'Special trust instructions', t: 'area'},
-    {sec: '7. Specific bequests'},
-    {bequests: true},
-    {sec: '8. Residue of the estate (everything not specifically left to someone)'},
-    {k: 'res_choice', label: 'Residue distribution', t: 'radio', opts: ['Entire residue to my spouse / life partner', 'Entire residue to my children equally, per stirpes', 'Entire residue to my children equally, per capita', 'Split as follows (table below)']},
-    {residue: true},
-    {sec: '9. Special assets'},
-    {note: 'Your property and business interests, and who each one passes to, are taken from the Assets and debts and the Companies and trusts sheets. Life policies and retirement funds, with their beneficiaries, are on your policy schedule.'},
-    {k: 'sa_off', label: 'Offshore assets', t: 'radio', opts: ['None', 'I hold assets offshore (a separate offshore will may be recommended)']},
-    {k: 'sa_off_detail', label: 'Country and nature of offshore assets', t: 'area'},
-    {k: 'sa_fire', label: 'Firearms', t: 'radio', opts: ['None', 'I own firearms (beneficiary must hold a valid licence)']},
-    {k: 'sa_fire_num', label: 'Number of firearms', t: 'text'},
-    {k: 'sa_fire_licensed', label: 'Firearms licensed to', t: 'text'},
-    {sec: '10. Living will and organ donation'},
-    {k: 'lw', label: 'Living will', t: 'radio', opts: ['Yes — I wish a living will to be drafted', 'No — I do not want a living will', 'I already have a living will (date below)']},
-    {k: 'lw_date', label: 'Date of existing living will', t: 'text'},
-    {k: 'organ', label: 'Organ donation', t: 'radio', opts: ['I wish to donate my organs and tissues where medically suitable', 'I do not wish to donate organs or tissues', 'I am already a registered organ donor']},
-    {k: 'cl_organ_reg', label: 'Register me as an organ donor (done on my behalf)?', t: 'check'},
-    {sec: '11. Funeral wishes'},
-    {k: 'fw', label: 'Preference', t: 'radio', opts: ['Burial', 'Cremation', 'No preference — leave to family']},
-    {k: 'fw_location', label: 'Location (cemetery, church, scattering of ashes)', t: 'area'},
-    {k: 'fw_requests', label: 'Specific requests (music, readings, dress code, faith practices)', t: 'area'},
-    {k: 'fw_cover', label: 'Funeral cover', t: 'radio', opts: ['I have a funeral policy (details below)', 'None']},
-    {k: 'fw_cover_provider', label: 'Funeral policy provider', t: 'text'},
-    {k: 'fw_cover_policy', label: 'Funeral policy number', t: 'id'},
-    {k: 'fw_cost', label: 'Estimated funeral cost (R)', t: 'text'},
-    {sec: '12. Digital assets and accounts'},
-    {k: 'da_letter', label: 'A sealed letter of instruction (accounts, access) is lodged?', t: 'check'},
-    {k: 'da_letter_with', label: 'Lodged with', t: 'text'},
-    {k: 'da_social', label: 'Social media accounts to be', t: 'radio', opts: ['Memorialised', 'Closed', 'Transferred']},
-    {k: 'da_crypto', label: 'Cryptocurrency holdings exist?', t: 'check'},
-    {k: 'da_crypto_loc', label: 'Where the seed phrases or keys are kept (not the keys themselves)', t: 'text'},
-    {sec: '13. Pets'},
-    {k: 'pet_na', label: 'Not applicable?', t: 'check'},
-    {k: 'pet_carer', label: 'Pets to be cared for by (name, relationship, contact)', t: 'text'},
-    {k: 'pet_bequest', label: 'Bequest to the carer for the pets\' upkeep (R)', t: 'text'},
-    {sec: '14. Letter of wishes'},
-    {k: 'lo', label: 'Letter of wishes (private, not binding)', t: 'radio', opts: ['Yes — a separate letter of wishes will be drafted', 'No']},
-    {sec: '15. Notes to the attorney'},
-    {k: 'add_notes', label: 'Additional instructions or notes to the attorney', t: 'area'},
-    {sec: '16. Executor'},
-    {k: 'ex_p_name', label: 'Primary executor: full names', t: 'text'},
-    {k: 'ex_p_id', label: 'Primary executor: ID or registration number', t: 'id'},
-    {k: 'ex_p_rel', label: 'Primary executor: relationship', t: 'text'},
-    {k: 'ex_p_contact', label: 'Primary executor: contact number', t: 'id'},
-    {k: 'ex_p_address', label: 'Primary executor: address', t: 'text'},
-    {k: 'ex_a_name', label: 'Alternate executor: full names', t: 'text'},
-    {k: 'ex_a_id', label: 'Alternate executor: ID or registration number', t: 'id'},
-    {k: 'ex_a_rel', label: 'Alternate executor: relationship', t: 'text'},
-    {k: 'ex_a_contact', label: 'Alternate executor: contact number', t: 'id'},
-    {k: 'ex_security', label: 'Security', t: 'radio', opts: ['Waive security (bond of security) — usual for a family executor', 'Require security']},
-    {k: 'ex_fee', label: 'Executor fee basis', t: 'radio', opts: ['Agreed reduced rate (below)', 'Full statutory rate of 3.5% + VAT']},
-    {k: 'ex_fee_rate', label: 'Agreed rate (%) plus VAT, if reduced', t: 'text'},
-    {k: 'ex_assume', label: 'Executor may assume a co-executor (e.g. a professional firm)?', t: 'check'},
-    {k: 'ex_notes', label: 'Other powers or special instructions to the executor', t: 'area'},
-    {sec: '17. Capital Legacy (only for a will drafted through Capital Legacy)'},
-    {k: 'cl_lang', label: 'Will language', t: 'radio', opts: ['English', 'Afrikaans', 'Other (below)']},
-    {k: 'cl_lang_other', label: 'Other language', t: 'text'},
-    {k: 'cl_wt', label: 'Establish a Widow\'s Trust?', t: 'radio', opts: ['Yes', 'No']},
-    {k: 'cl_wt_sp_inc', label: 'Widow\'s Trust: spouse as income beneficiary?', t: 'radio', opts: ['Yes', 'No']},
-    {k: 'cl_wt_kids_cap', label: 'Widow\'s Trust: children as capital beneficiaries?', t: 'radio', opts: ['Yes', 'No']},
-    {k: 'cl_wt_cap1_name', label: 'Widow\'s Trust other capital beneficiary 1: full names', t: 'text'},
-    {k: 'cl_wt_cap1_rel', label: 'Other capital beneficiary 1: relationship', t: 'text'},
-    {k: 'cl_wt_cap2_name', label: 'Widow\'s Trust other capital beneficiary 2: full names', t: 'text'},
-    {k: 'cl_wt_cap2_rel', label: 'Other capital beneficiary 2: relationship', t: 'text'},
-    {k: 'cl_wt_cap3_name', label: 'Widow\'s Trust other capital beneficiary 3: full names', t: 'text'},
-    {k: 'cl_wt_cap3_rel', label: 'Other capital beneficiary 3: relationship', t: 'text'},
-    {k: 'cl_pt_ben', label: 'Provider\'s Trust beneficiary: full names', t: 'text'},
-    {k: 'cl_pt_rel', label: 'Provider\'s Trust beneficiary: relationship', t: 'text'},
-    {k: 'cl_nok_name', label: 'Next of kin: full names', t: 'text'},
-    {k: 'cl_nok_rel', label: 'Next of kin: relationship', t: 'text'},
-    {k: 'cl_nok_cell', label: 'Next of kin: cell', t: 'id'},
-    {k: 'cl_nok_email', label: 'Next of kin: email', t: 'text'},
-    {k: 'cl_ct1_name', label: 'Co-trustee 1: full names', t: 'text'}, {k: 'cl_ct1_id', label: 'Co-trustee 1: ID number', t: 'id'}, {k: 'cl_ct1_rel', label: 'Co-trustee 1: relationship', t: 'text'},
-    {k: 'cl_ct2_name', label: 'Co-trustee 2: full names', t: 'text'}, {k: 'cl_ct2_id', label: 'Co-trustee 2: ID number', t: 'id'}, {k: 'cl_ct2_rel', label: 'Co-trustee 2: relationship', t: 'text'},
-    {k: 'cl_exec', label: 'Capital Legacy as executor?', t: 'radio', opts: ['Yes', 'No']},
-    {k: 'cl_ce1_name', label: 'Co-executor 1: full names', t: 'text'}, {k: 'cl_ce1_id', label: 'Co-executor 1: ID number', t: 'id'}, {k: 'cl_ce1_rel', label: 'Co-executor 1: relationship', t: 'text'},
-    {k: 'cl_ce2_name', label: 'Co-executor 2: full names', t: 'text'}, {k: 'cl_ce2_id', label: 'Co-executor 2: ID number', t: 'id'}, {k: 'cl_ce2_rel', label: 'Co-executor 2: relationship', t: 'text'},
-    {k: 'cl_collect', label: 'Use the will collection service?', t: 'radio', opts: ['Yes', 'No']}
+    {sec: 'Before you start (not on the Capital Legacy form)', sh: 'main'},
+    {k: 'e_status', label: 'Existing will', t: 'radio', sh: 'main', opts: ['I do not have an existing will', 'I have an existing will', 'I have a codicil / amendment to a prior will'], xl: ['No will', 'Has a will', 'Has a will and a codicil']},
+    {k: 'e_date', label: 'Date of the existing will', wl: 'Existing will: date, and who drafted it', t: 'text', sh: 'main'},
+    {k: 'e_drafted_by', label: 'Drafted by', t: 'text', sh: 'main', beside: true},
+    {grey: 'marital', sh: 'main', label: 'Marriage regime (from the Client and family sheet)'},
+    {note: 'Check the antenuptial contract: with or without accrual. The regime drives the cost of dying. Change it on the Client and family sheet.', sh: 'main'},
+
+    {sec: 'A. Will information', sh: 'main'},
+    {k: 'cl_lang', label: 'Will language', t: 'radio', sh: 'main', opts: ['English', 'Afrikaans', 'Other (below)'], xl: ['English', 'Afrikaans', 'Other']},
+    {k: 'sa_off', label: 'Any worldwide (offshore) assets? List them in section I', t: 'radio', sh: 'main', opts: ['None', 'I hold assets offshore (a separate offshore will may be recommended)'], xl: ['No', 'Yes']},
+
+    {sec: 'B. Who inherits your estate', sh: 'main'},
+    {note: 'Who gets everything not left to someone specifically. Leave the % blank for equal shares. "Failing which" is who inherits if everyone in the step above has died.', sh: 'main'},
+    {table: 'in1', sh: 'main'},
+    {table: 'in2', sh: 'main'},
+    {table: 'in3', sh: 'main'},
+    {sub: 'Something specific to someone (optional)', sh: 'main'},
+    {table: 'bq', sh: 'main'},
+
+    {sec: 'C. Last wishes', sh: 'main'},
+    {k: 'fw', label: 'Buried or cremated', t: 'radio', sh: 'main', opts: ['Burial', 'Cremation', 'No preference — leave to family'], xl: ['Buried', 'Cremated', 'Not specified']},
+    {k: 'lw', label: 'Living will', t: 'radio', sh: 'main', opts: ['Yes — I wish a living will to be drafted', 'No — I do not want a living will', 'I already have a living will (date below)'], xl: ['Yes', 'No', 'Already has one']},
+    {k: 'fw_cost', label: 'Funeral cost for the cost of dying (R). Blank uses R50,000', t: 'text', sh: 'main'},
+
+    {sec: 'D. Trust and inheritance protection', sh: 'main'},
+    {k: 'tr_choice', label: 'Children\'s trust (needed if minor children could inherit)', t: 'radio', sh: 'main', opts: ['Yes — establish a testamentary trust', 'No — distribute directly', 'Only if beneficiaries are still minors at date of death'], xl: ['Yes', 'No', 'Only if still minors']},
+    {k: 'tr_term_age', label: 'Vesting age (18 or older; Capital Legacy recommends 25)', t: 'text', sh: 'main'},
+    {k: 'cl_wt', label: 'Widow\'s trust for the spouse?', t: 'radio', sh: 'main', opts: ['Yes', 'No']},
+    {k: 'cl_wt_kids_cap', label: 'Widow\'s trust: children own the capital?', t: 'radio', sh: 'main', opts: ['Yes', 'No']},
+    {k: 'cl_wt_cap1_name', label: 'If not the children, capital beneficiary 1', wl: 'If not the children, capital beneficiary 1, and relationship', t: 'text', sh: 'main'},
+    {k: 'cl_wt_cap1_rel', label: 'Capital beneficiary 1: relationship', t: 'text', sh: 'main', beside: true, list: 'willRel'},
+    {k: 'cl_wt_cap2_name', label: 'Capital beneficiary 2', wl: 'Capital beneficiary 2, and relationship', t: 'text', sh: 'main'},
+    {k: 'cl_wt_cap2_rel', label: 'Capital beneficiary 2: relationship', t: 'text', sh: 'main', beside: true, list: 'willRel'},
+    {k: 'cl_wt_cap3_name', label: 'Capital beneficiary 3', wl: 'Capital beneficiary 3, and relationship', t: 'text', sh: 'main'},
+    {k: 'cl_wt_cap3_rel', label: 'Capital beneficiary 3: relationship', t: 'text', sh: 'main', beside: true, list: 'willRel'},
+    {k: 'cl_pt_ben', label: 'Provider\'s trust: dependant with special needs', wl: 'Provider\'s trust: dependant with special needs, and relationship', t: 'text', sh: 'main'},
+    {k: 'cl_pt_rel', label: 'Provider\'s trust beneficiary: relationship', t: 'text', sh: 'main', beside: true, list: 'willRel'},
+
+    {sec: 'E. Organ donor', sh: 'main'},
+    {k: 'organ', label: 'Organ donor', t: 'radio', sh: 'main', opts: ['I wish to donate my organs and tissues where medically suitable', 'I do not wish to donate organs or tissues', 'I am already a registered organ donor'], xl: ['Yes', 'No', 'Already registered']},
+    {k: 'cl_organ_reg', label: 'Register me as a donor (Capital Legacy does it)?', t: 'check', sh: 'main'},
+
+    {sec: 'F. Next of kin', sh: 'main'},
+    {k: 'cl_nok_name', label: 'Next of kin: full names', wl: 'Next of kin: full names, and relationship', t: 'text', sh: 'main'},
+    {k: 'cl_nok_rel', label: 'Next of kin: relationship', t: 'text', sh: 'main', beside: true, list: 'willRel'},
+    {k: 'cl_nok_cell', label: 'Next of kin: cell', wl: 'Next of kin: cell, and email', t: 'id', sh: 'main'},
+    {k: 'cl_nok_email', label: 'Next of kin: email', t: 'text', sh: 'main', beside: true},
+
+    {sec: 'G. Guardians, trustees and executor', sh: 'main'},
+    {note: 'Guardians look after minor children if both parents have died. Their ID numbers and contact details go on the Will extras sheet, or fill them from the CRM.', sh: 'main'},
+    {k: 'g_p_name', label: 'Guardian 1: full names', wl: 'Guardian 1: full names, and relationship', t: 'text', sh: 'main'},
+    {k: 'g_p_rel', label: 'Guardian 1: relationship', t: 'text', sh: 'main', beside: true, list: 'willRel'},
+    {k: 'g_a_name', label: 'Guardian 2: full names', wl: 'Guardian 2: full names, and relationship', t: 'text', sh: 'main'},
+    {k: 'g_a_rel', label: 'Guardian 2: relationship', t: 'text', sh: 'main', beside: true, list: 'willRel'},
+    {k: 'g_mode', label: 'If there are two guardians', t: 'radio', sh: 'main', opts: ['Together, as joint guardians', 'Guardian 2 only if guardian 1 cannot act'], xl: ['Together', 'Guardian 2 is the alternate']},
+    {k: 'g_discussed', label: 'Have they been asked, and have they agreed?', t: 'check', sh: 'main'},
+    {k: 'cl_ct1_name', label: 'Co-trustee 1 (with Capital Legacy)', wl: 'Co-trustee 1 (with Capital Legacy), and relationship', t: 'text', sh: 'main'},
+    {k: 'cl_ct1_rel', label: 'Co-trustee 1: relationship', t: 'text', sh: 'main', beside: true, list: 'willRel'},
+    {k: 'cl_ct2_name', label: 'Co-trustee 2', wl: 'Co-trustee 2, and relationship', t: 'text', sh: 'main'},
+    {k: 'cl_ct2_rel', label: 'Co-trustee 2: relationship', t: 'text', sh: 'main', beside: true, list: 'willRel'},
+    {k: 'cl_exec', label: 'Capital Legacy as executor?', t: 'radio', sh: 'main', opts: ['Yes', 'No']},
+    {k: 'cl_ce1_name', label: 'Co-executor 1', wl: 'Co-executor 1, and relationship', t: 'text', sh: 'main'},
+    {k: 'cl_ce1_rel', label: 'Co-executor 1: relationship', t: 'text', sh: 'main', beside: true, list: 'willRel'},
+    {k: 'cl_ce2_name', label: 'Co-executor 2', wl: 'Co-executor 2, and relationship', t: 'text', sh: 'main'},
+    {k: 'cl_ce2_rel', label: 'Co-executor 2: relationship', t: 'text', sh: 'main', beside: true, list: 'willRel'},
+
+    {sec: 'H. Will collection', sh: 'main'},
+    {k: 'cl_collect', label: 'Use the free will collection service?', t: 'radio', sh: 'main', opts: ['Yes', 'No']},
+
+    {sec: 'I. Worldwide assets', sh: 'main'},
+    {k: 'sa_off_detail', label: 'Each offshore asset and its country, one per line', t: 'area', sh: 'main'},
+
+    // Older templates (1.5 and before) only: the residue question, now worked out from who inherits (B)
+    {k: 'res_choice', label: 'Residue distribution', t: 'radio', sh: 'old', opts: ['Entire residue to my spouse / life partner', 'Entire residue to my children equally, per stirpes', 'Entire residue to my children equally, per capita', 'Split as follows (table below)']},
+
+    // ── Will extras: only when needed ──
+    {sec: '1. You and your marriage', sh: 'extra'},
+    {grey: 'name', sh: 'extra', label: 'Full names'},
+    {k: 't_placeofbirth', label: 'Place of birth', t: 'text', sh: 'extra'},
+    {k: 't_marital_date', label: 'If divorced or widowed: the date', t: 'text', sh: 'extra'},
+    {k: 's_marriage_place', label: 'Place of marriage', t: 'text', sh: 'extra'},
+    {k: 's_anc_note', label: 'Antenuptial contract and accrual: notes for the attorney', t: 'area', sh: 'extra'},
+    {sec: '2. Children and dependants', sh: 'extra'},
+    {kidsNotes: true, sh: 'extra'},
+    {grey: 'dep_notes', sh: 'extra', label: 'Other dependants to provide for'},
+    {sec: '3. Existing will', sh: 'extra'},
+    {k: 'e_location', label: 'Where the existing will or codicil is kept', t: 'area', sh: 'extra'},
+    {k: 'e_revoke', label: 'Revoke all prior wills and codicils when the new will is signed?', t: 'check', sh: 'extra'},
+    {sec: '4. Guardians: details', sh: 'extra'},
+    {k: 'g_na', label: 'Not applicable (no minor children, or the other parent has full guardianship)?', t: 'check', sh: 'extra'},
+    {k: 'g_p_id', label: 'Guardian 1: ID number', t: 'id', sh: 'extra'},
+    {k: 'g_p_contact', label: 'Guardian 1: contact', t: 'id', sh: 'extra'},
+    {k: 'g_a_id', label: 'Guardian 2: ID number', t: 'id', sh: 'extra'},
+    {k: 'g_a_contact', label: 'Guardian 2: contact', t: 'id', sh: 'extra'},
+    {k: 'g_notes', label: 'Notes to the guardian (values, schooling preferences)', t: 'area', sh: 'extra'},
+    {sec: '5. Trust: details', sh: 'extra'},
+    {k: 'cl_ct1_id', label: 'Co-trustee 1: ID number', t: 'id', sh: 'extra'},
+    {k: 'cl_ct2_id', label: 'Co-trustee 2: ID number', t: 'id', sh: 'extra'},
+    {note: 'Trustees below are for a will that Capital Legacy does not draft.', sh: 'extra'},
+    {k: 'tr1_name', label: 'Trustee 1: full names', t: 'text', sh: 'extra'}, {k: 'tr1_id', label: 'Trustee 1: ID number', t: 'id', sh: 'extra'},
+    {k: 'tr2_name', label: 'Trustee 2: full names', t: 'text', sh: 'extra'}, {k: 'tr2_id', label: 'Trustee 2: ID number', t: 'id', sh: 'extra'},
+    {k: 'tr3_name', label: 'Trustee 3: full names', t: 'text', sh: 'extra'}, {k: 'tr3_id', label: 'Trustee 3: ID number', t: 'id', sh: 'extra'},
+    {k: 'tr_term', label: 'When the trust ends', t: 'radio', sh: 'extra', opts: ['Terminates when beneficiary reaches a set age (below)', 'Trustees may pay capital sooner for education, medical, first home, etc.', 'Income distributed as needed; capital held until termination age'], xl: ['At the vesting age', 'Capital sooner for education, medical, a first home', 'Income as needed, capital at the vesting age']},
+    {k: 'tr_notes', label: 'Special trust instructions', t: 'area', sh: 'extra'},
+    {sec: '6. Executor: details', sh: 'extra'},
+    {k: 'cl_ce1_id', label: 'Co-executor 1: ID number', t: 'id', sh: 'extra'},
+    {k: 'cl_ce2_id', label: 'Co-executor 2: ID number', t: 'id', sh: 'extra'},
+    {note: 'Executors below are for a will where Capital Legacy is not the executor.', sh: 'extra'},
+    {k: 'ex_p_name', label: 'Primary executor: full names', t: 'text', sh: 'extra'},
+    {k: 'ex_p_id', label: 'Primary executor: ID or registration number', t: 'id', sh: 'extra'},
+    {k: 'ex_p_rel', label: 'Primary executor: relationship', t: 'text', sh: 'extra'},
+    {k: 'ex_p_contact', label: 'Primary executor: contact number', t: 'id', sh: 'extra'},
+    {k: 'ex_p_address', label: 'Primary executor: address', t: 'text', sh: 'extra'},
+    {k: 'ex_a_name', label: 'Alternate executor: full names', t: 'text', sh: 'extra'},
+    {k: 'ex_a_id', label: 'Alternate executor: ID or registration number', t: 'id', sh: 'extra'},
+    {k: 'ex_a_rel', label: 'Alternate executor: relationship', t: 'text', sh: 'extra'},
+    {k: 'ex_a_contact', label: 'Alternate executor: contact number', t: 'id', sh: 'extra'},
+    {k: 'ex_security', label: 'Security', t: 'radio', sh: 'extra', opts: ['Waive security (bond of security) — usual for a family executor', 'Require security'], xl: ['Waive security', 'Require security']},
+    {k: 'ex_fee', label: 'Executor fee basis', t: 'radio', sh: 'extra', opts: ['Agreed reduced rate (below)', 'Full statutory rate of 3.5% + VAT'], xl: ['Agreed reduced rate', 'Full rate, 3.5% plus VAT']},
+    {k: 'ex_fee_rate', label: 'Agreed rate (%) plus VAT, if reduced', t: 'text', sh: 'extra'},
+    {k: 'ex_assume', label: 'Executor may assume a co-executor (e.g. a professional firm)?', t: 'check', sh: 'extra'},
+    {k: 'ex_notes', label: 'Other powers or special instructions to the executor', t: 'area', sh: 'extra'},
+    {sec: '7. Funeral details', sh: 'extra'},
+    {k: 'fw_location', label: 'Location (cemetery, church, scattering of ashes)', t: 'area', sh: 'extra'},
+    {k: 'fw_requests', label: 'Specific requests (music, readings, dress code, faith practices)', t: 'area', sh: 'extra'},
+    {k: 'fw_cover', label: 'Funeral cover', t: 'radio', sh: 'extra', opts: ['I have a funeral policy (details below)', 'None'], xl: ['Has a funeral policy', 'None']},
+    {k: 'fw_cover_provider', label: 'Funeral policy provider', t: 'text', sh: 'extra'},
+    {k: 'fw_cover_policy', label: 'Funeral policy number', t: 'id', sh: 'extra'},
+    {k: 'lw_date', label: 'Date of an existing living will', t: 'text', sh: 'extra'},
+    {sec: '8. Firearms, digital assets and pets', sh: 'extra'},
+    {k: 'sa_fire', label: 'Firearms', t: 'radio', sh: 'extra', opts: ['None', 'I own firearms (beneficiary must hold a valid licence)'], xl: ['None', 'Owns firearms']},
+    {k: 'sa_fire_num', label: 'Number of firearms', t: 'text', sh: 'extra'},
+    {k: 'sa_fire_licensed', label: 'Firearms licensed to', t: 'text', sh: 'extra'},
+    {k: 'da_letter', label: 'A sealed letter of instruction (accounts, access) is lodged?', t: 'check', sh: 'extra'},
+    {k: 'da_letter_with', label: 'Lodged with', t: 'text', sh: 'extra'},
+    {k: 'da_social', label: 'Social media accounts to be', t: 'radio', sh: 'extra', opts: ['Memorialised', 'Closed', 'Transferred']},
+    {k: 'da_crypto', label: 'Cryptocurrency holdings exist?', t: 'check', sh: 'extra'},
+    {k: 'da_crypto_loc', label: 'Where the seed phrases or keys are kept (not the keys themselves)', t: 'text', sh: 'extra'},
+    {k: 'pet_na', label: 'Pets: not applicable?', t: 'check', sh: 'extra'},
+    {k: 'pet_carer', label: 'Pets to be cared for by (name, relationship, contact)', t: 'text', sh: 'extra'},
+    {k: 'pet_bequest', label: 'Bequest to the carer for the pets\' upkeep (R)', t: 'text', sh: 'extra'},
+    {sec: '9. Other', sh: 'extra'},
+    {k: 'lo', label: 'Letter of wishes (private, not binding)', t: 'radio', sh: 'extra', opts: ['Yes — a separate letter of wishes will be drafted', 'No'], xl: ['Yes', 'No']},
+    {k: 'cl_wt_sp_inc', label: 'Widow\'s trust: spouse as income beneficiary?', t: 'radio', sh: 'extra', opts: ['Yes', 'No']},
+    {k: 'cl_lang_other', label: 'Will language, if Other', t: 'text', sh: 'extra'},
+    {k: 'add_notes', label: 'Additional instructions or notes to the attorney', t: 'area', sh: 'extra'}
   ],
+  // Will tables: data keys are pfx + row + '_' + column key (bq1_item, in1_2_name). rows = slots in the CRM.
+  // in1 to in3 (1.6): who inherits the residue, in Capital Legacy's "failing which" order. rs: older templates only.
   willTables: {
-    bq: {rows: 6, cols: [{k: 'item', h: 'Item or amount', w: 40}, {k: 'ben', h: 'To whom', w: 30}, {k: 'pre', h: 'If they die before you, to', w: 30}]},
-    rs: {rows: 5, cols: [{k: 'ben', h: 'Beneficiary', w: 40}, {k: 'pct', h: '% share', w: 12}, {k: 'pre', h: 'If they die before you, to', w: 30}]}
+    in1: {K: 'In1', pfx: 'in1_', rows: 4, title: 'First to', lab: 'Who inherits, first to', cols: [{k: 'name', h: 'Full names and surname', w: 46}, {k: 'rel', h: 'Relationship to you', w: 26, list: 'willRel'}, {k: 'yob', h: 'Year of birth', w: 14, t: 'num'}, {k: 'pct', h: '% share (blank = equal)', w: 24, t: 'pct'}]},
+    in2: {K: 'In2', pfx: 'in2_', rows: 4, title: 'Failing which, to', lab: 'Who inherits, failing which (step 2)', cols: [{k: 'name', h: 'Full names and surname', w: 46}, {k: 'rel', h: 'Relationship to you', w: 26, list: 'willRel'}, {k: 'yob', h: 'Year of birth', w: 14, t: 'num'}, {k: 'pct', h: '% share (blank = equal)', w: 24, t: 'pct'}]},
+    in3: {K: 'In3', pfx: 'in3_', rows: 4, title: 'Failing which, to', lab: 'Who inherits, failing which (step 3)', cols: [{k: 'name', h: 'Full names and surname', w: 46}, {k: 'rel', h: 'Relationship to you', w: 26, list: 'willRel'}, {k: 'yob', h: 'Year of birth', w: 14, t: 'num'}, {k: 'pct', h: '% share (blank = equal)', w: 24, t: 'pct'}]},
+    bq: {K: 'Bq', pfx: 'bq', rows: 6, sheetRows: 4, title: 'Specific bequest', lab: 'Bequest', cols: [{k: 'item', h: 'Item or amount', w: 46}, {k: 'ben', h: 'To whom', w: 26}, {k: 'pre', h: 'If they die before you, to', w: 38}]},
+    rs: {K: 'Rs', pfx: 'rs', rows: 5, title: 'Residue', lab: 'Residue', old: true, cols: [{k: 'ben', h: 'Beneficiary', w: 40}, {k: 'pct', h: '% share', w: 12, t: 'pct'}, {k: 'pre', h: 'If they die before you, to', w: 30}]}
   }
 };
+
 if (typeof module !== 'undefined') module.exports = FF_SPEC;
 
 // ══ FACT FIND WORKBOOK (Excel): export and import (12 Oct 2026, change log entry 78) ══
@@ -19018,6 +19318,15 @@ function wbkOut(t, v){
   if(t==='date'){ var m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/); return m ? new Date(Date.UTC(+m[1], +m[2]-1, +m[3])) : s; }
   if(t==='lead') return s==='Yes' ? 'Lead' : 'Client';
   return s;
+}
+// Will choices (1.6): the workbook shows short wording (x.xl), the CRM stores the full option (x.opts).
+// Older workbooks hold the full option itself, so both are read.
+function wbkWillOptOut(x, v){ v = String(v===undefined || v===null ? '' : v).trim(); if(!v) return null; if(x.xl){ var i = x.opts.indexOf(v); if(i>=0) return x.xl[i]; } return v; }
+function wbkWillOptIn(x, raw, warn){
+  if(wbkBlank(raw)) return '';
+  var want = String(raw).trim().toLowerCase(), lists = [x.xl||[], x.opts||[]];
+  for(var j=0;j<2;j++){ for(var i=0;i<lists[j].length;i++){ if(String(lists[j][i]).toLowerCase()===want) return x.opts[i]; } }
+  warn('"'+raw+'" is not one of the options'); return undefined;
 }
 // Are two CRM values the same, for this type?
 function wbkSame(t, a, b){
@@ -19240,14 +19549,18 @@ function wbkFill(wb, c){
   });
   // will
   var W = willData(c.ID);
-  FF_SPEC.will.forEach(function(x){ if(x.k) setN('FF_W_'+x.k, wbkOut(x.t==='check'?'yesno':'text', W[x.k])); });
+  // 1.6: choices go in with the workbook's short wording (xl)
+  FF_SPEC.will.forEach(function(x){ if(x.k) setN('FF_W_'+x.k, x.t==='radio' ? wbkWillOptOut(x, W[x.k]) : wbkOut(x.t==='check'?'yesno':'text', W[x.k])); });
   setN('FF_W_dep_notes', wbkOut('text', W.dep_notes));
   var KR = N.FF_T_WKids;
   if(KR){ var kws = wb.getWorksheet(KR.sheet); wbkKids(c.ID).slice(0, KR.r2-KR.r1+1).forEach(function(l, i){ kws.getCell(KR.c1+(KR.r1+i)).value = wbkOut('text', W['cn_'+l.ID]); }); }
-  [['Bq','bq',6,['item','ben','pre']],['Rs','rs',5,['ben','pct','pre']]].forEach(function(t){
-    var K = N['FF_K_'+t[0]], T = N['FF_T_'+t[0]]; if(!K || !T) return;
-    var keys = wbkKeys(wb, K), ws = wb.getWorksheet(T.sheet);
-    for(var i=1; i<=t[2]; i++) t[3].forEach(function(k){ if(keys[k]) ws.getCell(T.r1+i-1, keys[k]).value = wbkOut(k==='pct'?'pct':'text', W[t[1]+i+'_'+k]); });
+  // will tables (who inherits, bequests; residue in older templates), never past the rows the sheet has
+  Object.keys(FF_SPEC.willTables).forEach(function(tk){
+    var TS = FF_SPEC.willTables[tk], K = N['FF_K_'+TS.K], T = N['FF_T_'+TS.K]; if(!K || !T) return;
+    var keys = wbkKeys(wb, K), ws = wb.getWorksheet(T.sheet), cap = T.r2 - T.r1 + 1, used = 0;
+    for(var i=1; i<=TS.rows; i++){ if(TS.cols.some(function(col){ return clean(W[TS.pfx+i+'_'+col.k]); })) used = i; }
+    if(used > cap) warn.push('· Will, '+(TS.lab||TS.title)+': '+used+' rows, room for '+cap);
+    for(var j=1; j<=Math.min(TS.rows, cap); j++) TS.cols.forEach(function(col){ if(keys[col.k]) ws.getCell(T.r1+j-1, keys[col.k]).value = wbkOut(col.t||'text', W[TS.pfx+j+'_'+col.k]); });
   });
   return warn;
 }
@@ -19605,17 +19918,19 @@ function wbkPlan(wb, cidFrom, fileName){
   FF_SPEC.will.forEach(function(x){
     if(!x.k || !M.N['FF_W_'+x.k]) return;
     var t = x.t==='check' ? 'check' : (x.t==='radio' ? 'radio' : 'text');
-    var v = wbkIn(t==='text' ? (x.t==='id' ? 'id' : 'text') : t, M.raw('FF_W_'+x.k), M.cell('FF_W_'+x.k), function(msg){ P.warns.push('Will, '+x.label+': '+msg+'. Kept as it is.'); }, x.opts);
+    var wf = function(msg){ P.warns.push('Will, '+x.label+': '+msg+'. Kept as it is.'); };
+    var v = x.t==='radio' ? wbkWillOptIn(x, M.raw('FF_W_'+x.k), wf) : wbkIn(t==='text' ? (x.t==='id' ? 'id' : 'text') : t, M.raw('FF_W_'+x.k), M.cell('FF_W_'+x.k), wf, x.opts);
     wput(x.k, v, x.label, t);
   });
   if(M.N.FF_W_dep_notes) wput('dep_notes', wbkIn('area', M.raw('FF_W_dep_notes'), null, function(){}), 'Other dependants to provide for', 'text');
-  // bequests and residue: fixed slots
-  [['Bq','bq',FF_SPEC.willTables.bq],['Rs','rs',FF_SPEC.willTables.rs]].forEach(function(tb){
-    var rows = M.table(tb[0]) || [];
-    rows.forEach(function(row, i){
-      tb[2].cols.forEach(function(col){
-        var v = wbkIn(col.k==='pct' ? 'pct' : 'text', row._raw[col.k], row._cells[col.k], function(msg){ P.warns.push('Will, '+(tb[1]==='bq'?'bequest ':'residue ')+(i+1)+': '+msg+'. Kept as it is.'); });
-        wput(tb[1]+(i+1)+'_'+col.k, v, (tb[1]==='bq' ? 'Bequest '+(i+1) : 'Residue '+(i+1))+': '+col.h, col.k==='pct' ? 'pct' : 'text');
+  // will tables: fixed slots (who inherits and bequests; the residue table in older templates)
+  Object.keys(FF_SPEC.willTables).forEach(function(tk){
+    var TS = FF_SPEC.willTables[tk], rows = M.table(TS.K) || [];
+    rows.slice(0, TS.rows).forEach(function(row, i){
+      TS.cols.forEach(function(col){
+        var ct = col.t || 'text';
+        var v = wbkIn(ct, row._raw[col.k], row._cells[col.k], function(msg){ P.warns.push('Will, '+(TS.lab||TS.title)+' '+(i+1)+': '+msg+'. Kept as it is.'); });
+        wput(TS.pfx+(i+1)+'_'+col.k, v, (TS.lab||TS.title)+' '+(i+1)+': '+col.h, ct==='text' ? 'text' : ct);
       });
     });
   });
@@ -19628,6 +19943,19 @@ function wbkPlan(wb, cidFrom, fileName){
   // one home for marital status and the wedding date: keep the will in step with the client record
   var WMAP_REV = {'Single':'Single / never married','Married in COP':'Married in community of property (COP)','Married - ANC with accrual':'Married out of community of property (ANC) with accrual','Married - ANC without accrual':'Married out of community of property (ANC) without accrual','Divorced':'Divorced','Widowed':'Widowed','Life partner':'Life partner / cohabiting'};
   if(clean(W0.t_marital) && !wbkSame('text', cur.MaritalStatus, next.MaritalStatus) && WMAP_REV[next.MaritalStatus]) wput('t_marital', WMAP_REV[next.MaritalStatus], 'Marital status / regime (will, kept in step with the client record)', 'text');
+  // 1.6: years of birth found in the CRM, and the residue answer the cost of dying reads, worked out from
+  // who inherits; listed with the other changes so they can be seen before saving
+  if(willHasChain(W1)){
+    var Wd = willDerive(JSON.parse(JSON.stringify(W1)), target ? cid : null);
+    var dk = {}; Object.keys(Wd).concat(Object.keys(W1)).forEach(function(k){ dk[k] = 1; });
+    Object.keys(dk).forEach(function(k){
+      if(wbkSame('text', W1[k], Wd[k])) return;
+      var lbl = /_yob$/.test(k) ? 'Year of birth from the CRM ('+String(W1[k.replace(/_yob$/,'_name')]||'')+')' : (k==='res_choice' ? 'Residue, for the cost of dying (worked out from who inherits)' : 'Residue table (worked out from who inherits): '+k);
+      wch = wch.filter(function(x){ return x.k!==k; });
+      if(!wbkSame('text', W0[k], Wd[k])) wch.push({k:k, label:lbl, old:W0[k], nw:(Wd[k]===undefined ? '' : Wd[k]), t:'text'});
+      W1[k] = Wd[k];
+    });
+  }
   P.will = {ch:wch, next:W1, existed:!!(target && willFor(cid))};
   // ── Meeting notes (template 1.2): added to the client's notes, never twice ──
   var nlines = [];
