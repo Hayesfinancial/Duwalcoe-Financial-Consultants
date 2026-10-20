@@ -598,6 +598,7 @@ function syncNow(quiet) {
 
     // Clients — load from server then re-apply any locally pending client saves
     DB.clients = (loaded.clients||[]).map(function(c){ return c; });
+    spExCheck(loaded.clients);   // is the 20 Oct 2026 database update in? (clients.Spouse* details)
     try{
       var _ldb2=JSON.parse(localStorage.getItem('du_db')||'{}');
       (_ldb2.clients||[]).forEach(function(lc){
@@ -792,6 +793,8 @@ function post(data, cb){
     if(table==='familylinks' && sendRow && sendRow.Dependent!==undefined && window._famDepReady!==true){
       sendRow = Object.assign({}, sendRow); delete sendRow.Dependent;
     }
+    // clients.Spouse* details (20 Oct 2026): leave them out until the database columns exist.
+    if(table==='clients') sendRow = spExStrip(sendRow);
     sbFetch('POST', '/rest/v1/'+table, [sendRow], function(res, err){
       // Save-failure protection for locally-cached tables: on failure flag the local
       // record so syncNow keeps it; on success clear the flag. Prevents a failed save
@@ -924,7 +927,7 @@ function post(data, cb){
     upsert('will_instructions', data.item, cb);
   }
   else if(action==='patchClientFields'){
-    patch('clients', data.id, data.fields, cb);
+    patch('clients', data.id, spExStrip(data.fields), cb);
   }
   else {
     console.warn('post(): unknown action:', action);
@@ -3041,6 +3044,25 @@ function famFor(cid){
 // familylinks.Dependent ('Yes' / 'No' / '' = not asked). Needs Familylinks_Dependent.sql;
 // until that has run the question is hidden and never sent, so family saves keep working.
 window._famDepReady = (window._famDepReady === undefined) ? null : window._famDepReady;
+// ── Spouse details (20 Oct 2026) ────────────────────────────────────────────
+// The spouse's title, calling name, gender, smoker status, phones, employer, education and
+// qualification, on the client record (clients.Spouse*). Needs Clients_Spouse_Details.sql; until it
+// has run the boxes are hidden and the columns are never sent, so client saves keep working.
+// When the spouse is a client in her own right, her own record is the home: applySpouseFieldsFrom
+// copies these across, as it does her name, ID and cell.
+var SPOUSE_EXTRA = ['SpouseTitle','SpouseCallingName','SpouseGender','SpouseSmoker','SpouseTelHome','SpouseTelWork','SpouseEmployer','SpouseEducation','SpouseQualification'];
+var SPOUSE_EXTRA_FROM = {SpouseTitle:'Title', SpouseCallingName:'CallingName', SpouseGender:'Gender', SpouseSmoker:'Smoker', SpouseTelHome:'TelHome', SpouseTelWork:'TelWork', SpouseEmployer:'Employer', SpouseEducation:'Education', SpouseQualification:'Qualification'};
+window._spExReady = (window._spExReady === undefined) ? null : window._spExReady;
+function spExCheck(rows){
+  if(rows && rows.length){ window._spExReady = ('SpouseSmoker' in rows[0]); return; }
+  sbFetch('GET','/rest/v1/clients?select=ID,SpouseSmoker&limit=1', null, function(res, err){
+    if(err && /SpouseSmoker|column/i.test(String(err))) window._spExReady = false;
+    else if(!err) window._spExReady = true;
+  });
+}
+function spExStrip(row){ if(window._spExReady===true || !row) return row; var r = null; SPOUSE_EXTRA.forEach(function(k){ if(row[k]!==undefined){ if(!r) r = Object.assign({}, row); delete r[k]; } }); return r || row; }
+// The spouse's gender: as captured, or worked out from a valid SA ID
+function spouseGenderOf(c){ if(clean(c.SpouseGender)) return c.SpouseGender; var d = String(c.SpouseIDNumber||'').replace(/\D/g,''); return (d.length===13 && saIdValid(d)) ? ((+d.charAt(6) >= 5) ? 'Male' : 'Female') : ''; }
 function famDepCheck(rows){
   if(rows && rows.length){ window._famDepReady = ('Dependent' in rows[0]); return; }
   sbFetch('GET','/rest/v1/familylinks?select=ID,Dependent&limit=1', null, function(res, err){
@@ -3355,10 +3377,17 @@ function upgradeToClient(linkId, opts){
     Anniversary:   shareMar ? (principal2.Anniversary||'') : '',
     Cohabiting: (isPartner && principal2 && principal2.Cohabiting==='Yes') ? 'Yes' : 'No',
     Occupation: (isPartner && principal2) ? (principal2.SpouseOccupation||'') : '',
-    Employer:'',
+    Employer: (isPartner && principal2) ? (principal2.SpouseEmployer||'') : '',
     Income: (isPartner && principal2 && clean(principal2.SpouseIncome)) ? principal2.SpouseIncome : 0,
-    TaxNo:'', Smoker:'', RiskCategory:'Not Started',
-    Gender:_gender, TelHome:'', TelWork:'',
+    TaxNo:'', Smoker: (isPartner && principal2) ? (principal2.SpouseSmoker||'') : '', RiskCategory:'Not Started',
+    Gender: _gender || ((isPartner && principal2) ? (principal2.SpouseGender||'') : ''),
+    TelHome: (isPartner && principal2) ? (principal2.SpouseTelHome||'') : '',
+    TelWork: (isPartner && principal2) ? (principal2.SpouseTelWork||'') : '',
+    // 20 Oct 2026: what was captured about the spouse on the principal's record comes with her
+    Title: (isPartner && principal2) ? (principal2.SpouseTitle||'') : '',
+    CallingName: (isPartner && principal2) ? (principal2.SpouseCallingName||'') : '',
+    Education: (isPartner && principal2) ? (principal2.SpouseEducation||'') : '',
+    Qualification: (isPartner && principal2) ? (principal2.SpouseQualification||'') : '',
     Address: (isPartner && principal2) ? (principal2.Address||'') : '',
     POBox:   (isPartner && principal2) ? (principal2.POBox||'') : '',
     DriveUrl:'', Notes:'', BankDetails:'', Doctors:'',
@@ -3510,6 +3539,9 @@ function applySpouseFieldsFrom(target, source){
     SpouseOccupation: source.Occupation || '',
     SpouseIncome:     source.Income || ''
   };
+  // 20 Oct 2026: her title, calling name, gender, smoker status, phones, employer, education and
+  // qualification too, once the database columns exist
+  if(window._spExReady===true) SPOUSE_EXTRA.forEach(function(k){ next[k] = source[SPOUSE_EXTRA_FROM[k]] || ''; });
   // Only assert "spouse works" when there's evidence (income or occupation);
   // otherwise leave whatever answer is already on the record.
   if(clean(source.Income) || clean(source.Occupation)) next.SpouseWorks = 'Yes';
@@ -11790,6 +11822,25 @@ function openClientModal(id, isLead){
     fld('fspoccup','Spouse Occupation',c.SpouseOccupation||'')+
     fld('fspincome','Spouse Gross Income /pm (R)',c.SpouseIncome||'','number')+
     '</div>'+
+    // 20 Oct 2026: what quoting the spouse's own cover needs (hidden until Clients_Spouse_Details.sql has run)
+    (window._spExReady===true ?
+      '<div class="g3" style="margin-top:10px">'+
+      fs('fsptitle','Spouse Title',['','Mr.','Mrs.','Ms.','Miss','Dr.','Prof.','Rev.','Adv.'],c.SpouseTitle||'')+
+      fld('fspcalling','Spouse Calling Name',c.SpouseCallingName||'')+
+      fld('fspemployer','Spouse Employer',c.SpouseEmployer||'')+
+      '</div>'+
+      '<div class="g2" style="margin-top:10px">'+
+      radioGroup('fspgen','Spouse Gender',['Male','Female'],c.SpouseGender||'')+
+      radioGroup('fspsm','Spouse Smoker',['Yes','No'],c.SpouseSmoker||'')+
+      '</div>'+
+      '<div class="g3" style="margin-top:10px">'+
+      fs('fspedu','Spouse Education Level',['','School - no matric','Matric','Diploma / Certificate','Degree','Post Graduate','Other'],c.SpouseEducation||'')+
+      fld('fspqual','Spouse Qualification Detail',c.SpouseQualification||'')+
+      fld('fsptelh','Spouse Tel Home',c.SpouseTelHome||'')+
+      fld('fsptelw','Spouse Tel Work',c.SpouseTelWork||'')+
+      '</div>'+
+      (linkedSpouseClientId(c.ID) ? '<div style="font-size:10.5px;color:#889;margin-top:4px">The spouse is a client in her or his own right: their own record is where these are kept, and it updates the boxes above when the two records are saved or linked.</div>' : '')
+    : '')+
 
     // SECTION: Children
     '<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:1px;padding:4px 0 8px;border-bottom:2px solid var(--gold);margin:18px 0 14px">Children</div>'+
@@ -12178,10 +12229,16 @@ function buildFnaDataPack(cid, includeSpouse){
     // When the partner is a client too, their own record holds gender and smoker status.
     var _spCid = linkedSpouseClientId(cid);
     var _spC = _spCid ? DB.clients.find(function(x){ return String(x.ID)===String(_spCid); }) : null;
-    if(_spC){ kv('Gender', _spC.Gender); kv('Smoker', _spC.Smoker); }
+    // 20 Oct 2026: otherwise what was captured about the spouse on this record (what quoting needs)
+    var _sx = function(own, sp){ return _spC ? _spC[own] : c[sp]; };
+    kv('Gender', _spC ? _spC.Gender : spouseGenderOf(c));
+    kv('Smoker', _sx('Smoker', 'SpouseSmoker'));
     kv('Working', c.SpouseWorks);
     kv('Occupation', c.SpouseOccupation);
+    kv('Employer', _sx('Employer', 'SpouseEmployer'));
     kv('Gross Income per Month (R)', c.SpouseIncome);
+    kv('Highest education', _sx('Education', 'SpouseEducation'));
+    kv('Qualification', _sx('Qualification', 'SpouseQualification'));
     if(_spC) line('  (Also a client in their own right — own record and data pack.)');
     line('');
   }
@@ -14635,6 +14692,14 @@ function saveClient(openFNA){
     // the next sync, so an edited family member popped into Clients for ~30s.
     if(_existing.FamilyType!==undefined) c.FamilyType=_existing.FamilyType;
   }
+  // Spouse details (20 Oct 2026): from the form when its boxes are shown (database update in);
+  // otherwise whatever the record already holds is kept
+  if(window._spExReady===true && document.getElementById('fsptitle')){
+    c.SpouseTitle=g('fsptitle'); c.SpouseCallingName=g('fspcalling'); c.SpouseEmployer=g('fspemployer');
+    c.SpouseGender=getRadio('fspgen')||''; c.SpouseSmoker=getRadio('fspsm')||'';
+    c.SpouseEducation=g('fspedu'); c.SpouseQualification=g('fspqual'); c.SpouseTelHome=g('fsptelh'); c.SpouseTelWork=g('fsptelw');
+    if(!c.SpouseGender) c.SpouseGender = spouseGenderOf(c);   // a valid SA ID gives the gender
+  } else if(_existing) SPOUSE_EXTRA.forEach(function(k){ if(_existing[k]!==undefined) c[k]=_existing[k]; });
   // Duwalcoe ticks. A key is only sent when ticked, or when the record already has the
   // column, so an untick saves '' but a save never names a column the database lacks.
   [['fduwst','ShortTermDuwalcoe'],['fduwhealth','HealthDuwalcoe']].forEach(function(f){
@@ -18822,6 +18887,8 @@ function runPasteClaudeImport(){
 // CRM on export (live today in a blank template); the children's Age shows blank on a bad date.
 // 1.6 (20 Oct 2026): the Will sheet follows the Capital Legacy application form (sections A to I), with who
 // inherits as three "failing which" steps; what Capital Legacy does not ask moved to a new Will extras sheet.
+// 1.7 (20 Oct 2026): the spouse column on Client and family takes title, calling name, gender, smoker, phones,
+// employer, education and qualification (yellow; were grey because the CRM had no spouse field for them).
 // The template builder (build_template.js) and the CRM (index.html, FF_SPEC) both use
 // this. Every typed fact has one home (a yellow cell) with a named range:
 //   FF_C_<key>   client field          FF_S_<key>   spouse field (CRM key in .s)
@@ -18829,7 +18896,7 @@ function runPasteClaudeImport(){
 //   FF_B<n>_<k>  company / trust n     FF_W_<key>   will field     FF_M_<key> meta
 // Column keys are read from the workbook's own key row, so columns can move freely.
 var FF_SPEC = {
-  version: '1.6',
+  version: '1.7',
   sheets: {
     start: 'Start here', notes: 'Meeting notes', fam: 'Client and family', inc: 'Income and expenses', ast: 'Assets and debts',
     biz: 'Companies and trusts', needs: 'Needs', will: 'Will', sum: 'Summary', lists: 'Lists'
@@ -18867,29 +18934,31 @@ var FF_SPEC = {
 
   // ── Client and family: one row per fact, client column and spouse column ──
   person: [
-    {label: 'Title', c: 'Title', t: 'list:titles'},
+    // 20 Oct 2026 (1.7): s keys added for title, calling name, gender, smoker, phones, employer, education
+    // and qualification (clients.Spouse*, Clients_Spouse_Details.sql)
+    {label: 'Title', c: 'Title', s: 'SpouseTitle', t: 'list:titles'},
     // First names and surname are joined into the CRM's one name field (Name / SpouseName).
     {label: 'First names', c: 'FirstNames', s: 'SpouseFirstNames', t: 'text', name: 'first'},
     {label: 'Surname', c: 'Surname', s: 'SpouseSurname', t: 'text', name: 'last'},
-    {label: 'Calling name (what we call you)', c: 'CallingName', t: 'text'},
+    {label: 'Calling name (what we call you)', c: 'CallingName', s: 'SpouseCallingName', t: 'text'},
     {label: 'SA ID number', c: 'IDNumber', s: 'SpouseIDNumber', t: 'id'},
     {label: 'Date of birth (only if no valid SA ID number)', c: 'DOB', s: 'SpouseDOB', t: 'date'},
-    {label: 'Gender (only if no valid SA ID number)', c: 'Gender', t: 'list:gender'},
-    {label: 'Smoker', c: 'Smoker', t: 'list:yesno'},
+    {label: 'Gender (only if no valid SA ID number)', c: 'Gender', s: 'SpouseGender', t: 'list:gender'},
+    {label: 'Smoker', c: 'Smoker', s: 'SpouseSmoker', t: 'list:yesno'},
     {label: 'Cell', c: 'Cell', s: 'SpouseCell', t: 'id'},
     {label: 'Email', c: 'Email', s: 'SpouseEmail', t: 'text'},
-    {label: 'Home telephone', c: 'TelHome', t: 'id'},
-    {label: 'Work telephone', c: 'TelWork', t: 'id'},
+    {label: 'Home telephone', c: 'TelHome', s: 'SpouseTelHome', t: 'id'},
+    {label: 'Work telephone', c: 'TelWork', s: 'SpouseTelWork', t: 'id'},
     {label: 'Physical address', c: 'Address', t: 'area'},
     {label: 'Postal address', c: 'POBox', t: 'area'},
     {label: 'Occupation', c: 'Occupation', s: 'SpouseOccupation', t: 'text'},
-    {label: 'Employer', c: 'Employer', t: 'text'},
+    {label: 'Employer', c: 'Employer', s: 'SpouseEmployer', t: 'text'},
     // grey: the salary and business income rows on the Income sheet, added up (one home)
     {label: 'Gross income a month (R): salary and business income from the Income sheet', c: 'Income', s: 'SpouseIncome', t: 'money', grey: 'earned'},
     {label: 'Working?', s: 'SpouseWorks', t: 'list:yesno'},
     {label: 'Tax number', c: 'TaxNo', t: 'id'},
-    {label: 'Highest education', c: 'Education', t: 'list:edu'},
-    {label: 'Qualification', c: 'Qualification', t: 'text'},
+    {label: 'Highest education', c: 'Education', s: 'SpouseEducation', t: 'list:edu'},
+    {label: 'Qualification', c: 'Qualification', s: 'SpouseQualification', t: 'text'},
     {label: 'Marital status and regime', c: 'MaritalStatus', t: 'list:marital'},
     {label: 'Wedding anniversary', c: 'Anniversary', t: 'date'},
     {label: 'Lead or client', c: 'IsLead', t: 'lead'}
@@ -19687,7 +19756,7 @@ function wbkPlan(wb, cidFrom, fileName){
   // ── Client and spouse ──
   var cur = target || {};
   var next = target ? JSON.parse(JSON.stringify(target)) : {ID:'new_'+Date.now(), Name:'', IsLead:'Yes', ClientType:'Individual', Status:'Active', Adviser:cu(), Notes:'', BankDetails:'[]', Doctors:'[]'};
-  var cch = [], ver = wbkTplVer(M);
+  var cch = [], ver = wbkTplVer(M), spExSkipped = [];
   FF_SPEC.person.forEach(function(p){
     if(p.name) return;                        // first names / surname: joined below
     if(p.grey && ver>=1.2) return;            // gross income: worked out from the Income sheet below
@@ -19695,6 +19764,8 @@ function wbkPlan(wb, cidFrom, fileName){
       var key = side[1]; if(!key) return;
       var nmn = (side[0]==='c' ? 'FF_C_' : 'FF_S_')+key;
       if(!M.N[nmn]) return;
+      // spouse details (1.7) only once the database columns exist; otherwise say so, and leave them
+      if(side[0]==='s' && SPOUSE_EXTRA.indexOf(key)>=0 && window._spExReady!==true){ if(!wbkBlank(M.raw(nmn))) spExSkipped.push(p.label.replace(/\s*\(.*$/,'')); return; }
       var label = p.label+(side[0]==='s' && key!=='SpouseWorks' ? ' (spouse)' : '');
       var v = wbkIn(p.t, M.raw(nmn), M.cell(nmn), function(msg){ P.warns.push('Client and family, '+label+': '+msg+'. '+(target ? 'Kept as it is.' : 'Left blank.')); });
       if(v===undefined) return;
@@ -19739,7 +19810,8 @@ function wbkPlan(wb, cidFrom, fileName){
   if(!target && !clean(next.IsLead)) next.IsLead = 'Yes';   // a new fact find starts as a lead, like the on-screen New Fact Find
   // Worked out from the SA ID, as the CRM does everywhere
   if(saIdValid(next.IDNumber)){ next.DOB = dobFromID(String(next.IDNumber).replace(/\D/g,'')); if(!clean(next.Gender)) next.Gender = (+String(next.IDNumber).replace(/\D/g,'').charAt(6) >= 5) ? 'Male' : 'Female'; }
-  if(saIdValid(next.SpouseIDNumber)) next.SpouseDOB = dobFromID(String(next.SpouseIDNumber).replace(/\D/g,''));
+  if(saIdValid(next.SpouseIDNumber)){ next.SpouseDOB = dobFromID(String(next.SpouseIDNumber).replace(/\D/g,'')); if(window._spExReady===true && !clean(next.SpouseGender)) next.SpouseGender = spouseGenderOf(next); }
+  if(spExSkipped.length) P.warns.push('Client and family: the spouse\'s '+spExSkipped.join(', ').toLowerCase()+' cannot be saved yet. Run Clients_Spouse_Details.sql in Supabase first, then import this workbook again.');
   // Calling name: the name the client goes by, never the surname (13 Oct 2026, Megan Wilmot)
   var cnRaw = clean(next.CallingName) ? String(next.CallingName).trim() : '';
   if(cnRaw && !wbkSameName(cnRaw, cur.CallingName)){
