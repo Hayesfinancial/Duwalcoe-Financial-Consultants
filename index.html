@@ -4637,7 +4637,7 @@ function fpHoldingsHtml(d){
 // ID 'fpnn_<clientId>' so saves upsert the same row). Pure capture — every
 // amount is the client's stated need, not an analysis result.
 var NEED_SCENARIOS = ['Death','Disability','Dread Disease','Retirement','Other'];
-// "For whom" only applies to a Death (or Other) need. Retirement, Disability and
+// "For whom" (shown as "Whose need" from 21 Oct 2026) only applies to a Death (or Other) need. Retirement, Disability and
 // Dread Disease needs are always the client's own (1 Oct 2026).
 function needAsksForWhom(scenario){ return !scenario || scenario==='Death' || scenario==='Other'; }
 // Engaged (1 Oct 2026): legally single until the wedding. The Anniversary field then
@@ -4710,7 +4710,7 @@ function renderNeeds(c){
       function cell(lbl,val){ return '<div><div style="font-size:10px;color:#999;text-transform:uppercase;letter-spacing:.3px">'+lbl+'</div><div style="font-weight:600;font-size:13px">'+(val||'—')+'</div></div>'; }
       var cells = cell(isIncome?'Income Need':'Capital Need', amtTxt);
       if(isIncome) cells += cell('Escalation', d.esc?d.esc+'% p.a.':'Not specified — CPI assumed');
-      if(needAsksForWhom(scen)) cells += cell('For Whom', fpPassesToLabel({passesTo:d.benTo, passesToName:d.benName}));
+      if(needAsksForWhom(scen)) cells += cell('Whose need', fpPassesToLabel({passesTo:d.benTo, passesToName:d.benName}));
       var typeBadge = '<span style="background:'+(isIncome?'#e8f0fe;color:#1a4f9c':'#e8f5e9;color:#2e7d5a')+';border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700">'+(isIncome?'Income /pm':'Once-off capital')+'</span>';
       var scenBadge = '<span style="'+(NEED_SCEN_STYLE[scen]||NEED_SCEN_STYLE.Other)+';border-radius:10px;padding:2px 10px;font-size:11px;font-weight:600">'+scen+'</span>';
       return '<div class="card" style="margin-bottom:10px">'+
@@ -13526,7 +13526,7 @@ function renderWillRefPanel(c){
   } else {
     h += '<div style="font-size:11.5px;color:#889;margin-top:10px">No active policies captured. Add them in the <strong>Policies</strong> tab.</div>';
   }
-  h += tbl('Needs','<tr><th>Need</th><th>Scenario</th><th style="text-align:right">Amount</th><th>For whom</th></tr>', nH);
+  h += tbl('Needs','<tr><th>Need</th><th>Scenario</th><th style="text-align:right">Amount</th><th>Whose need</th></tr>', nH);
   if(nnTxt) h += '<div style="font-weight:700;font-size:12px;color:#445;margin:8px 0 3px">Needs discussion notes</div><div style="font-size:12px;color:#556;white-space:pre-wrap;background:#fff;border:1px solid #eef;border-radius:6px;padding:7px 9px">'+wfEsc(nnTxt)+'</div>';
   h += '</div></details>';
   return h;
@@ -17035,7 +17035,7 @@ function openFinPosModal(cid, kind, fpid){
       '<input type="text" id="fpesc" value="'+clean(d.esc||'')+'" autocomplete="off">'+
       '</div>'+
       '<div id="fpBenToWrap" style="display:'+(askWhom?'block':'none')+'">'+
-      fs('fpbenTo','For Whom',['','Spouse','Estate','Named person'],d.benTo||'')+
+      fs('fpbenTo','Whose need',['','Spouse','Estate','Named person'],d.benTo||'')+
       '</div>'+
       '</div>'+
       '<div class="g2">'+
@@ -19113,7 +19113,7 @@ var FF_SPEC = {
         {k: 'amount', h: 'Amount (R): a month, or the once-off total', t: 'money', w: 16},
         {k: 'years', h: 'For how many years (income)', t: 'num', w: 12},
         {k: 'esc', h: 'Increase % a year (blank = inflation)', t: 'num', w: 13},
-        {k: 'benTo', h: 'For whom (death only)', t: 'list:forWhom', w: 13},
+        {k: 'benTo', h: 'Whose need (death only)', t: 'list:forWhom', w: 13},
         {k: 'benName', h: 'Named person', t: 'text', w: 18},
         {k: 'notes', h: 'Notes', t: 'text', w: 28}
       ]}
@@ -19581,6 +19581,11 @@ function wbkExport(cid){
       set('FF_M_Version', FF_SPEC.version);
       set('FF_M_ExportedAt', new Date().toISOString().slice(0,16).replace('T',' '));
       set('FF_M_ExportedBy', (typeof userLabel==='function') ? userLabel(cu()) : cu());
+      // 21 Oct 2026: "For whom" on the Needs sheet reads "Whose need" (the template text is replaced only where it is the old one)
+      try{ var NK = N.FF_K_need; if(NK){ var nws = wb.getWorksheet(NK.sheet), nkeys = wbkKeys(wb, NK);
+        if(nkeys.benTo){ var hc = nws.getCell(NK.r1+1, nkeys.benTo); if(String(wbkRaw(hc)||'')==='For whom (death only)') hc.value = 'Whose need (death only)'; }
+        var tc = nws.getCell(NK.r1-1, 2), tv = String(wbkRaw(tc)||''); if(tv.indexOf('and for whom (death only)')>=0) tc.value = tv.replace('and for whom (death only)', 'and whose need it is (death only)');
+      } }catch(e){ console.warn('Needs heading not renamed', e); }
       // 1.5: Start here fills itself in: today's date (stamped, so it stays fixed when the file is reopened) and Clinton's name
       var tdy = new Date(), tdyUtc = new Date(Date.UTC(tdy.getFullYear(), tdy.getMonth(), tdy.getDate()));
       set('FF_G_ValDate', tdyUtc); set('FF_G_DateCompleted', tdyUtc); set('FF_G_CompletedBy', 'Clinton Hayes');
@@ -19964,6 +19969,7 @@ function wbkPlan(wb, cidFrom, fileName){
           if(!wbkSame(col.t, od[col.k], o[col.k])){ ch.push({k:col.k, label:col.h, old:od[col.k], nw:o[col.k], t:col.t}); nd[col.k] = o[col.k]; }
         });
         wbkFixRow(kind, nd, gen, od, ch);
+        if(kind==='need'){ var ww2 = wbkWhoseNeedMsg(nd); if(ww2) P.warns.push(where+' ('+(nd.desc||'')+'): '+ww2); }
         var _wh = wbkHomeFor(cid, kind, nd.owner, fr._home), _stay = false;
         if(String(_wh.cid)!==String(fr._home)){
           var _whc = wbkClient(_wh.cid), _whn = String(_wh.cid)===String(cid) ? L.c : (_whc ? fpClientLabel(_whc) : L.s);
@@ -20135,6 +20141,13 @@ function wbkPlan(wb, cidFrom, fileName){
   P.cid = cid;
   return P;
 }
+// 21 Oct 2026: a death need that does not say whose need it is is left out of the Quick FNA, so the import says so.
+function wbkWhoseNeedMsg(d){
+  if(String(d.scenario||'')!=='Death') return '';
+  if(!d.benTo) return 'no "Whose need" chosen, so the Quick FNA leaves this death need out. Choose the spouse, or Named person with the name, on the Needs tab.';
+  if(d.benTo==='Named person' && !clean(d.benName)) return '"Whose need" is Named person but no name is given, so the Quick FNA leaves this death need out. Add the name on the Needs tab.';
+  return '';
+}
 // New Financial Position row: the same defaults as the CRM's own form.
 function wbkNewRow(kind, o, gen, ctx){
   var d = Object.assign({}, o);
@@ -20144,6 +20157,7 @@ function wbkNewRow(kind, o, gen, ctx){
   if(kind==='need'){
     if(!d.scenario) ctx.warn('no "If this happens" chosen, so it is saved as Other. Set it on the Needs tab.');
     if(!d.needType) ctx.warn('monthly income or once-off not chosen, so it is saved as a monthly income. Check it on the Needs tab.');
+    var ww = wbkWhoseNeedMsg(d); if(ww) ctx.warn(ww);
   }
   if(['property','vehicle','other'].indexOf(kind)>=0){
     d.owner = d.owner || 'Client'; d.passesTo = d.passesTo || 'Estate';
@@ -20416,11 +20430,15 @@ function wbkFinish(P, cid, results){
 // 2.4 (16 Oct 2026): Workings and Figures for quoting show policies and death income paid to the spouse on their own
 // line with the s.4(q) deduction under it; the gross dutiable estate holds only what can carry duty. The CRM reads a
 // death income row's own beneficiary when it has one (the income and the lump sum can go to different people).
+// 2.5 (21 Oct 2026, Clinton): a child the spouse provides for ("Provided for by the spouse?" Yes, the default for a married
+// client's children not in a trust) has their need added to the spouse's. Each person keeps their own amount, term and rise,
+// but the money reaching the spouse (and anything reaching the child) pays for all of it, taxed in the spouse's hands, and
+// the spouse's new cover closes the family's gap. A child in a trust, or from another relationship (set No), stands alone.
 // The template builder (build_qfna.js) and the CRM (index.html, QF_SPEC) both use this.
 // The CRM fills the Inputs sheet by named range (QF_<key> single cells, QF_T_<table> table
 // bodies). Everything else in the workbook is a formula. One way only: nothing comes back.
 var QF_SPEC = {
-  version: '2.4',
+  version: '2.5',
   copyOffset: 25,                      // hidden copy of the CRM's values: column + 25 (B -> AA) on Inputs
   watched: ['assets', 'debts', 'cover', 'dinc', 'funds', 'deps'],   // tables whose changes turn orange (plus the client cells except Wishes)
   sheets: {inputs: 'Inputs', summary: 'Summary', quote: 'Figures for quoting', work: 'Workings', lists: 'Lists'},
@@ -20471,7 +20489,8 @@ var QF_SPEC = {
       {k: 'needPM', h: 'Needs a month from this money (R, after tax)', t: 'money'}, {k: 'years', h: 'For how many years', t: 'int'},
       {k: 'esc', h: 'Rising each year by (%, blank: inflation)', t: 'pct'}, {k: 'trust', h: 'Held in a trust?', t: 'list:yesno'},
       {k: 'other', h: 'Their own taxable income (R a year)', t: 'money'},
-      {k: 'lump', h: 'Once-off needs (R, today\'s money)', t: 'money'}]},
+      {k: 'lump', h: 'Once-off needs (R, today\'s money)', t: 'money'},
+      {k: 'via', h: 'Provided for by the spouse? (children)', t: 'list:yesno'}]},
     checks: {rows: 14, cols: [{k: 'text', h: 'From the CRM', t: 'text'}]}
   },
   quote: [
@@ -20699,7 +20718,7 @@ function qfnaData(c){
   // Each need is matched to one person first (the spouse, one family member, or a name not found), and needs for
   // the same person with the same years and rise are added together. The name shown is the first word of the
   // need's "For whom" when the person is found ("Cara Family" shows as Cara), as written when not.
-  var wTrust = String(W.tr_choice||''), byKey = {}, depOrder = [];
+  var wTrust = String(W.tr_choice||''), byKey = {}, depOrder = [], noWhose = 0;
   // A policy or fund nominating a trust: the children are taken to be in it, whatever the will says
   var trustNom = pols.some(function(p){ try{ return (JSON.parse(p.Beneficiaries||'[]')||[]).some(function(b){ return b && String(b.type||'')==='Trust'; }); }catch(e){ return false; } });
   function first(s){ return String(s||'').trim().split(/\s+/)[0]; }
@@ -20713,7 +20732,10 @@ function qfnaData(c){
     if(once && !(amt>0)){ warn('the once-off death need "'+lbl+'" has no amount, so it is left out.'); return; }
     if(once && d.benTo==='Estate'){ warn('the once-off death need "'+lbl+'" (R '+Number(amt).toLocaleString('en-US')+') is for the estate. If it is not already a debt in section 2, add it there; it is not added on its own, so nothing is counted twice.'); return; }
     var bn = d.benTo==='Named person' ? clean(d.benName) : '';
-    if(d.benTo!=='Spouse' && !bn){ warn('the death need "'+lbl+'" says '+(d.benTo==='Estate' ? 'it is for the estate' : 'nobody under "For whom"')+', so it is left out. Add the person in section 6.'); return; }
+    if(d.benTo!=='Spouse' && !bn){
+      if(d.benTo!=='Estate') noWhose++;
+      warn('the death need "'+lbl+'" says '+(d.benTo==='Estate' ? 'it is for the estate' : 'nobody under "Whose need"')+', so it is left out. Set "Whose need" on the Needs tab (the spouse, or the person by name) and export again, or add the person in section 6.'); return;
+    }
     var P;
     if(d.benTo==='Spouse') P = {key:'sp', name:spName||'Spouse', rel:'Spouse', dob:spDOB};
     else {
@@ -20752,6 +20774,30 @@ function qfnaData(c){
     var other = (p.rel==='Spouse' && fpN(c.SpouseIncome)>0) ? Math.round(fpN(c.SpouseIncome)*12*100)/100 : null;
     out.deps.push({name:p.name, rel:p.rel, age:age, needPM:p.needPM, years:p.years, esc:p.esc, trust:trust, other:other, lump:(p.lump>0 ? p.lump : null)});
   });
+  // 2.5 (21 Oct 2026, Clinton): a married client's children are provided for by the spouse: the spouse (or the nominee on the
+  // policy) gets the money, and the needs are split per person only so that each has its own term. Their needs are added to
+  // the spouse's in the workbook. A child in a trust stands on its own; a child from another relationship is set to No by hand.
+  // A spouse with no death need of their own is still put in section 6 when they provide for the children.
+  var spouseLaw = /^Married/.test(marital) || marital==='Life partner' || marital==='Civil Union';
+  if(spouseLaw){
+    var kidsAll = out.deps.filter(function(x){ return x.rel==='Child'; });
+    var poolKids = kidsAll.filter(function(x){ return x.trust!=='Yes'; });
+    kidsAll.forEach(function(x){ x.via = 'No'; });
+    var hostSp = out.deps.find(function(x){ return x.rel==='Spouse'; });
+    if(poolKids.length && !hostSp && spName){
+      var hAge = spDOB ? calcAge(spDOB) : null;
+      hostSp = {name:spName, rel:'Spouse', age:hAge, needPM:null, years:null, esc:null, trust:'No', other:(fpN(c.SpouseIncome)>0 ? Math.round(fpN(c.SpouseIncome)*12*100)/100 : null), lump:null};
+      out.deps.push(hostSp);
+      note(spName+' has no death need of their own on the Needs tab, but provides for the children, so '+spName+' is in section 6 with no need of their own: what reaches '+spName+' pays for the children\'s needs.');
+      if(hAge===null) warn(spName+' has no date of birth on the record: fill in the age in section 6 (it sets the rebates at 65 and 75).');
+    }
+    if(poolKids.length && hostSp){
+      poolKids.forEach(function(x){ x.via = 'Yes'; });
+      var pn = poolKids.map(function(x){ return x.name; }), pt = pn.length===1 ? pn[0] : pn.slice(0,-1).join(', ')+' and '+pn[pn.length-1];
+      note(pt+(pn.length===1 ? ' is' : ' are')+' taken as provided for by '+hostSp.name+': '+(pn.length===1 ? 'their need is' : 'their needs are')+' added to '+hostSp.name+'\'s (each for its own years) and paid from what reaches '+hostSp.name+'. If a child is from another relationship, set "Provided for by the spouse?" to No in section 6.');
+    } else if(poolKids.length) note('The children are not taken as provided for by the spouse, because the spouse\'s name is not on the record: their needs stand on their own.');
+    kidsAll.filter(function(x){ return x.trust==='Yes'; }).forEach(function(x){ note(x.name+' is in the children\'s trust, so '+x.name+'\'s need stands on its own (not added to the spouse\'s).'); });
+  }
   out.deps.sort(function(a, b){
     var o = function(x){ return x.rel==='Spouse' ? 0 : (x.rel==='Child' ? 1 : (x.rel==='Other' ? 2 : 3)); };
     return o(a)-o(b) || ((a.rel==='Child' && b.rel==='Child') ? ((b.age===null?-1:b.age)-(a.age===null?-1:a.age)) : 0);
@@ -20994,7 +21040,10 @@ function qfnaData(c){
     if(!wrow){ kidsShare = 'Not to the dependants'; note('No will captured: the residue is not counted for the children (worst case). Change "How the residue reaches the children" in section 6 if they inherit it.'); }
     else if(!/^Entire residue to my children/.test(W.res_choice||'')){ kidsShare = 'Not to the dependants'; warn('the residue is not left to the children equally in the will capture, so it is not counted for them. Change "How the residue reaches the children" in section 6 if they inherit part of it.'); }
   }
-  if(!out.deps.length) note('No death needs paid as a monthly income on the Needs tab, so there are no dependants in section 6: the workbook shows the cost of dying only.');
+  if(!out.deps.length){
+    if(noWhose) warn((noWhose===1 ? 'the death need on the Needs tab does not say' : 'none of the '+noWhose+' death needs on the Needs tab says')+' whose need it is, so section 6 is empty and the workbook shows the cost of dying only. Set "Whose need" on the Needs tab and export again.');
+    else note('No death needs on the Needs tab, so there are no dependants in section 6: the workbook shows the cost of dying only.');
+  }
 
   var asAt = rows.map(function(r){ return String(r.d.valueDate||''); }).filter(function(s){ return /^\d{4}-\d{2}-\d{2}$/.test(s); }).sort().pop();
   out.single = { Client:(clean(c.Title)?c.Title+' ':'')+nm, First:clean(c.CallingName)||nm.split(' ')[0], Adviser:QF_ADVISER,
@@ -21168,7 +21217,7 @@ function ffNeedRowHtml(){
     +ffField('Scenario', ffSel('scenario',NEED_SCENARIOS,'Death'))
     +ffField('Need type', ffSel('type',['Monthly income','Once-off capital'],'Monthly income',' onchange="ffNeedType(this)"'))
     +ffField('Description', ffText('description','e.g. Spouse living expenses'))
-    +ffField('For whom', ffText('beneficiary','Spouse / Estate / name'))
+    +ffField('Whose need', ffText('beneficiary','Spouse / Estate / name'))
     +'</div>'
     +'<div class="ffg4">'
     +ffField('Amount (R) — /month, or lump sum', ffText('amount',''))
@@ -21476,7 +21525,7 @@ function printFactFind(filled){
 
   doc+=sh('8. Needs / FNA (death · disability · dread disease · retirement)');
   var needRows = p ? p.needs.map(function(nd){ return [nd.scenario, nd.type, nd.description, nd.beneficiary, nd.amount, nd.years]; }) : [];
-  doc+=tbl(['Scenario','Type','Description','For whom','Amount (R)','Years'], needRows, 6);
+  doc+=tbl(['Scenario','Type','Description','Whose need','Amount (R)','Years'], needRows, 6);
 
   doc+=sh('9. Will / estate');
   doc+=two('Has a will?', cl.HasWill, 'Placed through me?', cl.WillThroughMe);
