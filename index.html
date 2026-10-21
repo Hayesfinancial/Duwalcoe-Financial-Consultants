@@ -22275,6 +22275,7 @@ function renderAstutePreview(){
       if(!r.ownerIsClient && r.ownerName) html += '<div style="font-size:11.5px;color:#92400e;margin-top:6px">⚠ Owner is '+astuteEsc(r.ownerName)+' — not this client. Imports with owner recorded.</div>';
       if(r.insuredName) html += '<div style="font-size:11.5px;color:#92400e;margin-top:6px">⚠ Life assured / annuitant is '+astuteEsc(r.insuredName)+' — not this client. Imports into the Life Assured field.</div>';
       if(r.jointLife) html += '<div style="font-size:11.5px;color:#667;margin-top:4px">ℹ Joint life: '+astuteEsc(r.jointLife)+' — recorded in Notes.</div>';
+      if(r.advisorOfRecord==='No') html += '<div style="font-size:11.5px;color:#667;margin-top:4px">ℹ Another adviser’s policy — saved as Advisor of record: No, not counted in AUM.</div>';
       if(r.covers.length && (r.type==='Life / Income Protector'||r.type==='Business Assurance')){
         var cls = astuteClassifyCovers(r.covers);
         if(cls.lumps.length || cls.incomes.length || cls.fee){
@@ -22289,6 +22290,31 @@ function renderAstutePreview(){
           html += '</div><div style="font-size:11.5px;color:#92400e">⚠ Risk benefits imported from Astute — verify amounts, waiting and benefit periods against the policy schedule.</div>';
         }
       } else if(r.type==='Pension Fund'||r.type==='Provident Fund'){
+        // Contribution check (21 Oct 2026): salary × % against the stated contribution,
+        // and the net figure the card will hold, shown before anything is saved.
+        (function(){
+          var _ex = astuteFindExisting(r);
+          var _sal = r.pensionableSalary || (_ex ? _ex.PensionableSalary : '');
+          var _mp  = r.memberPct   || (_ex ? _ex.MemberContribPct   : '');
+          var _ep  = r.employerPct || (_ex ? _ex.EmployerContribPct : '');
+          var _ad  = r.adminFees   || (_ex ? _ex.AnnualAdminFees    : '');
+          var _rk  = 0; grRowsFromCovers(r.covers).forEach(function(x){ _rk += N(x.prem); });
+          if(!_rk && _ex) grRows(_ex).forEach(function(x){ _rk += N(x.prem); });
+          var _pc = crmPensionContrib(_sal, _mp, _ep, _rk, _ad);
+          var _fm = function(v){ return 'R'+Number(N(v)).toLocaleString('en-ZA',{minimumFractionDigits:2,maximumFractionDigits:2}); };
+          if(_pc){
+            html += '<div style="font-size:11.5px;color:#475;margin-top:6px;line-height:1.6"><strong>Contribution</strong><br>'+
+              '• Salary '+_fm(_sal)+' pa × (member '+astuteEsc(_mp||'0')+'% + employer '+astuteEsc(_ep||'0')+'%) = '+_fm(_pc.grossMonthly)+' pm gross<br>'+
+              (_pc.hasCosts ? '• Less '+_fm(_pc.costsMonthly)+' pm costs ('+(N(_ad)?'admin & fees '+_fm(_ad)+' pa':'')+(N(_ad)&&_rk?' + ':'')+(_rk?'group risk '+_fm(_rk)+' pa':'')+') = <strong>'+_fm(_pc.netMonthly)+' pm net to retirement</strong> (saved as the contribution)<br>' : '')+
+              '</div>';
+            var _stated = N(r.premium);
+            if(_stated>0 && Math.abs(_stated-_pc.grossMonthly) > Math.max(1, _pc.grossMonthly*0.01))
+              html += '<div style="font-size:11.5px;color:#92400e">⚠ The statement contribution '+_fm(_stated)+' pm does not match salary × % ('+_fm(_pc.grossMonthly)+' pm) — check the salary and percentages (update the salary if it has changed) before importing.</div>';
+          } else if(r.pensionableSalary || r.memberPct || r.employerPct){
+            html += '<div style="font-size:11.5px;color:#92400e;margin-top:6px">⚠ Salary and contribution % are incomplete — the contribution is imported as stated; finish them on the card.</div>';
+          }
+          if(r.groupRisk==='No' && !grRowsFromCovers(r.covers).length) html += '<div style="font-size:11.5px;color:#475;margin-top:4px">• No group risk benefits on this fund (retirement only).</div>';
+        })();
         // Group risk on an employer fund (6 Oct 2026): shown before anything is saved.
         var _gp = grRowsFromCovers(r.covers);
         if(_gp.length){
@@ -22421,7 +22447,42 @@ function astuteFundsToNotes(r){
 //              ← on a Pension / Provident Fund, covers are its GROUP RISK benefits (6 Oct 2026),
 //                with extra keys approved ("Approved"/"Unapproved"), nominee, basis,
 //                annualPrem, notes; plus policy-level groupRiskApproved for the whole fund.
+//     Pension / Provident Fund only (21 Oct 2026):
+//       pensionableSalary (alias salary) ← ANNUAL pensionable / contribution salary
+//       memberPct (alias memberContribPct), employerPct (alias employerContribPct) ← % of salary
+//       adminFees (alias annualAdminFees) ← ANNUAL rand admin, management, distribution and
+//                commission charges taken from the contribution (not risk premiums)
+//       groupRisk (alias hasGroupRisk) ← "Yes" / "No"; "No" = retirement-only fund
+//       With salary + %, Premium is set the way the card sets it: net to retirement when
+//       admin fees or group risk premiums are held, else gross. "premium" = the stated
+//       gross monthly contribution, used as a cross-check on the review screen.
+//     advisorOfRecord (21 Oct 2026, any type) ← "No" when another adviser placed the policy:
+//       saved as Advisor of record No and not counted in AUM. Blank on a refresh keeps the
+//       card's setting (a re-import no longer resets it to Yes).
+//     nonVestedPot (21 Oct 2026) ← NonVestedValue. Do not repeat a figure already in
+//       vestedPot: the card adds all four component boxes to make the fund value.
 //     bens:[{name,pct,benType,linkType,dob}] }
+// Paste amount / percentage: plain number as a string. Tolerates "R", "%" and spaces
+// (21 Oct 2026). Thousands commas are not stripped: the paste contract forbids them,
+// and "871,000" vs "871,00" cannot be told apart safely.
+function crmPasteNum(v){
+  if(v===null || v===undefined) return '';
+  return String(v).replace(/^\s*R\s*/i,'').replace(/%/g,'').replace(/\s+/g,'').trim();
+}
+// Employer fund contribution — the same sum the Pension / Provident card does in
+// pensionContribCalc(): gross = salary × (member% + employer%); net = gross less
+// annual group risk premiums and admin fees. Premium holds net when there are costs,
+// gross otherwise (21 Oct 2026). Returns null when salary or both % are missing.
+function crmPensionContrib(sal, memPct, empPct, riskAnnual, adminAnnual){
+  sal = N(sal); memPct = N(memPct); empPct = N(empPct);
+  if(sal<=0 || (memPct+empPct)<=0) return null;
+  var grossAnnual = sal*(memPct+empPct)/100;
+  var costsAnnual = N(riskAnnual) + N(adminAnnual);
+  var netAnnual = Math.max(0, grossAnnual - costsAnnual);
+  var r2 = function(x){ return Math.round(x*100)/100; };
+  return {grossMonthly:r2(grossAnnual/12), netMonthly:r2(netAnnual/12), costsMonthly:r2(costsAnnual/12),
+          hasCosts:costsAnnual>0, premium:String(r2((costsAnnual>0?netAnnual:grossAnnual)/12))};
+}
 function parseAstutePasteJSON(txt){
   var raw = String(txt||'').trim();
   if(!raw){ toast('Paste the policy block first','err'); return; }
@@ -22500,7 +22561,18 @@ function parseAstutePasteJSON(txt){
       totalWithdrawn: clean(o.totalWithdrawn),   // added 27 Sep 2026 (was never imported; typed by hand)
       irrSource: clean(o.irrSource),             // "calculated" when the IRR is the adviser's own calculation
       savingsPot: clean(o.savingsPot), retirementPot: clean(o.retirementPot), vestedPot: clean(o.vestedPot),
+      nonVestedPot: crmPasteNum(o.nonVestedPot),   // 21 Oct 2026: → NonVestedValue (was never read)
       retireAge: clean(o.retireAge),
+      // Pension / Provident employer-fund contribution (21 Oct 2026). These card fields had
+      // no paste keys, so salary, contribution % and admin fees were always typed by hand.
+      pensionableSalary: crmPasteNum(o.pensionableSalary!=null ? o.pensionableSalary : o.salary),   // annual → PensionableSalary
+      memberPct: crmPasteNum(o.memberPct!=null ? o.memberPct : o.memberContribPct),                // → MemberContribPct
+      employerPct: crmPasteNum(o.employerPct!=null ? o.employerPct : o.employerContribPct),        // → EmployerContribPct
+      adminFees: crmPasteNum(o.adminFees!=null ? o.adminFees : o.annualAdminFees),                 // ANNUAL rand → AnnualAdminFees
+      // Fund holds group risk benefits: "Yes" / "No". "No" stops the card defaulting to Yes.
+      groupRisk: (function(){ var t=clean(o.groupRisk!=null ? o.groupRisk : o.hasGroupRisk).trim(); return /^y/i.test(t)?'Yes':(/^n/i.test(t)?'No':''); })(),
+      // Any type (21 Oct 2026): "No" when Clinton is not the adviser on the policy.
+      advisorOfRecord: (function(){ var t=clean(o.advisorOfRecord!=null ? o.advisorOfRecord : o.adviserOfRecord).trim(); return /^y/i.test(t)?'Yes':(/^n/i.test(t)?'No':''); })(),
       ownerIsClient: ownerIsClient,
       ownerName: ownerName,
       insuredName: insuredName,
@@ -22830,7 +22902,8 @@ function runAstuteImport(){
     }
     // Policy fee: PolFee tag on the policy + any fee riders found above
     var policyFee = N(r.polFee) + coverFee;
-    var _grImp = (r.type==='Pension Fund'||r.type==='Provident Fund') ? grRowsFromCovers(r.covers) : [];
+    var _isEmpFund = (r.type==='Pension Fund'||r.type==='Provident Fund');
+    var _grImp = _isEmpFund ? grRowsFromCovers(r.covers) : [];
     // Rows on another person's life (covers[].insured) are not the client's cover (10 Oct 2026).
     function lumpSum(t){ var s=0; lumps.forEach(function(x){if(x.type===t && !lumpOnOtherLife(x))s+=N(x.cover);}); return s?String(s):''; }
     // A beneficiary matched to a family member is saved under that member's
@@ -22884,7 +22957,9 @@ function runAstuteImport(){
       // Business Assurance estate dutiable (11 Oct 2026): only a value the block states. A blank
       // never overwrites the policy's value on a refresh; new policies get the type default below.
       EstateDutiable:(r.type==='Business Assurance' ? (r.estateDutiable||'') : ''),
-      AdvisorOfRecord:'Yes', CountsForAUM:'Yes',
+      // advisorOfRecord paste key (21 Oct 2026): "No" for a fund placed by another adviser,
+      // so it is not counted as Duwalcoe AUM. Default stays Yes for a new policy.
+      AdvisorOfRecord:(r.advisorOfRecord||'Yes'), CountsForAUM:(r.advisorOfRecord==='No'?'No':'Yes'),
       BizType:(r.bizType||''), LifeAssuredType:'', LifeAssured:'', LoanAmount:'', KeyPosition:(r.keyPosition||''),
       Premium:premiumVal, Frequency:r.frequency,
       PolicyFee:(policyFee>0?String(Math.round(policyFee*100)/100):''),
@@ -22900,7 +22975,7 @@ function runAstuteImport(){
       LumpBenefits:JSON.stringify(lumps),
       BenSurrenderValue:surrVal, BenFundValue:benFundValue, BenMaturityValue:'',
       MaturityDate:r.maturityDate, MaturityAge:'', maturityAge:'', RetirementAge:r.retireAge||'',
-      VestedValue:r.vestedPot||'', NonVestedValue:'',
+      VestedValue:r.vestedPot||'', NonVestedValue:r.nonVestedPot||'',
       RetirementComponent:r.retirementPot||'', SavingsComponent:r.savingsPot||'',
       IllustrativeRate:(r.irr||''), PremGrowthRate:(r.growthRate||''), GrowthRate:(r.growthRate||''),
       TotalInvested:totalInvVal, TotalWithdrawn:totalWdVal,
@@ -22912,10 +22987,18 @@ function runAstuteImport(){
       LAIncomeTaxable:(r.laTaxable||''),   // blank here so a refresh never resets a hand-set 'No'; new policies default to 'Yes' below
       Insured:r.insuredName||'',
       PayerType:'', PayerName:'',
-      PensionableSalary:'', MemberContribPct:'', EmployerContribPct:'', AnnualAdminFees:'',
+      // Pension / Provident contribution inputs (21 Oct 2026): from the paste keys
+      // pensionableSalary / memberPct / employerPct / adminFees. Blank on other types,
+      // and blank leaves the held value on a refresh.
+      PensionableSalary:(_isEmpFund ? (r.pensionableSalary||'') : ''),
+      MemberContribPct:(_isEmpFund ? (r.memberPct||'') : ''),
+      EmployerContribPct:(_isEmpFund ? (r.employerPct||'') : ''),
+      AnnualAdminFees:(_isEmpFund ? (r.adminFees||'') : ''),
       // Pension / Provident: covers become Group Risk Benefits rows (6 Oct 2026). Other
       // types keep these blank. A blank status stays blank and is flagged on the card.
-      HasGroupRisk:(_grImp.length?'Yes':''), GroupRiskApproved:(_grImp.length?(r.grFund||''):''), GroupRiskBenefits:JSON.stringify(_grImp),
+      // groupRisk "No" (21 Oct 2026) records a retirement-only fund, so the card no
+      // longer defaults it to Yes / Approved when it is opened and saved.
+      HasGroupRisk:(_grImp.length?'Yes':(_isEmpFund && r.groupRisk==='No' ? 'No' : '')), GroupRiskApproved:(_grImp.length?(r.grFund||''):''), GroupRiskBenefits:JSON.stringify(_grImp),
       Notes:(function(){
         var base=astuteFundsToNotes(r); var extra=[];
         if(fxMarker) extra.push(fxMarker);                                       // offshore currency marker (native + dated rates)
@@ -22936,6 +23019,14 @@ function runAstuteImport(){
     var isUpdate = !!existingPol;
     var finalPol = isUpdate ? astuteMergePolicy(existingPol, pol) : pol;
     if(isUpdate) finalPol.ID = existingPol.ID;
+    // Advisor of record / counts for AUM (21 Oct 2026): the import's "Yes" is only a
+    // default, so on a refresh it no longer overwrites a value set on the card (a re-pull
+    // was flipping other advisers' funds back into Duwalcoe AUM). A stated
+    // advisorOfRecord in the block still wins.
+    if(isUpdate && !r.advisorOfRecord){
+      if(clean(existingPol.AdvisorOfRecord)) finalPol.AdvisorOfRecord = existingPol.AdvisorOfRecord;
+      if(clean(existingPol.CountsForAUM))    finalPol.CountsForAUM    = existingPol.CountsForAUM;
+    }
     // Retirement funds with no retirement age AND no maturity date: default to 65
     // (1 Oct 2026, Clinton's rule; matches the edit screen's own default). Applied
     // after the merge so it only ever fills a blank: a hand-entered or stated age
@@ -22947,6 +23038,22 @@ function runAstuteImport(){
     // LA tax treatment: new policies default to fully taxable (the edit screen's
     // own default); on a refresh a blank import keeps whatever is already held.
     if(!isUpdate && !clean(finalPol.LAIncomeTaxable)) finalPol.LAIncomeTaxable = 'Yes';
+    // Pension / Provident (21 Oct 2026). Applied after the merge, so it works on the
+    // values the card will actually hold (held salary / % / fees / group risk rows on a
+    // refresh that does not restate them):
+    //  • group risk rows on the card win over a "No" (a statement can't remove cover
+    //    captured by hand from another document);
+    //  • Premium is set exactly as the card's own calculation sets it on save
+    //    (pensionContribCalc): net to retirement when admin fees or group risk premiums
+    //    are held, gross otherwise. Before this, the import stored the gross figure and
+    //    the card silently changed it to net the next time it was saved.
+    if(finalPol.Type==='Pension Fund' || finalPol.Type==='Provident Fund'){
+      var _fgr = grRows(finalPol);
+      if(_fgr.length && finalPol.HasGroupRisk==='No') finalPol.HasGroupRisk = 'Yes';
+      var _riskAnn = 0; _fgr.forEach(function(x){ _riskAnn += N(x.prem); });
+      var _pc = crmPensionContrib(finalPol.PensionableSalary, finalPol.MemberContribPct, finalPol.EmployerContribPct, _riskAnn, finalPol.AnnualAdminFees);
+      if(_pc){ finalPol.Premium = _pc.premium; if(!clean(finalPol.Frequency)) finalPol.Frequency = 'Monthly'; }
+    }
     // Business Assurance estate dutiable, new policies only (11 Oct 2026): Contingent Liability = Yes,
     // Buy & Sell (or type not stated) = No, Keyman = left unset until the family company test is done.
     if(!isUpdate && finalPol.Type==='Business Assurance' && !clean(finalPol.EstateDutiable)) finalPol.EstateDutiable = baEstateDefault(finalPol.BizType);
