@@ -20434,11 +20434,14 @@ function wbkFinish(P, cid, results){
 // client's children not in a trust) has their need added to the spouse's. Each person keeps their own amount, term and rise,
 // but the money reaching the spouse (and anything reaching the child) pays for all of it, taxed in the spouse's hands, and
 // the spouse's new cover closes the family's gap. A child in a trust, or from another relationship (set No), stands alone.
+// 2.6 (21 Oct 2026, Clinton): the executor's cash shortfall is paid by the spouse from what reaches them (the default when the
+// spouse is in section 6): it is a once-off in the spouse's need, so the family has one figure and no cover goes into the estate.
+// The client page is one summary table (what is needed, what is in place, the new cover) and a short table per person.
 // The template builder (build_qfna.js) and the CRM (index.html, QF_SPEC) both use this.
 // The CRM fills the Inputs sheet by named range (QF_<key> single cells, QF_T_<table> table
 // bodies). Everything else in the workbook is a formula. One way only: nothing comes back.
 var QF_SPEC = {
-  version: '2.5',
+  version: '2.6',
   copyOffset: 25,                      // hidden copy of the CRM's values: column + 25 (B -> AA) on Inputs
   watched: ['assets', 'debts', 'cover', 'dinc', 'funds', 'deps'],   // tables whose changes turn orange (plus the client cells except Wishes)
   sheets: {inputs: 'Inputs', summary: 'Summary', quote: 'Figures for quoting', work: 'Workings', lists: 'Lists'},
@@ -20451,6 +20454,7 @@ var QF_SPEC = {
     rel: ['Spouse', 'Child', 'Other'],
     kidsShare: ['In equal shares', 'Not to the dependants'],
     spouseCover: ['The spouse', 'A trust for the spouse'],
+    execPays: ['The spouse, from what they receive', 'Cover paid to the estate'],   // 2.6
     marital: ['Single', 'Engaged', 'Married - ANC with accrual', 'Married - ANC without accrual', 'Married in COP', 'Life partner', 'Divorced', 'Widowed', 'Married', 'Civil Union', 'Co-Habitation']
   },
   // Kinds that carry capital gains tax on death (the rest do not: cash, tax-free, loan accounts, vehicles and contents)
@@ -20594,6 +20598,19 @@ function qfNoSbr(d){
   return null;
 }
 
+// 2.6: whose need a description names: the spouse ("wife", "husband", "spouse", "partner" or the spouse's own first names), or
+// exactly one family member by one of their first names. Returns {benTo, benName} or null when it is not clear.
+function qfWhoFromDesc(desc, fam, c){
+  var W = function(s){ return String(s||'').toLowerCase().replace(/[^a-zÀ-ɏ\s'-]/g,' ').split(/\s+/).filter(function(w){ return w; }); };
+  var given = function(n){ var w = W(n); return w.length>1 ? w.slice(0,-1) : w; };     // first names: all but the surname
+  var dw = W(desc).map(function(w){ return w.replace(/'s$/,''); });
+  var spWords = given(c.SpouseName).concat(W(c.SpouseCallingName));
+  var sp = dw.some(function(w){ return ['wife','husband','spouse','partner','vrou'].indexOf(w)>=0 || spWords.indexOf(w)>=0; });
+  var hits = (fam||[]).filter(function(l){ return !isPartnerType(l.Type) && l.Type!=='Life Partner' && given(l.Name).some(function(g){ return g.length>1 && dw.indexOf(g)>=0; }); });
+  if(sp && !hits.length) return {benTo:'Spouse', benName:''};
+  if(!sp && hits.length===1){ var g = given(hits[0].Name).filter(function(x){ return dw.indexOf(x)>=0; })[0]; return {benTo:'Named person', benName:g.charAt(0).toUpperCase()+g.slice(1)}; }
+  return null;
+}
 // The record, as Quick FNA input rows. Returns {single:{}, assets:[], debts:[], cover:[], dinc:[], funds:[], deps:[], checks:[], assumptions:{}}.
 function qfnaData(c){
   var out = { single:{}, assets:[], debts:[], cover:[], dinc:[], funds:[], deps:[], checks:[], assumptions:{} };
@@ -20731,6 +20748,12 @@ function qfnaData(c){
     var once = d.needType!=='Monthly income', amt = fpN(d.amount);
     if(once && !(amt>0)){ warn('the once-off death need "'+lbl+'" has no amount, so it is left out.'); return; }
     if(once && d.benTo==='Estate'){ warn('the once-off death need "'+lbl+'" (R '+Number(amt).toLocaleString('en-US')+') is for the estate. If it is not already a debt in section 2, add it there; it is not added on its own, so nothing is counted twice.'); return; }
+    // 2.6 (21 Oct 2026, Clinton): "Whose need" left blank is read from the description ("Total income for Levi", "income for
+    // wife"), only when it names the spouse or exactly one family member, and the check says so. Anything unclear stays out (red).
+    if(d.benTo!=='Spouse' && d.benTo!=='Estate' && !(d.benTo==='Named person' && clean(d.benName))){
+      var gw = qfWhoFromDesc(lbl, fam, c);
+      if(gw){ d = Object.assign({}, d, gw); note('"Whose need" is blank on the death need "'+lbl+'", so it is taken from the description: '+(gw.benTo==='Spouse' ? 'the spouse' : gw.benName)+'. Set it on the Needs tab to keep it.'); }
+    }
     var bn = d.benTo==='Named person' ? clean(d.benName) : '';
     if(d.benTo!=='Spouse' && !bn){
       if(d.benTo!=='Estate') noWhose++;
@@ -21048,7 +21071,9 @@ function qfnaData(c){
   var asAt = rows.map(function(r){ return String(r.d.valueDate||''); }).filter(function(s){ return /^\d{4}-\d{2}-\d{2}$/.test(s); }).sort().pop();
   out.single = { Client:(clean(c.Title)?c.Title+' ':'')+nm, First:clean(c.CallingName)||nm.split(' ')[0], Adviser:QF_ADVISER,
     Date:qfDate(localDateStr()), AsAt:asAt ? qfDate(asAt) : null, Marital:marital, Residue:residue, Wishes:null,
-    TI:TI, TINote:parts.length ? parts.join(' and ')+' a month' : 'no taxable income captured', KidsShare:kidsShare, SpouseCover:'The spouse' };
+    TI:TI, TINote:parts.length ? parts.join(' and ')+' a month' : 'no taxable income captured', KidsShare:kidsShare, SpouseCover:'The spouse',
+    // 2.6: with the spouse in section 6, the spouse pays the executor's shortfall from what they receive (one family figure)
+    ExecPays:(spouseLaw && out.deps.some(function(x){ return x.rel==='Spouse'; })) ? QF_SPEC.lists.execPays[0] : QF_SPEC.lists.execPays[1] };
   return out;
 }
 
