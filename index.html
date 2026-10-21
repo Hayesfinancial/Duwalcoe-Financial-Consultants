@@ -24642,15 +24642,38 @@ function openPolicySchedule(cid){
 
   // Premium totals — personal and business ALWAYS kept separate
   function isNonMonthly(p){var f=p.Frequency||'Monthly';return f==='Once Off'||f==='Lump Sum'||f==='Annually'||f==='Quarterly';}
+  // Employer pension / provident fund contribution split (21 Oct 2026, Clinton, Daniel Puente).
+  // The card stores Premium as NET to retirement when admin fees or group risk premiums are
+  // captured (pensionContribCalc). The schedule shows the money going in instead:
+  // salary x (member % + employer %), split into the member's salary deduction and the
+  // employer's share, with the costs and the net beneath on the card. Costs are summed exactly
+  // as the card sums them (every group risk row premium plus the annual admin fees).
+  // Null when the card has no salary or % — the schedule then uses Premium exactly as before.
+  function pensSplit(p){
+    if(p.Type!=='Pension Fund' && p.Type!=='Provident Fund') return null;
+    var sal=N(p.PensionableSalary), mp=N(p.MemberContribPct), ep=N(p.EmployerContribPct);
+    if(sal<=0 || (mp+ep)<=0) return null;
+    var riskAnn=0; grRows(p).forEach(function(r){ riskAnn+=N(r.prem); });
+    var adminAnn=N(p.AnnualAdminFees);
+    var pc=crmPensionContrib(sal, mp, ep, riskAnn, adminAnn);
+    if(!pc) return null;
+    return {sal:sal, mp:mp, ep:ep, member:sal*mp/100/12, employer:sal*ep/100/12,
+            gross:pc.grossMonthly, costs:pc.costsMonthly, net:pc.netMonthly, hasCosts:pc.hasCosts,
+            riskM:riskAnn/12, adminM:adminAnn/12};
+  }
+  // The monthly figure the schedule uses for a policy: the full contribution for a split
+  // employer fund, else the captured Premium.
+  function schedPrem(p){ var s=pensSplit(p); return s ? s.gross : N(p.Premium); }
   var nonMonthly=[];
   var tPersM=0, tBizM=0, tPersAll=0, tBizAll=0;
 
   var personalGroups=[groups.personal,groups.ra,groups.invest,groups.medical,groups.other];
   personalGroups.forEach(function(g){
     g.pols.forEach(function(p){
-      var n=N(p.Premium);
+      var n=schedPrem(p);
       tPersAll+=n;
-      if(isNonMonthly(p)) nonMonthly.push(p);
+      // A split employer fund is a monthly payroll figure whatever the card's frequency says.
+      if(!pensSplit(p) && isNonMonthly(p)) nonMonthly.push(p);
       else tPersM+=n;
     });
   });
@@ -24693,6 +24716,23 @@ function openPolicySchedule(cid){
   var costByPayer            = { client: _newPayerBucket(), others:{} };
   var costNonMonthlyByPayer  = { client: _newPayerBucket(), others:{} }; // tracked but not currently displayed
   var annualByCategory       = {risk:0, retirement:0, investment:0, medical:0, business:0, other:0};
+  // A legacy typed Payer that is plainly the client's own name (21 Oct 2026). About 35 clients'
+  // policies carry "Bennie", "anje", "DQ Campbell", "JJ beukes" etc. with no PayerType, which
+  // read as someone else paying. Matches ONLY: one word equal to one of the client's first names;
+  // or first name / initials of the client's first names followed by the client's surname.
+  // A surname alone never matches ("Stephen Keyser" for Anna Maria Keyser, "EV Vroom" for Candice
+  // Vroom are other people). Nicknames ("Strini") are not guessed and stay as typed.
+  function typedPayerIsClient(typed, full){
+    var t=String(typed||'').toLowerCase().replace(/[.,]/g,' ').split(/\s+/).filter(Boolean);
+    var f=String(full||'').toLowerCase().replace(/[.,]/g,' ').split(/\s+/).filter(Boolean);
+    if(!t.length || f.length<2) return false;
+    var given=f.slice(0,-1), sur=f[f.length-1];
+    if(t.length===1) return given.indexOf(t[0])>=0;
+    if(t.length!==2 || t[1]!==sur) return false;
+    if(given.indexOf(t[0])>=0) return true;
+    var ini=given.map(function(g){ return g.charAt(0); }).join('');
+    return /^[a-z]{1,4}$/.test(t[0]) && ini.indexOf(t[0])===0;
+  }
   function resolvedPayer(p){
     var pt = p.PayerType||'';
     if(!pt){
@@ -24702,7 +24742,7 @@ function openPolicySchedule(cid){
       // Payer "HC Rhodes" stays under HC Rhodes in the Cost block, not Client).
       var typedPayer = (p.Payer||'').trim();
       var clientName = (c.Name||'').trim();
-      if(typedPayer && typedPayer!==clientName){
+      if(typedPayer && typedPayer!==clientName && !typedPayerIsClient(typedPayer, clientName)){
         return {key:'others', name:typedPayer};
       }
       // No typed payer override — use policy-type default.
@@ -24779,6 +24819,38 @@ function openPolicySchedule(cid){
       covDis   += lumpSum(p,'Capital Disability','BenDisability');
       covDD    += lumpSum(p,'Dread Disease / Severe Illness','BenDreadDisease');
       covIP    += incomeMax(p);
+    });
+  });
+
+  // ── YOUR COVER sources (21 Oct 2026, Clinton: the summary showed life cover only; a client with
+  // two dread disease policies had to add them up by scrolling). Each cover total keeps the list of
+  // policies it came from, so the tile shows the total and where it comes from.
+  // Employer group risk on a Pension / Provident card is included (Clinton, 21 Oct 2026), on its own
+  // line. Spouse, child, funeral and other group cover is not the client's own cover and stays out.
+  // A group row captured only as a basis (e.g. "3 x salary") is named, never turned into an amount.
+  function polTitle(p){
+    var pr=String(p.Product||''), ins=String(p.Insurer||'');
+    return pr ? (pr.toLowerCase().indexOf(ins.toLowerCase())===0 ? pr : ((ins?ins+' ':'')+pr)) : (ins||'Policy');
+  }
+  var covSrc={death:[], dis:[], dd:[], ip:[], di:[]};
+  var grCov={death:0, dis:0, dd:0, ip:0};
+  var GR_COVER_KEY={'Life Cover':'death', 'Capital Disability (Lump Sum)':'dis', 'Dread Disease':'dd', 'Income Disability (PHI)':'ip'};
+  personalGroups.forEach(function(g){
+    g.pols.forEach(function(p){
+      var a={death:lumpSum(p,'Life Cover','BenDeath'), dis:lumpSum(p,'Capital Disability','BenDisability'),
+             dd:lumpSum(p,'Dread Disease / Severe Illness','BenDreadDisease'), ip:incomeMax(p)};
+      var _emp=(p.Type==='Pension Fund' || p.Type==='Provident Fund');
+      Object.keys(a).forEach(function(k){ if(a[k]>0) covSrc[k].push({name:(_emp?'Employer fund: ':'')+polTitle(p), amt:a[k], group:_emp}); });
+      var _di=deathIncomeRows(p).reduce(function(t,r){ return t+N(r.amount); },0);
+      if(_di>0) covSrc.di.push({name:polTitle(p), amt:_di});
+      if((p.Type==='Pension Fund' || p.Type==='Provident Fund') && p.HasGroupRisk!=='No'){
+        grRows(p).forEach(function(r){
+          var k=GR_COVER_KEY[r.type]; if(!k) return;
+          var nm='Employer fund: '+polTitle(p);
+          if(N(r.cover)>0){ grCov[k]+=N(r.cover); covSrc[k].push({name:nm, amt:N(r.cover), group:true}); }
+          else if(clean(r.basis)) covSrc[k].push({name:nm, basis:clean(r.basis), group:true});
+        });
+      }
     });
   });
 
@@ -25378,7 +25450,23 @@ function openPolicySchedule(cid){
       // for a USD 93,953 investment made from dirhams).
       var _ifx=(fx && fx.ccy && fx.ccy!=='ZAR') ? fx : null;
       var _invNat=(_ifx && N(_ifx.invNat)) ? N(_ifx.invNat) : 0;
-      if(N(p.Premium)>0){
+      var _sp=pensSplit(p);
+      if(_sp){
+        // Employer fund (21 Oct 2026): what goes in and from where, then the costs and the net
+        // to retirement, instead of one "Premium" that was the net figure.
+        var _pmS='<span style="font-size:10px;font-weight:400;color:'+MUT+'"> /pm</span>';
+        var _pcS=function(x){ return (Math.round(x*100)/100)+'%'; };
+        fields.push({label:'Pensionable salary', value:R(_sp.sal)+'<span style="font-size:10px;font-weight:400;color:'+MUT+'"> /year</span>'});
+        if(_sp.member>0)   fields.push({label:'Your contribution ('+_pcS(_sp.mp)+')', value:R(_sp.member)+_pmS+fxSub('from your salary')});
+        if(_sp.employer>0) fields.push({label:'Employer ('+_pcS(_sp.ep)+')', value:R(_sp.employer)+_pmS+fxSub('paid by your employer')});
+        fields.push({label:'Monthly contribution', value:R(_sp.gross)+_pmS});
+        if(_sp.hasCosts){
+          var _cTxt = (_sp.adminM>0 && _sp.riskM>0) ? ('admin '+R(_sp.adminM)+' &middot; group risk '+R(_sp.riskM)) : (_sp.riskM>0 ? 'group risk premiums' : 'admin &amp; other fees');
+          fields.push({label:'Fund costs', value:R(_sp.costs)+_pmS+fxSub(_cTxt)});
+          fields.push({label:'Net to retirement', value:R(_sp.net)+_pmS});
+        }
+        if(N(p.TotalInvested)>0) fields.push({label:'Total contributions', value:R(p.TotalInvested)});
+      } else if(N(p.Premium)>0){
         if(isLumpFreq(p)){
           fields.push({label:'Contribution', value:(p.Frequency||'Once-off')});
           // Native only when the native first investment was recorded — never
@@ -25456,7 +25544,9 @@ function openPolicySchedule(cid){
     var strip=[];
     if(bens.length) strip.push('<span style="color:'+MUT+';text-transform:uppercase;letter-spacing:.4px;font-size:9px">Beneficiaries</span> '+benDisplay(bens, isRAP));
     var rp=resolvedPayer(p);
-    if(rp&&rp.name&&rp.name!=='(unallocated)') strip.push('<span style="color:'+MUT+';text-transform:uppercase;letter-spacing:.4px;font-size:9px">Payer</span> <span style="color:'+TXT+'">'+escHtml(rp.name)+'</span>');
+    // An employer fund is paid through the payroll (21 Oct 2026): never show the client as the payer.
+    if(p.Type==='Pension Fund'||p.Type==='Provident Fund') strip.push('<span style="color:'+MUT+';text-transform:uppercase;letter-spacing:.4px;font-size:9px">Payer</span> <span style="color:'+TXT+'">Through your employer&rsquo;s payroll</span>');
+    else if(rp&&rp.name&&rp.name!=='(unallocated)') strip.push('<span style="color:'+MUT+';text-transform:uppercase;letter-spacing:.4px;font-size:9px">Payer</span> <span style="color:'+TXT+'">'+escHtml(rp.name)+'</span>');
     if(strip.length) card+='<div style="padding:9px 18px;border-top:1px solid '+LINE+';font-size:11.5px;line-height:1.7">'+strip.join('&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;')+'</div>';
 
     // Residual caveat note — cleaned, with the EAC and wealth-bonus clauses
@@ -25538,28 +25628,49 @@ function openPolicySchedule(cid){
     var fvKind=(fvInvN&&fvRetN)?'investment and retirement polic':(fvRetN?'retirement polic':'investment polic');
     tiles.push(tile('Portfolio value','R\u00a0'+Math.round(invFV).toLocaleString('en-ZA'),'Across '+fvN+' '+fvKind+(fvN===1?'y':'ies')));
   }
-  if(tPersM>0){
-    var cb=costByPayer.client.byCategory;
-    var subParts=[];
-    [['risk','Risk'],['retirement','Retirement'],['investment','Investment'],['medical','Medical'],['other','Other']].forEach(function(pr){
-      if(cb[pr[0]]>0) subParts.push(pr[1]+' R\u00a0'+Math.round(cb[pr[0]]).toLocaleString('en-ZA'));
-    });
-    var otherPay=Object.keys(costByPayer.others).reduce(function(s,k){return s+costByPayer.others[k].total;},0);
-    var msub=subParts.join(' &middot; ');
-    if(otherPay>0) msub+=(msub?'<br>':'')+'+ R\u00a0'+Math.round(otherPay).toLocaleString('en-ZA')+' paid on your behalf';
-    tiles.push(tile('Monthly contribution','R\u00a0'+Math.round(tPersM).toLocaleString('en-ZA'),msub));
-  }
-  if(covDeath>0 || covDI>0){
-    var riskPols=groups.personal.pols.filter(function(p){return lumpSum(p,'Life Cover','BenDeath')>0 || deathIncomeRows(p).length>0;});
-    var csub = riskPols.length===1 ? (escHtml(riskPols[0].Insurer||'')+(riskPols[0].Product?' '+escHtml(riskPols[0].Product):'')) : (riskPols.length+' life policies');
-    // Foreign cover inside the rand total is named, with its rate (27 Sep 2026).
-    var _fxCov={};
-    riskPols.forEach(function(p){ var f=riskFX(p); if(!f) return; var k=f.ccy+'|'+f.coverRate; _fxCov[k]=(_fxCov[k]||0)+lumpSum(p,'Life Cover','BenDeath')/N(f.coverRate); });
-    Object.keys(_fxCov).forEach(function(k){ var kk=k.split('|'); csub+='<br>incl. '+fxNat(_fxCov[k],kk[0],0)+' @ R'+escHtml(kk[1]); });
-    // Death income (16 Oct 2026): a monthly income on death, shown with the lump sum, never added to it.
-    var _pm='<span style="font-size:13px;font-weight:400;color:'+MUT+'"> /pm</span>';
-    if(covDeath>0) tiles.push(tile('Life cover','R\u00a0'+Math.round(covDeath).toLocaleString('en-ZA'),(covDI>0?'plus R\u00a0'+Math.round(covDI).toLocaleString('en-ZA')+' /pm death income<br>':'')+csub));
-    else tiles.push(tile('Death income','R\u00a0'+Math.round(covDI).toLocaleString('en-ZA')+_pm,csub));
+  // \u2500\u2500 WHAT YOU PAY (21 Oct 2026, Clinton: "clients want to see what comes off their account").
+  // The old "Monthly contribution" tile added an employer fund's net-to-retirement figure to the
+  // debit orders (Daniel Puente: R10,564, which nobody pays). Now the headline is the debit orders
+  // from the client's bank account; the salary deduction, the employer's share, an employer fund
+  // with no split captured, and anything paid by someone else are listed beneath, then the total
+  // going in. Business assurance stays out, as before. Monthly premiums only, as before.
+  function RR(n){ return 'R\u00a0'+Math.round(n).toLocaleString('en-ZA'); }
+  var pay={bank:0, bankCat:{}, salary:0, employer:0, empUnsplit:0, others:{}, othersOrder:[]};
+  allPols.forEach(function(p){
+    if(p.Type==='Business Assurance') return;
+    var sp=pensSplit(p);
+    if(sp){ pay.salary+=sp.member; pay.employer+=sp.employer; return; }
+    if(isNonMonthly(p)) return;
+    var prem=N(p.Premium); if(prem<=0) return;
+    // An employer fund is paid through the payroll, never by debit order.
+    if(p.Type==='Pension Fund' || p.Type==='Provident Fund'){ pay.empUnsplit+=prem; return; }
+    var rp=resolvedPayer(p);
+    if(rp.key==='client'){ pay.bank+=prem; var ct=_premCategory(p); pay.bankCat[ct]=(pay.bankCat[ct]||0)+prem; }
+    else { if(!(rp.name in pay.others)){ pay.others[rp.name]=0; pay.othersOrder.push(rp.name); } pay.others[rp.name]+=prem; }
+  });
+  var payOthers=pay.othersOrder.reduce(function(s,k){ return s+pay.others[k]; },0);
+  var payTotal=pay.bank+pay.salary+pay.employer+pay.empUnsplit+payOthers;
+  if(payTotal>0){
+    var head, cap, lines=[], parts=0;
+    [pay.bank,pay.salary,pay.employer,pay.empUnsplit].forEach(function(x){ if(x>0) parts++; });
+    parts+=pay.othersOrder.length;
+    if(pay.bank>0){ head=pay.bank; cap='debit orders from your bank account'; }
+    else if(pay.salary>0){ head=pay.salary; cap='deducted from your salary'; }
+    else { head=payTotal; cap='monthly contributions'; }
+    if(pay.bank>0){
+      var bc=[];
+      [['risk','Risk'],['retirement','Retirement'],['investment','Investment'],['medical','Medical'],['other','Other']].forEach(function(pr){ if(pay.bankCat[pr[0]]>0) bc.push(pr[1]+' '+RR(pay.bankCat[pr[0]])); });
+      if(bc.length>1) lines.push(bc.join(' &middot; '));
+    }
+    // "+" when the headline is the client's own payment; "of which" when it is the total.
+    var pfx=(pay.bank>0 || pay.salary>0) ? '+ ' : 'of which ';
+    if(pay.salary>0 && pay.bank>0) lines.push(pfx+RR(pay.salary)+' deducted from your salary');
+    if(pay.employer>0) lines.push(pfx+RR(pay.employer)+' paid by your employer');
+    if(pay.empUnsplit>0) lines.push(pfx+RR(pay.empUnsplit)+' to your employer fund (salary / employer split not captured)');
+    pay.othersOrder.forEach(function(k){ lines.push(pfx+RR(pay.others[k])+' paid on your behalf by '+escHtml(k)); });
+    if(parts>1 && head!==payTotal) lines.push('<strong style="color:'+TXT+'">'+RR(payTotal)+' a month goes in altogether</strong>');
+    var payVal=RR(head)+'<div style="font-family:Arial,Helvetica,sans-serif;font-size:10px;font-weight:400;color:'+MUT+';margin-top:3px">'+cap+'</div>';
+    tiles.push(tile('What you pay each month', payVal, lines.join('<br>')));
   }
   if(provNames.length){
     if(provNames.length===1){
@@ -25571,6 +25682,57 @@ function openPolicySchedule(cid){
     }
   }
   if(tiles.length) doc+='<div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:8px;align-items:stretch">'+tiles.join('')+'</div>';
+
+  // ── YOUR COVER (21 Oct 2026, Clinton): life, disability, dread disease and income protection,
+  // each a total with the policies under it. "None held" where a cover type is empty (a fact, not
+  // advice). The whole row is left off when the client holds no cover at all (an investment-only
+  // or retired client would otherwise get four empty tiles). Business assurance is not here.
+  var covTot={death:covDeath+grCov.death, dis:covDis+grCov.dis, dd:covDD+grCov.dd, ip:covIP+grCov.ip};
+  var anyCovSrc=covSrc.death.length||covSrc.dis.length||covSrc.dd.length||covSrc.ip.length;
+  if(anyCovSrc || covDI>0){
+    var srcList=function(arr, perMonth){
+      if(!arr.length) return '';
+      var pmS=perMonth?' /pm':'';
+      var show=arr.slice(0,6);
+      var s='<table style="width:100%;border-collapse:collapse;font-size:10.5px;line-height:1.45;color:'+MUT+'">';
+      show.forEach(function(x){
+        // Basis-only employer cover: one full-width line (a narrow amount column squashed it).
+        if(x.basis){ s+='<tr><td colspan="2" style="padding:1px 0;text-align:left;vertical-align:top">'+escHtml(x.name)+': <span style="color:'+TXT+'">'+escHtml(x.basis)+'</span>, amount not captured</td></tr>'; return; }
+        s+='<tr><td style="padding:1px 8px 1px 0;text-align:left;vertical-align:top">'+escHtml(x.name)+'</td>'+
+           '<td style="padding:1px 0;text-align:right;vertical-align:top;white-space:nowrap;color:'+TXT+'">'+
+           (x.basis ? escHtml(x.basis)+'<span style="color:'+MUT+'"> (amount not captured)</span>' : RR(x.amt)+pmS)+'</td></tr>';
+      });
+      if(arr.length>show.length) s+='<tr><td colspan="2" style="padding:1px 0;text-align:left">+ '+(arr.length-show.length)+' more (see the policy pages)</td></tr>';
+      return s+'</table>';
+    };
+    var noneVal='<span style="font-size:15px;color:'+MUT+';font-weight:400">None held</span>';
+    var _pmBig='<span style="font-size:13px;font-weight:400;color:'+MUT+'"> /pm</span>';
+    var cTiles=[];
+    // Life cover (with death income beside it, never added to it, 16 Oct 2026)
+    var lifeSub=srcList(covSrc.death,false);
+    if(covDI>0) lifeSub = (covDeath+grCov.death>0) ? ('plus '+RR(covDI)+' /pm death income'+(lifeSub?'<br>'+lifeSub:'')) : ('Monthly income to your beneficiaries'+srcList(covSrc.di,true));
+    // Foreign cover inside the rand total is named, with its rate (27 Sep 2026).
+    var _fxCov={};
+    groups.personal.pols.forEach(function(p){ var f=riskFX(p); if(!f) return; var lc=lumpSum(p,'Life Cover','BenDeath'); if(!(lc>0)) return; var k=f.ccy+'|'+f.coverRate; _fxCov[k]=(_fxCov[k]||0)+lc/N(f.coverRate); });
+    Object.keys(_fxCov).forEach(function(k){ var kk=k.split('|'); lifeSub+='<div style="font-size:10px;color:'+MUT+'">incl. '+fxNat(_fxCov[k],kk[0],0)+' @ R'+escHtml(kk[1])+'</div>'; });
+    // Cover held only as an employer basis with no rand amount: say so, never "None held".
+    var emptyVal=function(k){ return covSrc[k].length ? '<span style="font-size:15px;color:'+MUT+';font-weight:400">Amount not captured</span>' : noneVal; };
+    if(covTot.death>0) cTiles.push(tile('Life cover', RR(covTot.death), lifeSub));
+    else if(covDI>0) cTiles.push(tile('Death income', RR(covDI)+_pmBig, lifeSub));
+    else cTiles.push(tile('Life cover', emptyVal('death'), srcList(covSrc.death,false)));
+    cTiles.push(tile('Disability', covTot.dis>0?RR(covTot.dis):emptyVal('dis'), srcList(covSrc.dis,false)));
+    cTiles.push(tile('Dread disease', covTot.dd>0?RR(covTot.dd):emptyVal('dd'), srcList(covSrc.dd,false)));
+    cTiles.push(tile('Income protection', covTot.ip>0?(RR(covTot.ip)+_pmBig):emptyVal('ip'), srcList(covSrc.ip,true)));
+    var cNotes=[];
+    if(covTot.death>0 && (covTot.dis>0 || covTot.dd>0)) cNotes.push('Where a disability or dread disease benefit is accelerated, a claim on it reduces the life cover by the amount paid.');
+    if(covTot.ip>0) cNotes.push('Income protection is the monthly benefit; where a policy pays in phases, the highest phase is shown.');
+    if(grCov.death+grCov.dis+grCov.dd+grCov.ip>0 || [covSrc.death,covSrc.dis,covSrc.dd,covSrc.ip].some(function(a){ return a.some(function(x){ return x.group; }); }))
+      cNotes.push('Cover through an employer fund usually ends when you leave that employer.');
+    doc+='<div class="keep"><div class="sect">Your Cover</div>'+
+         '<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:stretch">'+cTiles.join('')+'</div>'+
+         (cNotes.length?'<div style="font-size:10px;color:'+MUT+';line-height:1.6;margin:8px 2px 4px">'+cNotes.join(' ')+'</div>':'')+
+         '</div>';
+  }
 
   // ── AT A GLANCE — COST & RETURN ──
   var glancePols=[];
@@ -25585,8 +25747,12 @@ function openPolicySchedule(cid){
       var isFundP=(raSet.indexOf(p.Type)>=0||invSet.indexOf(p.Type)>=0)&&p.Type!=='Life Annuity';
       var val = isFundP ? N(p.BenFundValue) : 0;
       if(val>0) gValTot+=val;
-      var mon = (!isLumpFreq(p)&&(p.Frequency||'Monthly')==='Monthly') ? N(p.Premium) : 0;
+      // A split employer fund shows the full contribution (member + employer), so the column
+      // total matches "What you pay" (21 Oct 2026); the card shows the costs and the net.
+      var _gsp=pensSplit(p);
+      var mon = _gsp ? _gsp.gross : ((!isLumpFreq(p)&&(p.Frequency||'Monthly')==='Monthly') ? N(p.Premium) : 0);
       if(mon>0) gMonTot+=mon;
+      var monSub = (_gsp && _gsp.member>0 && _gsp.employer>0) ? '<div style="font-size:9.5px;color:'+MUT+';font-weight:400">you '+RR(_gsp.member)+' &middot; employer '+RR(_gsp.employer)+'</div>' : '';
       // IRR
       var irrCell='<span style="color:'+MUT+'">n/a</span>';
       if(!isRiskP && p.IllustrativeRate && N(p.IllustrativeRate)!==0){
@@ -25607,7 +25773,7 @@ function openPolicySchedule(cid){
         '<td style="font-weight:600;color:'+INK+'">'+(p.Product?escHtml(p.Product):V(p.Insurer))+'</td>'+
         '<td style="color:'+MUT+'">'+escHtml(friendlyType(p))+'</td>'+
         '<td>'+(val>0?('R\u00a0'+Math.round(val).toLocaleString('en-ZA')):'<span style="color:#bbb">&mdash;</span>')+'</td>'+
-        '<td>'+(mon>0?('R\u00a0'+Math.round(mon).toLocaleString('en-ZA')):'<span style="color:#bbb">&mdash;</span>')+'</td>'+
+        '<td>'+(mon>0?('R\u00a0'+Math.round(mon).toLocaleString('en-ZA')+monSub):'<span style="color:#bbb">&mdash;</span>')+'</td>'+
         '<td>'+irrCell+'</td>'+
         '<td>'+eacCell+'</td></tr>';
     });
