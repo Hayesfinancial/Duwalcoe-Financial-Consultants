@@ -20438,16 +20438,21 @@ function wbkFinish(P, cid, results){
 // 2.6 (21 Oct 2026, Clinton): the executor's cash shortfall is paid by the spouse from what reaches them (the default when the
 // spouse is in section 6): it is a once-off in the spouse's need, so the family has one figure and no cover goes into the estate.
 // The client page is one summary table (what is needed, what is in place, the new cover) and a short table per person.
+// 2.7 (25 Oct 2026, Clinton): the executor uses what he controls first. Cash and deposits are always his; when the cash is short
+// he sells investments only as far as needed, in the order crypto, tax free savings, shares and unit trusts, other investments.
+// "Executor sells: Yes" forces the sale of the whole asset. Capital gains tax falls on the part sold; what the spouse keeps rolls
+// over. Crypto is a kind of its own; crypto with no base cost captured is taken at 50% of value (a yellow assumption, flagged).
+// No will captured for a married client: the residue is taken as going to the spouse.
 // The template builder (build_qfna.js) and the CRM (index.html, QF_SPEC) both use this.
 // The CRM fills the Inputs sheet by named range (QF_<key> single cells, QF_T_<table> table
 // bodies). Everything else in the workbook is a formula. One way only: nothing comes back.
 var QF_SPEC = {
-  version: '2.6',
+  version: '2.7',
   copyOffset: 25,                      // hidden copy of the CRM's values: column + 25 (B -> AA) on Inputs
   watched: ['assets', 'debts', 'cover', 'dinc', 'funds', 'deps'],   // tables whose changes turn orange (plus the client cells except Wishes)
   sheets: {inputs: 'Inputs', summary: 'Summary', quote: 'Figures for quoting', work: 'Workings', lists: 'Lists'},
   lists: {
-    kind: ['Property', 'Cash and deposits', 'Shares and unit trusts', 'Other investment', 'Tax-free investment', 'Loan account', 'Vehicle or contents', 'Business interest'],
+    kind: ['Property', 'Cash and deposits', 'Shares and unit trusts', 'Other investment', 'Crypto', 'Tax-free investment', 'Loan account', 'Vehicle or contents', 'Business interest'],   // 2.7: Crypto
     passes: ['Estate (residue)', 'Spouse', 'Named heir'],
     paidTo: ['Estate', 'Spouse', 'Named person'],
     yesno: ['Yes', 'No'],
@@ -20459,7 +20464,9 @@ var QF_SPEC = {
     marital: ['Single', 'Engaged', 'Married - ANC with accrual', 'Married - ANC without accrual', 'Married in COP', 'Life partner', 'Divorced', 'Widowed', 'Married', 'Civil Union', 'Co-Habitation']
   },
   // Kinds that carry capital gains tax on death (the rest do not: cash, tax-free, loan accounts, vehicles and contents)
-  cgtKinds: ['Property', 'Shares and unit trusts', 'Other investment', 'Business interest'],
+  cgtKinds: ['Property', 'Shares and unit trusts', 'Other investment', 'Crypto', 'Business interest'],
+  // 2.7 (25 Oct 2026, Clinton): when the executor's cash is short he sells investments only as far as needed, in this order
+  liquidOrder: ['Crypto', 'Tax-free investment', 'Shares and unit trusts', 'Other investment'],
   // Single cells on Inputs: key, label, type
   client: [
     {k: 'Client', label: 'Client', t: 'text'},
@@ -20521,6 +20528,7 @@ var QF_SPEC = {
     {k: 'CGTExcl', label: 'Capital gains exclusion in the year of death (R)', t: 'money', v: 440000},
     {k: 'Inclusion', label: 'Capital gains inclusion rate (%)', t: 'pct', v: 40},
     {k: 'PRExcl', label: 'Primary residence exclusion (R)', t: 'money', v: 3000000},
+    {k: 'CryptoBase', label: 'Crypto base cost when not captured (% of value)', t: 'pct', v: 50},   // 2.7 (Clinton, 25 Oct 2026)
     // 2.0: the needs (unit trust tax basis, as the full FNA calculator)
     {k: 'Gross', label: 'Return on capital, after fees, before tax (%)', t: 'pct', v: 7},
     {k: 'TrustFee', label: 'Trustee fees while in a trust (% a year)', t: 'pct', v: 2},
@@ -20542,7 +20550,7 @@ var QF_SPEC = {
 };
 if (typeof module !== 'undefined') module.exports = QF_SPEC;
 
-// ══ QUICK FNA (13 Oct 2026, phase 1: cost of dying; 15 Oct 2026, 2.0/2.1: the life cover need, simplified;
+// ══ QUICK FNA (13 Oct 2026, phase 1: cost of dying; 15 Oct 2026, 2.0/2.1: the life cover need, simplified; 2.7 (25 Oct 2026): the executor sells what he controls, in order;
 //    2.2: death income benefits in section 4b, set against the need of the person they are for;
 //    2.3: a company with a buy and sell is sold at death (its policy left out), a living annuity is paid out in cash) ══
 // Fills Duwalcoe_Quick_FNA_Template.xlsx (next to index.html) from the client's record and
@@ -20653,7 +20661,7 @@ function qfnaData(c){
   });
   // ── Other assets ──
   var OTHER_KIND = {'Cash / Savings':'Cash and deposits', 'Fixed Deposit':'Cash and deposits', 'Shares / Unit Trusts':'Shares and unit trusts',
-    'Crypto':'Other investment', 'Loan Account':'Loan account', 'Art / Collectibles':'Vehicle or contents', 'Household Contents':'Vehicle or contents',
+    'Crypto':'Crypto', 'Loan Account':'Loan account',   // 2.7: crypto is a kind of its own 'Art / Collectibles':'Vehicle or contents', 'Household Contents':'Vehicle or contents',
     'Business Interest':'Business interest', 'Other':'Other investment',
     // older type names still on some records (15 Oct 2026)
     'Cash':'Cash and deposits', 'Savings':'Cash and deposits', 'Tax-Free Investment':'Tax-free investment'};
@@ -20661,9 +20669,9 @@ function qfnaData(c){
     var d = r.d, f = share(d); if(!f) return;
     var k = OTHER_KIND[d.type] || 'Other investment';
     if(k==='Business interest') red('a business interest ('+(clean(d.desc)||'business')+') is captured as an "Other" asset: capture it as a business on the record, so the Quick FNA can cost it (a buy and sell, loan account and small business relief are read from there).');
-    // listed investments left to the estate are cashed in by the executor, unless the residue goes to the spouse:
-    // then the answer on the record decides (kept and passed to the spouse rolls over for CGT; sold is taxed)
-    var sold = (k==='Shares and unit trusts' && passes(d)==='Estate (residue)' && !residueToSpouse) ? 'Yes' : (d.soldDeath==='Yes' ? 'Yes' : 'No');
+    // 2.7 (25 Oct 2026, Clinton): the workbook sells investments itself, only as far as the cash is short (crypto, then tax free,
+    // shares, other). "Sold" here means the record says the whole asset is sold at death.
+    var sold = (d.soldDeath==='Yes' ? 'Yes' : 'No');
     out.assets.push({name:clean(d.desc)||d.type||'Asset', kind:k, value:amt(d.value,f), base:(QF_SPEC.cgtKinds.indexOf(k)>=0 ? amt(d.baseCost,f) : null),
       home:'', passes:passes(d), sold:(k==='Cash and deposits'?'':sold),
       notes:join([f<1?'half of a joint asset':'', heirNote(d), d.type==='Crypto'?'crypto':'', clean(d.notes)])});
@@ -21050,7 +21058,8 @@ function qfnaData(c){
     }
     var nb = 0; for(var i=1;i<=6;i++){ if(clean(W['bq'+i+'_item'])) nb++; }
     if(nb) note('The will capture has '+nb+' specific bequest'+(nb>1?'s':'')+': check "Passes to" on those assets (Named heir).');
-  } else note('No will captured: worst case, everything goes to heirs as people (no spouse deduction).');
+  } else if(spouseLaw){ residue = 'Spouse'; note('No will captured: everything is taken as going to the spouse (the residue, and the spouse deduction for estate duty). Change "Who inherits the residue" on Inputs if the will says otherwise.'); }   // 2.7 (Clinton, 25 Oct 2026)
+  else note('No will captured: worst case, everything goes to heirs as people (no spouse deduction).');
 
   // Offshore money captured as an ordinary asset or policy: the Quick FNA treats it as South African
   out.assets.concat(out.cover).concat(out.funds).forEach(function(a){
@@ -21104,6 +21113,7 @@ function qfnaExport(cid){
         if(k!=='Wishes' && N['QF_'+k]){ var R = N['QF_'+k]; copy(wb.getWorksheet(R.sheet), R.r1, wbkColNum(R.c1), D.single[k]); }
       });
       Object.keys(D.assumptions).forEach(function(k){ set('QF_A_'+k, D.assumptions[k]); });
+      cell('QF_A_CryptoBase');   // 2.7: an older template has no sale order or crypto kind: stop with "upload the latest template"
       function fill(tbl, list, what){
         var K = N['QF_K_'+tbl], T = N['QF_T_'+tbl];
         if(!K || !T){ errs.push('QF_T_'+tbl); return; }
