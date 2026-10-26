@@ -4241,10 +4241,122 @@ function fpR(n){
   var s = 'R ' + Math.abs(v).toLocaleString('en-ZA');
   return v < 0 ? '−' + s : s;
 }
+// ── Split between people (26 Oct 2026, Clinton): one asset left to several people in shares ──
+// Stored on the asset (a JSON blob, so no SQL): d.passesTo = 'Split' and d.shares = [{who, name, pct}], who being
+// 'Spouse', 'Named person' or 'Estate'; d.passesToName stays blank. Property, vehicles and other assets only, not business interests.
+var FP_SPLIT = 'Split';
+var FP_SPLIT_LABEL = 'Split between people';
+function fpPctTxt(n){ return String(Math.round(fpN(n)*100)/100); }
+function fpSharesOf(d){
+  var a = d && d.shares;
+  if(!Array.isArray(a)) return [];
+  return a.map(function(s){ s = s || {}; return {who:(s.who==='Spouse' || s.who==='Estate') ? s.who : 'Named person', name:clean(s.name), pct:fpN(s.pct)}; });
+}
+// "Michael Sean Burgess 50%": the name, else Spouse / Estate / Named person (no name), then the share
+function fpShareLabel(s){
+  var who = s.who==='Estate' ? 'Estate' : (clean(s.name) || (s.who==='Spouse' ? 'Spouse' : 'Named person (no name)'));
+  return who+' '+fpPctTxt(s.pct)+'%';
+}
+function fpSplitLabel(d){
+  var a = fpSharesOf(d);
+  return a.length ? a.map(fpShareLabel).join(', ') : 'Split (no shares captured)';
+}
 function fpPassesToLabel(d){
   if(!d.passesTo) return '—';
+  if(d.passesTo===FP_SPLIT) return fpSplitLabel(d);
   if(d.passesTo==='Named person') return d.passesToName ? d.passesToName : 'Named person (no name)';
   return d.passesTo;
+}
+// What a share is to the person whose record holds the asset, from their own family card (the FNA Data Pack).
+// A name that is not on the card is said so, never guessed.
+function fpShareRelation(homeCid, s){
+  if(s.who==='Estate') return 'Estate';
+  var hc = DB.clients.find(function(x){ return String(x.ID)===String(homeCid); }) || {};
+  var norm = function(t){ return String(t||'').replace(/\s+/g,' ').trim().toLowerCase(); };
+  var nm = norm(s.name);
+  var hit = nm ? (famFor(homeCid)||[]).find(function(m){ return norm(m.Name)===nm; }) : null;
+  var _spRow = (typeof partnerLinkFor==='function') ? partnerLinkFor(homeCid) : null;
+  var lp = (_spRow && _spRow.Type==='Life Partner') || hc.MaritalStatus==='Life partner';
+  if(s.who==='Spouse') return lp ? 'Life partner' : 'Spouse';
+  if(hit) return hit.Type==='Life Partner' ? 'Life partner' : (hit.Type || 'family member (type not captured)');
+  if(nm && norm(hc.SpouseName)===nm) return lp ? 'Life partner' : 'Spouse';
+  return 'relationship NOT CAPTURED (not on the family card)';
+}
+// Read the shares typed in the form. Returns {shares:[], err:''}; err says what to fix.
+function fpSplitRead(){
+  var out = [], err = '', tot = 0, seenSp = 0, seenEs = 0, seenNm = {};
+  document.querySelectorAll('#fpSplitBody tr.fpSplitRow').forEach(function(tr, i){
+    function q(cls){ var e = tr.querySelector('.'+cls); return e ? String(e.value).trim() : ''; }
+    var who = q('fps-who'), name = who==='Estate' ? '' : q('fps-name'), raw = q('fps-pct').replace('%','').trim();
+    if(!who && !name && !raw) return;   // an empty row is ignored
+    var n = (raw==='') ? NaN : fpN(raw);
+    if(!err){
+      if(!(n>0) || !/^[\d\s,.]+$/.test(raw)) err = 'Share '+(i+1)+' needs a percentage above 0.';
+      else if(n>100) err = 'Share '+(i+1)+' is more than 100%.';
+      else if(who==='Named person' && !name) err = 'Share '+(i+1)+' is a named person but has no name.';
+      else if(who==='Spouse' && ++seenSp>1) err = 'Spouse is in the split twice. Put the spouse\'s share on one row.';
+      else if(who==='Estate' && ++seenEs>1) err = 'Estate is in the split twice. Put the estate\'s share on one row.';
+      else if(who==='Named person'){ var k = name.replace(/\s+/g,' ').toLowerCase(); if(seenNm[k]) err = name+' is in the split twice. Put their share on one row.'; seenNm[k] = 1; }
+    }
+    if(n>0) tot += n;
+    out.push({who:who||'Named person', name:name, pct:Math.round(n*10000)/10000});
+  });
+  if(!err){
+    if(out.length<2) err = 'A split needs at least two people. For one person choose Spouse, Estate or Named person.';
+    else if(Math.abs(tot-100)>=0.005) err = 'The shares add up to '+fpPctTxt(tot)+'%, not 100%.';
+  }
+  return {shares:out, err:err, total:tot};
+}
+function fpSplitTotal(){
+  var el = document.getElementById('fpSplitTot'); if(!el) return;
+  var tot = 0;
+  document.querySelectorAll('#fpSplitBody .fps-pct').forEach(function(e){ var r = String(e.value).replace('%','').trim(); if(r!=='' && /^[\d\s,.]+$/.test(r)) tot += fpN(r); });
+  var ok = Math.abs(tot-100)<0.005;
+  el.innerHTML = 'Total: <strong>'+fpPctTxt(tot)+'%</strong> '+(ok ? '<span style="color:#1f7a4d">✓ adds up to 100%</span>' : '<span style="color:var(--rose)">must add up to 100%</span>');
+}
+function fpSplitRowHtml(s){
+  s = s || {};
+  var ist = 'width:100%;box-sizing:border-box;padding:6px;border:1px solid #cdd6dd;border-radius:6px;font-size:12.5px;font-family:inherit;background:#fff';
+  var who = ['Spouse','Named person','Estate'].map(function(w){ return '<option value="'+w+'"'+((s.who||'Named person')===w?' selected':'')+'>'+w+'</option>'; }).join('');
+  var pct = (s.pct===undefined || s.pct===null || s.pct==='') ? '' : fpPctTxt(s.pct);
+  return '<tr class="fpSplitRow">'+
+    '<td style="padding:2px;width:132px"><select class="fps-who" style="'+ist+'" onchange="fpSplitWho(this)">'+who+'</select></td>'+
+    '<td style="padding:2px"><input class="fps-name" list="fpNameList" style="'+ist+'" value="'+wfEsc(s.name||'')+'" autocomplete="off" placeholder="Choose from family or type a name"'+(s.who==='Estate'?' disabled':'')+'></td>'+
+    '<td style="padding:2px;width:84px"><input class="fps-pct" style="'+ist+';text-align:right" value="'+wfEsc(pct)+'" inputmode="decimal" autocomplete="off" placeholder="%" oninput="fpSplitTotal()"></td>'+
+    '<td style="padding:2px;width:34px"><button type="button" class="btn b-gh xs" title="Remove this share" onclick="fpSplitDel(this)">✕</button></td></tr>';
+}
+function fpSplitAdd(){
+  var b = document.getElementById('fpSplitBody'); if(!b) return;
+  b.insertAdjacentHTML('beforeend', fpSplitRowHtml({who:'Named person'}));
+  fpSplitTotal();
+}
+function fpSplitDel(btn){ var tr = btn.closest('tr'); if(tr) tr.remove(); fpSplitTotal(); }
+// Choosing Spouse fills the spouse's name when the row has none (for an item the spouse owns, the "spouse" is the client); Estate has no name
+function fpSplitWho(sel){
+  var tr = sel.closest('tr'), nm = tr ? tr.querySelector('.fps-name') : null; if(!nm) return;
+  if(sel.value==='Estate'){ nm.value = ''; nm.disabled = true; return; }
+  nm.disabled = false;
+  if(sel.value==='Spouse' && !nm.value.trim()){
+    var c = DB.clients.find(function(x){ return String(x.ID)===String(FP_CLIENT_ID); });
+    var ow = document.getElementById('fpowner');
+    if(c) nm.value = (ow && ow.value==='Spouse') ? clean(c.Name) : clean(c.SpouseName);
+  }
+}
+function fpSplitEditorHtml(d){
+  var sh = fpSharesOf(d);
+  if(!sh.length) sh = [{who:'Spouse', name:'', pct:''}, {who:'Named person', name:'', pct:''}];
+  var th = 'text-align:left;font-size:10.5px;color:#667;font-weight:600;padding:2px 4px';
+  var c = DB.clients.find(function(x){ return String(x.ID)===String(FP_CLIENT_ID); });
+  if(c && sh[0] && sh[0].who==='Spouse' && !sh[0].name){ var ow = String(d.owner||'Client'); sh[0].name = ow==='Spouse' ? clean(c.Name) : clean(c.SpouseName); }
+  return '<div id="fpSplitWrap" style="display:'+(d.passesTo===FP_SPLIT?'block':'none')+';margin:2px 0 12px;padding:10px 12px;border:1px solid #e2e8ee;border-radius:9px;background:#fbfcfd">'+
+    '<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:.6px;margin-bottom:6px">Who gets it, and in what shares (must add up to 100%)</div>'+
+    '<table style="width:100%;border-collapse:collapse"><thead><tr><th style="'+th+'">Who</th><th style="'+th+'">Name</th><th style="'+th+'">Share %</th><th></th></tr></thead><tbody id="fpSplitBody">'+sh.map(fpSplitRowHtml).join('')+'</tbody></table>'+
+    '<div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;gap:10px;flex-wrap:wrap"><button type="button" class="btn b-gh xs" onclick="fpSplitAdd()">＋ Add person</button><span id="fpSplitTot" style="font-size:12px;color:#556"></span></div>'+
+    '</div>';
+}
+function fpPassSelectHtml(val){
+  var opts = [['Spouse','Spouse'],['Estate','Estate'],['Named person','Named person'],[FP_SPLIT, FP_SPLIT_LABEL]];
+  return '<div class="fld"><label>Passes to at Death</label><select id="fppassesTo">'+opts.map(function(o){ return '<option value="'+o[0]+'"'+(String(val||'').trim().toLowerCase()===o[0].toLowerCase()?' selected':'')+'>'+o[1]+'</option>'; }).join('')+'</select></div>';
 }
 
 // ── Business interests: what the entity holds, client's and spouse's shares (12 Oct 2026) ──
@@ -12457,11 +12569,19 @@ function buildFnaDataPack(cid, includeSpouse){
         line('  • '+(d.desc||'(no description)')+fnaStampTxt(r.UpdatedAt, fm));
         var _cashR = fpCashRow(r, d);
         Object.keys(d).forEach(function(key){
-          if(key==='desc' || key==='holdings') return;
+          if(key==='desc' || key==='holdings' || key==='shares') return;   // shares: printed one line each under passesTo (26 Oct 2026)
           if(_cashR && (key==='soldDeath' || key==='soldDisab')) return;   // cash is not sold
           var v = d[key];
           if(v===undefined || v===null || String(v).trim()==='') return;
           line('      '+key+': '+v);
+          if(key==='passesTo' && v===FP_SPLIT){
+            // Split between people (26 Oct 2026): one line per share with the person, the relationship and the %
+            var _shs = fpSharesOf(d), _holder = (String(r.ClientID)!==String(forCid)) ? (clean((DB.clients.find(function(x){ return String(x.ID)===String(r.ClientID); })||{}).Name) || 'the other record') : '';
+            if(!_shs.length) line('        shares: NOT CAPTURED');
+            _shs.forEach(function(s, i){
+              line('        share '+(i+1)+': '+(s.who==='Estate' ? 'Estate' : (clean(s.name) || 'name NOT CAPTURED'))+', '+fpShareRelation(r.ClientID, s)+(_holder ? ' (as seen from '+_holder+'\'s record)' : '')+', '+fpPctTxt(s.pct)+'%');
+            });
+          }
         });
         // Whose it is, and what counts in this person's figures (15 Oct 2026)
         if(FP_SHARED_KINDS.indexOf(r.Kind)>=0){
@@ -17138,12 +17258,13 @@ function openFinPosModal(cid, kind, fpid){
     }
     var death =
       '<div class="g2">'+
-      fs('fppassesTo', FP_KIND==='business' ? 'Passes to at Death (the client\'s share and loan account)' : 'Passes to at Death', passOpts, d.passesTo||'Estate')+
+      (FP_KIND==='business' ? fs('fppassesTo', 'Passes to at Death (the client\'s share and loan account)', passOpts, d.passesTo||'Estate') : fpPassSelectHtml(d.passesTo||'Estate'))+   // 26 Oct 2026: property, vehicles and other assets also offer "Split between people"; business interests do not
       '<div class="fld" id="fpNameWrap" style="display:'+((d.passesTo||'Estate')==='Named person'?'flex':'none')+'">'+
       '<label>Named Person</label>'+
       '<input type="text" id="fppassesToName" list="fpNameList" value="'+clean(d.passesToName||'')+'" autocomplete="off" placeholder="Choose from family or type a name">'+
       '</div>'+
       '</div>'+
+      (FP_KIND==='business' ? '' : fpSplitEditorHtml(d))+
       '<div class="g2" id="fpSoldWrap" style="display:'+(_cashNow?'none':'')+'">'+
       fpChk('fpsoldDeath','Sold at death',d.soldDeath)+
       fpChk('fpsoldDisab','Sold at disability',d.soldDisab)+
@@ -17172,8 +17293,11 @@ function openFinPosModal(cid, kind, fpid){
     passSel.addEventListener('change', function(){
       var w = document.getElementById('fpNameWrap');
       if(w) w.style.display = passSel.value==='Named person' ? 'flex' : 'none';
+      var sw = document.getElementById('fpSplitWrap');   // 26 Oct 2026: the shares rows show for "Split between people"
+      if(sw){ sw.style.display = passSel.value===FP_SPLIT ? 'block' : 'none'; fpSplitTotal(); }
     });
   }
+  fpSplitTotal();
   // Need modal: toggle income-only fields on need type, named person on "For Whom"
   var ntSel = document.getElementById('fpneedType');
   if(ntSel){
@@ -17428,6 +17552,7 @@ function collectFinPosForm(){
   d.valueDate = g('fpvalueDate');
   d.passesTo = g('fppassesTo');
   d.passesToName = d.passesTo==='Named person' ? g('fppassesToName') : '';
+  if(d.passesTo===FP_SPLIT) d.shares = fpSplitRead().shares;   // 26 Oct 2026: checked in saveFinPos before this is saved
   d.soldDeath = fpChkVal('fpsoldDeath');
   d.soldDisab = fpChkVal('fpsoldDisab');
   if(FP_KIND==='property'){
@@ -17455,6 +17580,11 @@ function saveFinPos(){
       var _e = document.getElementById('fpesc'); if(_e){ _e.focus(); _e.select(); }
       return;
     }
+  }
+  // 26 Oct 2026: a split must name at least two people and add up to 100% before it saves
+  if(['property','vehicle','other'].indexOf(FP_KIND)>=0 && g('fppassesTo')===FP_SPLIT){
+    var _sp = fpSplitRead();
+    if(_sp.err){ toast(_sp.err,'err'); return; }
   }
   if(FP_KIND==='business'){
     var _bd = fpBizFormData();
@@ -19609,6 +19739,11 @@ function wbkExport(cid){
     }catch(e){ WBK.busy=false; console.error(e); toast('Could not fill the workbook: '+e.message,'err'); }
   }); });
 }
+// Split between people in the workbook (26 Oct 2026, no template change): "Passes to at death" shows Named person and the shares are
+// text in the Named person cell, as the CRM shows them ("Michael Sean Burgess 50%, Reinhardt Potgieter 25%, ..."). On import the
+// text is never read back: while "Passes to" still says Named person the split in the CRM stays exactly as it is (who, name and
+// % come from the record). Changing "Passes to" replaces the split, and the import preview says so.
+function wbkSplitOut(d){ return {passesTo:'Named person', passesToName:fpSplitLabel(d)}; }
 // Rows on a client's record, as the workbook groups them.
 function wbkKids(cid){
   return ((typeof famFor==='function') ? (famFor(cid)||[]) : []).filter(function(l){ return !isPartnerType(l.Type); });
@@ -19683,6 +19818,8 @@ function wbkFill(wb, c){
     fillTable(kind, items, function(r){
       var d = fpData(r), o = {_id:String(r.ID)};
       spec.cols.forEach(function(col){ o[col.k] = col.t==='owner' ? wbkOwnerOut(d[col.k], L) : wbkOut(col.t, d[col.k]); });
+      // 26 Oct 2026: a split between people goes out as text, no template change: "Passes to at death" shows Named person and the shares are in the Named person cell
+      if(d.passesTo===FP_SPLIT && spec.cols.some(function(col){ return col.k==='passesToName'; })){ var so = wbkSplitOut(d); o.passesTo = wbkOut('list:passes', so.passesTo); o.passesToName = wbkOut('text', so.passesToName); }
       return o;
     });
   });
@@ -19964,11 +20101,31 @@ function wbkPlan(wb, cidFrom, fileName){
         seen[fr.ID] = 1;
         if(!row._used){ X.gone.push({row:fr, why:'cleared in the workbook'}); return; }
         var od = fpData(fr), nd = Object.assign({}, od), ch = [];
+        // 26 Oct 2026: a split between people comes back as text in the Named person cell. While "Passes to" still says Named person
+        // the split is kept exactly as it is in the CRM; if "Passes to" was changed, the split is replaced (and the preview says so).
+        var _splitKeep = false, _splitGone = false;
+        if(od.passesTo===FP_SPLIT && (kind==='property' || kind==='vehicle' || kind==='other')){
+          var _so = wbkSplitOut(od), _np = o.passesTo;   // _np undefined: the cell could not be read (already warned), so the split is kept
+          if(_np!==undefined && (_np==='' ? stamped : !wbkSame('list:passes', _np, _so.passesTo))) _splitGone = true;
+          else {
+            _splitKeep = true;
+            var _nn = o.passesToName;
+            if(_nn!==undefined && String(_nn).trim()!==_so.passesToName && !(String(_nn).trim()==='' && !stamped)) P.warns.push(where+' ('+(od.desc||'')+'): the shares in the Named person cell were changed, but Passes to still says Named person, so the split stays as it is in the CRM. To change the split, edit it in the CRM, or change Passes to in the workbook to replace it.');
+          }
+        }
         spec.cols.forEach(function(col){
+          if(_splitKeep && (col.k==='passesTo' || col.k==='passesToName')) return;
           if(o[col.k]===undefined) return;
           if(o[col.k]==='' && (!stamped || col.k==='desc' || col.t==='owner' || col.k==='scenario' || col.k==='needType')) return;
           if(!wbkSame(col.t, od[col.k], o[col.k])){ ch.push({k:col.k, label:col.h, old:od[col.k], nw:o[col.k], t:col.t}); nd[col.k] = o[col.k]; }
         });
+        if(_splitGone){
+          var _was = fpSplitLabel(od);
+          delete nd.shares; nd.passesToName = '';
+          ch = ch.filter(function(x){ return x.k!=='passesToName'; });
+          ch.forEach(function(x){ if(x.k==='passesTo') x.old = FP_SPLIT_LABEL+': '+_was; });
+          ch.push({t:'note', nw:'The split between people ('+_was+') is replaced by the new "Passes to" choice.'});
+        }
         wbkFixRow(kind, nd, gen, od, ch);
         if(kind==='need'){ var ww2 = wbkWhoseNeedMsg(nd); if(ww2) P.warns.push(where+' ('+(nd.desc||'')+'): '+ww2); }
         var _wh = wbkHomeFor(cid, kind, nd.owner, fr._home), _stay = false;
@@ -20648,13 +20805,51 @@ function qfnaData(c){
   function heirNote(d){ return String(d.passesTo||'')==='Named person' && clean(d.passesToName) ? 'to '+d.passesToName : ''; }
   function join(a){ return a.filter(function(x){ return x; }).join('; '); }
   function amt(v, f){ var n = qfNum(v); return n===null ? null : Math.round(n*f*100)/100; }
+  // Split between people (26 Oct 2026, Clinton): an asset left to several people in shares goes out as one row per share, the
+  // value and base cost at that share (times the %), passed to the spouse, a named heir or the estate as the share says.
+  // The last share takes the cents left over, so the shares add back to the whole asset to the cent.
+  function splitParts(d, f, withBase, label){
+    var sh = fpSharesOf(d), pv = amt(d.value, f), pb = withBase ? amt(d.baseCost, f) : null;
+    if(!sh.length){ warn(label+': marked as split between people, but no shares are captured. It is shown as passing to the estate: fix the split on the record.'); return [{pct:100, value:pv, base:pb, passes:'Estate (residue)', who:'the estate', note:''}]; }
+    var tot = sh.reduce(function(a, s){ return a + s.pct; }, 0), whole = Math.abs(tot-100)<0.005, av = 0, ab = 0;
+    if(!whole) warn(label+': the shares add up to '+fpPctTxt(tot)+'%, not 100%, so each is taken at its own %. Fix the split on the record.');
+    return sh.map(function(s, i){
+      var last = whole && i===sh.length-1, p = s.pct/100;
+      var v = pv===null ? null : (last ? Math.round((pv-av)*100)/100 : Math.round(pv*p*100)/100);
+      var b = pb===null ? null : (last ? Math.round((pb-ab)*100)/100 : Math.round(pb*p*100)/100);
+      if(v!==null) av = Math.round((av+v)*100)/100;
+      if(b!==null) ab = Math.round((ab+b)*100)/100;
+      var who = s.who==='Estate' ? 'the estate' : (clean(s.name) || (s.who==='Spouse' ? 'the spouse' : 'a named person'));
+      return {pct:s.pct, value:v, base:b, passes:(s.who==='Spouse' ? 'Spouse' : (s.who==='Named person' ? 'Named heir' : 'Estate (residue)')), who:who, note:'to '+who};
+    });
+  }
+  function splitName(base, p){ return base+' ('+fpPctTxt(p.pct)+'% to '+p.who+')'; }
+  function isSplit(d){ return String(d.passesTo||'')===FP_SPLIT; }
 
   // ── Properties ──
   var rentalPM = 0;
   rows.filter(function(r){ return r.kind==='property'; }).forEach(function(r){
     var d = r.d, f = share(d); if(!f) return;
     rentalPM += fpN(d.rentalPM)*f;
-    out.assets.push({name:clean(d.desc)||'Property', kind:'Property', value:amt(d.value,f), base:amt(d.baseCost,f),
+    if(isSplit(d)){
+      var pn = clean(d.desc)||'Property', parts = splitParts(d, f, true, pn);
+      parts.forEach(function(p){
+        out.assets.push({name:splitName(pn, p), kind:'Property', value:p.value, base:p.base,
+          home:(d.primaryRes==='Yes'?'Yes':'No'), passes:p.passes, sold:(d.soldDeath==='Yes'?'Yes':'No'),
+          notes:join([f<1?'half of a joint property':'', 'split between people', clean(d.notes)])});
+      });
+      // The workbook counts the main home exclusion on every row, so a home split between people could get it more than once.
+      // It matters when two or more shares can carry capital gains tax (not left to the spouse and kept) and the gain is above the exclusion or cannot be worked out.
+      if(d.primaryRes==='Yes' && parts.length>1){
+        var prx = QF_SPEC.assumptions.filter(function(a){ return a.k==='PRExcl'; })[0].v;
+        var taxable = parts.filter(function(p){ return p.passes!=='Spouse' || d.soldDeath==='Yes'; });
+        if(taxable.length>1){
+          var unknown = taxable.some(function(p){ return p.value===null || p.base===null; });
+          var gain = taxable.reduce(function(a, p){ return a + ((p.value||0) - (p.base||0)); }, 0);
+          if(unknown || gain>prx) warn('"'+pn+'" is a main home split between '+parts.length+' people. The workbook counts the R '+Number(prx).toLocaleString('en-US')+' main home exclusion on each share (each is its own row), so the exclusion could be used more than once and the capital gains tax understated. '+(unknown ? 'The value or base cost is not captured, so the gain cannot be worked out.' : 'The gain on the shares that can be taxed is R '+Number(Math.round(gain*100)/100).toLocaleString('en-US')+'.')+' Work out the capital gains tax on this home by hand, or use the full FNA.');
+        }
+      }
+    } else out.assets.push({name:clean(d.desc)||'Property', kind:'Property', value:amt(d.value,f), base:amt(d.baseCost,f),
       home:(d.primaryRes==='Yes'?'Yes':'No'), passes:passes(d), sold:(d.soldDeath==='Yes'?'Yes':'No'),
       notes:join([f<1?'half of a joint property':'', heirNote(d), clean(d.notes)])});
     if(fpN(d.bondOut)>0) out.debts.push({name:'Bond: '+(clean(d.desc)||'property'), amount:amt(d.bondOut,f), notes:f<1?'half of the bond':''});
@@ -20672,6 +20867,15 @@ function qfnaData(c){
     // 2.7 (25 Oct 2026, Clinton): the workbook sells investments itself, only as far as the cash is short (crypto, then tax free,
     // shares, other). "Sold" here means the record says the whole asset is sold at death.
     var sold = (d.soldDeath==='Yes' ? 'Yes' : 'No');
+    if(isSplit(d)){
+      var on = clean(d.desc)||d.type||'Asset';
+      splitParts(d, f, QF_SPEC.cgtKinds.indexOf(k)>=0, on).forEach(function(p){
+        out.assets.push({name:splitName(on, p), kind:k, value:p.value, base:(QF_SPEC.cgtKinds.indexOf(k)>=0 ? p.base : null),
+          home:'', passes:p.passes, sold:(k==='Cash and deposits'?'':sold),
+          notes:join([f<1?'half of a joint asset':'', 'split between people', d.type==='Crypto'?'crypto':'', clean(d.notes)])});
+      });
+      return;
+    }
     out.assets.push({name:clean(d.desc)||d.type||'Asset', kind:k, value:amt(d.value,f), base:(QF_SPEC.cgtKinds.indexOf(k)>=0 ? amt(d.baseCost,f) : null),
       home:'', passes:passes(d), sold:(k==='Cash and deposits'?'':sold),
       notes:join([f<1?'half of a joint asset':'', heirNote(d), d.type==='Crypto'?'crypto':'', clean(d.notes)])});
@@ -20679,7 +20883,13 @@ function qfnaData(c){
   // ── Vehicles ──
   rows.filter(function(r){ return r.kind==='vehicle'; }).forEach(function(r){
     var d = r.d, f = share(d); if(!f) return;
-    out.assets.push({name:clean(d.desc)||'Vehicle', kind:'Vehicle or contents', value:amt(d.value,f), base:null, home:'', passes:passes(d),
+    if(isSplit(d)){
+      var vn = clean(d.desc)||'Vehicle';
+      splitParts(d, f, false, vn).forEach(function(p){
+        out.assets.push({name:splitName(vn, p), kind:'Vehicle or contents', value:p.value, base:null, home:'', passes:p.passes,
+          sold:(d.soldDeath==='Yes'?'Yes':'No'), notes:join([f<1?'half of a joint vehicle':'', 'split between people', clean(d.notes)])});
+      });
+    } else out.assets.push({name:clean(d.desc)||'Vehicle', kind:'Vehicle or contents', value:amt(d.value,f), base:null, home:'', passes:passes(d),
       sold:(d.soldDeath==='Yes'?'Yes':'No'), notes:join([f<1?'half of a joint vehicle':'', heirNote(d), clean(d.notes)])});
     if(fpN(d.financeOut)>0) out.debts.push({name:'Vehicle finance: '+(clean(d.desc)||'vehicle'), amount:amt(d.financeOut,f), notes:''});
   });
