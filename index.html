@@ -13089,7 +13089,8 @@ function fnaCapItem(r, meta){
   else if(r.Kind==='business' && fpIsTrust(d)){ bits.push('Trust'); if(d.loanAcc==='Credit'||d.loanAcc==='Debit') bits.push('Loan a/c '+d.loanAcc+' '+money(d.loanBal)); if(d.loanAccSpouse==='Credit'||d.loanAccSpouse==='Debit') bits.push('Spouse loan a/c '+d.loanAccSpouse+' '+money(d.loanBalSpouse)); if(fpHoldings(d).length) bits.push(fpHoldings(d).length+' holdings'); }
   else if(r.Kind==='business'){ if(d.pctHeld) bits.push(d.pctHeld+'% held'); bits.push('Share '+money(d.value)); if(fpN(d.pctHeldSpouse)>0) bits.push('Spouse '+d.pctHeldSpouse+'%, share '+money(d.valueSpouse)); if(fpHoldings(d).length) bits.push(fpHoldings(d).length+' holdings'); if(d.loanAcc==='Credit'||d.loanAcc==='Debit') bits.push('Loan a/c '+d.loanAcc+' '+money(d.loanBal)); bits.push(d.buySell==='Yes'?'Buy & Sell in place':'No Buy & Sell'); if(d.mainUse) bits.push(d.mainUse); if(d.dateAcquired) bits.push('Acquired '+fdate(d.dateAcquired)); if(d.activeInv) bits.push('Actively involved: '+d.activeInv); }
   else if(r.Kind==='liability'){ if(d.liabType) bits.push(d.liabType); bits.push('Balance '+money(d.balance)); if(fpN(d.paymentPM)) bits.push(money(d.paymentPM)+' /pm'); if(d.payOffDisab==='Yes') bits.push('Pay off if disabled'); }
-  else if(r.Kind==='income'){ if(d.incomeType) bits.push(d.incomeType); bits.push(money(d.amountPM)+' /pm'); if(fpN(d.bonus)) bits.push('Bonus '+money(d.bonus)+' /pa'); if(d.taxable==='No') bits.push('Non-taxable'); }
+  else if(r.Kind==='income'){ if(d.incomeType) bits.push(d.incomeType); bits.push(money(d.amountPM)+' /pm'); if(fpN(d.bonus)) bits.push('Bonus '+money(d.bonus)+' /pa'); if(d.taxable==='No') bits.push('Non-taxable');
+    if(d.deathOffset==='Yes') bits.push('counts against '+(d.benTo==='Named person' ? (clean(d.benName)||'a named person') : 'the spouse')+'\u2019s death need'+(clean(d.fromAge) ? ' from age '+clean(d.fromAge) : '')+(clean(d.toAge) ? ' to age '+clean(d.toAge) : '')); }
   else if(r.Kind==='expense'){ if(d.expCategory) bits.push(d.expCategory); bits.push(money(d.amountPM)+' /pm'); }
   else if(r.Kind==='need'){
     var isInc = d.needType==='Monthly income';
@@ -17202,6 +17203,22 @@ function openFinPosModal(cid, kind, fpid){
       '<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="fpincomeTaxable" value="Yes"'+(d.taxable!=='No'?' checked':'')+'>Taxable (PAYE / marginal rate)</label>'+
       '<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="fpincomeTaxable" value="No"'+(d.taxable==='No'?' checked':'')+'>Non-taxable / exempt</label>'+
       '</div></div>'+
+      // 2.8 (29 Oct 2026, Clinton): does this income carry on if the client dies, and whose death need does it count against
+      '<div class="fld" style="grid-column:1/-1;border-top:1px solid #e3e8e6;margin-top:6px;padding-top:10px"><label style="font-weight:700">If your client dies</label>'+
+      '<div style="font-size:12px;color:#667;margin-top:4px">Tick this only where the income really continues, or starts, after the death: the FNA then sizes the cover on what is left after it.</div></div>'+
+      fpChk('fpdeathOffset','Counts against the death need',d.deathOffset)+
+      '<div class="g2">'+
+      fs('fpincBenTo','Whose need it counts against',['','Spouse','Named person'],d.benTo||'')+
+      fld('fpincBenName','Their name (only for Named person)',d.benName||'')+
+      '</div>'+
+      '<div class="g2">'+
+      fld('fpoffsetPM','Amount a month after tax (R), blank uses the gross above',d.offsetPM||'')+
+      fld('fpoffsetEsc','Rising each year (%), blank means level',d.offsetEsc||'')+
+      '</div>'+
+      '<div class="g2">'+
+      fld('fpfromAge','From their age (blank: already being paid)',d.fromAge||'')+
+      fld('fptoAge','To their age (blank: to the end of their need)',d.toAge||'')+
+      '</div>'+
       fld('fpnotes','Notes (e.g. notice period, contract end date)',d.notes||'','textarea');
   } else if(FP_KIND==='expense'){
     html =
@@ -17531,6 +17548,14 @@ function collectFinPosForm(){
     d.bonus = g('fpbonus');
     var taxEl = document.querySelector('input[name="fpincomeTaxable"]:checked');
     d.taxable = taxEl ? taxEl.value : 'Yes';
+    // 2.8: set against a death need
+    d.deathOffset = fpChkVal('fpdeathOffset');
+    d.benTo = g('fpincBenTo');
+    d.benName = d.benTo === 'Named person' ? g('fpincBenName') : '';
+    d.offsetPM = g('fpoffsetPM');
+    d.offsetEsc = g('fpoffsetEsc');
+    d.fromAge = g('fpfromAge');
+    d.toAge = g('fptoAge');
     return d;
   }
   if(FP_KIND==='expense'){
@@ -20600,13 +20625,18 @@ function wbkFinish(P, cid, results){
 // "Executor sells: Yes" forces the sale of the whole asset. Capital gains tax falls on the part sold; what the spouse keeps rolls
 // over. Crypto is a kind of its own; crypto with no base cost captured is taken at 50% of value (a yellow assumption, flagged).
 // No will captured for a married client: the residue is taken as going to the spouse.
+// 2.8 (29 Oct 2026, Clinton): section 6b, income the person will receive anyway (a pension that starts later, their own
+// earnings until they stop, a rental). Each row says who it is for, the amount a month after tax, the rise, when it starts
+// and how long it pays. It is set against that person's need in each year it pays, exactly as a death income benefit is,
+// but it is not a policy: no estate duty, no executor's fee, and it is not cash for the executor. The amount is in today's
+// money and rises from today, so it matches every other figure on the sheet. Blank months: it runs to the end of their need.
 // The template builder (build_qfna.js) and the CRM (index.html, QF_SPEC) both use this.
 // The CRM fills the Inputs sheet by named range (QF_<key> single cells, QF_T_<table> table
 // bodies). Everything else in the workbook is a formula. One way only: nothing comes back.
 var QF_SPEC = {
-  version: '2.7',
+  version: '2.8',
   copyOffset: 25,                      // hidden copy of the CRM's values: column + 25 (B -> AA) on Inputs
-  watched: ['assets', 'debts', 'cover', 'dinc', 'funds', 'deps'],   // tables whose changes turn orange (plus the client cells except Wishes)
+  watched: ['assets', 'debts', 'cover', 'dinc', 'funds', 'deps', 'oinc'],   // tables whose changes turn orange (plus the client cells except Wishes)
   sheets: {inputs: 'Inputs', summary: 'Summary', quote: 'Figures for quoting', work: 'Workings', lists: 'Lists'},
   lists: {
     kind: ['Property', 'Cash and deposits', 'Shares and unit trusts', 'Other investment', 'Crypto', 'Tax-free investment', 'Loan account', 'Vehicle or contents', 'Business interest'],   // 2.7: Crypto
@@ -20660,6 +20690,12 @@ var QF_SPEC = {
       {k: 'other', h: 'Their own taxable income (R a year)', t: 'money'},
       {k: 'lump', h: 'Once-off needs (R, today\'s money)', t: 'money'},
       {k: 'via', h: 'Provided for by the spouse? (children)', t: 'list:yesno'}]},
+    // 2.8: income the person will receive anyway, set against their need in the years it pays (no estate duty, not executor's cash)
+    oinc: {rows: 8, cols: [
+      {k: 'name', h: 'Income', t: 'text'}, {k: 'forWhom', h: 'For whom (a person in section 6)', t: 'dep'},
+      {k: 'pm', h: 'A month (R), after tax', t: 'money'}, {k: 'esc', h: 'Rising each year (%)', t: 'pct'},
+      {k: 'start', h: 'Starts after (months)', t: 'months'}, {k: 'months', h: 'Months it pays (blank: to the end of their need)', t: 'months'},
+      {k: 'notes', h: 'Notes', t: 'text'}]},
     checks: {rows: 14, cols: [{k: 'text', h: 'From the CRM', t: 'text'}]}
   },
   quote: [
@@ -20777,9 +20813,9 @@ function qfWhoFromDesc(desc, fam, c){
   if(!sp && hits.length===1){ var g = given(hits[0].Name).filter(function(x){ return dw.indexOf(x)>=0; })[0]; return {benTo:'Named person', benName:g.charAt(0).toUpperCase()+g.slice(1)}; }
   return null;
 }
-// The record, as Quick FNA input rows. Returns {single:{}, assets:[], debts:[], cover:[], dinc:[], funds:[], deps:[], checks:[], assumptions:{}}.
+// The record, as Quick FNA input rows. Returns {single:{}, assets:[], debts:[], cover:[], dinc:[], oinc:[], funds:[], deps:[], checks:[], assumptions:{}}.
 function qfnaData(c){
-  var out = { single:{}, assets:[], debts:[], cover:[], dinc:[], funds:[], deps:[], checks:[], assumptions:{} };
+  var out = { single:{}, assets:[], debts:[], cover:[], dinc:[], oinc:[], funds:[], deps:[], checks:[], assumptions:{} };
   var red = function(t){ out.checks.push('✗ Full FNA: '+t); };
   var warn = function(t){ out.checks.push('✗ '+t); };
   var note = function(t){ out.checks.push('• '+t); };
@@ -21283,6 +21319,48 @@ function qfnaData(c){
   if(partnerJoint.length){ var _pc = DB.clients.find(function(x){ return String(x.ID)===String(partnerJoint[0].ClientID); }); note(partnerJoint.length+' joint item'+(partnerJoint.length>1?'s are':' is')+' held on '+((_pc && (clean(_pc.CallingName)||String(_pc.Name||'').split(' ')[0]))||'the spouse')+'\'s record and included here at half. "Passes to" and "sold at death" are as captured there: check they match '+(clean(c.CallingName)||nm.split(' ')[0])+'\'s will.'); }
   if(!out.assets.length) warn('no assets are captured.');
 
+  // ── 2.8 (29 Oct 2026, Clinton): section 6b, income a dependant will receive anyway ──
+  // An income line on the record ticked "Counts against the death need". The ages are turned into months from the
+  // date of this FNA using that person's date of birth, so "from 65 to 67" needs no arithmetic. The gross on the line
+  // stays where it is (it sets the client's taxable income); what is set against the need is the after-tax amount.
+  rows.filter(function(r){ return r.kind==='income' && String(r.d.deathOffset||'')==='Yes'; }).forEach(function(r){
+    var d = r.d, lbl = clean(d.desc) || 'an income';
+    var bn = d.benTo==='Named person' ? clean(d.benName) : '';
+    if(d.benTo!=='Spouse' && !bn){ warn('the income "'+lbl+'" is ticked as counting against the death need, but it does not say whose need: set it on the income line, or untick it.'); return; }
+    var P;
+    if(d.benTo==='Spouse') P = {name:spName||'Spouse', dob:spDOB};
+    else {
+      var hits = fam.filter(function(l){ return sameName(bn, l.Name); });
+      if(!hits.length && spName && sameName(bn, spName)) P = {name:spName, dob:spDOB};
+      else if(hits.length===1) P = {name:first(bn), dob:clean(hits[0].DOB)};
+      else { warn('the income "'+lbl+'" counts against the need of "'+bn+'", who '+(hits.length ? 'matches '+hits.length+' family members ('+hits.map(function(l){ return l.Name; }).join(', ')+')' : 'is not a family member on the record by that name')+': fix the name on the income line, or fill in section 6b by hand.'); return; }
+    }
+    var who = depByLabel(P.name);
+    if(!who){ warn('the income "'+lbl+'" counts against '+P.name+'\'s need, but '+P.name+' is not in section 6 (no death need is captured for them): add the need on the Needs tab, or untick the income.'); return; }
+    var pm = fpN(d.offsetPM);
+    if(!(pm>0)){
+      if(String(d.taxable||'')==='No') pm = fpN(d.amountPM);
+      else { warn('the income "'+lbl+'" is ticked against '+who+'\'s need and is marked taxable, but no after-tax amount a month is captured, so it is left out: enter it on the income line (the need is after tax).'); return; }
+    }
+    if(!(pm>0)){ warn('the income "'+lbl+'" is ticked against '+who+'\'s need but has no amount a month, so it is left out.'); return; }
+    var fa = fpN(d.fromAge), ta = fpN(d.toAge), tnote = [], start = 0, months = null;
+    if(fa>0){
+      var st = qfMonthsTo(P.dob, fa, fnaDay);
+      if(st===null) warn('the income "'+lbl+'" starts at age '+fa+', but '+who+' has no date of birth on the record: it is taken as already being paid. Fill in "Starts after (months)" in section 6b, or add the date of birth.');
+      else { start = st; tnote.push('from age '+fa); }
+    }
+    if(ta>0){
+      var en = qfMonthsTo(P.dob, ta, fnaDay);
+      if(en===null) warn('the income "'+lbl+'" stops at age '+ta+', but '+who+' has no date of birth on the record: it is taken as running to the end of '+who+'\'s need. Fill in "Months it pays" in section 6b, or add the date of birth.');
+      else if(en<=start) warn('the income "'+lbl+'" stops at age '+ta+', which is not after it starts, so it would pay nothing: check the ages on the income line.');
+      else { months = en - start; tnote.push('to age '+ta); }
+    }
+    if(d.incomeType==='Rental Income' && out.assets.some(function(a){ return a.kind==='Property' && a.sold==='Yes'; })) warn('the rental "'+lbl+'" counts against '+who+'\'s need, and a property is marked "Executor sells: Yes": if the rent comes from that property it stops at death and the capital reaches '+who+' instead. Check it.');
+    out.oinc.push({name:lbl, forWhom:who, pm:Math.round(pm*100)/100, esc:(clean(d.offsetEsc)==='' ? null : fpN(d.offsetEsc)),
+      start:start, months:months, notes:join([tnote.join(' '), clean(d.incomeType)])});
+  });
+  if(out.oinc.length) note(out.oinc.length+' income line'+(out.oinc.length>1 ? 's are' : ' is')+' set against a death need in section 6b, so the cover is sized on what is left after '+(out.oinc.length>1 ? 'them' : 'it')+'. Nothing there carries estate duty and none of it is cash for the executor.');
+
   // ── 2.0: how the residue reaches the children; 2.1: new cover for the spouse is nominated to the spouse ──
   var kidsShare = 'In equal shares';
   if(residue!=='Spouse' && out.deps.some(function(x){ return x.rel==='Child'; })){
@@ -21339,6 +21417,7 @@ function qfnaExport(cid){
       }
       fill('assets', D.assets, 'assets'); fill('debts', D.debts, 'debts'); fill('cover', D.cover, 'policies'); fill('dinc', D.dinc, 'death income benefits'); fill('funds', D.funds, 'retirement funds');
       fill('deps', D.deps, 'dependants');
+      fill('oinc', D.oinc, 'income lines set against a need');   // 2.8: section 6b
       fill('checks', D.checks.map(function(t){ return {text:t}; }), 'check lines');
       set('QF_M_ClientID', String(c.ID)); set('QF_M_ClientName', c.Name||''); set('QF_M_Version', QF_SPEC.version);
       set('QF_M_ExportedAt', new Date().toISOString().slice(0,16).replace('T',' '));
