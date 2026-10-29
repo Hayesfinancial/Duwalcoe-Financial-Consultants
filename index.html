@@ -284,6 +284,7 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--cream);c
           <span id="fnaPackSpJointLbl">Joint FNA: add the partner&rsquo;s full data pack, needs included</span>
         </label>
       </div>
+      <div id="fnaPackReady" style="display:none;margin:4px 0 8px;padding:8px 11px;background:#fdecea;border:1.5px solid #c92a2a;border-radius:7px;font-size:12px;line-height:1.5;color:#9a1f1f"></div>
       <textarea id="fnaPackTxt" readonly style="width:100%;min-height:420px;border:1.5px solid var(--mist);border-radius:7px;padding:10px 12px;font-size:12px;font-family:monospace;line-height:1.5;color:var(--ink);outline:none;resize:vertical;white-space:pre"></textarea>
     </div>
     <div class="mf">
@@ -3907,7 +3908,7 @@ function renderOverview(c,pols,roas,ctasks){
     '</div>';
   // Compact stat helper
   function cstat(cls,val,lbl){return '<div class="stat '+cls+'" style="padding:10px 12px;min-height:0"><div class="v" style="font-size:16px">'+val+'</div><div class="l" style="font-size:10px">'+lbl+'</div></div>';}
-  return fnaCapBadge(c)+familyHtml+
+  return fnaCapBadge(c)+fnaReadyPanel(c)+familyHtml+
     '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px;margin-bottom:16px">'+
     cstat('s-gd', activePols.length, 'Policies')+
     cstat('s-sg', tPers>0?rnd(tPers):'—', 'Personal /pm')+
@@ -4822,6 +4823,7 @@ function renderNeeds(c){
       function cell(lbl,val){ return '<div><div style="font-size:10px;color:#999;text-transform:uppercase;letter-spacing:.3px">'+lbl+'</div><div style="font-weight:600;font-size:13px">'+(val||'—')+'</div></div>'; }
       var cells = cell(isIncome?'Income Need':'Capital Need', amtTxt);
       if(isIncome) cells += cell('Escalation', d.esc?d.esc+'% p.a.':'Not specified — CPI assumed');
+      if(scen==='Retirement') cells += cell('From age', clean(d.fromAge)||'Not captured');   // 2.10
       if(needAsksForWhom(scen)) cells += cell('Whose need', fpPassesToLabel({passesTo:d.benTo, passesToName:d.benName}));
       var typeBadge = '<span style="background:'+(isIncome?'#e8f0fe;color:#1a4f9c':'#e8f5e9;color:#2e7d5a')+';border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700">'+(isIncome?'Income /pm':'Once-off capital')+'</span>';
       var scenBadge = '<span style="'+(NEED_SCEN_STYLE[scen]||NEED_SCEN_STYLE.Other)+';border-radius:10px;padding:2px 10px;font-size:11px;font-weight:600">'+scen+'</span>';
@@ -6328,7 +6330,7 @@ var REV_BATCH_PREFIX = 'review_feed_batch_';
 var REV_FEED_BATCHES = null;              // {ym:[clientId,...]}; null until loaded
 var _revBatchUnsaved = {}, _revBatchSaving = {}, _revBatchTried = {};
 var _revFeedTried = 0;
-var FP_NOT_ITEM_KINDS = ['need','need_notes','fna_meta','review_log'];   // finpos rows that are not assets/liabilities
+var FP_NOT_ITEM_KINDS = ['need','need_notes','fna_meta','review_log','fna_instr'];   // finpos rows that are not assets/liabilities (2.10: fna_instr)
 function revPad(n){ return ('0'+n).slice(-2); }
 function revYM(d){ return d.getFullYear()+'-'+revPad(d.getMonth()+1); }
 function revYmDate(ym){ var p=String(ym).split('-'); return new Date(+p[0], +p[1]-1, 1); }
@@ -12281,6 +12283,309 @@ function buildFormsUrl(c){
   return base + '?' + params.toString();
 }
 
+// ══ READY FOR FNA (2.10, 29 Oct 2026, Clinton) ══════════════════════════════
+// One panel at the top of the client's Overview tab, and the gate on the Quick FNA export.
+// It runs two sets of lines:
+//   1. READINESS GAPS — facts the FNA needs that the record does not have yet. Marked ⚠.
+//      These were built for the 26 Oct readiness check, which was overwritten by the 29 Oct
+//      build (the 2.8 work branched off the file before it), so they are rebuilt here and
+//      the Data Pack carries them again, at the top, as it did.
+//   2. QUICK FNA CHECK LINES — straight out of qfnaData, which is pure (no workbook, no
+//      ExcelJS), so the panel shows exactly what the workbook's Checks sheet will show,
+//      including the row caps, which are read off QF_SPEC.
+// WHAT BLOCKS THE EXPORT. A readiness gap or a fixable Quick FNA line ('✗ ...') blocks it:
+// those are all fixed by typing. An out-of-scope line ('✗ Full FNA: ...') does NOT block:
+// a business interest, offshore money, a living annuity or a split residue cannot be typed
+// away, and blocking on those would lock the Quick FNA out of most of the book. They are
+// shown in the panel in amber and they still print on the Checks sheet.
+// The panel also holds "Adviser instructions for this FNA": one row per client in
+// financial_position, Kind 'fna_instr' (a JSON blob, so no schema change), printed in the
+// Data Pack above the client's details.
+var FNA_READY_REMINDER = 'Confirm every policy is captured, including Capital Legacy and other estate plans, funeral cover and group cover.';
+var FNA_READY_REGIMES = ['Married - ANC with accrual', 'Married - ANC without accrual', 'Married in COP'];
+var FNA_READY_RISK = ['Life / Income Protector'];
+var FNA_READY_RET = ['Retirement Annuity', 'Pension Fund', 'Provident Fund', 'Pension Preservation', 'Provident Preservation', 'Living Annuity'];
+// The friendly words the Quick FNA export uses when a table overflows, so the panel and the sheet agree.
+var FNA_READY_TBL_WORD = {assets:'assets', debts:'debts', cover:'policies', dinc:'death income benefits', funds:'retirement funds', deps:'dependants', oinc:'income lines set against a need'};
+
+function fnaReadyKey(s){ return String(s===undefined||s===null?'':s).trim().toLowerCase().replace(/\s+/g, ' '); }
+
+// Every name this record knows: the family card, the spouse on the client card, the linked
+// spouse's own record and the client's own name. Used to tell a beneficiary or a share whose
+// relationship is known from one that is a stranger to the record.
+function fnaReadyKnownNames(cid){
+  var c = DB.clients.find(function(x){ return String(x.ID)===String(cid); }) || {};
+  var out = {};
+  function add(n){ var k = fnaReadyKey(n); if(k) out[k] = 1; }
+  add(c.Name); add(c.SpouseName);
+  ((typeof famFor==='function' ? famFor(cid) : []) || []).forEach(function(m){ add(m.Name); });
+  var spId = (typeof linkedSpouseClientId==='function') ? linkedSpouseClientId(cid) : null;
+  if(spId){ var sp = DB.clients.find(function(x){ return String(x.ID)===String(spId); }); if(sp) add(sp.Name); }
+  return out;
+}
+
+// Married for the readiness check: a status starting "Married" (an old bare "Married" counts),
+// a Civil Union, or a blank status with a spouse on the record. A life partner is not married.
+function fnaReadyIsMarried(c){
+  var m = clean(c.MaritalStatus);
+  if(m.indexOf('Married')===0 || m==='Civil Union') return true;
+  if(m) return false;
+  if(clean(c.SpouseName)) return true;
+  return ((typeof famFor==='function' ? famFor(c.ID) : []) || []).some(function(x){ return isPartnerType(x.Type); });
+}
+
+// The gaps, one line each, no rand amounts and no guesses.
+function fnaReadinessGaps(cid){
+  var c = DB.clients.find(function(x){ return String(x.ID)===String(cid); });
+  var G = [];
+  if(!c) return G;
+  if(c.ClientType==='Company') return G;   // no marital status, no will, no family card
+  var known = fnaReadyKnownNames(cid);
+  var married = fnaReadyIsMarried(c);
+
+  // 1. Married, regime not captured. A bare "married" off an import carries no regime, so it lands here.
+  if(married && FNA_READY_REGIMES.indexOf(clean(c.MaritalStatus))<0){
+    G.push('Marital regime not captured'+(clean(c.MaritalStatus) ? ' (the status reads "'+c.MaritalStatus+'")' : ' (the status is blank and there is a spouse on the record)')+'. The estate cannot be split without it: set in community of property, ANC with accrual, or ANC without accrual on the client card.');
+  }
+  // 2. Accrual: the commencement values. A declared nil counts as captured, so type 0.
+  if(clean(c.MaritalStatus)==='Married - ANC with accrual'){
+    var miss = [];
+    if(!clean(c.ANCCommClient)) miss.push('the client');
+    if(!clean(c.ANCCommSpouse)) miss.push('the spouse');
+    if(miss.length) G.push('ANC with accrual, but the commencement value for '+miss.join(' and ')+' is not captured. A nil value declared in the ANC counts: type 0.');
+  }
+  // 3. Will.
+  if(c.HasWill!=='Yes' && c.HasWill!=='No') G.push('Will: not yet asked. Ask whether there is a will and where it is kept.');
+  else if(c.HasWill==='Yes' && !clean(c.WillDate)) G.push('A will is on record with no date, so the CRM cannot tell whether it is the current one.');
+
+  // 4 and 7. Assets: who they pass to, and whether the person is known to the record.
+  // Own items and joint items held on the partner's record. The partner's own items kept on this
+  // record are skipped: they are not this client's estate.
+  var pj = (typeof fpJointFromPartner==='function') ? fpJointFromPartner(cid) : [];
+  finposFor(cid).concat(pj).forEach(function(r){
+    if(['property','vehicle','other','business'].indexOf(r.Kind)<0) return;
+    var d = fpData(r);
+    var elsewhere = String(r.ClientID)!==String(cid);
+    if(!elsewhere && String(d.owner||'Client')==='Spouse') return;
+    var where = (clean(d.desc) || r.Kind)+(elsewhere ? ' (joint, held on the partner’s record)' : '');
+    var p = String(d.passesTo||'');
+    if(!p){ G.push(where+': "Passes to at death" is not captured.'); return; }
+    if(p==='Named person' && !clean(d.passesToName)){ G.push(where+': it passes to a named person, but no name is given.'); return; }
+    if(p===FP_SPLIT){
+      var sh = (typeof fpSharesOf==='function') ? fpSharesOf(d) : [];
+      if(!sh.length){ G.push(where+': it is split between people, but no shares are captured.'); return; }
+      var tot = sh.reduce(function(a, x){ return a + fpN(x.pct); }, 0);
+      if(Math.abs(tot-100) > 0.005) G.push(where+': the shares add up to '+fpPctTxt(tot)+'%, not 100%.');
+      sh.forEach(function(x){
+        if(x.who!=='Named person') return;
+        if(!clean(x.name)){ G.push(where+': one of the shares has no name.'); return; }
+        if(!known[fnaReadyKey(x.name)]) G.push(where+': the share for "'+clean(x.name)+'" is for someone who is not on the family card, so the relationship is unknown.');
+      });
+    }
+    if(p==='Named person' && clean(d.passesToName) && !known[fnaReadyKey(d.passesToName)]){
+      G.push(where+': it passes to "'+clean(d.passesToName)+'", who is not on the family card, so the relationship is unknown.');
+    }
+  });
+
+  // 5 and 6. Beneficiaries on risk policies and on retirement funds and annuities. Active only.
+  ((typeof polsFor==='function' ? polsFor(cid) : []) || []).forEach(function(p){
+    if(typeof polIsGone==='function' && polIsGone(p)) return;
+    var t = clean(p.Type);
+    var isRisk = FNA_READY_RISK.indexOf(t)>=0, isRet = FNA_READY_RET.indexOf(t)>=0;
+    if(!isRisk && !isRet) return;
+    var bens = [];
+    try{ bens = p.Beneficiaries ? JSON.parse(p.Beneficiaries) : []; if(!Array.isArray(bens)) bens = []; }catch(e){ bens = []; }
+    bens = bens.filter(function(b){ return b && clean(b.name); });
+    var nm = (clean(p.Insurer) ? p.Insurer+' ' : '')+t+(clean(p.PolicyNo) ? ' '+p.PolicyNo : '');
+    if(!bens.length){
+      G.push(nm+': no beneficiaries captured.'+(isRet ? ' With no nomination the fund trustees decide under s.37C.' : ''));
+      return;
+    }
+    bens.forEach(function(b){
+      var ty = clean(b.type);
+      if(ty==='Estate' || ty==='Trust') return;
+      if(!known[fnaReadyKey(b.name)]) G.push(nm+': the beneficiary "'+clean(b.name)+'" is not on the family card, so the relationship is unknown.');
+    });
+  });
+
+  // 8. No death needs, where there is someone who depends on the client.
+  var needs = finposFor(cid).filter(function(r){ return r.Kind==='need'; });
+  var hasDep = ((typeof famFor==='function' ? famFor(cid) : []) || []).some(function(m){ return !isPartnerType(m.Type) && m.Dependent==='Yes'; });
+  if((married || hasDep) && !needs.some(function(r){ return (fpData(r).scenario||'')==='Death'; })){
+    G.push('No death needs captured on the Needs tab, so there is nothing to size life cover on.');
+  }
+  // 10 (2.10). A retirement need with no From age.
+  needs.forEach(function(r){
+    var d = fpData(r);
+    if((d.scenario||'')!=='Retirement') return;
+    if(!clean(d.fromAge)) G.push('The retirement need "'+(clean(d.desc)||'(no description)')+'" has no From age, so the FNA cannot tell when the income must start.');
+  });
+  return G;
+}
+
+// The Quick FNA's own check lines, with the row caps the workbook will apply.
+function qfnaCheckLines(c){
+  var D = qfnaData(c), out = D.checks.slice();
+  Object.keys(FNA_READY_TBL_WORD).forEach(function(t){
+    var list = D[t]; if(!list || !list.length) return;
+    var T = QF_SPEC.tables[t]; if(!T) return;
+    if(list.length > T.rows) out.push('✗ Only '+T.rows+' '+FNA_READY_TBL_WORD[t]+' fit on the Inputs sheet; '+(list.length-T.rows)+' left out. Use the full FNA.');
+  });
+  return out;
+}
+
+// Everything the panel and the gate need, in one call. broke: the check itself could not run,
+// which never blocks the export (a bug in here must not stop Clinton working).
+function fnaReadyBlockers(cid){
+  var c = DB.clients.find(function(x){ return String(x.ID)===String(cid); });
+  var R = {gaps:[], scope:[], fix:[], notes:[], blocked:false, broke:'', quick:(c && c.ClientType!=='Company')};
+  if(!c) return R;
+  try{ R.gaps = fnaReadinessGaps(cid); }catch(e){ R.broke = String(e && e.message || e); }
+  if(R.quick){
+    try{
+      var lines = qfnaCheckLines(c);
+      lines.forEach(function(t){
+        if(t.indexOf('✗ Full FNA')===0) R.scope.push(t);
+        else if(t.indexOf('✗')===0) R.fix.push(t);
+        else R.notes.push(t);
+      });
+    }catch(e){ R.broke = R.broke || String(e && e.message || e); }
+  }
+  R.blocked = !R.broke && (R.gaps.length + R.fix.length) > 0;
+  return R;
+}
+
+// ── Adviser instructions for this FNA: one finpos row per client, no schema change ──
+function fnaInstrRowFor(cid){
+  return DB.finpos.find(function(r){ return String(r.ClientID)===String(cid) && r.Kind==='fna_instr'; });
+}
+function fnaInstrText(cid){
+  var r = fnaInstrRowFor(cid);
+  return r ? String(fpData(r).text || '') : '';
+}
+// Same hardened pattern as saveNeedNotes: local first, then the server, never a render()
+// under the user's cursor.
+function saveFnaInstr(cid){
+  var txtEl = document.getElementById('fnaInstrTxt');
+  if(!txtEl) return;
+  var now = new Date().toISOString().slice(0,16).replace('T',' ');
+  var existing = fnaInstrRowFor(cid);
+  var row = {
+    ID: existing ? existing.ID : ('fpfi_'+cid),
+    ClientID: cid,
+    Kind: 'fna_instr',
+    Data: JSON.stringify({text: txtEl.value}),
+    UpdatedAt: now
+  };
+  row._pendingSave = true;
+  if(existing){ var gi = DB.finpos.indexOf(existing); if(gi>=0) DB.finpos[gi] = row; }
+  else DB.finpos.push(row);
+  try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
+  var _rowForServer = JSON.parse(JSON.stringify(row));
+  delete _rowForServer._pendingSave;
+  post({action:'saveFinPos', item:_rowForServer}, function(res){
+    if(res && res.ok===1){
+      var _ci = DB.finpos.findIndex(function(x){ return x.ID===row.ID; });
+      if(_ci>=0) DB.finpos[_ci] = _rowForServer;
+      try{ localStorage.setItem('du_db', JSON.stringify(DB)); }catch(e){}
+      if(window._fnaInstrDraft && String(window._fnaInstrDraft.cid)===String(cid)) window._fnaInstrDraft = null;
+      toast('Adviser instructions saved ✓','ok');
+    } else {
+      console.error('FNA instructions NOT saved to server. Retained locally with _pendingSave flag. ID:', row.ID);
+    }
+  });
+}
+
+// ── The panel ──
+function fnaReadyPanel(c){
+  if(!c) return '';
+  if(c.ClientType==='Company') return '';   // the FNA is for people
+  if(typeof isFamilyRecord==='function' && isFamilyRecord(c)) return '';
+  var R = fnaReadyBlockers(c.ID);
+  function esc(x){ return escHtml(String(x===undefined||x===null?'':x)); }
+  function strip(t){ return String(t).replace(/^✗ Full FNA:\s*/, '').replace(/^[✗•]\s*/, ''); }
+  function group(title, items, colour, bg, mark, pre){
+    if(!items.length) return '';
+    return '<div style="margin-top:8px">'+
+      '<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:'+colour+';margin-bottom:4px">'+esc(title)+'</div>'+
+      (pre ? '<div style="font-size:11.5px;color:#667;margin-bottom:4px">'+esc(pre)+'</div>' : '')+
+      '<ul style="margin:0;padding-left:0;list-style:none">'+
+      items.map(function(t){
+        return '<li style="display:flex;gap:7px;padding:4px 8px;margin-bottom:3px;background:'+bg+';border-radius:5px;font-size:12.5px;line-height:1.5;color:var(--ink)">'+
+          '<span style="color:'+colour+';font-weight:700;flex-shrink:0">'+mark+'</span><span>'+esc(strip(t))+'</span></li>';
+      }).join('')+
+      '</ul></div>';
+  }
+  var nFix = R.gaps.length + R.fix.length;
+  var head, headBg, headCol;
+  if(R.broke){ head = '⚠ Ready for FNA: the check could not run'; headBg = '#fef3c7'; headCol = '#92400e'; }
+  else if(nFix){ head = '⛔ Not ready for the FNA · '+nFix+' to fix'; headBg = '#fdecea'; headCol = '#9a1f1f'; }
+  else { head = '✅ Ready for the FNA'; headBg = '#f0fdf4'; headCol = '#0f766e'; }
+
+  var draft = window._fnaInstrDraft;
+  var instr = (draft && String(draft.cid)===String(c.ID)) ? draft.text : fnaInstrText(c.ID);
+  var instrRow = fnaInstrRowFor(c.ID);
+  var instrPending = (instrRow && instrRow._pendingSave) ? ' <span style="background:#fde8e8;color:var(--rose);border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700">⚠️ Not saved to server yet</span>' : '';
+  var isCo = c.ClientType==='Company';
+
+  var h = '<div class="card" style="margin-bottom:14px">'+
+    '<div style="padding:9px 16px;background:'+headBg+';border-radius:8px 8px 0 0;display:flex;align-items:center;gap:10px;flex-wrap:wrap">'+
+    '<span style="font-weight:700;font-size:13.5px;color:'+headCol+'">'+head+'</span>'+
+    '<span style="flex:1"></span>'+
+    '<button class="btn b-gd xs" onclick="copyFnaDataPack(\''+c.ID+'\')">📦 FNA Data Pack</button>'+
+    (isCo ? '' : (nFix || R.broke
+      ? '<button class="btn b-gh xs" disabled title="Fix the red lines below first" style="opacity:.5;cursor:not-allowed">📊 Quick FNA</button>'
+      : '<button class="btn b-gd xs" onclick="qfnaExport(\''+c.ID+'\')">📊 Quick FNA</button>'))+
+    '</div>'+
+    '<div style="padding:10px 16px 14px">';
+
+  if(R.broke){
+    h += '<div style="font-size:12.5px;color:#9a1f1f">The readiness check hit an error on this record: '+esc(R.broke)+'. The Quick FNA export is NOT blocked, so you can still export, but check the Checks sheet by hand.</div>';
+  } else if(!nFix && !R.scope.length && !R.notes.length){
+    h += '<div style="font-size:12.5px;color:#0f766e">Nothing missing. Every figure the Quick FNA needs is captured.</div>';
+  }
+  h += group('Fix before the FNA', R.gaps, '#9a1f1f', '#fdecea', '⚠', '');
+  h += group('Fix before the Quick FNA export', R.fix, '#9a1f1f', '#fdecea', '✗', 'These block the export: each one is fixed on the record.');
+  h += group('Outside the Quick FNA', R.scope, '#92400e', '#fef3c7', '✗', 'These do not block the export. The Quick FNA cannot cost them, so use the full FNA for this part.');
+  if(R.notes.length){
+    h += '<details style="margin-top:8px"><summary style="cursor:pointer;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:#667">Notes on the Quick FNA ('+R.notes.length+')</summary>'+
+      '<ul style="margin:6px 0 0;padding-left:0;list-style:none">'+
+      R.notes.map(function(t){ return '<li style="display:flex;gap:7px;padding:3px 8px;font-size:12px;line-height:1.5;color:#556"><span style="flex-shrink:0">•</span><span>'+esc(strip(t))+'</span></li>'; }).join('')+
+      '</ul></details>';
+  }
+  h += '<div style="margin-top:9px;font-size:11.5px;color:#92400e">⚠ '+esc(FNA_READY_REMINDER)+'</div>';
+
+  h += '<div style="margin-top:12px;border-top:1px solid var(--smoke);padding-top:10px">'+
+    '<div style="font-size:11px;font-weight:700;color:#667;text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px">Adviser instructions for this FNA'+instrPending+'</div>'+
+    '<div style="font-size:11.5px;color:#667;margin-bottom:5px">What this FNA must do, in your words. It goes out at the top of the Data Pack, above the client’s details.</div>'+
+    '<textarea id="fnaInstrTxt" oninput="window._fnaInstrDraft={cid:\''+c.ID+'\',text:this.value}" style="width:100%;min-height:62px;border:1.5px solid var(--mist);border-radius:7px;padding:8px 11px;font-size:13px;font-family:inherit;color:var(--ink);outline:none;resize:vertical" placeholder="e.g. Size the cover on R30,000 a month for 20 years escalating at 6%. Do not offset the rental income. Treat the estate as one pool.">'+String(instr).replace(/&/g,'&amp;').replace(/</g,'&lt;')+'</textarea>'+
+    '<div style="margin-top:7px;text-align:right"><button class="btn b-gd xs" data-act="save-fna-instr" data-id="'+c.ID+'">💾 Save Instructions</button></div>'+
+    '</div>';
+
+  h += '</div></div>';
+  return h;
+}
+
+// The red box above the pack text in the Data Pack window (restored with the readiness check).
+function fnaPackReadyRender(cid, mode){
+  var el = document.getElementById('fnaPackReady');
+  if(!el) return;
+  function block(id, withName){
+    var cc = DB.clients.find(function(x){ return String(x.ID)===String(id); });
+    var g = [];
+    try{ g = fnaReadinessGaps(id); }catch(e){ g = []; }
+    var head = withName ? '<div style="font-weight:700;margin-bottom:2px">'+escHtml(String((cc&&cc.Name)||''))+'</div>' : '';
+    if(!g.length) return head+'<div style="color:#0f766e;font-weight:600">Readiness check: nothing missing</div>';
+    return head+g.map(function(x){ return '<div style="margin-bottom:2px">⚠ '+escHtml(x)+'</div>'; }).join('');
+  }
+  var joint = mode==='joint', spId = joint ? linkedSpouseClientId(cid) : null;
+  var h = block(cid, joint);
+  if(spId) h += '<div style="margin-top:7px">'+block(spId, true)+'</div>';
+  h += '<div style="margin-top:6px">⚠ '+escHtml(FNA_READY_REMINDER)+'</div>';
+  el.innerHTML = h;
+  el.style.display = 'block';
+}
+
 // ══ FNA DATA PACK ═════════════════════════════════════════════════════════
 // Assembles everything Claude needs to do an FNA for a client into one
 // structured text block: client details, will status, spouse, family,
@@ -12316,6 +12621,15 @@ function buildFnaDataPack(cid, includeSpouse){
     return m||'';
   }
 
+  // 2.10: the readiness check leads the pack, so every gap is fixed in the CRM before the FNA
+  // is built, not discovered halfway through it. It never blocks the pack.
+  var _rgaps = [];
+  try{ _rgaps = fnaReadinessGaps(cid); }catch(e){ _rgaps = []; }
+  line('═══ READINESS CHECK — '+(c.Name||'')+' ═══');
+  if(!_rgaps.length) line('Readiness check: nothing missing');
+  else _rgaps.forEach(function(g){ line('⚠ '+g); });
+  line('⚠ '+FNA_READY_REMINDER);
+  line('');
   line('═══ FNA DATA PACK — '+(c.Name||'')+' ═══');
   line('Generated: '+new Date().toISOString().slice(0,16).replace('T',' ')+'  ·  Source: Duwalcoe CRM');
   // FNA capture status — tells the FNA which figures were reviewed with the client
@@ -12331,6 +12645,16 @@ function buildFnaDataPack(cid, includeSpouse){
     line('No FNA capture session on record — item dates below are last-edited dates only, not client confirmations.');
   }
   line('');
+
+  // ── Adviser instructions (2.10) — Clinton's own instruction for this FNA, typed in the
+  // Ready for FNA panel. Printed only when there is something in it.
+  var _instr = '';
+  try{ _instr = fnaInstrText(cid); }catch(e){ _instr = ''; }
+  if(clean(_instr)){
+    line('── ADVISER INSTRUCTIONS FOR THIS FNA ──');
+    line('  '+String(_instr).replace(/\r/g,'').replace(/\n/g, '\n  '));
+    line('');
+  }
 
   // ── Client ──
   line('── CLIENT ──');
@@ -12388,6 +12712,14 @@ function buildFnaDataPack(cid, includeSpouse){
     kv('Occupation', c.SpouseOccupation);
     kv('Employer', _sx('Employer', 'SpouseEmployer'));
     kv('Gross Income per Month (R)', c.SpouseIncome);
+    // 2.10: the taxable income the FNA actually uses for her, and where it came from
+    (function(){
+      var t; try{ t = qfSpouseTI(c); }catch(e){ return; }
+      if(!t) return;
+      if(t.ti > 0) line('  Own taxable income (R a year): '+fpR(t.ti)+'  ('+t.what+')');
+      else line('  Own taxable income: none captured'+(t.ownRecord ? ' on her own client record' : '')+', so she is treated as under the tax threshold.');
+      if(t.orphans.length) line('  ⚠ Rows marked as hers are still on this record and are NOT counted in her taxable income: '+t.orphans.join('; ')+'. Move them to her record.');
+    })();
     kv('Highest education', _sx('Education', 'SpouseEducation'));
     kv('Qualification', _sx('Qualification', 'SpouseQualification'));
     if(_spC) line('  (Also a client in their own right — own record and data pack.)');
@@ -12742,9 +13074,13 @@ function buildFnaDataPack(cid, includeSpouse){
       var d = fpData(r);
       var isInc = d.needType==='Monthly income';
       var amt = String(d.amount||'').trim();
+      // 2.10: a retirement need carries the age it starts at; a missing age is flagged, never guessed
+      var fromA = (String(d.scenario||'')==='Retirement')
+        ? (clean(d.fromAge) ? ' from age '+clean(d.fromAge) : ' (FROM AGE NOT CAPTURED)')
+        : '';
       var spec = isInc
-        ? ('Income: '+(amt?('R '+amt+' /pm'):'(amount not set)')+(d.years?' for '+d.years+' years':'')+(d.esc?', escalating '+d.esc+'% p.a.':', escalation not specified (assume CPI)'))
-        : ('Capital: '+(amt?('R '+amt):'(amount not set)'));
+        ? ('Income: '+(amt?('R '+amt+' /pm'):'(amount not set)')+fromA+(d.years?' for '+d.years+' years':'')+(d.esc?', escalating '+d.esc+'% p.a.':', escalation not specified (assume CPI)'))
+        : ('Capital: '+(amt?('R '+amt):'(amount not set)')+fromA);
       line('  • '+(d.desc||'(no description)')+' — '+spec+(d.benTo&&needAsksForWhom(d.scenario||'Other')?'  · for: '+(d.benTo==='Named person'?(d.benName||'named person'):d.benTo):'')+fnaStampTxt(r.UpdatedAt, fm));
       if(d.notes) line('      notes: '+d.notes);
     });
@@ -12835,6 +13171,7 @@ function copyFnaDataPack(cid){
     }
   }
   var txt = buildFnaDataPack(cid, false);
+  try{ fnaPackReadyRender(cid, 'none'); }catch(e){}   // 2.10
   document.getElementById('fnaPackT').textContent = 'FNA Data Pack — '+(c.Name||'');
   document.getElementById('fnaPackTxt').value = txt;
   document.getElementById('fnaPackMod').classList.add('open');
@@ -13090,12 +13427,14 @@ function fnaCapItem(r, meta){
   else if(r.Kind==='business'){ if(d.pctHeld) bits.push(d.pctHeld+'% held'); bits.push('Share '+money(d.value)); if(fpN(d.pctHeldSpouse)>0) bits.push('Spouse '+d.pctHeldSpouse+'%, share '+money(d.valueSpouse)); if(fpHoldings(d).length) bits.push(fpHoldings(d).length+' holdings'); if(d.loanAcc==='Credit'||d.loanAcc==='Debit') bits.push('Loan a/c '+d.loanAcc+' '+money(d.loanBal)); bits.push(d.buySell==='Yes'?'Buy & Sell in place':'No Buy & Sell'); if(d.mainUse) bits.push(d.mainUse); if(d.dateAcquired) bits.push('Acquired '+fdate(d.dateAcquired)); if(d.activeInv) bits.push('Actively involved: '+d.activeInv); }
   else if(r.Kind==='liability'){ if(d.liabType) bits.push(d.liabType); bits.push('Balance '+money(d.balance)); if(fpN(d.paymentPM)) bits.push(money(d.paymentPM)+' /pm'); if(d.payOffDisab==='Yes') bits.push('Pay off if disabled'); }
   else if(r.Kind==='income'){ if(d.incomeType) bits.push(d.incomeType); bits.push(money(d.amountPM)+' /pm'); if(fpN(d.bonus)) bits.push('Bonus '+money(d.bonus)+' /pa'); if(d.taxable==='No') bits.push('Non-taxable');
-    if(d.deathOffset==='Yes') bits.push('counts against '+(d.benTo==='Named person' ? (clean(d.benName)||'a named person') : 'the spouse')+'\u2019s death need'+(clean(d.fromAge) ? ' from age '+clean(d.fromAge) : '')+(clean(d.toAge) ? ' to age '+clean(d.toAge) : '')); }
+    if(d.deathOffset==='Yes') bits.push('counts against '+(d.benTo==='Named person' ? (clean(d.benName)||'a named person') : 'the spouse')+'\u2019s death need'+(clean(d.fromAge) ? ' from age '+clean(d.fromAge) : '')+(clean(d.toAge) ? ' to age '+clean(d.toAge) : ''));
+    if(d.retCont==='Yes') bits.push('continues in retirement'+(clean(d.retFromAge) ? ' from age '+clean(d.retFromAge) : '')+(clean(d.retToAge) ? ' to age '+clean(d.retToAge) : ' for life')); }
   else if(r.Kind==='expense'){ if(d.expCategory) bits.push(d.expCategory); bits.push(money(d.amountPM)+' /pm'); }
   else if(r.Kind==='need'){
     var isInc = d.needType==='Monthly income';
     bits.push(d.scenario||'Other');
     bits.push(isInc ? (money(d.amount)+' /pm'+(d.years?' × '+d.years+' yrs':'')+(d.esc?' @ '+d.esc+'%':' (CPI)')) : ('Capital '+money(d.amount)));
+    if((d.scenario||'')==='Retirement') bits.push(clean(d.fromAge) ? 'from age '+clean(d.fromAge) : 'from age NOT CAPTURED');   // 2.10
     if(d.benTo && needAsksForWhom(d.scenario||'Other')) bits.push('for: '+fpPassesToLabel({passesTo:d.benTo, passesToName:d.benName}));
   }
   if(d.owner && r.Kind!=='need') bits.unshift(FP_SHARED_KINDS.indexOf(r.Kind)>=0 && FNA_CAP.cid ? fpOwnerInfo(r, FNA_CAP.cid).text : d.owner);
@@ -13309,6 +13648,7 @@ function refreshFnaPack(){
   var sel = document.querySelector('input[name="fnaPackSp"]:checked');
   var mode = sel ? sel.value : 'none';
   var txt = buildFnaDataPack(cid, mode==='joint' ? 'joint' : (mode==='bg'));
+  try{ fnaPackReadyRender(cid, mode); }catch(e){}   // 2.10
   document.getElementById('fnaPackTxt').value = txt;
   toast(mode==='joint' ? 'Joint pack built — copy again to include the partner' : mode==='bg' ? 'Partner background added — copy again to include it' : 'Partner data removed','ok');
 }
@@ -17138,6 +17478,8 @@ function openFinPosModal(cid, kind, fpid){
   if(FP_KIND==='need'){
     var isIncomeNow = (d.needType||'Monthly income')==='Monthly income';
     var askWhom = needAsksForWhom(d.scenario||'Death');
+    // 2.10 (29 Oct 2026, Clinton): a retirement need says from what age it must be paid. The term stays "for how many years".
+    var isRetNow = (d.scenario||'Death')==='Retirement';
     html =
       fld('fpdesc','Description (e.g. Spouse living expenses, Education fund)',d.desc||'')+
       '<div class="g2">'+
@@ -17155,6 +17497,10 @@ function openFinPosModal(cid, kind, fpid){
       '<div class="fld" id="fpEscWrap" style="display:'+(isIncomeNow?'flex':'none')+'">'+
       '<label>Escalation % p.a. (blank = CPI assumed in the FNA)</label>'+
       '<input type="text" id="fpesc" value="'+clean(d.esc||'')+'" autocomplete="off">'+
+      '</div>'+
+      '<div class="fld" id="fpNeedFromAgeWrap" style="display:'+(isRetNow?'flex':'none')+'">'+
+      '<label>From Age (retirement: when it must start)</label>'+
+      '<input type="text" id="fpneedFromAge" value="'+clean(d.fromAge||'')+'" autocomplete="off">'+
       '</div>'+
       '<div id="fpBenToWrap" style="display:'+(askWhom?'block':'none')+'">'+
       fs('fpbenTo','Whose need',['','Spouse','Estate','Named person'],d.benTo||'')+
@@ -17218,6 +17564,14 @@ function openFinPosModal(cid, kind, fpid){
       '<div class="g2">'+
       fld('fpfromAge','From their age (blank: already being paid)',d.fromAge||'')+
       fld('fptoAge','To their age (blank: to the end of their need)',d.toAge||'')+
+      '</div>'+
+      // 2.10 (29 Oct 2026, Clinton): does this income carry on past retirement, and between which ages
+      '<div class="fld" style="grid-column:1/-1;border-top:1px solid #e3e8e6;margin-top:6px;padding-top:10px"><label style="font-weight:700">At retirement</label>'+
+      '<div style="font-size:12px;color:#667;margin-top:4px">Tick this where the income carries on after the client retires, or starts then: a rental, an annuity, a pension, part-time work. The retirement need is then sized on what is left after it.</div></div>'+
+      fpChk('fpretCont','Continues in retirement',d.retCont)+
+      '<div class="g2">'+
+      fld('fpretFromAge','From their age (blank: from the retirement date)',d.retFromAge||'')+
+      fld('fpretToAge','To their age (blank: for life)',d.retToAge||'')+
       '</div>'+
       fld('fpnotes','Notes (e.g. notice period, contract end date)',d.notes||'','textarea');
   } else if(FP_KIND==='expense'){
@@ -17324,6 +17678,14 @@ function openFinPosModal(cid, kind, fpid){
       var ew = document.getElementById('fpEscWrap');
       if(yw) yw.style.display = inc ? 'flex' : 'none';
       if(ew) ew.style.display = inc ? 'flex' : 'none';
+    });
+  }
+  // 2.10: From age is a retirement question only
+  var scSel0 = document.getElementById('fpscenario');
+  if(scSel0){
+    scSel0.addEventListener('change', function(){
+      var fw = document.getElementById('fpNeedFromAgeWrap');
+      if(fw) fw.style.display = scSel0.value==='Retirement' ? 'flex' : 'none';
     });
   }
   var btSel = document.getElementById('fpbenTo');
@@ -17529,6 +17891,8 @@ function collectFinPosForm(){
     var isInc = d.needType==='Monthly income';
     d.years = isInc ? g('fpyears') : '';
     d.esc   = isInc ? g('fpesc') : '';
+    d.fromAge = d.scenario==='Retirement' ? g('fpneedFromAge') : '';   // 2.10
+
     d.benTo = needAsksForWhom(d.scenario) ? g('fpbenTo') : '';
     d.benName = d.benTo==='Named person' ? g('fpbenName') : '';
     return d;
@@ -17556,6 +17920,10 @@ function collectFinPosForm(){
     d.offsetEsc = g('fpoffsetEsc');
     d.fromAge = g('fpfromAge');
     d.toAge = g('fptoAge');
+    // 2.10: carries on past retirement
+    d.retCont = fpChkVal('fpretCont');
+    d.retFromAge = g('fpretFromAge');
+    d.retToAge = g('fpretToAge');
     return d;
   }
   if(FP_KIND==='expense'){
@@ -19095,7 +19463,7 @@ function runPasteClaudeImport(){
 //   FF_B<n>_<k>  company / trust n     FF_W_<key>   will field     FF_M_<key> meta
 // Column keys are read from the workbook's own key row, so columns can move freely.
 var FF_SPEC = {
-  version: '1.7',
+  version: '1.8',
   sheets: {
     start: 'Start here', notes: 'Meeting notes', fam: 'Client and family', inc: 'Income and expenses', ast: 'Assets and debts',
     biz: 'Companies and trusts', needs: 'Needs', will: 'Will', sum: 'Summary', lists: 'Lists'
@@ -19267,6 +19635,7 @@ var FF_SPEC = {
         {k: 'scenario', h: 'If this happens', t: 'list:scenario', w: 14},
         {k: 'needType', h: 'Monthly income or once-off?', t: 'list:needType', w: 16},
         {k: 'amount', h: 'Amount (R): a month, or the once-off total', t: 'money', w: 16},
+        {k: 'fromAge', h: 'From age (retirement only)', t: 'num', w: 12},
         {k: 'years', h: 'For how many years (income)', t: 'num', w: 12},
         {k: 'esc', h: 'Increase % a year (blank = inflation)', t: 'num', w: 13},
         {k: 'benTo', h: 'Whose need (death only)', t: 'list:forWhom', w: 13},
@@ -20116,6 +20485,10 @@ function wbkPlan(wb, cidFrom, fileName){
       var where = (kind==='need' ? 'Needs' : spec.title.replace(/^\d+\.\s*/,''))+', row '+(row._index+1);
       var o = {}, isOld = !!(row._id && crm.some(function(r){ return String(r.ID)===row._id; }));
       spec.cols.forEach(function(col){
+        // 2.10: a column added to the spec after a workbook went out is simply not in that sheet.
+        // Its cell reads as blank, and on a stamped workbook a blank means "cleared", which would
+        // wipe a value the client never saw. A column the workbook does not have is left alone.
+        if(!(col.k in row._raw)) return;
         var w = function(msg){ P.warns.push(where+', '+col.h+': '+msg+'. '+(isOld ? 'Kept as it is.' : 'Not used; the CRM default applies.')); };
         var v = col.t==='owner' ? wbkOwnerIn(row._raw[col.k], L, w) : wbkIn(col.t, row._raw[col.k], row._cells[col.k], w);
         if(v!==undefined) o[col.k] = v;
@@ -20355,6 +20728,7 @@ function wbkNewRow(kind, o, gen, ctx){
   else if(kind==='need'){
     d.scenario = d.scenario || 'Other'; d.needType = d.needType || 'Monthly income';
     if(d.needType!=='Monthly income'){ d.years = ''; d.esc = ''; }
+    if(d.scenario!=='Retirement') d.fromAge = '';   // 2.10
     if(!needAsksForWhom(d.scenario)){ d.benTo = ''; d.benName = ''; }
     else if(d.benTo!=='Named person') d.benName = '';
   }
@@ -20367,6 +20741,7 @@ function wbkFixRow(kind, d, gen, od, ch){
   }
   if(kind==='need'){
     if(d.needType!=='Monthly income'){ d.years = ''; d.esc = ''; }
+    if(d.scenario!=='Retirement') d.fromAge = '';   // 2.10
     if(!needAsksForWhom(d.scenario)){ d.benTo = ''; d.benName = ''; }
   }
 }
@@ -20385,7 +20760,7 @@ function wbkRowSum(kind, d){
   else if(kind==='property' || kind==='vehicle' || kind==='other'){ if(d.type) b.push(d.type); if(clean(d.value)) b.push(m(d.value)); if(fpN(d.bondOut)) b.push('bond '+m(d.bondOut)); if(fpN(d.financeOut)) b.push('finance '+m(d.financeOut)); if(d.owner) b.push(own[d.owner]||d.owner); if(d.source) b.push(d.source); }
   else if(kind==='liability'){ if(d.liabType) b.push(d.liabType); b.push(m(d.balance)); if(d.owner) b.push(own[d.owner]||d.owner); }
   else if(kind==='business'){ if(d.entityType) b.push(d.entityType); if(fpIsTrust(d)){ if(d.loanAcc==='Credit'||d.loanAcc==='Debit') b.push('loan account '+m(d.loanBal)); } else { if(d.pctHeld) b.push(d.pctHeld+'%, share '+m(d.value)); if(fpN(d.pctHeldSpouse)>0) b.push('spouse '+d.pctHeldSpouse+'%, share '+m(d.valueSpouse)); } var hs = fpHoldings(d); if(hs.length) b.push(hs.length+' holding'+(hs.length===1?'':'s')); }
-  else if(kind==='need'){ b.push(d.scenario||''); if(d.needType==='Monthly income'){ b.push(m(d.amount)+' a month'); b.push(d.years ? 'for '+d.years+' years' : 'years not given'); b.push('increase: '+(clean(d.esc) ? d.esc+'% a year' : 'inflation')); } else b.push(m(d.amount)+' once-off'); if(d.benTo) b.push('for '+(d.benTo==='Named person' ? (d.benName||'a named person') : d.benTo)); }
+  else if(kind==='need'){ b.push(d.scenario||''); if(d.needType==='Monthly income'){ b.push(m(d.amount)+' a month'); b.push(d.years ? 'for '+d.years+' years' : 'years not given'); b.push('increase: '+(clean(d.esc) ? d.esc+'% a year' : 'inflation')); } else b.push(m(d.amount)+' once-off'); if(d.scenario==='Retirement') b.push(clean(d.fromAge) ? 'from age '+clean(d.fromAge) : 'from age not given'); if(d.benTo) b.push('for '+(d.benTo==='Named person' ? (d.benName||'a named person') : d.benTo)); }
   return b.filter(Boolean).join(' · ');
 }
 function wbkChangeCount(P){
@@ -20632,11 +21007,15 @@ function wbkFinish(P, cid, results){
 // money and rises from today, so it matches every other figure on the sheet. Blank months: it runs to the end of their need.
 // 2.9 (29 Oct 2026, Clinton): the client page names each income already coming in, with the amount a month and for
 // how long, and the needs line says it is the capital for what is left after them. Presentation only: no figure moves.
+// 2.10 (29 Oct 2026, Clinton): the spouse's taxable income in section 6 is read off her own client record when she has
+// one (qfSpouseTI), instead of falling back to the gross income typed on this record. Art and household contents go
+// out as "Vehicle or contents", not "Other investment", so they no longer carry capital gains tax on death. The
+// Ready for FNA panel on the client page runs these check lines before the export and blocks it on the fixable ones.
 // The template builder (build_qfna.js) and the CRM (index.html, QF_SPEC) both use this.
 // The CRM fills the Inputs sheet by named range (QF_<key> single cells, QF_T_<table> table
 // bodies). Everything else in the workbook is a formula. One way only: nothing comes back.
 var QF_SPEC = {
-  version: '2.9',
+  version: '2.10',
   copyOffset: 25,                      // hidden copy of the CRM's values: column + 25 (B -> AA) on Inputs
   watched: ['assets', 'debts', 'cover', 'dinc', 'funds', 'deps', 'oinc'],   // tables whose changes turn orange (plus the client cells except Wishes)
   sheets: {inputs: 'Inputs', summary: 'Summary', quote: 'Figures for quoting', work: 'Workings', lists: 'Lists'},
@@ -20815,6 +21194,70 @@ function qfWhoFromDesc(desc, fam, c){
   if(!sp && hits.length===1){ var g = given(hits[0].Name).filter(function(x){ return dw.indexOf(x)>=0; })[0]; return {benTo:'Named person', benName:g.charAt(0).toUpperCase()+g.slice(1)}; }
   return null;
 }
+// ── 2.10 (29 Oct 2026, Clinton): the spouse's own taxable income ──────────────
+// It is the only thing that sets her marginal rate, and her rate sets the rate her capital is
+// valued at in section 6. Three cases, in this order:
+//   1. She is a client in her own right: it is built from HER record, her own rows in full and
+//      joint rows at half, exactly as the client's own taxable income is built from his.
+//   2. She is not: it is built from the rows on this record marked as hers or joint, as before.
+//   3. Neither gives anything: the gross income on the record is used, as before.
+// So a record captured the old way gives the same answer it did, and a couple who are both
+// clients stops falling back to a figure typed on the husband's card months ago.
+// Dividends and anything marked not taxable are left out; a bonus counts at a twelfth; rent on
+// the property cards counts at her share. SpouseIncome on the record keeps its own meaning.
+// Returns {ti, what, rentBoth, orphans} — orphans: rows marked as hers that are sitting on his
+// record while she has her own, which are NOT counted and must be moved.
+function qfSpouseTI(c){
+  var spId = (typeof linkedSpouseClientId==='function') ? linkedSpouseClientId(c.ID) : null;
+  function build(rows, mine){
+    var incPM = 0, rows_ = 0, rentPM = 0, rentRow = false;
+    rows.filter(function(r){ return r.kind==='income'; }).forEach(function(r){
+      var d = r.d, f = mine(d); if(!f) return;
+      rows_++;
+      if(d.incomeType==='Dividends' || d.taxable==='No') return;
+      if(d.incomeType==='Rental Income') rentRow = true;
+      incPM += fpN(d.amountPM)*f;
+      if(fpN(d.bonus)>0) incPM += fpN(d.bonus)*f/12;
+    });
+    rows.filter(function(r){ return r.kind==='property'; }).forEach(function(r){
+      var d = r.d, f = mine(d); if(!f) return;
+      rentPM += fpN(d.rentalPM)*f;
+    });
+    return {incPM:incPM, rows:rows_, rentPM:rentPM, rentRow:rentRow};
+  }
+  function asRows(cid){
+    var pj = (typeof fpJointFromPartner==='function') ? fpJointFromPartner(cid) : [];
+    return finposFor(cid).concat(pj).map(function(r){ return {kind:r.Kind, d:fpData(r)}; });
+  }
+  // Her share of a row on her OWN record: her own in full, joint at half, the other person's left out.
+  var hers = function(d){ var o = String(d.owner||'Client'); return o==='Spouse' ? 0 : (o==='Joint' ? 0.5 : 1); };
+  // Her share of a row on HIS record: marked hers in full, joint at half, his own left out.
+  var onHis = function(d){ var o = String(d.owner||'Client'); return o==='Spouse' ? 1 : (o==='Joint' ? 0.5 : 0); };
+  var orphans = [];
+  var B, src;
+  if(spId){
+    B = build(asRows(spId), hers); src = 'own';
+    // rows still sitting on this record marked as hers: they are not counted, so they are named
+    asRows(c.ID).forEach(function(r){
+      if(r.kind!=='income' && r.kind!=='property') return;
+      if(String(r.d.owner||'Client')!=='Spouse') return;
+      orphans.push(clean(r.d.desc) || (r.kind==='income' ? 'an income line' : 'a property'));
+    });
+  } else {
+    B = build(asRows(c.ID), onHis); src = 'this';
+  }
+  var fromRecord = !B.rows && !(B.rentPM > 0);
+  var ti = fromRecord ? Math.round(fpN(c.SpouseIncome)*12*100)/100
+                      : Math.round((B.incPM + B.rentPM)*12*100)/100;
+  var what;
+  if(fromRecord) what = 'the gross income on the record';
+  else {
+    what = [B.incPM>0 ? 'income '+qfR2(B.incPM) : '', B.rentPM>0 ? 'rentals '+qfR2(B.rentPM) : '']
+      .filter(function(x){ return x; }).join(' and ')+' a month'+(src==='own' ? ', off her own client record' : '');
+  }
+  return {ti:ti, what:what, rentBoth:(B.rentRow && B.rentPM>0), orphans:orphans, fromRecord:fromRecord, ownRecord:!!spId};
+}
+
 // The record, as Quick FNA input rows. Returns {single:{}, assets:[], debts:[], cover:[], dinc:[], oinc:[], funds:[], deps:[], checks:[], assumptions:{}}.
 function qfnaData(c){
   var out = { single:{}, assets:[], debts:[], cover:[], dinc:[], oinc:[], funds:[], deps:[], checks:[], assumptions:{} };
@@ -20894,7 +21337,11 @@ function qfnaData(c){
   });
   // ── Other assets ──
   var OTHER_KIND = {'Cash / Savings':'Cash and deposits', 'Fixed Deposit':'Cash and deposits', 'Shares / Unit Trusts':'Shares and unit trusts',
-    'Crypto':'Crypto', 'Loan Account':'Loan account',   // 2.7: crypto is a kind of its own 'Art / Collectibles':'Vehicle or contents', 'Household Contents':'Vehicle or contents',
+    // 2.7: crypto is a kind of its own. 2.10: the comment used to sit mid line and commented out the two
+    // lines below it, so art and household contents went out as "Other investment", which carries capital
+    // gains tax on death. They are personal-use assets: they belong with vehicles and contents, which do not.
+    'Crypto':'Crypto', 'Loan Account':'Loan account',
+    'Art / Collectibles':'Vehicle or contents', 'Household Contents':'Vehicle or contents',
     'Business Interest':'Business interest', 'Other':'Other investment',
     // older type names still on some records (15 Oct 2026)
     'Cash':'Cash and deposits', 'Savings':'Cash and deposits', 'Tax-Free Investment':'Tax-free investment'};
@@ -20978,31 +21425,11 @@ function qfnaData(c){
   });
 
   // ── 2.8 (29 Oct 2026, Clinton): the spouse's own taxable income for section 6 ──
-  // It is the only thing that sets her marginal rate, and her rate sets the rate her capital is discounted at. It is
-  // built the same way as the client's own taxable income further down: every income row at her share, less dividends
-  // (exempt) and anything marked not taxable, plus any bonus at a twelfth, plus the rent on the property cards at her
-  // share. Where she has none of those, the gross income on the record is used exactly as before, so a record captured
-  // the old way gives the same answer. SpouseIncome on the record keeps its own meaning (salary and business income)
-  // and is not changed here, so nothing else in the CRM moves.
-  function spShare(d){ var o = String(d.owner||'Client'); return o==='Spouse' ? 1 : (o==='Joint' ? 0.5 : 0); }
-  var spIncPM = 0, spIncRows = 0, spRentPM = 0, spRentRows = false;
-  rows.filter(function(r){ return r.kind==='income'; }).forEach(function(r){
-    var d = r.d, f = spShare(d); if(!f) return;
-    spIncRows++;
-    if(d.incomeType==='Dividends' || d.taxable==='No') return;
-    if(d.incomeType==='Rental Income') spRentRows = true;
-    spIncPM += fpN(d.amountPM)*f;
-    if(fpN(d.bonus)>0) spIncPM += fpN(d.bonus)*f/12;
-  });
-  rows.filter(function(r){ return r.kind==='property'; }).forEach(function(r){
-    var d = r.d, f = spShare(d); if(!f) return;
-    spRentPM += fpN(d.rentalPM)*f;
-  });
-  var spFromRecord = !spIncRows && !(spRentPM > 0);
-  var spouseTI = spFromRecord ? Math.round(fpN(c.SpouseIncome)*12*100)/100 : Math.round((spIncPM + spRentPM)*12*100)/100;
-  var spouseTIWhat = spFromRecord ? 'the gross income on the record' :
-    [spIncPM>0 ? 'income '+qfR2(spIncPM) : '', spRentPM>0 ? 'rentals '+qfR2(spRentPM) : ''].filter(function(x){ return x; }).join(' and ')+' a month';
-  if(spRentRows && spRentPM>0) warn('the spouse\'s rental income is on a property card and on an income row: her taxable income counts both, so check it in section 6.');
+  // 2.10 (29 Oct 2026, Clinton): built by qfSpouseTI, which reads her own client record when she has one.
+  var _spTI = qfSpouseTI(c);
+  var spouseTI = _spTI.ti, spouseTIWhat = _spTI.what;
+  if(_spTI.rentBoth) warn('the spouse\'s rental income is on a property card and on an income row: her taxable income counts both, so check it in section 6.');
+  if(_spTI.orphans.length) warn('the spouse has her own client record, so her taxable income in section 6 is read off it. '+(_spTI.orphans.length===1 ? 'One row' : _spTI.orphans.length+' rows')+' marked as hers '+(_spTI.orphans.length===1 ? 'is' : 'are')+' still on this record and '+(_spTI.orphans.length===1 ? 'is' : 'are')+' NOT counted: '+_spTI.orphans.join('; ')+'. Move '+(_spTI.orphans.length===1 ? 'it' : 'them')+' to her record.');
 
   // ── 2.0: the people who depend on the client: the Death needs on the Needs tab paid as a monthly income ──
   // The person is the need's "For whom": the spouse, or a named person found among the family members on
@@ -21416,6 +21843,18 @@ function qfnaExport(cid){
   var c = wbkClient(cid);
   if(!c){ toast('Client not found.','err'); return; }
   if(c.ClientType==='Company'){ toast('The Quick FNA is for individuals, not company records.','err'); return; }
+  // 2.10: the Ready for FNA panel gates the export. Readiness gaps and fixable check lines stop
+  // it (they are all fixed by typing); out-of-scope lines do not. A failure inside the check
+  // never stops the export.
+  var _rdy = null;
+  try{ _rdy = fnaReadyBlockers(cid); }catch(e){ console.error(e); _rdy = null; }
+  if(_rdy && _rdy.blocked){
+    var _n = _rdy.gaps.length + _rdy.fix.length;
+    CTAB = 'overview';
+    try{ render(); }catch(e){}
+    toast('Not ready for the FNA: '+_n+' item'+(_n>1?'s':'')+' to fix first. See Ready for FNA at the top of the Overview tab.','err');
+    return;
+  }
   QF.busy = true;
   toast('Preparing the Quick FNA…','ok');
   wbkWithExcelJS(function(){ qfnaLoadTemplate(function(wb){
@@ -24070,6 +24509,7 @@ document.addEventListener('click', function(e){
         case 'move-finpos':    fpMoveToPartner(el.getAttribute('data-fpid')); break;
         case 'add-need':       openFinPosModal(id, 'need'); break;
         case 'save-need-notes':saveNeedNotes(id); break;
+        case 'save-fna-instr':saveFnaInstr(id); break;   // 2.10
         case 'add-doctor':     openDoctorModal(id); break;
         case 'edit-doctor':    openDoctorModal(id,parseInt(idx)); break;
         case 'del-doctor':     deleteDoctor(id,parseInt(idx)); break;
