@@ -20975,6 +20975,33 @@ function qfnaData(c){
     out.debts.push({name:clean(d.desc)||d.liabType||'Debt', amount:amt(d.balance,f), notes:join([f<1?'half of a joint debt':'', d.liabType||''])});
   });
 
+  // ── 2.8 (29 Oct 2026, Clinton): the spouse's own taxable income for section 6 ──
+  // It is the only thing that sets her marginal rate, and her rate sets the rate her capital is discounted at. It is
+  // built the same way as the client's own taxable income further down: every income row at her share, less dividends
+  // (exempt) and anything marked not taxable, plus any bonus at a twelfth, plus the rent on the property cards at her
+  // share. Where she has none of those, the gross income on the record is used exactly as before, so a record captured
+  // the old way gives the same answer. SpouseIncome on the record keeps its own meaning (salary and business income)
+  // and is not changed here, so nothing else in the CRM moves.
+  function spShare(d){ var o = String(d.owner||'Client'); return o==='Spouse' ? 1 : (o==='Joint' ? 0.5 : 0); }
+  var spIncPM = 0, spIncRows = 0, spRentPM = 0, spRentRows = false;
+  rows.filter(function(r){ return r.kind==='income'; }).forEach(function(r){
+    var d = r.d, f = spShare(d); if(!f) return;
+    spIncRows++;
+    if(d.incomeType==='Dividends' || d.taxable==='No') return;
+    if(d.incomeType==='Rental Income') spRentRows = true;
+    spIncPM += fpN(d.amountPM)*f;
+    if(fpN(d.bonus)>0) spIncPM += fpN(d.bonus)*f/12;
+  });
+  rows.filter(function(r){ return r.kind==='property'; }).forEach(function(r){
+    var d = r.d, f = spShare(d); if(!f) return;
+    spRentPM += fpN(d.rentalPM)*f;
+  });
+  var spFromRecord = !spIncRows && !(spRentPM > 0);
+  var spouseTI = spFromRecord ? Math.round(fpN(c.SpouseIncome)*12*100)/100 : Math.round((spIncPM + spRentPM)*12*100)/100;
+  var spouseTIWhat = spFromRecord ? 'the gross income on the record' :
+    [spIncPM>0 ? 'income '+qfR2(spIncPM) : '', spRentPM>0 ? 'rentals '+qfR2(spRentPM) : ''].filter(function(x){ return x; }).join(' and ')+' a month';
+  if(spRentRows && spRentPM>0) warn('the spouse\'s rental income is on a property card and on an income row: her taxable income counts both, so check it in section 6.');
+
   // ── 2.0: the people who depend on the client: the Death needs on the Needs tab paid as a monthly income ──
   // The person is the need's "For whom": the spouse, or a named person found among the family members on
   // the record (by any one word of their name, so "Harold John (Harry)" is found as Harry). Not found, or
@@ -21053,7 +21080,7 @@ function qfnaData(c){
       else if(/^Yes/.test(wTrust)) trust = 'Yes';
       else if(/^Only if/.test(wTrust)){ trust = (age===null || age<18) ? 'Yes' : 'No'; if(age===null) note(p.name+': the will\'s trust is only for minors and the age is not known, so the trust is assumed.'); }
     }
-    var other = (p.rel==='Spouse' && fpN(c.SpouseIncome)>0) ? Math.round(fpN(c.SpouseIncome)*12*100)/100 : null;
+    var other = (p.rel==='Spouse' && spouseTI>0) ? spouseTI : null;   // 2.8: every taxable income of hers, not only salary
     out.deps.push({name:p.name, rel:p.rel, age:age, needPM:p.needPM, years:p.years, esc:p.esc, trust:trust, other:other, lump:(p.lump>0 ? p.lump : null)});
   });
   // 2.5 (21 Oct 2026, Clinton): a married client's children are provided for by the spouse: the spouse (or the nominee on the
@@ -21068,7 +21095,7 @@ function qfnaData(c){
     var hostSp = out.deps.find(function(x){ return x.rel==='Spouse'; });
     if(poolKids.length && !hostSp && spName){
       var hAge = spDOB ? calcAge(spDOB) : null;
-      hostSp = {name:spName, rel:'Spouse', age:hAge, needPM:null, years:null, esc:null, trust:'No', other:(fpN(c.SpouseIncome)>0 ? Math.round(fpN(c.SpouseIncome)*12*100)/100 : null), lump:null};
+      hostSp = {name:spName, rel:'Spouse', age:hAge, needPM:null, years:null, esc:null, trust:'No', other:(spouseTI>0 ? spouseTI : null), lump:null};
       out.deps.push(hostSp);
       note(spName+' has no death need of their own on the Needs tab, but provides for the children, so '+spName+' is in section 6 with no need of their own: what reaches '+spName+' pays for the children\'s needs.');
       if(hAge===null) warn(spName+' has no date of birth on the record: fill in the age in section 6 (it sets the rebates at 65 and 75).');
@@ -21086,7 +21113,8 @@ function qfnaData(c){
   });
   var depSp = out.deps.find(function(x){ return x.rel==='Spouse'; });
   var trustKids = out.deps.some(function(x){ return x.rel==='Child' && x.trust==='Yes'; });
-  if(out.deps.some(function(x){ return x.rel==='Spouse' && x.other; })) note('The spouse\'s own income (gross income on the record x 12) is in section 6: it sets their tax rate.');
+  if(out.deps.some(function(x){ return x.rel==='Spouse' && x.other; })) note('The spouse\'s own taxable income in section 6 is '+spouseTIWhat+', x 12: it sets their tax rate, which sets the rate their capital is valued at. Dividends and anything marked not taxable are left out.');
+  else if(out.deps.some(function(x){ return x.rel==='Spouse'; })) note('No taxable income is captured for the spouse, so section 6 shows none and their capital is valued at the rate for someone under the tax threshold. Add their income lines in the CRM if they have any.');
   // The dependant a beneficiary is: a trust, the spouse, or a named dependant
   function whomFor(b){
     var t = String(b.type||'');
