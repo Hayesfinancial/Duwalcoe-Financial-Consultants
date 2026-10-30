@@ -12293,11 +12293,15 @@ function buildFormsUrl(c){
 //   2. QUICK FNA CHECK LINES — straight out of qfnaData, which is pure (no workbook, no
 //      ExcelJS), so the panel shows exactly what the workbook's Checks sheet will show,
 //      including the row caps, which are read off QF_SPEC.
-// WHAT BLOCKS THE EXPORT. A readiness gap or a fixable Quick FNA line ('✗ ...') blocks it:
-// those are all fixed by typing. An out-of-scope line ('✗ Full FNA: ...') does NOT block:
-// a business interest, offshore money, a living annuity or a split residue cannot be typed
-// away, and blocking on those would lock the Quick FNA out of most of the book. They are
-// shown in the panel in amber and they still print on the Checks sheet.
+// 2.11 (30 Oct 2026, Clinton): NOTHING BLOCKS THE EXPORT. The Quick FNA always downloads,
+// like a Momentum calculator: where the CRM is sure the yellow cell is filled, where it is
+// not the cell is blank or rough and the Checks sheet says which one to look at. Clinton
+// types the rest in Excel. The panel is one plain line on the card with the lists in a fold;
+// nothing red, because every client had red lines and not one Quick FNA came out.
+//   '✗ ...'        a yellow cell to check (the CRM could not work it out)
+//   '✗ Rough: ...' a figure the Quick FNA costs roughly (a business, offshore money, a
+//                  living annuity with no nominee): check it, or use the full FNA for that part
+//   '• ...'        a note on how something was read
 // The panel also holds "Adviser instructions for this FNA": one row per client in
 // financial_position, Kind 'fna_instr' (a JSON blob, so no schema change), printed in the
 // Data Pack above the client's details.
@@ -12434,8 +12438,8 @@ function qfnaCheckLines(c){
   return out;
 }
 
-// Everything the panel and the gate need, in one call. broke: the check itself could not run,
-// which never blocks the export (a bug in here must not stop Clinton working).
+// Everything the panel needs, in one call. 2.11: blocked is always false; the export is never
+// gated. broke: the check itself could not run (a bug in here must not stop Clinton working).
 function fnaReadyBlockers(cid){
   var c = DB.clients.find(function(x){ return String(x.ID)===String(cid); });
   var R = {gaps:[], scope:[], fix:[], notes:[], blocked:false, broke:'', quick:(c && c.ClientType!=='Company')};
@@ -12445,13 +12449,13 @@ function fnaReadyBlockers(cid){
     try{
       var lines = qfnaCheckLines(c);
       lines.forEach(function(t){
-        if(t.indexOf('✗ Full FNA')===0) R.scope.push(t);
+        if(t.indexOf('✗ Rough')===0) R.scope.push(t);
         else if(t.indexOf('✗')===0) R.fix.push(t);
         else R.notes.push(t);
       });
     }catch(e){ R.broke = R.broke || String(e && e.message || e); }
   }
-  R.blocked = !R.broke && (R.gaps.length + R.fix.length) > 0;
+  R.blocked = false;
   return R;
 }
 
@@ -12503,24 +12507,28 @@ function fnaReadyPanel(c){
   if(typeof isFamilyRecord==='function' && isFamilyRecord(c)) return '';
   var R = fnaReadyBlockers(c.ID);
   function esc(x){ return escHtml(String(x===undefined||x===null?'':x)); }
-  function strip(t){ return String(t).replace(/^✗ Full FNA:\s*/, '').replace(/^[✗•]\s*/, ''); }
-  function group(title, items, colour, bg, mark, pre){
+  function strip(t){ return String(t).replace(/^✗ Rough:\s*/, '').replace(/^[✗•]\s*/, ''); }
+  // 2.11: plain grey lists in a fold; nothing red, nothing blocks
+  function group(title, items, mark){
     if(!items.length) return '';
     return '<div style="margin-top:8px">'+
-      '<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:'+colour+';margin-bottom:4px">'+esc(title)+'</div>'+
-      (pre ? '<div style="font-size:11.5px;color:#667;margin-bottom:4px">'+esc(pre)+'</div>' : '')+
+      '<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:#667;margin-bottom:4px">'+esc(title)+'</div>'+
       '<ul style="margin:0;padding-left:0;list-style:none">'+
       items.map(function(t){
-        return '<li style="display:flex;gap:7px;padding:4px 8px;margin-bottom:3px;background:'+bg+';border-radius:5px;font-size:12.5px;line-height:1.5;color:var(--ink)">'+
-          '<span style="color:'+colour+';font-weight:700;flex-shrink:0">'+mark+'</span><span>'+esc(strip(t))+'</span></li>';
+        return '<li style="display:flex;gap:7px;padding:3px 8px;font-size:12px;line-height:1.5;color:#556">'+
+          '<span style="flex-shrink:0">'+mark+'</span><span>'+esc(strip(t))+'</span></li>';
       }).join('')+
       '</ul></div>';
   }
-  var nFix = R.gaps.length + R.fix.length;
-  var head, headBg, headCol;
-  if(R.broke){ head = '⚠ Ready for FNA: the check could not run'; headBg = '#fef3c7'; headCol = '#92400e'; }
-  else if(nFix){ head = '⛔ Not ready for the FNA · '+nFix+' to fix'; headBg = '#fdecea'; headCol = '#9a1f1f'; }
-  else { head = '✅ Ready for the FNA'; headBg = '#f0fdf4'; headCol = '#0f766e'; }
+  // The one line on the card: how many yellow cells to check in Excel, how many facts the Data Pack flags
+  var bits = [];
+  if(R.quick && R.fix.length) bits.push(R.fix.length+(R.fix.length===1 ? ' cell' : ' cells')+' to check in Excel');
+  if(R.quick && R.scope.length) bits.push(R.scope.length+' rough '+(R.scope.length===1 ? 'figure' : 'figures'));
+  if(R.gaps.length) bits.push(R.gaps.length+(R.gaps.length===1 ? ' fact' : ' facts')+' not captured');
+  var head, headBg = 'var(--smoke)', headCol = '#556';
+  if(R.broke){ head = 'Quick FNA · the check could not run'; }
+  else if(!bits.length){ head = R.quick ? 'Quick FNA · nothing to check' : 'FNA'; }
+  else head = (R.quick ? 'Quick FNA · ' : 'FNA · ')+bits.join(' · ');
 
   var draft = window._fnaInstrDraft;
   var instr = (draft && String(draft.cid)===String(c.ID)) ? draft.text : fnaInstrText(c.ID);
@@ -12533,27 +12541,27 @@ function fnaReadyPanel(c){
     '<span style="font-weight:700;font-size:13.5px;color:'+headCol+'">'+head+'</span>'+
     '<span style="flex:1"></span>'+
     '<button class="btn b-gd xs" onclick="copyFnaDataPack(\''+c.ID+'\')">📦 FNA Data Pack</button>'+
-    (isCo ? '' : (nFix || R.broke
-      ? '<button class="btn b-gh xs" disabled title="Fix the red lines below first" style="opacity:.5;cursor:not-allowed">📊 Quick FNA</button>'
-      : '<button class="btn b-gd xs" onclick="qfnaExport(\''+c.ID+'\')">📊 Quick FNA</button>'))+
+    (isCo ? '' : '<button class="btn b-gd xs" onclick="qfnaExport(\''+c.ID+'\')">📊 Quick FNA</button>')+
     '</div>'+
     '<div style="padding:10px 16px 14px">';
 
+  // 2.11: the lists live in a fold. The same lines print on the Checks sheet of the download,
+  // which is where they are needed, next to the yellow cells.
   if(R.broke){
-    h += '<div style="font-size:12.5px;color:#9a1f1f">The readiness check hit an error on this record: '+esc(R.broke)+'. The Quick FNA export is NOT blocked, so you can still export, but check the Checks sheet by hand.</div>';
-  } else if(!nFix && !R.scope.length && !R.notes.length){
-    h += '<div style="font-size:12.5px;color:#0f766e">Nothing missing. Every figure the Quick FNA needs is captured.</div>';
+    h += '<div style="font-size:12px;color:#556">The check hit an error on this record ('+esc(R.broke)+'). The Quick FNA still downloads: read its Checks sheet.</div>';
   }
-  h += group('Fix before the FNA', R.gaps, '#9a1f1f', '#fdecea', '⚠', '');
-  h += group('Fix before the Quick FNA export', R.fix, '#9a1f1f', '#fdecea', '✗', 'These block the export: each one is fixed on the record.');
-  h += group('Outside the Quick FNA', R.scope, '#92400e', '#fef3c7', '✗', 'These do not block the export. The Quick FNA cannot cost them, so use the full FNA for this part.');
-  if(R.notes.length){
-    h += '<details style="margin-top:8px"><summary style="cursor:pointer;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:#667">Notes on the Quick FNA ('+R.notes.length+')</summary>'+
-      '<ul style="margin:6px 0 0;padding-left:0;list-style:none">'+
-      R.notes.map(function(t){ return '<li style="display:flex;gap:7px;padding:3px 8px;font-size:12px;line-height:1.5;color:#556"><span style="flex-shrink:0">•</span><span>'+esc(strip(t))+'</span></li>'; }).join('')+
-      '</ul></details>';
+  var nAll = R.gaps.length + R.fix.length + R.scope.length + R.notes.length;
+  if(nAll){
+    h += '<details><summary style="cursor:pointer;font-size:11.5px;color:#667">Show the list ('+nAll+')'+(R.quick ? ' · the same lines are on the Checks sheet of the Quick FNA' : '')+'</summary>';
+    h += group('Yellow cells to check in Excel', R.fix, '✗');
+    h += group('Costed roughly: check the figure, or use the full FNA for that part', R.scope, '≈');
+    h += group('Not captured on the record (listed in the Data Pack)', R.gaps, '⚠');
+    h += group('How things were read', R.notes, '•');
+    h += '<div style="margin-top:9px;font-size:11.5px;color:#667">'+esc(FNA_READY_REMINDER)+'</div>';
+    h += '</details>';
+  } else if(!R.broke){
+    h += '<div style="font-size:11.5px;color:#667">'+esc(FNA_READY_REMINDER)+'</div>';
   }
-  h += '<div style="margin-top:9px;font-size:11.5px;color:#92400e">⚠ '+esc(FNA_READY_REMINDER)+'</div>';
 
   h += '<div style="margin-top:12px;border-top:1px solid var(--smoke);padding-top:10px">'+
     '<div style="font-size:11px;font-weight:700;color:#667;text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px">Adviser instructions for this FNA'+instrPending+'</div>'+
@@ -21015,7 +21023,7 @@ function wbkFinish(P, cid, results){
 // The CRM fills the Inputs sheet by named range (QF_<key> single cells, QF_T_<table> table
 // bodies). Everything else in the workbook is a formula. One way only: nothing comes back.
 var QF_SPEC = {
-  version: '2.10',
+  version: '2.11',
   copyOffset: 25,                      // hidden copy of the CRM's values: column + 25 (B -> AA) on Inputs
   watched: ['assets', 'debts', 'cover', 'dinc', 'funds', 'deps', 'oinc'],   // tables whose changes turn orange (plus the client cells except Wishes)
   sheets: {inputs: 'Inputs', summary: 'Summary', quote: 'Figures for quoting', work: 'Workings', lists: 'Lists'},
@@ -21130,7 +21138,7 @@ if (typeof module !== 'undefined') module.exports = QF_SPEC;
 // Fills Duwalcoe_Quick_FNA_Template.xlsx (next to index.html) from the client's record and
 // downloads it. One way only: nothing is read back. The workbook does every calculation with
 // live formulas; this code only copies the record into the Inputs sheet and lists what the
-// Quick FNA does not cover ("✗ Full FNA: ...") or could not read ("✗ ..."), and notes ("• ...").
+// Quick FNA costs roughly ("✗ Rough: ...") or could not read ("✗ ..."), and notes ("• ..."). 2.11: nothing blocks the download.
 var QF_TEMPLATE_URL = 'Duwalcoe_Quick_FNA_Template.xlsx';
 var QF_ADVISER = 'Clinton Hayes';
 var QF = { busy:false };
@@ -21261,7 +21269,8 @@ function qfSpouseTI(c){
 // The record, as Quick FNA input rows. Returns {single:{}, assets:[], debts:[], cover:[], dinc:[], oinc:[], funds:[], deps:[], checks:[], assumptions:{}}.
 function qfnaData(c){
   var out = { single:{}, assets:[], debts:[], cover:[], dinc:[], oinc:[], funds:[], deps:[], checks:[], assumptions:{} };
-  var red = function(t){ out.checks.push('✗ Full FNA: '+t); };
+  // 2.11: a rough figure (the Quick FNA costs it, roughly, and says so); nothing is left out or blocked
+  var red = function(t){ out.checks.push('✗ Rough: '+t); };
   var warn = function(t){ out.checks.push('✗ '+t); };
   var note = function(t){ out.checks.push('• '+t); };
   // One home per item (15 Oct 2026): joint items held on the spouse's record count here at half too
@@ -21383,24 +21392,33 @@ function qfnaData(c){
   // A simple company is costed here (15 Oct 2026): a Pty Ltd or CC, the client's share valued, no buy-and-sell,
   // no loan account for the client, and small business relief cannot apply. Anything else needs the full FNA.
   rows.filter(function(r){ return r.kind==='business'; }).forEach(function(r){
-    var d = r.d, bn = clean(d.desc)||d.entityType||'business', why = [];
-    if(!fpBizClientHolds(d) && d.loanAcc!=='Credit' && d.loanAcc!=='Debit'){ note(bn+': only the spouse holds shares, so it is left out.'); return; }
-    if(d.entityType!=='Pty Ltd' && d.entityType!=='CC') why.push(d.entityType==='Trust' ? 'it is a trust' : (clean(d.entityType) ? 'it is a '+String(d.entityType).toLowerCase() : 'the entity type is not captured'));
+    var d = r.d, bn = clean(d.desc)||d.entityType||'business', rough = [];
+    var hasLoan = (d.loanAcc==='Credit' || d.loanAcc==='Debit'), isTrust = d.entityType==='Trust';
+    if(!fpBizClientHolds(d) && !hasLoan){ note(bn+': only the spouse holds shares, so it is left out.'); return; }
     var noShares = !fpBizClientHolds(d), loanOnly = d.buySell==='Yes' && noShares;     // 2.3: the client holds only a loan account in it
-    if(qfNum(d.value)===null && d.entityType!=='Trust' && !noShares) why.push('the client\'s share has no value');
     // 2.3 (Clinton, 15 Oct 2026): with a buy and sell the co-owners buy the shares at death with their own policy, so the
     // shares are sold and the estate receives the price in cash (with capital gains tax and estate duty as usual); the
     // buy and sell policy is only the funding and is left out. A loan account in such a company is repaid in cash at death.
     var bs = d.buySell==='Yes';
-    if(!bs && (d.loanAcc==='Credit' || d.loanAcc==='Debit')) why.push('the client has a loan account with it');
     var sbr = qfNoSbr(d);
-    if(!sbr && !bs && !noShares) why.push('small business relief may apply'+(qfAcquired(d.dateAcquired) ? '' : ' (date acquired not captured)'));
-    if(why.length){ red('a business interest ('+bn+'): '+why.join('; ')+'.'); return; }
+    // 2.11 (30 Oct 2026, Clinton): nothing is refused. A trust puts only its loan account in the estate; any other
+    // entity goes in at the figures on the record, with a "rough" line where the record is thin, for Clinton to check in Excel.
+    if(isTrust){
+      if(d.loanAcc==='Credit' && fpN(d.loanBal)>0) out.assets.push({name:'Loan account: '+bn, kind:'Loan account', value:amt(d.loanBal,1), base:null, home:'', passes:passes(d), sold:(d.soldDeath==='Yes'?'Yes':'No'), notes:join(['owed to the client by the trust', heirNote(d), clean(d.notes)])});
+      if(d.loanAcc==='Debit' && fpN(d.loanBal)>0) out.debts.push({name:'Loan account owed to '+bn, amount:amt(d.loanBal,1), notes:'owed by the client to the trust'});
+      if(hasLoan && !(fpN(d.loanBal)>0)) warn(bn+': the loan account has no balance captured, so it is left out: type it on Inputs if there is one.');
+      note(bn+': a trust has no shares, so only '+(hasLoan ? 'the loan account' : 'nothing')+' belongs to the estate; the trust\'s own assets are left out.');
+      return;
+    }
+    if(d.entityType!=='Pty Ltd' && d.entityType!=='CC') rough.push(clean(d.entityType) ? 'it is a '+String(d.entityType).toLowerCase()+', costed like a company share' : 'the entity type is not captured');
+    if(qfNum(d.value)===null && !noShares) rough.push('the client\'s share has no value on the record, so its yellow cell is blank');
+    if(!bs && hasLoan) rough.push('the client has a loan account with it, put in at its balance');
+    if(rough.length) red('a business interest ('+bn+'): '+rough.join('; ')+'. Check section 2 on Inputs.');
     var pct = fpN(d.pctHeld);
     // with a buy and sell the price is cash in the estate: it falls into the residue (a bequest of the shares becomes a bequest of the price)
     var bsPass = passes(d);
     if(bs && bsPass!=='Estate (residue)') warn(bn+': the record leaves the shares to '+(bsPass==='Spouse' ? 'the spouse' : (clean(d.passesToName)||'a named person'))+', but under the buy and sell they are sold, so the price is in the residue. If the will leaves the price to them, the Quick FNA does not show it: use the full FNA.');
-    if(!loanOnly) out.assets.push({name:bn+(pct>0 ? ', '+String(d.pctHeld).replace('%','')+'%' : ''), kind:'Business interest', value:amt(d.value,1), base:amt(d.baseCost,1),
+    if(!noShares) out.assets.push({name:bn+(pct>0 ? ', '+String(d.pctHeld).replace('%','')+'%' : ''), kind:'Business interest', value:amt(d.value,1), base:amt(d.baseCost,1),
       home:'', passes:(bs ? 'Estate (residue)' : bsPass), sold:((bs || d.soldDeath==='Yes')?'Yes':'No'), notes:join([d.entityType, bs ? 'sold to the co-owners under the buy and sell' : '', bs ? '' : heirNote(d), clean(d.notes)])});
     if(bs){
       bsSeen++;
@@ -21414,7 +21432,14 @@ function qfnaData(c){
       if(loanOnly){}
       else if(!sbr) note(bn+': small business relief may apply'+(qfAcquired(d.dateAcquired) ? '' : ' (date acquired not captured)')+'. The Quick FNA leaves it out, so the capital gains tax may be lower than shown.');
       else note(bn+': small business relief does not apply ('+sbr+').');
-    } else note(bn+': small business relief does not apply ('+sbr+').');
+    } else {
+      // 2.11: no buy and sell. A loan account is an asset or a debt of the estate at its balance (the shares stay as captured).
+      if(d.loanAcc==='Credit' && fpN(d.loanBal)>0) out.assets.push({name:'Loan account: '+bn, kind:'Loan account', value:amt(d.loanBal,1), base:null, home:'', passes:bsPass, sold:(d.soldDeath==='Yes'?'Yes':'No'), notes:join(['owed to the client by the company', heirNote(d)])});
+      if(d.loanAcc==='Debit' && fpN(d.loanBal)>0) out.debts.push({name:'Loan account owed to '+bn, amount:amt(d.loanBal,1), notes:'owed by the client to the company'});
+      if(hasLoan && !(fpN(d.loanBal)>0)) warn(bn+': the loan account has no balance captured, so it is left out: type it on Inputs if there is one.');
+      if(!sbr && !noShares) note(bn+': small business relief may apply'+(qfAcquired(d.dateAcquired) ? '' : ' (date acquired not captured)')+'. The Quick FNA leaves it out (the worst case), so the capital gains tax may be lower than shown.');
+      else if(!noShares) note(bn+': small business relief does not apply ('+sbr+').');
+    }
   });
   if(bsLoan && out.assets.some(function(a){ return a.kind==='Loan account' && !/^Loan account: /.test(a.name); }))
     warn('a loan account is captured on a business with a buy and sell and also as an "Other" asset: check it is not counted twice (the one on the business is repaid in cash at death).');
@@ -21628,15 +21653,19 @@ function qfnaData(c){
         if(!bsSeen) warn('there is a buy and sell policy ('+lbl+'), but no business on the record says it has a buy and sell: tick "Buy and sell" on the business so the shares are treated as sold.');
         return;
       }
-      red('business assurance on '+lbl+(clean(p.BizType) ? ' ('+p.BizType+')' : ' (type not captured)')+' needs the full FNA.'); return;
+      red('business assurance on '+lbl+(clean(p.BizType) ? ' ('+p.BizType+')' : ' (type not captured)')+' is left out: it is paid to the company. If it is deemed property (contingent liability cover, or a keyman policy in a family company), type it in section 4 as paid to a named person, counted for estate duty.'); return;
     }
-    if(t==='Offshore Endowment' || t==='Offshore Flexible Investment'){ red('an offshore investment ('+lbl+') needs the full FNA.'); return; }
+    // 2.11: offshore money is costed as South African money (the worst case here), not refused
+    if(t==='Offshore Endowment' || t==='Offshore Flexible Investment'){
+      red('an offshore investment ('+lbl+') is costed as if it were South African money: no foreign probate or foreign tax. Check it, or use the full FNA for that part.');
+      t = (t==='Offshore Endowment') ? 'Endowment' : 'Flexible Investment';
+    }
     // 2.3 (Clinton, 15 Oct 2026): a living annuity is taken in cash. It goes straight to its nominees (not s.37C), after
     // the lump sum tax on death benefits on the total of all the retirement money, and carries no estate duty.
     if(t==='Living Annuity'){
       var lav = fpN(p.BenFundValue) || fpN(p.BenSurrenderValue) || null, LA0 = bens(p), LB = LA0.filter(function(b){ return String(b.type||'')!=='Estate'; });
-      if(!LB.length){ red('the living annuity '+lbl+(LA0.length ? ' is nominated only to the estate' : ' has no nominee')+', so it is paid into the estate in cash after tax (executor\'s fees, no estate duty).'); return; }
-      if(LB.length<LA0.length){ red('part of the living annuity '+lbl+' is nominated to the estate, so that part is paid into the estate in cash after tax.'); return; }
+      if(!LB.length){ red('the living annuity '+lbl+(LA0.length ? ' is nominated only to the estate' : ' has no nominee')+', so it is paid into the estate in cash after tax (executor\'s fees, no estate duty). It is left out here'+(lav ? ' (fund value R '+Number(lav).toLocaleString('en-US')+')' : '')+': type the after tax amount in section 2 as cash and deposits, passing to the estate.'); return; }
+      if(LB.length<LA0.length){ red('part of the living annuity '+lbl+' is nominated to the estate, so that part is paid into the estate in cash after tax. The whole annuity is left out here: type the nominees\' shares in section 5 and the estate\'s share, after tax, in section 2 as cash.'); return; }
       if(!lav) warn('the living annuity '+lbl+' has no fund value captured.');
       var lnote = 'living annuity, taken in cash; not in the estate; nominated: '+LB.map(function(b){ return clean(b.name)||b.type; }).join(', ');
       var ltot = LB.reduce(function(s2, b){ return s2+fpN(b.pct); }, 0), lused = 0;
@@ -21668,7 +21697,7 @@ function qfnaData(c){
       var start = qfDate(p.StartDate), gy = fpN(p.LifeAnnuityGuarYrs), inc = fpN(p.BenLifeAnnuityIncome);
       annuityPM += inc;
       var running = gy>0 && start && (new Date(Date.UTC(start.getUTCFullYear()+gy, start.getUTCMonth(), start.getUTCDate())) > today);
-      if(running) red('the life annuity '+lbl+' is still inside its guarantee period, so it pays out at death.');
+      if(running) red('the life annuity '+lbl+' is still inside its guarantee period, so the remaining guaranteed payments are paid out at death. They are left out here: type their value in section 4, paid to the nominee or the estate.');
       else out.funds.push({name:'Life annuity '+lbl, value:null, notes:(gy>0 ? 'guarantee ended: ' : 'no guarantee: ')+'stops at death, pays nothing'});
       return;
     }
@@ -21747,7 +21776,7 @@ function qfnaData(c){
   var residue = 'Heirs (people)';
   if(wrow){
     if(W.res_choice==='Entire residue to my spouse / life partner') residue = 'Spouse';
-    else if(W.res_choice==='Split as follows (table below)' && /Married|Life partner/.test(marital)) red('the residue is split, and part may go to the spouse.');
+    else if(W.res_choice==='Split as follows (table below)' && /Married|Life partner/.test(marital)) red('the will splits the residue, and part may go to the spouse. It is costed with the residue going to heirs (no spouse deduction, the worst case): change "Who inherits the residue" on Inputs if the spouse takes most of it.');
     if(qfNum(W.fw_cost)!==null && qfNum(W.fw_cost)>0){ out.assumptions.Funeral = qfNum(W.fw_cost); note('Funeral R '+Number(qfNum(W.fw_cost)).toLocaleString('en-US')+' from the will capture.'); }
     if(W.ex_fee==='Agreed reduced rate (below)'){
       var er = qfNum(String(W.ex_fee_rate||'').replace('%',''));
@@ -21843,18 +21872,8 @@ function qfnaExport(cid){
   var c = wbkClient(cid);
   if(!c){ toast('Client not found.','err'); return; }
   if(c.ClientType==='Company'){ toast('The Quick FNA is for individuals, not company records.','err'); return; }
-  // 2.10: the Ready for FNA panel gates the export. Readiness gaps and fixable check lines stop
-  // it (they are all fixed by typing); out-of-scope lines do not. A failure inside the check
-  // never stops the export.
-  var _rdy = null;
-  try{ _rdy = fnaReadyBlockers(cid); }catch(e){ console.error(e); _rdy = null; }
-  if(_rdy && _rdy.blocked){
-    var _n = _rdy.gaps.length + _rdy.fix.length;
-    CTAB = 'overview';
-    try{ render(); }catch(e){}
-    toast('Not ready for the FNA: '+_n+' item'+(_n>1?'s':'')+' to fix first. See Ready for FNA at the top of the Overview tab.','err');
-    return;
-  }
+  // 2.11 (30 Oct 2026, Clinton): no gate. The Quick FNA always downloads; the Checks sheet
+  // says which yellow cells to look at, and Clinton types them in Excel.
   QF.busy = true;
   toast('Preparing the Quick FNA…','ok');
   wbkWithExcelJS(function(){ qfnaLoadTemplate(function(wb){
@@ -21901,8 +21920,8 @@ function qfnaExport(cid){
         document.body.appendChild(a); a.click();
         setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); }, 4000);
         QF.busy = false;
-        var reds = D.checks.filter(function(t){ return t.indexOf('✗ Full FNA')===0; }).length;
-        toast('Downloaded '+fname+(reds ? ' · '+reds+' item'+(reds>1?'s':'')+' need the full FNA (see Checks)' : ''), reds ? 'err' : 'ok');
+        var toCheck = D.checks.filter(function(t){ return t.indexOf('✗')===0; }).length;
+        toast('Downloaded '+fname+(toCheck ? ' · '+toCheck+' line'+(toCheck>1?'s':'')+' on the Checks sheet to look at' : ''), 'ok');
       }).catch(function(e){ QF.busy=false; console.error(e); toast('Could not write the Quick FNA: '+e.message,'err'); });
     }catch(e){ QF.busy=false; console.error(e); toast('Could not fill the Quick FNA: '+e.message,'err'); }
   }); });
