@@ -21024,7 +21024,7 @@ function wbkFinish(P, cid, results){
 // The CRM fills the Inputs sheet by named range (QF_<key> single cells, QF_T_<table> table
 // bodies). Everything else in the workbook is a formula. One way only: nothing comes back.
 var QF_SPEC = {
-  version: '2.12',
+  version: '2.13',
   copyOffset: 25,                      // hidden copy of the CRM's values: column + 25 (B -> AA) on Inputs
   watched: ['assets', 'debts', 'cover', 'dinc', 'funds', 'deps', 'oinc'],   // tables whose changes turn orange (plus the client cells except Wishes)
   sheets: {inputs: 'Inputs', summary: 'Summary', quote: 'Figures for quoting', work: 'Workings', lists: 'Lists'},
@@ -21485,6 +21485,9 @@ function qfnaData(c){
     var once = d.needType!=='Monthly income', amt = fpN(d.amount);
     if(once && !(amt>0)){ warn('the once-off death need "'+lbl+'" has no amount, so it is left out.'); return; }
     if(once && d.benTo==='Estate'){ warn('the once-off death need "'+lbl+'" (R '+Number(amt).toLocaleString('en-US')+') is for the estate. If it is not already a debt in section 2, add it there; it is not added on its own, so nothing is counted twice.'); return; }
+    // 2.13 (6 Nov 2026, Clinton, Larty): a monthly need captured at zero (or blank) with nobody named is not a need.
+    // It is skipped with a note, not a red line, and it does not count as a missing "Whose need".
+    if(!once && !(amt>0) && d.benTo!=='Spouse' && !(d.benTo==='Named person' && clean(d.benName))){ note('the death need "'+lbl+'" is zero, so it is left out (no one needs cover from it).'); return; }
     // 2.6 (21 Oct 2026, Clinton): "Whose need" left blank is read from the description ("Total income for Levi", "income for
     // wife"), only when it names the spouse or exactly one family member, and the check says so. Anything unclear stays out (red).
     if(d.benTo!=='Spouse' && d.benTo!=='Estate' && !(d.benTo==='Named person' && clean(d.benName))){
@@ -21507,7 +21510,9 @@ function qfnaData(c){
     var esc = String(d.esc===undefined||d.esc===null?'':d.esc).trim();
     if(once){ P.lump = amt; P.inc = false; P.needPM = null; P.years = null; P.esc = null; }
     else {
-      if(!(amt>0) || !(fpN(d.years)>0)) warn('the death need "'+lbl+'" for '+P.name+' has no amount a month or no years: fill them in section 6.');
+      // 2.13: a zero need for a known person is a deliberate zero: the person is in section 6 so cover nominated to them counts
+      if(!(amt>0)) note('the death need "'+lbl+'" for '+P.name+' is zero: '+P.name+' is in section 6 with no need, so cover nominated to '+P.name+' still counts.');
+      else if(!(fpN(d.years)>0)) warn('the death need "'+lbl+'" for '+P.name+' has an amount a month but no years: fill them in section 6.');
       P.lump = 0; P.inc = true; P.needPM = amt||null; P.years = fpN(d.years)||null; P.esc = (esc==='' ? null : fpN(esc));
     }
     P.lbl = lbl;
@@ -21551,12 +21556,18 @@ function qfnaData(c){
     var poolKids = kidsAll.filter(function(x){ return x.trust!=='Yes'; });
     kidsAll.forEach(function(x){ x.via = 'No'; });
     var hostSp = out.deps.find(function(x){ return x.rel==='Spouse'; });
-    if(poolKids.length && !hostSp && spName){
+    // 2.13 (6 Nov 2026, Clinton, Larty): a married client's spouse is always in section 6, need or no need, so that
+    // cover nominated to the spouse is credited to them and the executor's shortfall can be paid from it (row 108).
+    // Before this the spouse was added only when providing for children; with no death need the spouse was missing
+    // and a R 2.29m policy nominated to the husband counted for nothing, so the sheet asked for R 1.8m of new cover.
+    if(!hostSp && spName){
       var hAge = spDOB ? calcAge(spDOB) : null;
       hostSp = {name:spName, rel:'Spouse', age:hAge, needPM:null, years:null, esc:null, trust:'No', other:(spouseTI>0 ? spouseTI : null), lump:null};
       out.deps.push(hostSp);
-      note(spName+' has no death need of their own on the Needs tab, but provides for the children, so '+spName+' is in section 6 with no need of their own: what reaches '+spName+' pays for the children\'s needs.');
-      if(hAge===null) warn(spName+' has no date of birth on the record: fill in the age in section 6 (it sets the rebates at 65 and 75).');
+      if(poolKids.length){
+        note(spName+' has no death need of their own on the Needs tab, but provides for the children, so '+spName+' is in section 6 with no need of their own: what reaches '+spName+' pays for the children\'s needs.');
+        if(hAge===null) warn(spName+' has no date of birth on the record: fill in the age in section 6 (it sets the rebates at 65 and 75).');
+      } else note(spName+' has no death need on the Needs tab, so '+spName+' is in section 6 with no need: cover nominated to '+spName+' is counted, and can pay the executor\'s shortfall (row 108).');
     }
     if(poolKids.length && hostSp){
       poolKids.forEach(function(x){ x.via = 'Yes'; });
@@ -21858,7 +21869,7 @@ function qfnaData(c){
     else if(!/^Entire residue to my children/.test(W.res_choice||'')){ kidsShare = 'Not to the dependants'; warn('the residue is not left to the children equally in the will capture, so it is not counted for them. Change "How the residue reaches the children" in section 6 if they inherit part of it.'); }
   }
   if(!out.deps.length){
-    if(noWhose) warn((noWhose===1 ? 'the death need on the Needs tab does not say' : 'none of the '+noWhose+' death needs on the Needs tab says')+' whose need it is, so section 6 is empty and the workbook shows the cost of dying only. Set "Whose need" on the Needs tab and export again.');
+    if(noWhose && !out.deps.length) warn((noWhose===1 ? 'the death need on the Needs tab does not say' : 'none of the '+noWhose+' death needs on the Needs tab says')+' whose need it is, so section 6 is empty and the workbook shows the cost of dying only. Set "Whose need" on the Needs tab and export again.');
     else note('No death needs on the Needs tab, so there are no dependants in section 6: the workbook shows the cost of dying only.');
   }
 
