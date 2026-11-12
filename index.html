@@ -12807,6 +12807,12 @@ function buildFnaDataPack(cid, includeSpouse){
           line('  CoverOnAnotherLife: '+(r.type||'Cover')+' '+N(r.cover)+' on the life of '+clean(r.life).trim()+
                ' (NOT death cover on this client; excluded from the totals above; pays the policy owner on that person\'s death)');
         });
+        // A life cover row with its own beneficiary (12 Nov 2026): it is paid to that beneficiary, not by the policy's shares.
+        var _pkC = DB.clients.find(function(x){ return String(x.ID)===String(forCid); }) || {};
+        lumpOwnRows(p).forEach(function(r){
+          var ob = lumpOwnTo(r, _pkC)[0];
+          line('  LumpBeneficiary: '+(clean(r.label) || 'Life Cover')+' '+N(r.cover)+' paid to '+(ob.type==='Estate' ? 'the estate' : ob.name)+' ['+ob.type+'] (this benefit\'s own beneficiary; the Beneficiaries line applies to the rest of the life cover)');
+        });
         // Death income, readable (12 Nov 2026, Clinton, Bidvest M. Lawrence): who it is for, the period in months where a
         // child's birthday sets it, and who the beneficiary on the policy is. The raw rows still print in IncomeBenefits.
         qfIncRows(p).forEach(function(r){
@@ -13925,6 +13931,11 @@ function renderWillPolicyRows(c){
       benTxt = '<span style="color:#b42318;font-weight:600">⚠ No beneficiary captured</span>';
     } else {
       benTxt = '<span style="color:#889">None captured</span>';
+    }
+    // 12 Nov 2026: life cover rows with their own beneficiary.
+    if(t==='Life / Income Protector' || t===''){
+      var _own = lumpOwnRows(p);
+      if(_own.length) benTxt += _own.map(function(r){ var b = lumpOwnTo(r, c)[0]; return '<div style="font-size:11px;margin-top:2px">'+wfEsc(clean(r.label)||'Life cover')+' '+fpR(N(r.cover))+' paid to '+wfEsc(b.type==='Estate' ? 'the estate' : b.name)+' <span style="color:#889">['+wfEsc(b.type)+'] (its own beneficiary)</span></div>'; }).join('');
     }
     var pName = wfEsc(p.Insurer||'?')+' · '+wfEsc(t||'Policy')+(p.PolicyNo?' <span style="color:#889">#'+wfEsc(p.PolicyNo)+'</span>':'')+(p.Status==='Paid Up'?' <span style="color:#889">(paid up)</span>':'');
     body += '<tr><td>'+pName+'</td><td style="text-align:right;white-space:nowrap">'+val+'<div style="color:#99a;font-size:10px">'+valLbl+'</div></td><td>'+benTxt+'</td>'
@@ -16463,8 +16474,22 @@ function renderLumpRows(){
       // (e.g. the spouse) keeps the cover OUT of the client's cover totals and FNA.
       '<div style="margin-top:8px"><div style="font-size:10px;color:#889;margin-bottom:3px">On the life of <span style="color:#aaa">(leave blank if this client &mdash; fill in for a spouse or other life; not counted as this client\'s cover)</span></div>'+
       '<input type="text" value="'+escHtml(clean(r.life))+'" placeholder="This client" onchange="POL_LUMP_ROWS['+i+'].life=this.value.trim()" style="width:100%;box-sizing:border-box;border:1.5px solid '+(lumpOnOtherLife(r)?'#d97706':'var(--mist)')+';border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>'+
+      // 12 Nov 2026: a life cover row can name its own beneficiary (two lump sums to different people on one policy).
+      ((r.type==='Life Cover' && !lumpOnOtherLife(r)) ?
+        '<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px">'+
+        '<div><div style="font-size:10px;color:#889;margin-bottom:3px">This cover is paid to</div><select onchange="POL_LUMP_ROWS['+i+'].benType=this.value;if(!this.value||this.value===\'Estate\')POL_LUMP_ROWS['+i+'].benName=\'\';document.getElementById(\'lumpRowsWrap\').innerHTML=renderLumpRows()" style="width:100%;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px">'+
+        [['','Same as the policy\'s beneficiaries'],['Spouse','The spouse'],['Named person','A named person'],['Trust','A trust'],['Estate','The estate']].map(function(o){ return '<option value="'+o[0]+'"'+((r.benType||'')===o[0]?' selected':'')+'>'+o[1]+'</option>'; }).join('')+
+        '</select></div>'+
+        ((r.benType==='Named person'||r.benType==='Trust'||r.benType==='Spouse') ? '<div><div style="font-size:10px;color:#889;margin-bottom:3px">Name</div><input type="text" value="'+escHtml(r.benName||'')+'"'+(r.benType==='Named person' ? ' list="polLumpNameList" autocomplete="off"' : '')+' placeholder="'+(r.benType==='Trust'?'e.g. Smith Family Trust':(r.benType==='Named person'?'Choose from family or type a name':'Full name'))+'" onchange="POL_LUMP_ROWS['+i+'].benName=this.value" style="width:100%;box-sizing:border-box;border:1.5px solid var(--mist);border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12px"></div>' : '<div></div>')+
+        '</div>' : '')+
       '</div>';
-  }).join('');
+  }).join('') + lumpNameList();
+}
+// The family names offered on a life cover row's "This cover is paid to" (12 Nov 2026): the client's family card.
+function lumpNameList(){
+  if(!POL_LUMP_ROWS.some(function(r){ return r && r.type==='Life Cover' && r.benType==='Named person'; })) return '';
+  var names = (typeof famFor==='function' && EPC) ? famFor(EPC).map(function(m){ return clean(m.Name).trim(); }).filter(Boolean) : [];
+  return '<datalist id="polLumpNameList">'+names.map(function(n){ return '<option value="'+escHtml(n)+'">'; }).join('')+'</datalist>';
 }
 
 function calcWeightedAvgPremEsc(){
@@ -17012,6 +17037,27 @@ function diTermText(r, name){
   var f = String(name||'').trim().split(/\s+/)[0];
   return 'to '+(f ? f+'’s' : 'the child’s')+' '+diOrdinal(a)+' birthday';
 }
+// ── A lump sum's own beneficiary (12 Nov 2026, Clinton, Bidvest M. Lawrence: R2.2m to the estate, R1.2m to her father) ──
+// A Life Cover row on the client's own life can name its own beneficiary ("This cover is paid to": benType, benName).
+// Blank = the policy's beneficiaries, as before. One beneficiary per row; splits stay with the policy's percentages.
+// The life cover rows with their own beneficiary.
+function lumpOwnRows(p){
+  var rows = []; try{ rows = JSON.parse((p && p.LumpBenefits)||'[]'); }catch(e){}
+  return Array.isArray(rows) ? rows.filter(function(r){ return r && r.type==='Life Cover' && !lumpOnOtherLife(r) && N(r.cover)>0 && clean(r.benType); }) : [];
+}
+// The beneficiary of such a row, in the policy beneficiary shape [{type, name, pct}]: the relationship comes from the
+// family card for a named person (Child, Parent or Dependant; anyone else Other); the spouse is a Life Partner when the
+// client's marital status is Life partner.
+function lumpOwnTo(r, c){
+  var own = String((r && r.benType)||''), nm = clean(r && r.benName).trim();
+  if(!own) return [];
+  if(own==='Estate') return [{type:'Estate', name:'Estate', pct:'100'}];
+  if(own==='Spouse') return [{type:(clean(c && c.MaritalStatus)==='Life partner' ? 'Life Partner' : 'Spouse'), name:nm || clean(c && c.SpouseName).trim() || 'Spouse', pct:'100'}];
+  if(own==='Trust') return [{type:'Trust', name:nm || 'Trust', pct:'100'}];
+  var m = diFamMember(c && c.ID, nm), ft = m ? String(m.Type||'') : '';
+  return [{type:(['Child','Parent','Dependant'].indexOf(ft)>=0 ? ft : 'Other'), name:nm || 'Name not captured', pct:'100'}];
+}
+function lumpOwnText(r, c){ var b = lumpOwnTo(r, c)[0]; return b ? (b.type==='Estate' ? 'the estate' : b.name) : ''; }
 
 function irrBadge(irr, calculated){
   if(irr === null || irr === undefined) return '';
@@ -18434,7 +18480,8 @@ function openPolicyView(cid,idx){
     if(lumps.length){
       h+='<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:.5px;margin-top:4px">Lump sum benefits</div>';
       h+=table(['Benefit','Cover','Premium','Premium esc.','Cover esc.'],
-        lumps.map(function(r){ return [escHtml(r.type||'')+(clean(r.label)?sub(escHtml(r.label)):'')+(lumpOnOtherLife(r)?sub('On the life of '+escHtml(clean(r.life).trim())+' &middot; not counted as this client&rsquo;s cover'):''), cov(r.cover), rprem(r.prem), pct(r.premEsc), pct(r.benEsc)]; }), [1,2]);
+        lumps.map(function(r){ return [escHtml(r.type||'')+(clean(r.label)?sub(escHtml(r.label)):'')+(lumpOnOtherLife(r)?sub('On the life of '+escHtml(clean(r.life).trim())+' &middot; not counted as this client&rsquo;s cover'):'')+
+          ((r.type==='Life Cover' && !lumpOnOtherLife(r) && clean(r.benType)) ? sub('Paid to '+escHtml(lumpOwnText(r, c))+' (this benefit&rsquo;s own beneficiary)') : ''), cov(r.cover), rprem(r.prem), pct(r.premEsc), pct(r.benEsc)]; }), [1,2]);
     }
     if(clean(p.DreadDiseaseNotes)) h+=grid([field('Dread disease notes', txt(p.DreadDiseaseNotes), {wide:true})]);
     put('R');
@@ -21650,9 +21697,10 @@ function qfnaData(c){
   // ── Policies ──
   var annuityPM = 0, today = new Date();
   function bens(p){ try{ var b = JSON.parse(p.Beneficiaries||'[]'); return Array.isArray(b) ? b.filter(function(x){ return x && (clean(x.name)||clean(x.type)); }) : []; }catch(e){ return []; } }
-  function coverRows(p, label, amount, routing){
+  // own (12 Nov 2026): a life cover row's own beneficiary, used in place of the policy's beneficiaries.
+  function coverRows(p, label, amount, routing, own){
     if(!(amount>0)) return;
-    var B = bens(p);
+    var B = own || bens(p);
     if(routing==='Estate' || !B.length){
       out.cover.push({name:label, paidTo:'Estate', amount:Math.round(amount*100)/100, counted:'Yes', notes:B.length ? 'falls into the estate' : 'no beneficiary nominated: paid to the estate'}); return;
     }
@@ -21835,7 +21883,12 @@ function qfnaData(c){
     }
     // life and funeral cover on the client's life
     var dc = lumpSum(p,'Life Cover','BenDeath'), fc = lumpSum(p,'Funeral','');
-    coverRows(p, 'Life cover '+lbl, dc, 'Direct');
+    // 12 Nov 2026: a life cover row with its own beneficiary is its own row in section 4, paid to that beneficiary;
+    // the rest of the life cover follows the policy's beneficiaries as before.
+    var ownL = (t==='Life / Income Protector' || t==='') ? lumpOwnRows(p) : [];
+    var ownSum = ownL.reduce(function(s, r){ return s+N(r.cover); }, 0);
+    coverRows(p, 'Life cover '+lbl, Math.round(Math.max(0, dc-ownSum)*100)/100, 'Direct');
+    ownL.forEach(function(r){ coverRows(p, (clean(r.label) || 'Life cover')+' '+lbl, Math.round(N(r.cover)*100)/100, 'Direct', lumpOwnTo(r, c)); });
     coverRows(p, 'Funeral benefit '+lbl, fc, 'Direct');
     if(lumpOtherLives(p).length) note(lbl+' also covers someone else\'s life; that cover is left out.');
   });
@@ -22969,7 +23022,14 @@ function astuteClassifyCovers(covers){
             nameStr.indexOf('trauma')>=0 || /living lifestyle/.test(nameStr)){
       t = 'Dread Disease / Severe Illness';
     }
-    lumps.push({type:t, label:cv.plan||'', cover:cv.amt, prem:cv.prem||'', premEsc:cv.premEsc||'', benEsc:cv.benEsc||'', life:cv.life||''});
+    var lumpRow = {type:t, label:cv.plan||'', cover:cv.amt, prem:cv.prem||'', premEsc:cv.premEsc||'', benEsc:cv.benEsc||'', life:cv.life||''};
+    // 12 Nov 2026: a life cover benefit's own beneficiary (benName, benType as on the policy's bens).
+    if(t==='Life Cover' && !clean(cv.life) && (clean(cv.benName) || clean(cv.benType)==='Estate')){
+      var lbt = clean(cv.benType);
+      lumpRow.benType = lbt==='Estate' ? 'Estate' : ((lbt==='Spouse' || lbt==='Life Partner') ? 'Spouse' : (lbt==='Trust' ? 'Trust' : 'Named person'));
+      lumpRow.benName = lumpRow.benType==='Estate' ? '' : clean(cv.benName).trim();
+    }
+    lumps.push(lumpRow);
   });
   return {lumps:lumps, incomes:incomes, fee:fee, ddNotes:ddNotes};
 }
@@ -23515,6 +23575,8 @@ function parseAstutePasteJSON(txt){
               // forWhom / spouseBen (12 Nov 2026): on a death income, the person it is meant for, and "Yes" when the
               // spouse is the beneficiary on the policy for that person.
               forWhom:clean(cv.forWhom), spouseBen:clean(cv.spouseBen),
+              // benName / benType (12 Nov 2026): a lump sum benefit's own beneficiary, when the schedule names one for it.
+              benName:clean(cv.benName), benType:clean(cv.benType),
               // group risk on a Pension / Provident fund (6 Oct 2026)
               approved:clean(cv.approved), nominee:clean(cv.nominee), basis:clean(cv.basis),
               annualPrem:clean(cv.annualPrem), notes:clean(cv.notes)};
@@ -25914,7 +25976,9 @@ function openPolicySchedule(cid){
         }
       }
 
-      var polDeath = isRiskP ? lumpSum(p,'Life Cover','BenDeath') : 0;
+      // 12 Nov 2026: life cover rows with their own beneficiary are credited to that person below, not split by the policy's shares.
+      var polDeath = isRiskP ? Math.max(0, lumpSum(p,'Life Cover','BenDeath') - lumpOwnRows(p).reduce(function(s,r){ return s+N(r.cover); },0)) : 0;
+      if(isRiskP && !isInvP && !isRaP && !(polDeath>0) && lumpOwnRows(p).length) return;   // all its life cover has its own beneficiaries
       var polFV    = (isInvP||isRaP) ? N(p.BenFundValue) : 0;
       // Per-policy split: use the captured percentages when ANY are valid; when
       // a policy's beneficiary percentages are ALL blank/garbage, split EQUALLY
@@ -25942,6 +26006,23 @@ function openPolicySchedule(cid){
         if(isInvP)  entry.inv   += polFV    * pct;
         if(isRaP)   entry.ret   += polFV    * pct;
         entry.policyIds[p.ID||p.PolicyNo||(p.Insurer+'-'+p.Product)] = true;
+      });
+    });
+  });
+  // A life cover row with its own beneficiary (12 Nov 2026): the whole row to that person.
+  personalGroups.forEach(function(g){
+    g.pols.forEach(function(p){
+      var t=p.Type||'';
+      if(!(t==='Life / Income Protector' || t==='')) return;
+      lumpOwnRows(p).forEach(function(r){
+        lumpOwnTo(r, c).forEach(function(b){
+          var key=normName(b.name);
+          if(!benMap[key]) benMap[key]={displayName:String(b.name).trim(), types:[], death:0, inv:0, ret:0, policyIds:{}};
+          var e=benMap[key], typ=b.type||'Other';
+          if(e.types.indexOf(typ)<0) e.types.push(typ);
+          e.death += N(r.cover);
+          e.policyIds[p.ID||p.PolicyNo||(p.Insurer+'-'+p.Product)]=true;
+        });
       });
     });
   });
@@ -26275,7 +26356,9 @@ function openPolicySchedule(cid){
     lumps.forEach(function(r){
       var ce=escTxt(r.benEsc), pe=escTxt(r.premEsc);
       if(ce) out.anyCoverEsc=true; if(pe) out.anyPremEsc=true;
-      rows+='<tr>'+nameCell(r.label, r.type).replace(/<\/td>$/, lifeSub(r)+'</td>')+
+      // 12 Nov 2026: a life cover row with its own beneficiary says who it is paid to.
+      var _ownTo = (r.type==='Life Cover' && !lumpOnOtherLife(r) && clean(r.benType)) ? '<div style="font-size:10px;color:'+MUT+';margin-top:1px">paid to '+escHtml(lumpOwnText(r, c))+'</div>' : '';
+      rows+='<tr>'+nameCell(r.label, r.type).replace(/<\/td>$/, _ownTo+lifeSub(r)+'</td>')+
         '<td>'+(N(r.cover)>0?(rfx?fxDual(r.cover,rfx.coverRate,rfx.ccy,0):R(r.cover)):dash)+'</td>'+
         '<td>'+(N(r.prem)>0?(rfx?fxDual(r.prem,rfx.premRate,rfx.ccy,2):R(r.prem)):dash)+'</td>'+
         '<td>'+(ce||dash)+'</td><td>'+(pe||dash)+'</td></tr>';
